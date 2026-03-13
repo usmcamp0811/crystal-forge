@@ -4,6 +4,7 @@ title: Admin Configuration Health Warnings — Pipeline Readiness Alerts
 status: Backlog
 assignee: []
 created_date: '2026-03-13 01:16'
+updated_date: '2026-03-13 01:21'
 labels:
   - frontend
   - backend
@@ -28,51 +29,98 @@ priority: medium
 
 When a new admin stands up Crystal Forge for the first time, they create a system and a flake and expect things to work — but they don't. There is no feedback about *why*. The deployment pipeline has multiple stages (commit detection → evaluation → policy check → build → cache push → agent deployment), and a missing configuration at any stage causes a silent failure. The admin has no way to know what's misconfigured without independently understanding the full pipeline architecture.
 
-## Desired Outcome
+## Goal
 
-Admin users receive clear, actionable warnings about configuration gaps that will prevent the deployment pipeline from functioning. Warnings appear in three locations:
+Admin users receive clear, actionable warnings about configuration gaps that prevent the deployment pipeline from functioning. Warnings appear in three locations: a dashboard health widget, contextual inline warnings on entity views, and a global notification bar. Warnings are visible only to Admin users.
 
-1. **Dashboard** — A configuration health summary widget showing overall pipeline readiness and listing unresolved issues
-2. **Contextual views** — Inline warnings on the specific entity views where the missing config is relevant (e.g., the Systems view warns about missing builders, the Flakes view warns about missing cache)
-3. **Global notification bar** — A persistent top-of-page banner visible across all views (dismissible per-session) that summarizes critical configuration gaps until resolved
+## Non-Goals
 
-Warnings are visible **only to Admin users**. Non-admin users (Operators, Viewers) see normal empty states.
+- This task does NOT implement a guided setup wizard (see TASK-187).
+- This task does NOT add remediation forms inline (warnings link to existing pages; they don't embed creation forms).
+- This task does NOT change the behavior of the deployment pipeline itself — it only surfaces existing failures as UI warnings.
+- This task does NOT add email/webhook/external notifications — only in-app UI warnings.
+- This task does NOT modify the evaluation, build, or deployment logic.
+- This task does NOT add warning persistence to a database — all state is derived dynamically from existing entity counts/associations.
 
 ## Configuration Health Checks
 
-The following pipeline readiness checks should be implemented, covering every critical checkpoint in the eval-build-deploy flow:
+The following pipeline readiness checks must be implemented, mapped to the eval-build-deploy flow:
 
-### Global / Dashboard Level
+### Global Level (Dashboard widget + notification bar)
 1. **No Flakes configured** → "No flakes are being watched. Add a flake to begin evaluating NixOS configurations."
 2. **No Environments created** → "No environments exist. Environments are required to organize systems, builders, and caches."
 3. **No Builders registered** → "No builders are registered. Derivations will be evaluated but never built."
 4. **No Cache Destinations configured** → "No cache destinations configured. Builds will succeed but agents won't be able to pull deployments."
 
-### System View (contextual, per-system or list-level)
+### System View (contextual, per-system)
 5. **System has no flake_id** → "This system is not linked to a flake. It won't be included in evaluations."
-6. **System has no connected agent** → "No agent heartbeat detected. This system cannot receive deployments." (Already enforced by `require_cf_agent` policy, but the UI should surface it clearly)
+6. **System has no connected agent** → "No agent heartbeat detected. This system cannot receive deployments."
 
 ### Environment View (contextual, per-environment)
 7. **Environment has no builder assigned** → "No builder is assigned to this environment. Builds for systems in this environment won't be processed."
 8. **Environment has no cache destination assigned** → "No cache destination is assigned to this environment. Builds for this environment won't be deployable."
 
 ### Flakes View (contextual)
-9. **Flake has evaluation errors on latest commit** → "Latest evaluation failed. Check flake configuration." (informational, not a config gap per se)
+9. **Flake has evaluation errors on latest commit** → "Latest evaluation failed. Check flake configuration."
 
-## Technical Notes
+## Architectural Constraints
 
-- A new server-side API endpoint (e.g., `GET /api/v1/admin/config-health`) should aggregate all checks and return a structured health status response. This avoids N+1 queries from the frontend.
-- The frontend should call this endpoint on dashboard load and cache the result for contextual views during the session.
-- Contextual warnings on entity views can supplement with entity-specific checks (e.g., per-system flake_id presence is already available from the system list endpoint).
-- The global notification bar should be dismissible per browser session (localStorage flag) but reappear if the health status changes.
-- Warnings should include actionable links (e.g., "No builders registered" links to the Builders page with a prompt to create one).
+- **Backend**: New `GET /api/v1/admin/config-health` endpoint following the existing handler pattern. Uses `require_admin()` from `handlers/api/rbac.rs` for access control. Aggregates counts via `sqlx::query_scalar` using the same patterns as `queries/dashboard.rs`. Uses `tokio::try_join!` for parallel count queries. Returns a structured `ConfigHealthResponse` with per-check status.
+- **Frontend API**: New function in `api/client.rs` using `fetch_json()` to call the health endpoint. Follow the adapter pattern (see `dashboard/adapter.rs`) with fallback support and login redirect detection.
+- **Frontend components**: New reusable `AlertBanner` component in `components/notifications/` (following the `Toast` component pattern) for consistent warning rendering across views. Supports severity levels (warning/info), dismissibility, and action links.
+- **Global notification bar**: Inserted in `app_shell.rs` between `DevModeBanner { Top }` and the main flex container. Conditionally rendered only for admin users (check `is_admin()` from `state/auth.rs`). Dismissible per browser session via `web_sys::window().local_storage()`. Reappears if health status changes (compare hash of issues list).
+- **Dashboard widget**: New widget added to `default_widget_positions()` and `render_widget_content()` in `dashboard.rs`. Renders a summary card showing pipeline readiness with a list of unresolved issues and action links.
+- **Contextual warnings**: Added to existing entity view components (`systems_list.rs`, `environments_list.rs`, `flakes_list.rs`) as `AlertBanner` instances above the entity list, rendered conditionally based on health data or entity-specific field checks.
+- **Admin-only visibility**: All warning rendering gated behind `is_admin(&app_state.read().auth)` check. Non-admin users see standard empty states unchanged.
+- **No new database tables or migrations required** — all health checks are derived from counts of existing entities and their associations.
+- **Contextual per-entity checks** (system.flake_id, environment builder/cache assignments) can use data already returned by existing list endpoints — no additional API calls needed for those.
 
-## References
+## Impact Areas
 
-- Deployment pipeline flow: `docs/eval-build-deploy-flow.md`
-- Entity relationships: see database migrations in `packages/default/migrations/`
-- Existing setup-status endpoint pattern: `handlers/api/auth_status.rs` (`/api/auth/setup-status`)
-- Sidebar/view structure: `packages/web-ui/src/components/layout/sidebar.rs`
-- Dashboard view: `packages/web-ui/src/views/dashboard.rs`
-- Role checking: `packages/web-ui/src/services/auth.rs` (`is_admin()`)
+- `packages/default/src/handlers/api/` — new admin health endpoint handler
+- `packages/default/src/bin/server.rs` — route registration
+- `packages/default/src/queries/` — new count/existence queries (or reuse existing)
+- `packages/web-ui/src/api/client.rs` — new API call function
+- `packages/web-ui/src/components/notifications/` — new AlertBanner component
+- `packages/web-ui/src/components/layout/app_shell.rs` — global notification bar insertion
+- `packages/web-ui/src/views/dashboard.rs` — new health widget
+- `packages/web-ui/src/views/systems_list.rs` — contextual system warnings
+- `packages/web-ui/src/views/environments_list.rs` — contextual environment warnings
+- `packages/web-ui/src/views/flakes_list.rs` — contextual flake warnings
+
+## Risk Level
+
+**Medium** — Touches multiple frontend views and adds a new API endpoint, but the changes are additive (no modification of existing logic). Risk is primarily in getting the warning conditions correct and ensuring they don't produce false positives when the pipeline is partially configured intentionally.
+
+## Verification Plan
+
+- **Tier 0**: `cargo fmt -- --check`, `cargo clippy -- -D warnings`, `cargo test` (targeted: health endpoint handler tests, query tests)
+- **Tier 1**: Start full stack (`server-stack up`), verify:
+  - Fresh instance with no entities shows all global warnings on dashboard and notification bar
+  - Adding a flake removes the "no flakes" warning
+  - Adding a builder removes the "no builders" warning
+  - Non-admin user does NOT see any warnings
+  - Notification bar dismisses on click and stays dismissed during session
+  - Notification bar reappears after adding/removing entities that change health status
+  - Contextual warnings appear on correct entity views
+- **Tier 2**: `nix flake check` — required since new API endpoint affects the server package
 <!-- SECTION:DESCRIPTION:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 A new `GET /api/v1/admin/config-health` endpoint exists that returns a structured JSON response with boolean/count fields for each health check (flakes, environments, builders, caches, and aggregate issue count). Returns 403 for non-admin users.
+- [ ] #2 The endpoint response includes at minimum: `has_flakes`, `has_environments`, `has_builders`, `has_cache_destinations`, `total_issues` count, and a `checks` array with per-check `id`, `passed`, `message`, and `action_url`.
+- [ ] #3 A reusable `AlertBanner` component exists in `components/notifications/` that accepts severity (warning/info), message text, optional action link, and optional dismiss handler.
+- [ ] #4 The Dashboard view includes a Configuration Health widget that displays when the admin is logged in AND at least one health check fails. The widget lists all failing checks with actionable links to the relevant configuration page.
+- [ ] #5 A global notification bar appears at the top of the layout (in `app_shell.rs`) for admin users when health checks fail. It summarizes the count of configuration issues (e.g., '4 configuration issues detected') and links to the dashboard health widget.
+- [ ] #6 The global notification bar is dismissible per browser session (using localStorage). It reappears if the set of failing checks changes.
+- [ ] #7 The Systems list view shows an inline warning banner for any system where `flake_id` is null, stating the system won't be evaluated.
+- [ ] #8 The Systems list view shows an inline warning banner for any system with no recent agent heartbeat, stating the system cannot receive deployments.
+- [ ] #9 The Environments list view shows an inline warning banner for any environment with no builder assigned, stating builds won't process for that environment.
+- [ ] #10 The Environments list view shows an inline warning banner for any environment with no cache destination assigned, stating builds won't be deployable for that environment.
+- [ ] #11 The Flakes list view shows an inline warning banner when the latest commit for a flake has an evaluation error.
+- [ ] #12 All warning UI (dashboard widget, notification bar, contextual banners) is gated behind `is_admin()` — non-admin users (Operator, Viewer) see no warnings and experience no behavior change.
+- [ ] #13 When all health checks pass (fully configured instance), no warnings appear anywhere — the dashboard widget is hidden, the notification bar is hidden, and no contextual banners render.
+- [ ] #14 Unit tests exist for the config-health endpoint handler covering: all checks failing (empty instance), all checks passing (fully configured), partial configuration, and 403 for non-admin users.
+- [ ] #15 The health endpoint queries run efficiently using COUNT queries (not loading full entity lists) and use `tokio::try_join!` for parallel execution.
+<!-- AC:END -->
