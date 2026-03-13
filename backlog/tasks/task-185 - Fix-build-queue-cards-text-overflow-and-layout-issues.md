@@ -1,9 +1,10 @@
 ---
 id: TASK-185
 title: Fix build queue cards - text overflow and layout issues
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-03-13 01:01'
+updated_date: '2026-03-13 01:01'
 labels:
   - web-ui
   - ux
@@ -76,3 +77,9 @@ Apply modern UI best practices to build queue cards to match the quality and con
 - [ ] #8 cargo fmt and cargo clippy pass
 - [ ] #9 nix build .#checks.x86_64-linux.web-ui passes
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: agent-claude on gray in ~/code/crystal-forge/TASK-185-fix-build-queue-cards
+<!-- SECTION:NOTES:END -->
