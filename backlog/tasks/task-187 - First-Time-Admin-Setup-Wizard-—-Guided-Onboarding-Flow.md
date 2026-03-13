@@ -1,10 +1,10 @@
 ---
 id: TASK-187
 title: First-Time Admin Setup Wizard — Guided Onboarding Flow
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-03-13 01:16'
-updated_date: '2026-03-13 12:08'
+updated_date: '2026-03-13 12:09'
 labels:
   - frontend
   - backend
@@ -163,4 +163,8 @@ The wizard guides the admin through these steps in dependency order (reflecting 
 
 <!-- SECTION:NOTES:BEGIN -->
 Moved to To Do by maintainer request on 2026-03-13 for immediate execution next.
+
+LOCK: OpenCode on reckless in ~/code/crystal-forge/TASK-187-first-time-admin-setup-wizard
+
+Sprint-Ready review: task includes objective ACs, non-goals, architecture constraints, verification plan, impact areas, and risk/dependency notes. Proceeding with implementation.
 <!-- SECTION:NOTES:END -->
