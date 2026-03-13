@@ -69,38 +69,7 @@ pub fn BuildersList() -> Element {
                                 }
                             }
                         } else {
-                            // Warn if any builder has no environment assigned — builds
-                            // will never be dispatched to an unassigned builder.
-                            {
-                                let unassigned: Vec<_> = builder_list
-                                    .iter()
-                                    .filter(|b| b.assigned_environment_count == 0)
-                                    .collect();
-                                if !unassigned.is_empty() {
-                                    let names = unassigned
-                                        .iter()
-                                        .map(|b| b.name.as_str())
-                                        .collect::<Vec<_>>()
-                                        .join(", ");
-                                    let plural = if unassigned.len() == 1 { "" } else { "s" };
-                                    let verb = if unassigned.len() == 1 { "has" } else { "have" };
-                                    let msg = format!(
-                                        "The following builder{plural} {verb} no environment assigned and will not process any build jobs: {names}. Open the builder settings (✏ Edit) and assign it to an environment."
-                                    );
-                                    rsx! {
-                                        div {
-                                            style: "background:rgba(161,98,7,0.2); border:1px solid rgba(217,119,6,0.5); border-radius:8px; padding:12px 16px; display:flex; gap:10px; align-items:flex-start;",
-                                            span { style: "font-size:18px; line-height:1;", "⚠️" }
-                                            div {
-                                                p { style: "color:#fcd34d; font-weight:600; font-size:14px; margin:0 0 4px;", "Builder not assigned to any environment" }
-                                                p { style: "color:#fde68a; font-size:13px; margin:0;", "{msg}" }
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    rsx! {}
-                                }
-                            }
+
                             div {
                                 class: "grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4",
                                 for builder in builder_list {

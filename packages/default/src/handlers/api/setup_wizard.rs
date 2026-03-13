@@ -25,7 +25,10 @@ struct SetupWizardCounts {
     system_with_links: i64,
 }
 
-pub async fn get_setup_progress(State(pool): State<PgPool>, headers: HeaderMap) -> impl IntoResponse {
+pub async fn get_setup_progress(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     let Some(user_id) = require_admin_user(&pool, &headers).await else {
         return forbidden();
     };
@@ -96,11 +99,12 @@ async fn load_counts(pool: &PgPool) -> anyhow::Result<SetupWizardCounts> {
         .fetch_one(pool)
         .await?;
 
-    let builder_with_environment = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(DISTINCT b.id)::bigint FROM builders b JOIN builder_environment_assignments bea ON bea.builder_id = b.id",
-    )
-    .fetch_one(pool)
-    .await?;
+    // A builder with no environment assignments is a wildcard builder that
+    // handles jobs from all environments — it counts as fully configured.
+    let builder_with_environment =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::bigint FROM builders")
+            .fetch_one(pool)
+            .await?;
 
     let cache_with_environment = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(DISTINCT c.id)::bigint FROM cache_destinations c JOIN cache_destination_environments cde ON cde.cache_destination_id = c.id",
@@ -149,8 +153,11 @@ fn build_progress_response(
         count: counts.system_with_links,
     };
 
-    let all_required_complete =
-        environment.complete && flake.complete && builder.complete && cache.complete && system.complete;
+    let all_required_complete = environment.complete
+        && flake.complete
+        && builder.complete
+        && cache.complete
+        && system.complete;
 
     SetupWizardProgressResponse {
         dismissed,
