@@ -1,7 +1,7 @@
 ---
 id: TASK-185
 title: Fix build queue cards - text overflow and layout issues
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-03-13 01:01'
 updated_date: '2026-03-13 01:09'
@@ -158,4 +158,6 @@ LOCK: agent-claude on gray in ~/code/crystal-forge/TASK-185-fix-build-queue-card
 9. **web-ui check** - ✅ PASSED (21/21 screenshots captured)
 
 Ready for MR.
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/157
 <!-- SECTION:NOTES:END -->
