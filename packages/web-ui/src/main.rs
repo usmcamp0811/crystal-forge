@@ -10,6 +10,7 @@ mod dashboard;
 mod environments;
 mod hooks;
 mod routes;
+mod showcase;
 mod state;
 mod systems;
 pub mod theme;

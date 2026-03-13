@@ -1,209 +1,220 @@
-//! Style guide view — displays all design tokens for visual review.
+//! Component isolation surface for frontend visual development.
 
 use dioxus::prelude::*;
 
-use crate::api::models::{DeploymentStatus, HealthStatus, PipelineStage};
+use crate::api::models::{DeploymentStatus, HealthStatus};
 use crate::components::status_badge::{DeploymentBadge, HealthBadge};
+use crate::showcase::fixtures::{stat_card_fixtures, timeline_fixtures};
+use crate::showcase::shell::{ResponsivePreview, ShowcaseSection, StateMatrix, StateTile};
 use crate::theme::{self, presets};
 
-/// Style guide page showing all design system tokens.
 #[component]
 pub fn StyleGuideView() -> Element {
+    let stat_fixtures = stat_card_fixtures();
+    let timeline = timeline_fixtures();
+
     rsx! {
         div {
             class: "{theme::spacing::PAGE_PADDING}",
             h1 {
-                class: "{theme::typography::PAGE_TITLE} mb-8",
-                "Design System — Style Guide"
+                class: "{theme::typography::PAGE_TITLE} mb-2",
+                "Component Isolation Surface"
+            }
+            p {
+                class: "{theme::text::SECONDARY} mb-8",
+                "Develop and review UI primitives, composite components, and page widgets in isolation."
             }
 
-            // ── Health Status ──────────────────────────────────────
-            section { class: "mb-10",
-                h2 { class: "{theme::typography::SECTION_TITLE} mb-4", "Health Status" }
-                div { class: "flex flex-wrap {theme::spacing::CARD_GAP}",
-                    StatusSwatch { label: "Healthy", text_class: theme::health::HEALTHY_TEXT, bg_class: theme::health::HEALTHY_BG, dot_class: theme::health::HEALTHY_DOT }
-                    StatusSwatch { label: "Warning", text_class: theme::health::WARNING_TEXT, bg_class: theme::health::WARNING_BG, dot_class: theme::health::WARNING_DOT }
-                    StatusSwatch { label: "Critical", text_class: theme::health::CRITICAL_TEXT, bg_class: theme::health::CRITICAL_BG, dot_class: theme::health::CRITICAL_DOT }
-                    StatusSwatch { label: "Offline", text_class: theme::health::OFFLINE_TEXT, bg_class: theme::health::OFFLINE_BG, dot_class: theme::health::OFFLINE_DOT }
+            div { class: "flex flex-wrap gap-2 mb-8",
+                TaxonomyChip { label: "Primitives" }
+                TaxonomyChip { label: "Composites" }
+                TaxonomyChip { label: "Page Widgets" }
+            }
+
+            ShowcaseSection {
+                title: "Primitives",
+                description: "Small visual building blocks that should stay stateless and reusable.",
+                div { class: "grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3",
+                    PrimitiveCard {
+                        title: "Health Badge",
+                        content: rsx!(
+                            div { class: "flex gap-2 flex-wrap",
+                                HealthBadge { status: HealthStatus::Healthy }
+                                HealthBadge { status: HealthStatus::Warning }
+                                HealthBadge { status: HealthStatus::Critical }
+                            }
+                        )
+                    }
+                    PrimitiveCard {
+                        title: "Deployment Badge",
+                        content: rsx!(
+                            div { class: "flex gap-2 flex-wrap",
+                                DeploymentBadge { status: DeploymentStatus::UpToDate }
+                                DeploymentBadge { status: DeploymentStatus::Behind }
+                                DeploymentBadge { status: DeploymentStatus::NeverDeployed }
+                            }
+                        )
+                    }
+                    PrimitiveCard {
+                        title: "Color Tokens",
+                        content: rsx!(
+                            div { class: "space-y-2",
+                                ColorSwatch { label: "Healthy", text_class: theme::health::HEALTHY_TEXT, bg_class: theme::health::HEALTHY_BG }
+                                ColorSwatch { label: "Warning", text_class: theme::health::WARNING_TEXT, bg_class: theme::health::WARNING_BG }
+                                ColorSwatch { label: "Critical", text_class: theme::health::CRITICAL_TEXT, bg_class: theme::health::CRITICAL_BG }
+                            }
+                        )
+                    }
+                    PrimitiveCard {
+                        title: "Buttons",
+                        content: rsx!(
+                            div { class: "flex flex-wrap gap-2",
+                                button { class: "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}", "Primary" }
+                                button { class: "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::DANGER_BTN}", "Danger" }
+                            }
+                        )
+                    }
                 }
             }
 
-            // ── Health Badges ──────────────────────────────────────
-            section { class: "mb-10",
-                h2 { class: "{theme::typography::SECTION_TITLE} mb-4", "Health Badges (Component)" }
-                div { class: "flex flex-wrap gap-3",
-                    HealthBadge { status: HealthStatus::Healthy }
-                    HealthBadge { status: HealthStatus::Warning }
-                    HealthBadge { status: HealthStatus::Critical }
-                    HealthBadge { status: HealthStatus::Offline }
+            ShowcaseSection {
+                title: "Composites",
+                description: "Prop-driven UI components composed from primitives and shared in multiple views.",
+                StateMatrix { title: "Stat Card Matrix",
+                    StateTile { label: "loading", SkeletonStatCard {} }
+                    StateTile { label: "empty", EmptyStatCard {} }
+                    StateTile { label: "success", DemoStatCard { label: stat_fixtures[0].label, value: stat_fixtures[0].value, caption: stat_fixtures[0].caption } }
+                    StateTile { label: "error", ErrorStatCard {} }
+                    StateTile { label: "overflow", DemoStatCard { label: "Very Long Label For Build Queue Processing", value: "123,456,789", caption: "caption with a very long explanation to validate text wrapping" } }
                 }
             }
 
-            // ── Deployment Status ──────────────────────────────────
-            section { class: "mb-10",
-                h2 { class: "{theme::typography::SECTION_TITLE} mb-4", "Deployment Status" }
-                div { class: "flex flex-wrap {theme::spacing::CARD_GAP}",
-                    ColorSwatch { label: "Up to Date", text_class: theme::deployment::UP_TO_DATE_TEXT, bg_class: theme::deployment::UP_TO_DATE_BG }
-                    ColorSwatch { label: "Behind", text_class: theme::deployment::BEHIND_TEXT, bg_class: theme::deployment::BEHIND_BG }
-                    ColorSwatch { label: "Ahead", text_class: theme::deployment::AHEAD_TEXT, bg_class: theme::deployment::AHEAD_BG }
-                    ColorSwatch { label: "Never Deployed", text_class: theme::deployment::NEVER_DEPLOYED_TEXT, bg_class: theme::deployment::NEVER_DEPLOYED_BG }
-                    ColorSwatch { label: "Unknown", text_class: theme::deployment::UNKNOWN_TEXT, bg_class: theme::deployment::UNKNOWN_BG }
+            ShowcaseSection {
+                title: "Page Widgets",
+                description: "Larger sections used within pages. These should be presentational and fixture-driven in the showcase.",
+                ResponsivePreview {
+                    label: "mobile (375px)",
+                    width_class: "max-w-[375px]",
+                    WidgetPanel {
+                        title: "Flake Timeline",
+                        for item in timeline.iter() {
+                            TimelineRow {
+                                title: item.title,
+                                meta: item.meta,
+                                status: item.status,
+                            }
+                        }
+                    }
                 }
-            }
-
-            // ── Deployment Badges ──────────────────────────────────
-            section { class: "mb-10",
-                h2 { class: "{theme::typography::SECTION_TITLE} mb-4", "Deployment Badges (Component)" }
-                div { class: "flex flex-wrap gap-3",
-                    DeploymentBadge { status: DeploymentStatus::UpToDate }
-                    DeploymentBadge { status: DeploymentStatus::Behind }
-                    DeploymentBadge { status: DeploymentStatus::Ahead }
-                    DeploymentBadge { status: DeploymentStatus::NeverDeployed }
-                    DeploymentBadge { status: DeploymentStatus::Unknown }
-                }
-            }
-
-            // ── CVE Severity ───────────────────────────────────────
-            section { class: "mb-10",
-                h2 { class: "{theme::typography::SECTION_TITLE} mb-4", "CVE Severity" }
-                div { class: "flex flex-wrap {theme::spacing::CARD_GAP}",
-                    ColorSwatch { label: "Critical", text_class: theme::cve::CRITICAL_TEXT, bg_class: theme::cve::CRITICAL_BG }
-                    ColorSwatch { label: "High", text_class: theme::cve::HIGH_TEXT, bg_class: theme::cve::HIGH_BG }
-                    ColorSwatch { label: "Medium", text_class: theme::cve::MEDIUM_TEXT, bg_class: theme::cve::MEDIUM_BG }
-                    ColorSwatch { label: "Low", text_class: theme::cve::LOW_TEXT, bg_class: theme::cve::LOW_BG }
-                }
-            }
-
-            // ── Pipeline Stages ────────────────────────────────────
-            section { class: "mb-10",
-                h2 { class: "{theme::typography::SECTION_TITLE} mb-4", "Pipeline Stages" }
-                div { class: "flex flex-wrap gap-3",
-                    for stage in [PipelineStage::DryRun, PipelineStage::ReadyForBuild, PipelineStage::Building, PipelineStage::BuildComplete, PipelineStage::ReadyForDeploy, PipelineStage::Unknown] {
-                        span {
-                            class: "{presets::BADGE} {stage.color_class()} bg-gray-800",
-                            "{stage.label()}"
+                ResponsivePreview {
+                    label: "desktop (960px)",
+                    width_class: "max-w-[960px]",
+                    WidgetPanel {
+                        title: "Flake Timeline",
+                        for item in timeline.iter() {
+                            TimelineRow {
+                                title: item.title,
+                                meta: item.meta,
+                                status: item.status,
+                            }
                         }
                     }
                 }
             }
-
-            // ── Surface Colors ─────────────────────────────────────
-            section { class: "mb-10",
-                h2 { class: "{theme::typography::SECTION_TITLE} mb-4", "Surface Colors" }
-                div { class: "grid grid-cols-1 md:grid-cols-3 {theme::spacing::CARD_GAP}",
-                    div {
-                        class: "{theme::surface::PAGE_BG} border border-gray-700 rounded-lg p-4",
-                        p { class: "{theme::text::SECONDARY}", "Page BG (gray-950)" }
-                    }
-                    div {
-                        class: "{theme::surface::SIDEBAR_BG} border border-gray-700 rounded-lg p-4",
-                        p { class: "{theme::text::SECONDARY}", "Sidebar BG (gray-900)" }
-                    }
-                    div {
-                        class: "{theme::surface::SUBTLE_BG} border border-gray-700 rounded-lg p-4",
-                        p { class: "{theme::text::SECONDARY}", "Subtle BG (gray-800/50)" }
-                    }
-                }
-            }
-
-            // ── Typography ─────────────────────────────────────────
-            section { class: "mb-10",
-                h2 { class: "{theme::typography::SECTION_TITLE} mb-4", "Typography" }
-                div { class: "{presets::CARD} space-y-4",
-                    p { class: "{theme::typography::PAGE_TITLE}", "Page Title (text-2xl font-bold)" }
-                    p { class: "{theme::typography::SECTION_TITLE}", "Section Title (text-lg font-semibold)" }
-                    p { class: "{theme::typography::LABEL}", "Label (text-sm text-gray-400)" }
-                    p { class: "{theme::typography::STAT_VALUE}", "42" }
-                    p { class: "{theme::typography::TABLE_HEADER}", "Table Header" }
-                    p { class: "{theme::typography::MONO}", "/nix/store/abc123-nixos-system-24.11" }
-                    p { class: "{theme::typography::CAPTION}", "Caption — timestamps, minor info" }
-                }
-            }
-
-            // ── Text Hierarchy ─────────────────────────────────────
-            section { class: "mb-10",
-                h2 { class: "{theme::typography::SECTION_TITLE} mb-4", "Text Hierarchy" }
-                div { class: "{presets::CARD} space-y-2",
-                    p { class: "{theme::text::PRIMARY}", "Primary — headings, important values" }
-                    p { class: "{theme::text::SECONDARY}", "Secondary — labels, descriptions" }
-                    p { class: "{theme::text::MUTED}", "Muted — timestamps, versions" }
-                    p { class: "{theme::text::DISABLED}", "Disabled — inactive elements" }
-                }
-            }
-
-            // ── Interactive ────────────────────────────────────────
-            section { class: "mb-10",
-                h2 { class: "{theme::typography::SECTION_TITLE} mb-4", "Interactive Elements" }
-                div { class: "flex flex-wrap gap-3",
-                    button {
-                        class: "px-4 py-2 rounded-lg text-white font-medium transition-colors {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING}",
-                        "Primary"
-                    }
-                    button {
-                        class: "px-4 py-2 rounded-lg text-white font-medium transition-colors {theme::interactive::DANGER_BTN} {theme::interactive::FOCUS_RING}",
-                        "Danger"
-                    }
-                    button {
-                        class: "px-4 py-2 rounded-lg text-white font-medium transition-colors {theme::interactive::SUCCESS_BTN} {theme::interactive::FOCUS_RING}",
-                        "Success"
-                    }
-                    button {
-                        class: "px-4 py-2 rounded-lg text-gray-400 font-medium transition-colors {theme::interactive::GHOST_BTN} {theme::interactive::FOCUS_RING}",
-                        "Ghost"
-                    }
-                }
-                div { class: "mt-4",
-                    input {
-                        class: "rounded-lg px-4 py-2 text-sm text-gray-300 placeholder-gray-600 {theme::interactive::INPUT} {theme::interactive::FOCUS_RING}",
-                        r#type: "text",
-                        placeholder: "Input field...",
-                    }
-                }
-            }
-
-            // ── Card Preset ────────────────────────────────────────
-            section { class: "mb-10",
-                h2 { class: "{theme::typography::SECTION_TITLE} mb-4", "Card Preset" }
-                div { class: "{presets::CARD}",
-                    p { class: "{theme::typography::SECTION_TITLE} mb-2", "Example Card" }
-                    p { class: "{theme::text::SECONDARY}", "This card uses the presets::CARD class string." }
-                }
-            }
         }
     }
 }
 
-/// A color swatch showing text and background variants.
+#[component]
+fn TaxonomyChip(label: &'static str) -> Element {
+    rsx! {
+        span {
+            class: "rounded-full border {theme::surface::CARD_BORDER} px-3 py-1 text-xs font-semibold {theme::text::SECONDARY}",
+            "{label}"
+        }
+    }
+}
+
+#[component]
+fn PrimitiveCard(title: &'static str, content: Element) -> Element {
+    rsx! {
+        div { class: "{presets::CARD}",
+            p { class: "text-sm font-semibold {theme::text::SECONDARY} mb-3", "{title}" }
+            {content}
+        }
+    }
+}
+
 #[component]
 fn ColorSwatch(label: &'static str, text_class: &'static str, bg_class: &'static str) -> Element {
     rsx! {
-        div {
-            class: "{presets::CARD} min-w-[140px]",
-            span { class: "{text_class} font-medium text-sm", "{label}" }
-            div { class: "mt-2 {bg_class} rounded px-3 py-1.5",
-                span { class: "{text_class} text-xs", "Badge preview" }
-            }
+        div { class: "{bg_class} rounded px-2 py-1",
+            span { class: "{text_class} text-xs font-medium", "{label}" }
         }
     }
 }
 
-/// A status swatch with dot, text, and badge preview.
 #[component]
-fn StatusSwatch(
-    label: &'static str,
-    text_class: &'static str,
-    bg_class: &'static str,
-    dot_class: &'static str,
-) -> Element {
+fn DemoStatCard(label: &'static str, value: &'static str, caption: &'static str) -> Element {
     rsx! {
-        div {
-            class: "{presets::CARD} min-w-[140px]",
-            div { class: "flex items-center gap-2 mb-2",
-                span { class: "{presets::DOT} {dot_class}" }
-                span { class: "{text_class} font-medium text-sm", "{label}" }
-            }
-            div { class: "{bg_class} rounded px-3 py-1.5",
-                span { class: "{text_class} text-xs", "Badge preview" }
+        div { class: "rounded-lg border {theme::surface::CARD_BORDER} p-3 bg-gray-900/40",
+            p { class: "text-xs uppercase tracking-wide {theme::text::MUTED}", "{label}" }
+            p { class: "text-2xl font-bold {theme::text::PRIMARY} mt-1", "{value}" }
+            p { class: "text-xs {theme::text::SECONDARY} mt-1", "{caption}" }
+        }
+    }
+}
+
+#[component]
+fn SkeletonStatCard() -> Element {
+    rsx! {
+        div { class: "rounded-lg border {theme::surface::CARD_BORDER} p-3 bg-gray-900/40 animate-pulse",
+            div { class: "h-3 w-20 rounded bg-gray-700 mb-2" }
+            div { class: "h-7 w-14 rounded bg-gray-700 mb-2" }
+            div { class: "h-3 w-24 rounded bg-gray-700" }
+        }
+    }
+}
+
+#[component]
+fn EmptyStatCard() -> Element {
+    rsx! {
+        div { class: "rounded-lg border {theme::surface::CARD_BORDER} p-3 bg-gray-900/40",
+            p { class: "text-sm {theme::text::SECONDARY}", "No data available" }
+        }
+    }
+}
+
+#[component]
+fn ErrorStatCard() -> Element {
+    rsx! {
+        div { class: "rounded-lg border border-red-500/30 bg-red-500/10 p-3",
+            p { class: "text-xs text-red-300 uppercase tracking-wide", "error" }
+            p { class: "text-sm text-red-200 mt-1", "Unable to load widget data" }
+        }
+    }
+}
+
+#[component]
+fn WidgetPanel(title: &'static str, children: Element) -> Element {
+    rsx! {
+        div { class: "{presets::CARD}",
+            p { class: "text-sm font-semibold {theme::text::SECONDARY} mb-3", "{title}" }
+            div { class: "space-y-2", {children} }
+        }
+    }
+}
+
+#[component]
+fn TimelineRow(title: &'static str, meta: &'static str, status: &'static str) -> Element {
+    rsx! {
+        div { class: "rounded-lg border {theme::surface::CARD_BORDER} p-3 bg-gray-900/30",
+            div { class: "flex items-start justify-between gap-3",
+                div {
+                    p { class: "text-sm font-medium {theme::text::PRIMARY}", "{title}" }
+                    p { class: "text-xs {theme::text::MUTED} mt-1", "{meta}" }
+                }
+                span { class: "rounded-full px-2 py-0.5 text-xs {theme::deployment::UNKNOWN_TEXT} {theme::deployment::UNKNOWN_BG}", "{status}" }
             }
         }
     }
