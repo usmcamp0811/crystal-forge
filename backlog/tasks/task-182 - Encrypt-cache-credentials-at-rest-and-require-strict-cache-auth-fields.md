@@ -1,10 +1,10 @@
 ---
 id: TASK-182
 title: Encrypt cache credentials at rest and require strict cache auth fields
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-03-11 12:47'
-updated_date: '2026-03-11 12:47'
+updated_date: '2026-03-13 01:01'
 labels:
   - security
   - cache
@@ -63,4 +63,32 @@ Risk Level: high (security-sensitive storage and migration behavior)
 Moved to To Do per explicit maintainer request for immediate execution.
 
 LOCK: OpenCode on gray in /home/mcamp/code/crystal-forge/TASK-182-encrypt-cache-credentials
+
+## Implementation Found
+
+This task was already implemented in commits 3c599feb and cbfe353b (merged to dev on 2026-03-11):
+
+### Commit 3c599feb: `fix(cache): harden cache destination API and secret handling`
+- Encrypt cache credentials at rest
+- Sanitize URL-embedded credentials in redacted responses
+- Require authentication for cache destination reads
+- Add update-shape validation tests for Attic transitions
+- Encrypt legacy plaintext rows on startup
+- Added security/cache_secrets.rs module (+154 lines)
+- Updated cache queries with encryption/decryption (+206 lines)
+
+### Commit cbfe353b: `fix(nix): wire cache encryption key through module and dev scripts`
+- Add NixOS module support for cache.encryption_key_file
+- Export CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY for server/builder startup
+- Update dev scripts to generate local cache encryption key
+- Propagate key to run-server/run-builder/start-builder-api
+
+All acceptance criteria satisfied:
+- Sensitive fields not stored as plaintext ✅
+- Backend decrypts at runtime without exposing plaintext in API ✅
+- Required field validation enforced ✅
+- Migration strategy maintains compatibility ✅
+- Tests cover encryption/decryption behavior ✅
+
+Worktree cleanup: TASK-182-encrypt-cache-credentials
 <!-- SECTION:NOTES:END -->
