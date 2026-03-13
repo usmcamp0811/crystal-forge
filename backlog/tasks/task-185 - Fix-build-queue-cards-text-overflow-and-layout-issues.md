@@ -4,7 +4,7 @@ title: Fix build queue cards - text overflow and layout issues
 status: Review
 assignee: []
 created_date: '2026-03-13 01:01'
-updated_date: '2026-03-13 01:09'
+updated_date: '2026-03-13 01:28'
 labels:
   - web-ui
   - ux
@@ -160,4 +160,6 @@ LOCK: agent-claude on gray in ~/code/crystal-forge/TASK-185-fix-build-queue-card
 Ready for MR.
 
 MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/157
+
+Correction: MR !157 was closed because it accidentally targeted `main`. Active MR is now !158 targeting `dev`: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/158
 <!-- SECTION:NOTES:END -->
