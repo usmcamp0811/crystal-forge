@@ -3,10 +3,10 @@ id: TASK-189
 title: >-
   Reapply MR !156 responsive sidebar changes to dev after branch history
   divergence
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-03-13 02:17'
-updated_date: '2026-03-13 02:17'
+updated_date: '2026-03-13 02:29'
 labels:
   - frontend
   - recovery
@@ -78,4 +78,20 @@ Safely reapply the functional changes from MR `!156` onto current `dev` and open
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: codex on reckless in ~/code/crystal-forge/TASK-189-reapply-mr-156-sidebar
+
+Recovery branch created from current origin/dev: `TASK-189-reapply-mr-156-sidebar`.
+
+Reapplied MR !156 by cherry-picking merge content onto current dev as commit `bedda750`.
+
+Conflict handled: kept current backlog task file variant for TASK-158; code/UI changes from !156 retained.
+
+Verification executed:
+
+- `nix develop -c cargo fmt --manifest-path packages/web-ui/Cargo.toml -- --check` ✅
+
+- `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml` ✅
+
+- `nix build .#checks.x86_64-linux.web-ui` ✅
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/160
 <!-- SECTION:NOTES:END -->
