@@ -3,10 +3,10 @@ id: TASK-189
 title: >-
   Reapply MR !156 responsive sidebar changes to dev after branch history
   divergence
-status: Review
+status: Done
 assignee: []
 created_date: '2026-03-13 02:17'
-updated_date: '2026-03-13 02:29'
+updated_date: '2026-03-13 12:15'
 labels:
   - frontend
   - recovery
@@ -20,6 +20,7 @@ references:
   - packages/web-ui/src/components/layout/topbar.rs
   - packages/web-ui/assets/app.css
 priority: high
+ordinal: 2250
 ---
 
 ## Description
