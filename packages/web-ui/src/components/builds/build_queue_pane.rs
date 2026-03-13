@@ -51,84 +51,68 @@ pub fn BuildQueuePane(
 
                     div {
                         class: "space-y-2 max-h-[56vh] overflow-y-auto pr-1",
-                        "data-testid": "build-queue-list",
                         for build in filtered {
                             button {
                                 key: "{build.id}",
-                                class: "w-full rounded-xl border px-4 py-4 text-left transition min-h-[44px] {queue_row_style(*selected_id.read() == Some(build.id), build.status)}",
-                                "data-testid": "build-queue-card",
+                                class: "w-full rounded-xl border px-4 py-3 text-left transition {queue_row_style(*selected_id.read() == Some(build.id), build.status)}",
                                 onclick: move |_| selected_id.set(Some(build.id)),
                                 div {
-                                    class: "flex items-start justify-between gap-4 mb-3",
+                                    class: "flex items-start justify-between gap-3",
                                     div {
-                                        class: "flex-1 min-w-0",
                                         div {
-                                            class: "flex items-center gap-2 flex-wrap",
-                                            p {
-                                                class: "text-sm {theme::text::PRIMARY} font-semibold truncate",
-                                                title: "{build.hostname}",
-                                                "{build.hostname}"
-                                            }
+                                            class: "flex items-center gap-2",
+                                            p { class: "text-sm text-white font-semibold", "{build.hostname}" }
                                             span {
-                                                class: "inline-flex px-2 py-0.5 text-[10px] rounded border cf-chip-blue shrink-0",
+                                                class: "inline-flex px-2 py-0.5 text-[10px] rounded border text-blue-100 cf-chip-blue",
                                                 "{build.flake}"
                                             }
                                         }
-                                        p {
-                                            class: "text-xs {theme::text::MUTED} mt-1 truncate",
-                                            title: "{build.branch} · {short_commit(&build.commit)}",
-                                            "{build.branch} · {short_commit(&build.commit)}"
-                                        }
+                                        p { class: "text-xs text-gray-300 mt-1", "{build.branch} · {short_commit(&build.commit)}" }
                                     }
                                     div {
-                                        class: "text-right shrink-0",
+                                        class: "text-right",
                                         span {
                                             class: "inline-flex px-2 py-1 text-[10px] uppercase rounded border {build_status_badge_class(build.status)}",
                                             "{build.status_label()}"
                                         }
-                                        p { class: "text-[10px] {theme::text::DISABLED} mt-1 whitespace-nowrap", "{build.queued_for}" }
+                                        p { class: "text-[10px] text-gray-400 mt-1", "{build.queued_for}" }
                                     }
                                 }
 
                                 div {
-                                    class: "mt-2 rounded-md border {theme::surface::CARD_BORDER} cf-subtle-bg px-3 py-2",
+                                    class: "mt-2 rounded-md border border-gray-700/60 bg-gray-950/70 px-2 py-1",
                                     p {
-                                        class: "text-[11px] {theme::text::SECONDARY} leading-5 truncate",
-                                        title: "Build target: {build.flake} · {build.hostname}",
-                                        span { class: "{theme::text::MUTED}", "Build target: " }
+                                        class: "text-[11px] text-gray-300 leading-5",
+                                        span { class: "text-gray-400", "Build target: " }
                                         span { class: "font-mono text-cyan-300", "{build.flake}" }
-                                        span { class: "{theme::text::DISABLED} mx-1", "·" }
-                                        span { class: "font-mono {theme::text::SECONDARY}", "{build.hostname}" }
+                                        span { class: "text-gray-500 mx-1", "·" }
+                                        span { class: "font-mono text-gray-300", "{build.hostname}" }
                                     }
                                     if !build.summary.is_empty() && build.summary != format!("job {}", build.job_id.map(|id| id.to_string()).unwrap_or_else(|| "unknown".to_string())) {
-                                        p {
-                                            class: "text-[11px] {theme::text::MUTED} mt-1 italic truncate",
-                                            title: "{build.summary}",
-                                            "{build.summary}"
-                                        }
+                                        p { class: "text-[11px] text-gray-400 mt-1 italic truncate", "{build.summary}" }
                                     }
                                 }
 
                                 div {
-                                    class: "mt-3 flex flex-wrap items-center justify-between gap-3",
+                                    class: "mt-3 flex flex-wrap items-center justify-between gap-2",
                                     div {
-                                        class: "inline-flex items-center gap-2 text-[10px] flex-wrap",
+                                        class: "inline-flex items-center gap-2 text-[10px]",
                                         span {
-                                            class: "inline-flex px-2 py-1 rounded border cf-chip-slate",
+                                            class: "inline-flex px-2 py-1 rounded border text-gray-100 cf-chip-slate",
                                             "worker {build.worker_id}"
                                         }
                                         if let Some(runtime) = build.runtime {
                                             span {
-                                                class: "inline-flex px-2 py-1 rounded border cf-chip-teal",
+                                                class: "inline-flex px-2 py-1 rounded border text-gray-100 cf-chip-teal",
                                                 "runtime {runtime}"
                                             }
                                         }
                                     }
                                     div {
-                                        class: "inline-flex items-center gap-2 flex-wrap",
+                                        class: "inline-flex items-center gap-2",
                                         if matches!(build.status, BuildStatus::Building | BuildStatus::Restarting) {
                                             button {
-                                                class: "text-xs text-red-400 hover:text-red-300 px-3 py-1.5 rounded hover:bg-red-500/10 transition-colors min-h-[44px]",
+                                                class: "text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors",
                                                 onclick: move |evt| {
                                                     evt.stop_propagation();
                                                     on_build_action.call((build.id, BuildAction::Stop));
@@ -137,7 +121,7 @@ pub fn BuildQueuePane(
                                             }
                                         }
                                         button {
-                                            class: "text-xs px-3 py-1.5 rounded transition-colors cf-action-link min-h-[44px]",
+                                            class: "text-xs px-2 py-1 rounded transition-colors cf-action-link",
                                             onclick: move |evt| {
                                                 evt.stop_propagation();
                                                 on_build_action.call((build.id, BuildAction::Restart));
@@ -146,7 +130,7 @@ pub fn BuildQueuePane(
                                         }
                                         if build.status == BuildStatus::Queued {
                                             button {
-                                                class: "text-xs text-cyan-300 hover:text-cyan-200 px-3 py-1.5 rounded hover:bg-cyan-500/10 transition-colors min-h-[44px]",
+                                                class: "text-xs text-cyan-300 hover:text-cyan-200 px-2 py-1 rounded hover:bg-cyan-500/10 transition-colors",
                                                 onclick: move |evt| {
                                                     evt.stop_propagation();
                                                     on_build_action.call((build.id, BuildAction::RunNext));
