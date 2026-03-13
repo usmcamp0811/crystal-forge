@@ -78,6 +78,43 @@ pub fn StyleGuideView() -> Element {
             }
 
             ShowcaseSection {
+                title: "Design Tokens",
+                description: "Legacy token coverage retained so the isolation surface is additive, not reductive.",
+                div { class: "grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3",
+                    PrimitiveCard {
+                        title: "Health Status Swatches",
+                        content: rsx!(
+                            div { class: "space-y-2",
+                                StatusSwatch { label: "Healthy", text_class: theme::health::HEALTHY_TEXT, bg_class: theme::health::HEALTHY_BG, dot_class: theme::health::HEALTHY_DOT }
+                                StatusSwatch { label: "Warning", text_class: theme::health::WARNING_TEXT, bg_class: theme::health::WARNING_BG, dot_class: theme::health::WARNING_DOT }
+                                StatusSwatch { label: "Critical", text_class: theme::health::CRITICAL_TEXT, bg_class: theme::health::CRITICAL_BG, dot_class: theme::health::CRITICAL_DOT }
+                            }
+                        )
+                    }
+                    PrimitiveCard {
+                        title: "Deployment Swatches",
+                        content: rsx!(
+                            div { class: "space-y-2",
+                                ColorSwatch { label: "Up to Date", text_class: theme::deployment::UP_TO_DATE_TEXT, bg_class: theme::deployment::UP_TO_DATE_BG }
+                                ColorSwatch { label: "Behind", text_class: theme::deployment::BEHIND_TEXT, bg_class: theme::deployment::BEHIND_BG }
+                                ColorSwatch { label: "Never Deployed", text_class: theme::deployment::NEVER_DEPLOYED_TEXT, bg_class: theme::deployment::NEVER_DEPLOYED_BG }
+                            }
+                        )
+                    }
+                    PrimitiveCard {
+                        title: "Typography Tokens",
+                        content: rsx!(
+                            div { class: "space-y-2",
+                                p { class: "{theme::typography::SECTION_TITLE}", "Section Title" }
+                                p { class: "{theme::typography::LABEL}", "Label text token" }
+                                p { class: "{theme::typography::MONO}", "/nix/store/example-system" }
+                            }
+                        )
+                    }
+                }
+            }
+
+            ShowcaseSection {
                 title: "Composites",
                 description: "Prop-driven UI components composed from primitives and shared in multiple views.",
                 StateMatrix { title: "Stat Card Matrix",
@@ -155,6 +192,26 @@ fn ColorSwatch(label: &'static str, text_class: &'static str, bg_class: &'static
 }
 
 #[component]
+fn StatusSwatch(
+    label: &'static str,
+    text_class: &'static str,
+    bg_class: &'static str,
+    dot_class: &'static str,
+) -> Element {
+    rsx! {
+        div { class: "rounded border {theme::surface::CARD_BORDER} px-2 py-1.5",
+            div { class: "flex items-center gap-2",
+                span { class: "{presets::DOT} {dot_class}" }
+                span { class: "{text_class} text-xs font-medium", "{label}" }
+            }
+            div { class: "mt-1 {bg_class} rounded px-2 py-1",
+                span { class: "{text_class} text-xs", "Badge preview" }
+            }
+        }
+    }
+}
+
+#[component]
 fn DemoStatCard(label: &'static str, value: &'static str, caption: &'static str) -> Element {
     rsx! {
         div { class: "rounded-lg border {theme::surface::CARD_BORDER} p-3 bg-gray-900/40",
@@ -207,6 +264,8 @@ fn WidgetPanel(title: &'static str, children: Element) -> Element {
 
 #[component]
 fn TimelineRow(title: &'static str, meta: &'static str, status: &'static str) -> Element {
+    let (status_text, status_bg) = timeline_status_style(status);
+
     rsx! {
         div { class: "rounded-lg border {theme::surface::CARD_BORDER} p-3 bg-gray-900/30",
             div { class: "flex items-start justify-between gap-3",
@@ -214,8 +273,24 @@ fn TimelineRow(title: &'static str, meta: &'static str, status: &'static str) ->
                     p { class: "text-sm font-medium {theme::text::PRIMARY}", "{title}" }
                     p { class: "text-xs {theme::text::MUTED} mt-1", "{meta}" }
                 }
-                span { class: "rounded-full px-2 py-0.5 text-xs {theme::deployment::UNKNOWN_TEXT} {theme::deployment::UNKNOWN_BG}", "{status}" }
+                span { class: "rounded-full px-2 py-0.5 text-xs {status_text} {status_bg}", "{status}" }
             }
         }
+    }
+}
+
+fn timeline_status_style(status: &str) -> (&'static str, &'static str) {
+    match status {
+        "evaluating" => (theme::health::WARNING_TEXT, theme::health::WARNING_BG),
+        "ready for build" => (theme::deployment::AHEAD_TEXT, theme::deployment::AHEAD_BG),
+        "build complete" => (
+            theme::deployment::UP_TO_DATE_TEXT,
+            theme::deployment::UP_TO_DATE_BG,
+        ),
+        "policy failed" => (theme::health::CRITICAL_TEXT, theme::health::CRITICAL_BG),
+        _ => (
+            theme::deployment::UNKNOWN_TEXT,
+            theme::deployment::UNKNOWN_BG,
+        ),
     }
 }
