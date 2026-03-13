@@ -1,9 +1,10 @@
 ---
 id: TASK-188.1
 title: Component Isolation Surface + Fixture Foundation
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-03-13 01:51'
+updated_date: '2026-03-13 02:38'
 labels:
   - frontend
   - ux
