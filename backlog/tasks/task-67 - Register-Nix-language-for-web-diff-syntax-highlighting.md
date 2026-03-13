@@ -1,13 +1,14 @@
 ---
 id: TASK-67
 title: Register Nix language for web diff syntax highlighting
-status: Backlog
+status: Done
 assignee:
   - '@Matt'
 created_date: '2026-02-20 03:02'
-updated_date: '2026-02-20 18:12'
+updated_date: '2026-03-13 01:24'
 labels: []
 dependencies: []
+ordinal: 65000
 ---
 
 ## Description

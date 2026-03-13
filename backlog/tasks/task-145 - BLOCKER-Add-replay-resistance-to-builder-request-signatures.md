@@ -4,7 +4,7 @@ title: 'BLOCKER: Add replay resistance to builder request signatures'
 status: Done
 assignee: []
 created_date: '2026-03-01 02:27'
-updated_date: '2026-03-07 23:14'
+updated_date: '2026-03-13 01:24'
 labels:
   - security
   - blocker
@@ -12,7 +12,7 @@ labels:
   - backend
 dependencies: []
 priority: high
-ordinal: 90000
+ordinal: 83000
 ---
 
 ## Description

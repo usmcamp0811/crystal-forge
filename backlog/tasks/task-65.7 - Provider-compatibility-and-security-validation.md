@@ -5,7 +5,7 @@ status: Done
 assignee:
   - Claude Opus 4.5
 created_date: ''
-updated_date: '2026-02-23 03:15'
+updated_date: '2026-03-13 01:24'
 labels:
   - security
   - oidc
@@ -19,7 +19,7 @@ dependencies:
   - TASK-65.5
   - TASK-65.6
 priority: medium
-ordinal: 66000
+ordinal: 62000
 ---
 
 ## Description

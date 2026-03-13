@@ -4,7 +4,7 @@ title: Implement WebSocket-based real-time build log streaming
 status: Done
 assignee: []
 created_date: '2026-03-02 03:36'
-updated_date: '2026-03-02 18:24'
+updated_date: '2026-03-13 01:24'
 labels:
   - enhancement
   - builder
@@ -21,7 +21,7 @@ references:
     client
   - packages/web-ui/src/components/builds/build_detail_pane.rs - log display UI
 priority: medium
-ordinal: 2000
+ordinal: 6000
 ---
 
 ## Description

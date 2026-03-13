@@ -4,11 +4,11 @@ title: 'Sprint grooming: make selected micro-sprint tasks sprint-ready'
 status: Done
 assignee: []
 created_date: '2026-02-19 03:54'
-updated_date: '2026-02-23 03:15'
+updated_date: '2026-03-13 01:24'
 labels: []
 dependencies: []
 priority: high
-ordinal: 63000
+ordinal: 59000
 ---
 
 ## Description

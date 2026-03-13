@@ -4,7 +4,7 @@ title: Add authenticated runtime cache credentials flow for agent cache pulls
 status: Done
 assignee: []
 created_date: '2026-03-12 00:13'
-updated_date: '2026-03-13 00:53'
+updated_date: '2026-03-13 01:24'
 labels:
   - security
   - agent
@@ -13,6 +13,7 @@ labels:
   - runtime
 dependencies: []
 priority: high
+ordinal: 88000
 ---
 
 ## Description

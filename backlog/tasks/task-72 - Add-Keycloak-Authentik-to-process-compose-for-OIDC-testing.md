@@ -4,7 +4,7 @@ title: Add Keycloak/Authentik to process-compose for OIDC testing
 status: Done
 assignee: []
 created_date: '2026-02-20 14:28'
-updated_date: '2026-02-21 03:28'
+updated_date: '2026-03-13 01:24'
 labels:
   - devex
   - infra
@@ -12,7 +12,7 @@ labels:
   - oidc
 dependencies: []
 priority: medium
-ordinal: 53000
+ordinal: 50000
 ---
 
 ## Description

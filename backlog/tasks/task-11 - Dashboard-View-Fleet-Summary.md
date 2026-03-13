@@ -5,7 +5,7 @@ status: Done
 assignee:
   - KimiK2.5
 created_date: '2026-02-05 14:25'
-updated_date: '2026-02-21 03:28'
+updated_date: '2026-03-13 01:24'
 labels:
   - ui
   - views
@@ -16,7 +16,7 @@ dependencies:
   - TASK-8.8
   - TASK-9
 priority: high
-ordinal: 37000
+ordinal: 41000
 ---
 
 ## Description
