@@ -1,10 +1,10 @@
 ---
 id: TASK-173
 title: Fix eval logs visibility and enforce eval queue reordering priority
-status: Review
+status: Done
 assignee: []
 created_date: '2026-03-04 23:22'
-updated_date: '2026-03-08 02:03'
+updated_date: '2026-03-13 00:53'
 labels:
   - bug
   - eval-queue
@@ -125,4 +125,23 @@ Added focused helper tests in `server/mod.rs`: `select_next_pending_commit_id_ho
 Verification rerun: `nix develop -c env SQLX_OFFLINE=true cargo check -p crystal-forge` ✅, `nix develop -c env SQLX_OFFLINE=true cargo test -p crystal-forge queries::commits::tests::reorder_validation_accepts_full_permutation_and_positions_are_dense` ✅, plus both new server helper tests ✅.
 
 Posted MR follow-up note on !153 with behavior summary and verification command list.
+
+## Task Completion
+
+MR !153 merged into dev at commit e4664ac3.
+
+Implementation:
+- Fixed eval claim loop to re-query pending commits per cycle, honoring latest queue order
+- Added per-cycle skip guard to prevent head-of-queue starvation on poisoned commits
+- Moved flake/config errors to post-claim path with retry backoff
+- Inner loop continues on successful claim; failure paths yield to outer notifier
+- Added focused tests for reorder semantics and failed-head deferral
+
+All acceptance criteria satisfied:
+- Eval logs visible directly from Evaluations view
+- Eval queue reordering affects execution order
+- Server-side claim uses deterministic queue ordering
+- No regressions in log UI controls
+
+Worktree cleanup: TASK-173-fix-eval-logs-queue-priority
 <!-- SECTION:NOTES:END -->
