@@ -1,10 +1,10 @@
 ---
 id: TASK-174
 title: Add deterministic mock eval/build dev mode for fast workflow validation
-status: Review
+status: Done
 assignee: []
 created_date: '2026-03-04 23:28'
-updated_date: '2026-03-07 03:04'
+updated_date: '2026-03-13 00:54'
 labels:
   - dev-experience
   - eval-queue
@@ -240,6 +240,35 @@ Added deterministic helper coverage: `mock_policy_fail_pattern_is_deterministic`
 Verification rerun: `nix develop -c env SQLX_OFFLINE=true cargo check -p crystal-forge` ✅, `nix develop -c env SQLX_OFFLINE=true cargo test -p crystal-forge models::evaluate_with_policies::tests` ✅, `nix develop -c env SQLX_OFFLINE=true cargo test -p crystal-forge tests::mock_store_path_is_deterministic_and_sanitized` ✅, `nix build .#devScripts.server-stack-mock` ✅.
 
 Posted MR follow-up notes on !152 with the review response and command results.
+
+## Task Completion
+
+MR !152 merged into dev at commit b7f77596.
+
+Implementation:
+- Added execution_mode config (real|mock, default real)
+- Dev safety validation (mock requires auth_mode=local + local DB)
+- Startup hard-guard in server/builder binaries
+- Mock eval path with deterministic results, staged logs, realistic pacing (~30s)
+- Mock build path for both API builder and legacy workers
+- Synthetic commit injection for manual sync in mock mode
+- Eval/build log replay for late subscribers
+- Build history API and UI
+- Maximize/fullscreen modals for build logs
+- Non-production environment banners
+- Local admin bootstrap for mock stack
+- Developer docs at docs/mock-execution-mode.md
+- New dev script: server-stack-mock
+
+All acceptance criteria satisfied:
+- Config toggle exists (execution_mode)
+- Mock mode blocked in production
+- Mock paths use same queue/state APIs
+- Realistic streaming logs/events
+- UI indicates mock mode active
+- Developer guide documented
+
+Worktree cleanup: TASK-174-mock-eval-build-dev-mode
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
