@@ -66,12 +66,12 @@ Safely reapply the functional changes from MR `!156` onto current `dev` and open
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A recovery branch is created from current `dev` and contains the reapplication of MR `!156` changes.
-- [ ] #2 The resulting branch includes the responsive sidebar behavior originally delivered by MR `!156` (desktop full sidebar, narrow/tablet collapsed behavior, mobile drawer access).
-- [ ] #3 No force-push or integration-branch history rewrite is performed.
-- [ ] #4 `cargo fmt -- --check` and `cargo check` pass in the Nix dev environment.
-- [ ] #5 `nix build .#checks.x86_64-linux.web-ui` succeeds.
-- [ ] #6 A new MR targeting `dev` is opened with explanation that this is a recovery reapply of missing `!156` content.
+- [x] #1 A recovery branch is created from current `dev` and contains the reapplication of MR `!156` changes.
+- [x] #2 The resulting branch includes the responsive sidebar behavior originally delivered by MR `!156` (desktop full sidebar, narrow/tablet collapsed behavior, mobile drawer access).
+- [x] #3 No force-push or integration-branch history rewrite is performed.
+- [x] #4 `cargo fmt -- --check` and `cargo check` pass in the Nix dev environment.
+- [x] #5 `nix build .#checks.x86_64-linux.web-ui` succeeds.
+- [x] #6 A new MR targeting `dev` is opened with explanation that this is a recovery reapply of missing `!156` content.
 <!-- AC:END -->
 
 ## Implementation Notes
