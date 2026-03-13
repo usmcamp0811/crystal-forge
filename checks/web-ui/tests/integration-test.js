@@ -27,6 +27,129 @@ const TEST_USER = {
 // Timeout for page loads (don't use networkidle as it can hang)
 const LOAD_TIMEOUT = 10000;
 
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function mockBuildsDashboardSummary() {
+  const timestamp = nowIso();
+  return {
+    fleet_health: { healthy: 1, warning: 0, critical: 0, offline: 0 },
+    deployment_status: { up_to_date: 1, behind: 0, never_deployed: 0, unknown: 0 },
+    cve_summary: { critical: 0, high: 0, medium: 0, low: 0 },
+    total_systems: 1,
+    active_builds: 1,
+    build_queue: {
+      building_count: 1,
+      queued_count: 1,
+      timestamp,
+      items: [
+        {
+          job_id: "11111111-1111-4111-8111-111111111111",
+          system_id: "22222222-2222-4222-8222-222222222222",
+          hostname: "very-long-hostname-that-should-not-overflow-build-queue-card.example.internal",
+          flake_name: "critical-infra-flake-with-a-very-long-name-for-layout-testing",
+          commit_hash: "a1b2c3d4e5f678901234567890abcdef12345678",
+          commit_message:
+            "Queued build with intentionally long metadata to validate truncation and card boundaries in the Builds queue UI",
+          status: "queued",
+          builder_name: "builder-primary",
+          queued_at: timestamp,
+          started_at: null,
+          elapsed_secs: null,
+          logs: null,
+        },
+        {
+          job_id: "33333333-3333-4333-8333-333333333333",
+          system_id: "44444444-4444-4444-8444-444444444444",
+          hostname: "build-runner-02",
+          flake_name: "platform-core",
+          commit_hash: "deadbeefcafebabe1234567890abcdef12345678",
+          commit_message: "Building core platform",
+          status: "building",
+          builder_name: "builder-secondary",
+          queued_at: timestamp,
+          started_at: timestamp,
+          elapsed_secs: 42,
+          logs: null,
+        },
+      ],
+    },
+    recent_deployments: [],
+    timestamp,
+  };
+}
+
+function mockBuilders() {
+  const timestamp = nowIso();
+  return [
+    {
+      id: "55555555-5555-4555-8555-555555555555",
+      name: "builder-primary",
+      status: "active",
+      max_cpu_cores: 8,
+      max_memory_mb: 16384,
+      max_concurrent_jobs: 4,
+      last_heartbeat_at: timestamp,
+      assigned_environment_count: 1,
+      active_jobs: 1,
+      queued_jobs: 1,
+    },
+  ];
+}
+
+function mockRecentBuilds() {
+  const timestamp = nowIso();
+  return [
+    {
+      job_id: "66666666-6666-4666-8666-666666666666",
+      system_id: "77777777-7777-4777-8777-777777777777",
+      hostname: "history-system-1",
+      flake_name: "platform-core",
+      commit_hash: "abcd1234abcd1234abcd1234abcd1234abcd1234",
+      commit_message: "Recent successful build",
+      status: "complete",
+      builder_name: "builder-primary",
+      queued_at: timestamp,
+      started_at: timestamp,
+      elapsed_secs: 15,
+      logs: null,
+    },
+  ];
+}
+
+async function routeBuildsData(page) {
+  await page.route("**/api/v1/dashboard/summary*", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(mockBuildsDashboardSummary()),
+    });
+  });
+
+  await page.route("**/api/v1/builders*", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(mockBuilders()),
+    });
+  });
+
+  await page.route("**/api/v1/build-jobs/recent*", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(mockRecentBuilds()),
+    });
+  });
+}
+
+async function unrouteBuildsData(page) {
+  await page.unroute("**/api/v1/dashboard/summary*");
+  await page.unroute("**/api/v1/builders*");
+  await page.unroute("**/api/v1/build-jobs/recent*");
+}
+
 // Screenshot steps - executed in order
 const steps = [
   // ============================================================
@@ -141,11 +264,15 @@ const steps = [
     name: "11-builds",
     description: "Builds page",
     action: async (page) => {
+      await routeBuildsData(page);
       await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
 
       const queueCards = page.locator("[data-testid='build-queue-card']");
       const queueCardCount = await queueCards.count();
+      if (queueCardCount === 0) {
+        throw new Error("Expected at least one build queue card in builds screenshot");
+      }
       if (queueCardCount > 0) {
         const overflowingCards = await queueCards.evaluateAll((cards) =>
           cards.filter((card) => card.scrollWidth > card.clientWidth + 1).length,
@@ -154,12 +281,15 @@ const steps = [
           throw new Error(`Build queue has ${overflowingCards} overflowing cards`);
         }
       }
+
+      await unrouteBuildsData(page);
     },
   },
   {
     name: "11b-builds-queue-card-focus",
     description: "Build queue card layout focus",
     action: async (page) => {
+      await routeBuildsData(page);
       await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
 
@@ -167,7 +297,11 @@ const steps = [
       if (await firstQueueCard.isVisible({ timeout: 2000 }).catch(() => false)) {
         await firstQueueCard.click();
         await page.waitForTimeout(700);
+      } else {
+        throw new Error("Expected first build queue card to be visible for focused screenshot");
       }
+
+      await unrouteBuildsData(page);
     },
   },
   {
