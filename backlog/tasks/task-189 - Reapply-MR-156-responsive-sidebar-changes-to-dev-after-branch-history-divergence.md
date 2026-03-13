@@ -3,9 +3,10 @@ id: TASK-189
 title: >-
   Reapply MR !156 responsive sidebar changes to dev after branch history
   divergence
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-03-13 02:17'
+updated_date: '2026-03-13 02:17'
 labels:
   - frontend
   - recovery
