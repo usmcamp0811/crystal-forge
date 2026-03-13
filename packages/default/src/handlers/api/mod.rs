@@ -13,4 +13,5 @@ pub mod deployment_policies;
 pub mod environments;
 pub mod flakes;
 pub mod rbac;
+pub mod setup_wizard;
 pub mod systems;

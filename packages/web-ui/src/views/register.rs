@@ -98,16 +98,16 @@ pub fn RegisterView() -> Element {
                 return;
             }
 
-            // Registration successful - redirect to login
+            // Registration successful - send user into setup flow.
             error_message.set(Some(
-                "Registration successful. Redirecting to login...".to_string(),
+                "Registration successful. Redirecting to setup...".to_string(),
             ));
             is_loading.set(false);
-            nav.replace("/login");
+            nav.replace("/setup");
 
             // Fallback hard redirect in case router navigation is not active yet.
             if let Some(window) = web_sys::window() {
-                let _ = window.location().set_href("/login");
+                let _ = window.location().set_href("/setup");
             }
         });
     };

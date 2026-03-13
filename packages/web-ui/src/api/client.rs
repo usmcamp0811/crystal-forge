@@ -441,6 +441,26 @@ pub async fn delete_admin_oidc_mapping(mapping_id: &str) -> Result<(), ApiClient
     Ok(())
 }
 
+/// Fetch setup wizard progress for the current admin user.
+pub async fn fetch_setup_wizard_progress() -> Result<SetupWizardProgressResponse, ApiClientError> {
+    let url = format!("{}/admin/setup-progress", base_url());
+    fetch_json(&url).await
+}
+
+/// Set setup wizard dismissal state for current admin user.
+pub async fn set_setup_wizard_dismissed(dismissed: bool) -> Result<(), ApiClientError> {
+    let url = format!("{}/admin/setup-wizard/dismiss", base_url());
+    let request = SetupWizardDismissRequest { dismissed };
+    send_empty_with_csrf("POST", &url, Some(&request)).await
+}
+
+/// Set agent step acknowledgment for current admin user.
+pub async fn set_setup_wizard_agent_acknowledged(acknowledged: bool) -> Result<(), ApiClientError> {
+    let url = format!("{}/admin/setup-wizard/agent-acknowledge", base_url());
+    let request = SetupWizardAcknowledgeAgentRequest { acknowledged };
+    send_empty_with_csrf("POST", &url, Some(&request)).await
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Builder Management
 // ─────────────────────────────────────────────────────────────────────────────
