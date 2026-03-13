@@ -304,32 +304,24 @@ fn SetupProgressBar(
                     // Use explicit inline styles so colours are guaranteed
                     // visible on the dark #111827 card background regardless
                     // of Tailwind JIT purging or opacity stacking.
-                    let (card_style, label_style, indicator) = if is_active {
-                        (
-                            // Violet: solid border + noticeable bg fill
-                            "border: 2px solid #7c3aed; background: rgba(109,40,217,0.35); box-shadow: 0 0 0 1px rgba(139,92,246,0.4);",
-                            "color:#e9d5ff; font-weight:600;",
-                            "→",
-                        )
+                    let card_style = if is_active {
+                        "border: 2px solid #7c3aed; background: rgba(109,40,217,0.35); box-shadow: 0 0 0 1px rgba(139,92,246,0.4);"
                     } else if complete {
-                        (
-                            // Emerald: visible green tint
-                            "border: 1px solid rgba(16,185,129,0.6); background: rgba(6,95,70,0.35);",
-                            "color:#6ee7b7; font-weight:500;",
-                            "✓",
-                        )
+                        "border: 1px solid rgba(16,185,129,0.6); background: rgba(6,95,70,0.35);"
                     } else {
-                        (
-                            // Muted: just enough to distinguish from page bg
-                            "border: 1px solid rgba(100,116,139,0.5); background: rgba(30,41,59,0.6);",
-                            "color:#94a3b8; font-weight:500;",
-                            "",
-                        )
+                        "border: 1px solid rgba(100,116,139,0.5); background: rgba(30,41,59,0.6);"
+                    };
+                    let label_style = if is_active {
+                        "color:#e9d5ff; font-weight:600;"
+                    } else if complete {
+                        "color:#6ee7b7; font-weight:500;"
+                    } else {
+                        "color:#94a3b8; font-weight:500;"
                     };
 
                     rsx! {
                         div {
-                            class: "rounded-lg px-3 py-2 text-xs md:text-sm cursor-pointer transition-all",
+                            class: "rounded-lg px-3 py-2 cursor-pointer transition-all",
                             style: "{card_style}",
                             role: "button",
                             onclick: move |_| on_step_click.call(step),
@@ -339,12 +331,8 @@ fn SetupProgressBar(
                                     style: "{label_style}",
                                     "{label}"
                                 }
-                                if !indicator.is_empty() {
-                                    span {
-                                        class: "flex-shrink-0 text-sm",
-                                        style: if complete { "color:#34d399;" } else { "color:#a78bfa;" },
-                                        "{indicator}"
-                                    }
+                                if complete {
+                                    span { style: "color:#34d399; font-size:13px; flex-shrink:0;", "✓" }
                                 }
                             }
                         }

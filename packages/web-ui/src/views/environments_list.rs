@@ -16,6 +16,13 @@ use crate::environments::adapter::{
 use crate::routes::Route;
 use crate::theme;
 
+fn came_from_setup() -> bool {
+    web_sys::window()
+        .and_then(|w| w.location().search().ok())
+        .map(|q| q.contains("from=setup"))
+        .unwrap_or(false)
+}
+
 #[component]
 pub fn EnvironmentsListView() -> Element {
     let mut policy_library_state = use_signal(policy_library);
@@ -91,9 +98,23 @@ pub fn EnvironmentsListView() -> Element {
     let items = environments.read().clone();
     let policy_library_for_add = policy_library_state.read().clone();
 
+    let from_setup = came_from_setup();
+
     rsx! {
         div {
             class: "space-y-6",
+
+            if from_setup {
+                div {
+                    style: "background:rgba(109,40,217,0.2); border:1px solid rgba(139,92,246,0.5); border-radius:8px; padding:10px 16px; display:flex; align-items:center; justify-content:space-between; gap:12px;",
+                    span { style: "color:#e9d5ff; font-size:14px;", "← You came here from the Setup Wizard" }
+                    a {
+                        href: "/setup",
+                        style: "color:#a78bfa; font-size:13px; font-weight:500; white-space:nowrap; text-decoration:underline;",
+                        "Back to Setup Wizard"
+                    }
+                }
+            }
 
             // API fallback notice banner
             if let Some(notice) = api_notice.read().clone() {
