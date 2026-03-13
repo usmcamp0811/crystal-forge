@@ -1,10 +1,10 @@
 ---
 id: TASK-123
 title: Deployment Policies View - Backend Integration
-status: Review
+status: Done
 assignee: []
 created_date: '2026-02-23'
-updated_date: '2026-03-09 12:53'
+updated_date: '2026-03-13 01:24'
 labels:
   - backend
   - api
@@ -13,6 +13,7 @@ labels:
 milestone: m-13
 dependencies: []
 priority: high
+ordinal: 2500
 ---
 
 ## Description
