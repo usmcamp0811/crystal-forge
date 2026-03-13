@@ -1,10 +1,10 @@
 ---
 id: TASK-188.1
 title: Component Isolation Surface + Fixture Foundation
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-03-13 01:51'
-updated_date: '2026-03-13 02:38'
+updated_date: '2026-03-13 02:40'
 labels:
   - frontend
   - ux
@@ -90,3 +90,9 @@ Medium — foundational structural changes; additive but can impact developer wo
 - [ ] #6 The isolation surface is discoverable from UI navigation or clearly linked from contributor-facing docs.
 - [ ] #7 The isolation foundation compiles and runs without introducing regressions to existing routes/views.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: codex on reckless in ~/code/crystal-forge/TASK-188.1-component-isolation-foundation
+<!-- SECTION:NOTES:END -->
