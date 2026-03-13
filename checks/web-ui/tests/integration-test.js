@@ -27,6 +27,27 @@ const TEST_USER = {
 // Timeout for page loads (don't use networkidle as it can hang)
 const LOAD_TIMEOUT = 10000;
 
+const VIEWPORTS = {
+  desktop: { width: 1440, height: 900 },
+  tablet: { width: 900, height: 900 },
+  narrowDesktop: { width: 560, height: 900 },
+  mobile: { width: 375, height: 812 },
+};
+
+async function assertVisible(locator, message) {
+  const visible = await locator.isVisible({ timeout: 5000 }).catch(() => false);
+  if (!visible) {
+    throw new Error(message);
+  }
+}
+
+async function assertHidden(locator, message) {
+  const visible = await locator.isVisible({ timeout: 1500 }).catch(() => false);
+  if (visible) {
+    throw new Error(message);
+  }
+}
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -224,8 +245,240 @@ const steps = [
       await page.waitForTimeout(2000);
     },
   },
+  // ============================================================
+  // RESPONSIVE SIDEBAR SCREENSHOTS
+  // Each step clears localStorage first so state is deterministic.
+  // ============================================================
   {
-    name: "07-user-menu",
+    name: "07-sidebar-desktop-expanded",
+    description: "Desktop: sidebar expanded — grouped sections with labels visible",
+    action: async (page) => {
+      await page.setViewportSize(VIEWPORTS.desktop);
+      // Force expanded state
+      await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1500);
+      await page.evaluate(() => {
+        localStorage.setItem("cf-sidebar-collapsed", "false");
+      });
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1500);
+
+      const sidebar = page.locator("[data-testid='sidebar-nav']");
+      const toggle = page.locator("[data-testid='sidebar-edge-toggle']");
+
+      await assertVisible(sidebar, "Desktop: sidebar should be visible");
+      await assertVisible(toggle, "Desktop: sidebar edge toggle should be visible");
+      await assertHidden(
+        page.locator("[data-testid='mobile-nav-toggle']"),
+        "Desktop: mobile nav toggle should be hidden",
+      );
+
+      // Confirm sidebar is expanded (full width ~256px)
+      const box = await sidebar.boundingBox();
+      if (!box || box.width < 200) {
+        throw new Error(`Desktop expanded sidebar too narrow: ${box ? box.width : "missing"}`);
+      }
+    },
+  },
+  {
+    name: "08-sidebar-desktop-collapsed",
+    description: "Desktop: sidebar in icons-only collapsed state with edge toggle",
+    action: async (page) => {
+      await page.setViewportSize(VIEWPORTS.desktop);
+      await page.evaluate(() => {
+        localStorage.setItem("cf-sidebar-collapsed", "true");
+      });
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1500);
+
+      const sidebar = page.locator("[data-testid='sidebar-nav']");
+      const toggle = page.locator("[data-testid='sidebar-edge-toggle']");
+
+      await assertVisible(sidebar, "Desktop collapsed: sidebar should still be visible");
+      await assertVisible(toggle, "Desktop collapsed: edge toggle should be visible");
+
+      const box = await sidebar.boundingBox();
+      if (!box || box.width > 100) {
+        throw new Error(`Desktop collapsed sidebar too wide: ${box ? box.width : "missing"}`);
+      }
+      // Screenshot taken here: collapsed icons-only state
+    },
+  },
+  {
+    name: "08b-sidebar-desktop-toggle-expand",
+    description: "Desktop: sidebar expanded via toggle click — full labels and sections",
+    action: async (page) => {
+      // Self-contained: force collapsed, reload, then click toggle to expand
+      await page.setViewportSize(VIEWPORTS.desktop);
+      await page.evaluate(() => {
+        localStorage.setItem("cf-sidebar-collapsed", "true");
+      });
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1500);
+
+      const sidebar = page.locator("[data-testid='sidebar-nav']");
+      const toggle = page.locator("[data-testid='sidebar-edge-toggle']");
+
+      const collapsedBox = await sidebar.boundingBox();
+      if (!collapsedBox || collapsedBox.width > 100) {
+        throw new Error(`Desktop expand: expected collapsed start: ${collapsedBox ? collapsedBox.width : "missing"}`);
+      }
+
+      await toggle.click();
+      await page.waitForTimeout(400);
+
+      const expandedBox = await sidebar.boundingBox();
+      if (!expandedBox || expandedBox.width < 200) {
+        throw new Error(`Desktop toggle expand failed: ${expandedBox ? expandedBox.width : "missing"}`);
+      }
+      // Screenshot taken here: expanded state after clicking toggle
+    },
+  },
+  {
+    name: "09-sidebar-tablet-collapsed",
+    description: "Tablet (900px): default icons-only state, edge toggle visible",
+    action: async (page) => {
+      await page.setViewportSize(VIEWPORTS.tablet);
+      await page.evaluate(() => {
+        localStorage.removeItem("cf-sidebar-collapsed");
+      });
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1500);
+
+      const sidebar = page.locator("[data-testid='sidebar-nav']");
+      const toggle = page.locator("[data-testid='sidebar-edge-toggle']");
+
+      await assertVisible(sidebar, "Tablet: sidebar should be visible");
+      await assertVisible(toggle, "Tablet: edge toggle should be visible");
+      await assertHidden(
+        page.locator("[data-testid='mobile-nav-toggle']"),
+        "Tablet: mobile nav toggle should be hidden",
+      );
+
+      const box = await sidebar.boundingBox();
+      if (!box) throw new Error("Tablet: sidebar bounding box missing");
+      // Screenshot taken here: collapsed icons-only at tablet width
+    },
+  },
+  {
+    name: "09b-sidebar-tablet-expanded",
+    description: "Tablet (900px): sidebar expanded via toggle — section labels visible",
+    action: async (page) => {
+      // Self-contained: force collapsed, reload, then click toggle to expand
+      await page.setViewportSize(VIEWPORTS.tablet);
+      await page.evaluate(() => {
+        localStorage.setItem("cf-sidebar-collapsed", "true");
+      });
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1500);
+
+      const sidebar = page.locator("[data-testid='sidebar-nav']");
+      const toggle = page.locator("[data-testid='sidebar-edge-toggle']");
+
+      const collapsedBox = await sidebar.boundingBox();
+      if (!collapsedBox || collapsedBox.width > 100) {
+        throw new Error(`Tablet expand: expected collapsed start: ${collapsedBox ? collapsedBox.width : "missing"}`);
+      }
+
+      await toggle.click();
+      await page.waitForTimeout(400);
+
+      const expandedBox = await sidebar.boundingBox();
+      if (!expandedBox || expandedBox.width < 200) {
+        throw new Error(`Tablet toggle expand failed: ${expandedBox ? expandedBox.width : "missing"}`);
+      }
+      // Screenshot taken here: expanded labels + sections at tablet viewport
+    },
+  },
+  {
+    name: "09c-sidebar-mobile-drawer",
+    description: "Mobile (375px): drawer open with grouped navigation sections",
+    action: async (page) => {
+      await page.setViewportSize(VIEWPORTS.mobile);
+      await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1500);
+
+      await assertHidden(
+        page.locator("[data-testid='sidebar-nav']"),
+        "Mobile: sidebar should be hidden",
+      );
+
+      const mobileToggle = page.locator("[data-testid='mobile-nav-toggle']");
+      await assertVisible(mobileToggle, "Mobile: hamburger toggle should be visible");
+      await mobileToggle.click();
+      await page.waitForTimeout(500);
+
+      await assertVisible(
+        page.locator("[data-testid='mobile-drawer']"),
+        "Mobile: drawer should open after tapping hamburger",
+      );
+      // Screenshot taken here: mobile drawer open showing grouped sections
+    },
+  },
+  {
+    name: "09d-sidebar-narrow-collapsed",
+    description: "Narrow desktop (560px): default icons-only — no hamburger, edge toggle present",
+    action: async (page) => {
+      await page.setViewportSize(VIEWPORTS.narrowDesktop);
+      await page.evaluate(() => {
+        localStorage.removeItem("cf-sidebar-collapsed");
+      });
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1500);
+
+      const sidebar = page.locator("[data-testid='sidebar-nav']");
+      const edgeToggle = page.locator("[data-testid='sidebar-edge-toggle']");
+
+      await assertVisible(sidebar, "Narrow desktop: sidebar visible");
+      await assertVisible(edgeToggle, "Narrow desktop: edge toggle visible");
+      await assertHidden(
+        page.locator("[data-testid='mobile-nav-toggle']"),
+        "Narrow desktop: mobile hamburger hidden",
+      );
+
+      const box = await sidebar.boundingBox();
+      if (!box || box.width > 120) {
+        throw new Error(
+          `Narrow desktop should default to icons-only: ${box ? box.width : "missing"}`,
+        );
+      }
+      // Screenshot taken here: icons-only collapsed at 560px
+    },
+  },
+  {
+    name: "09e-sidebar-sections-fullwidth",
+    description: "Desktop: full-width sidebar showing all section group headers",
+    action: async (page) => {
+      await page.setViewportSize(VIEWPORTS.desktop);
+      await page.evaluate(() => {
+        localStorage.setItem("cf-sidebar-collapsed", "false");
+      });
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1500);
+
+      const sidebar = page.locator("[data-testid='sidebar-nav']");
+      await assertVisible(sidebar, "Sections shot: sidebar must be visible");
+      const box = await sidebar.boundingBox();
+      if (!box || box.width < 200) {
+        throw new Error(`Sections shot: sidebar not expanded: ${box ? box.width : "missing"}`);
+      }
+      // Screenshot taken here: full desktop expanded sidebar, all groups visible
+    },
+  },
+  {
+    name: "10-responsive-reset-desktop",
+    description: "Reset viewport and localStorage to desktop defaults for remaining screenshots",
+    action: async (page) => {
+      await page.setViewportSize(VIEWPORTS.desktop);
+      await page.evaluate(() => {
+        localStorage.removeItem("cf-sidebar-collapsed");
+      });
+      await page.goto(`${baseUrl}/`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1200);
+    },
+  },
+  {
+    name: "11-user-menu",
     description: "User dropdown menu",
     action: async (page) => {
       // Click user menu if visible
@@ -237,7 +490,7 @@ const steps = [
     },
   },
   {
-    name: "08-systems",
+    name: "12-systems",
     description: "Systems list",
     action: async (page) => {
       await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
@@ -245,7 +498,7 @@ const steps = [
     },
   },
   {
-    name: "09-flakes",
+    name: "13-flakes",
     description: "Flakes registry",
     action: async (page) => {
       await page.goto(`${baseUrl}/flakes`, { timeout: LOAD_TIMEOUT });
@@ -253,7 +506,7 @@ const steps = [
     },
   },
   {
-    name: "10-environments",
+    name: "14-environments",
     description: "Environments registry",
     action: async (page) => {
       await page.goto(`${baseUrl}/environments`, { timeout: LOAD_TIMEOUT });
@@ -261,7 +514,7 @@ const steps = [
     },
   },
   {
-    name: "11-builds",
+    name: "15-builds",
     description: "Builds page",
     action: async (page) => {
       await routeBuildsData(page);
@@ -305,7 +558,7 @@ const steps = [
     },
   },
   {
-    name: "12-cves",
+    name: "16-cves",
     description: "CVE dashboard",
     action: async (page) => {
       await page.goto(`${baseUrl}/cves`, { timeout: LOAD_TIMEOUT });
@@ -313,7 +566,7 @@ const steps = [
     },
   },
   {
-    name: "13-style-guide",
+    name: "17-style-guide",
     description: "Style guide",
     action: async (page) => {
       await page.goto(`${baseUrl}/style-guide`, { timeout: LOAD_TIMEOUT });
@@ -321,7 +574,7 @@ const steps = [
     },
   },
   {
-    name: "14-policies",
+    name: "18-policies",
     description: "Policies view",
     action: async (page) => {
       await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
@@ -330,7 +583,7 @@ const steps = [
     },
   },
   {
-    name: "15-policies-new-modal-basic",
+    name: "19-policies-new-modal-basic",
     description: "Policies new modal in basic mode",
     action: async (page) => {
       await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
@@ -343,7 +596,7 @@ const steps = [
     },
   },
   {
-    name: "16-policies-new-modal-advanced",
+    name: "20-policies-new-modal-advanced",
     description: "Policies new modal in advanced mode",
     action: async (page) => {
       await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
@@ -360,7 +613,7 @@ const steps = [
     },
   },
   {
-    name: "17-caches",
+    name: "21-caches",
     description: "Cache management view",
     action: async (page) => {
       await page.goto(`${baseUrl}/caches`, { timeout: LOAD_TIMEOUT });
@@ -368,7 +621,7 @@ const steps = [
     },
   },
   {
-    name: "18-caches-modal-nix",
+    name: "22-caches-modal-nix",
     description: "Add cache modal with Nix type selected",
     action: async (page) => {
       await page.goto(`${baseUrl}/caches`, { timeout: LOAD_TIMEOUT });
@@ -385,7 +638,7 @@ const steps = [
     },
   },
   {
-    name: "19-caches-modal-http",
+    name: "23-caches-modal-http",
     description: "Add cache modal with Http type selected",
     action: async (page) => {
       await page.goto(`${baseUrl}/caches`, { timeout: LOAD_TIMEOUT });
@@ -402,7 +655,7 @@ const steps = [
     },
   },
   {
-    name: "20-caches-modal-s3",
+    name: "24-caches-modal-s3",
     description: "Add cache modal with S3 type selected",
     action: async (page) => {
       await page.goto(`${baseUrl}/caches`, { timeout: LOAD_TIMEOUT });
@@ -419,7 +672,7 @@ const steps = [
     },
   },
   {
-    name: "21-caches-modal-attic",
+    name: "25-caches-modal-attic",
     description: "Add cache modal with Attic type selected",
     action: async (page) => {
       await page.goto(`${baseUrl}/caches`, { timeout: LOAD_TIMEOUT });

@@ -8,9 +8,7 @@ use uuid::Uuid;
 
 use crate::api::client::delete_deployment_policy;
 use crate::components::layout::Card;
-use crate::components::policy::{
-    PolicyCard, PolicyDefinition, PolicyEditorModal, PolicyFormat,
-};
+use crate::components::policy::{PolicyCard, PolicyDefinition, PolicyEditorModal, PolicyFormat};
 use crate::theme;
 use crate::views::policies_api;
 
@@ -57,7 +55,7 @@ const POLICY_JSON_TEMPLATE: &str = r#"{
 pub fn PoliciesView() -> Element {
     let mut policy_library: Signal<Vec<PolicyDefinition>> = use_signal(Vec::new);
     let mut show_editor = use_signal(|| false);
-    
+
     // Load policies from API on mount
     use_effect(move || {
         spawn(async move {
@@ -464,7 +462,10 @@ fn initial_policy_definitions() -> Vec<PolicyDefinition> {
         .into_iter()
         .map(|preset| {
             // Extract policy_type from TOML body for core policy detection
-            let policy_type = if preset.body.contains("type = \"require_crystal_forge_agent\"") {
+            let policy_type = if preset
+                .body
+                .contains("type = \"require_crystal_forge_agent\"")
+            {
                 Some("require_crystal_forge_agent".to_string())
             } else if preset.body.contains("type = \"require_cf_agent\"") {
                 Some("require_cf_agent".to_string())
@@ -475,7 +476,7 @@ fn initial_policy_definitions() -> Vec<PolicyDefinition> {
             } else {
                 None
             };
-            
+
             PolicyDefinition {
                 id: preset.id,
                 name: preset.title.to_string(),

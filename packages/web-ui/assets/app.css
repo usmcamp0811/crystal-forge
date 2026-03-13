@@ -715,3 +715,105 @@ html, body {
     grid-template-columns: 1fr;
   }
 }
+
+/* Sidebar section headers */
+.cf-nav-section {
+  /* Bleed past the px-3 parent padding to fill edge-to-edge */
+  margin-left: -0.75rem;
+  margin-right: -0.75rem;
+  margin-top: 0.5rem;
+  /* Subtle tinted wash — one step darker/lighter than sidebar bg */
+  background-color: var(--cf-subtle-bg);
+  /* Hairline borders top and bottom to frame the row */
+  border-top: 1px solid var(--cf-card-border);
+  border-bottom: 1px solid var(--cf-card-border);
+  min-height: 1.625rem;
+  display: flex;
+  align-items: center;
+  padding: 0 1rem;
+  margin-bottom: 0.25rem;
+}
+
+.cf-nav-section-label {
+  display: block;
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--cf-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+/* Sidebar edge toggle — fixed to viewport center-left, flush with sidebar edge */
+.cf-sidebar-edge-toggle {
+  position: fixed;
+  top: 50vh;
+  transform: translate(-50%, -50%);
+  z-index: 50;
+  display: none; /* hidden on mobile, shown by cf-sidebar-shell media query */
+  height: 3rem;
+  width: 1.125rem;
+  align-items: center;
+  justify-content: center;
+  /* Pill shape — fully rounded on right, square flush on left */
+  border-radius: 0 999px 999px 0;
+  /* Matches sidebar exactly at rest — blends in */
+  background-color: var(--cf-sidebar-bg);
+  color: var(--cf-text-muted);
+  /* Subtle border on the non-sidebar edges only */
+  border-top: 1px solid var(--cf-card-border);
+  border-right: 1px solid var(--cf-card-border);
+  border-bottom: 1px solid var(--cf-card-border);
+  border-left: none;
+  transition: left 0.3s ease-in-out, background-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
+  cursor: pointer;
+}
+
+.cf-sidebar-edge-toggle:hover {
+  background-color: var(--cf-brand-purple);
+  color: #ffffff;
+  border-color: var(--cf-brand-purple);
+  box-shadow: 2px 0 8px -1px rgba(130, 105, 155, 0.5);
+}
+
+/* Responsive navigation controls and sidebar visibility */
+.cf-sidebar-shell {
+  display: none;
+}
+
+.cf-mobile-only {
+  display: inline-flex;
+}
+
+.cf-desktop-only {
+  display: none;
+}
+
+.cf-mobile-overlay,
+.cf-mobile-drawer {
+  display: flex;
+}
+
+@media (min-width: 480px) {
+  .cf-sidebar-shell {
+    display: flex;
+  }
+
+  .cf-sidebar-edge-toggle {
+    display: inline-flex;
+  }
+
+  .cf-mobile-only {
+    display: none;
+  }
+
+  .cf-desktop-only {
+    display: inline-flex;
+  }
+
+  .cf-mobile-overlay,
+  .cf-mobile-drawer {
+    display: none;
+  }
+}

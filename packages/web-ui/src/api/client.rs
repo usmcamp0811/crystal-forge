@@ -113,7 +113,11 @@ pub async fn request_system_sync(
 
 /// Fetch the evaluation queue (active + completed commits).
 pub async fn fetch_eval_queue() -> Result<EvalQueueSummary, ApiClientError> {
-    let url = format!("{}/commits/eval-queue?_ts={}", base_url(), js_sys::Date::now());
+    let url = format!(
+        "{}/commits/eval-queue?_ts={}",
+        base_url(),
+        js_sys::Date::now()
+    );
     fetch_json(&url).await
 }
 
@@ -512,7 +516,9 @@ pub async fn fetch_builder_metrics(id: &Uuid) -> Result<Vec<BuilderMetrics>, Api
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// List cache destinations
-pub async fn fetch_cache_destinations(enabled_only: bool) -> Result<Vec<CacheDestination>, ApiClientError> {
+pub async fn fetch_cache_destinations(
+    enabled_only: bool,
+) -> Result<Vec<CacheDestination>, ApiClientError> {
     let url = if enabled_only {
         format!("{}/caches?enabled_only=true", base_url())
     } else {
@@ -528,13 +534,18 @@ pub async fn fetch_cache_destination(id: i32) -> Result<CacheDestination, ApiCli
 }
 
 /// Create a new cache destination
-pub async fn create_cache_destination(data: &CreateCacheDestination) -> Result<CacheDestination, ApiClientError> {
+pub async fn create_cache_destination(
+    data: &CreateCacheDestination,
+) -> Result<CacheDestination, ApiClientError> {
     let url = format!("{}/caches", base_url());
     send_json_with_csrf("POST", &url, Some(data)).await
 }
 
 /// Update an existing cache destination
-pub async fn update_cache_destination(id: i32, data: &UpdateCacheDestination) -> Result<CacheDestination, ApiClientError> {
+pub async fn update_cache_destination(
+    id: i32,
+    data: &UpdateCacheDestination,
+) -> Result<CacheDestination, ApiClientError> {
     let url = format!("{}/caches/{}", base_url(), id);
     send_json_with_csrf("PUT", &url, Some(data)).await
 }
@@ -546,8 +557,17 @@ pub async fn delete_cache_destination(id: i32) -> Result<(), ApiClientError> {
 }
 
 /// List cache push jobs with optional filtering
-pub async fn fetch_cache_push_jobs(status: Option<&str>, limit: i32, offset: i32) -> Result<Vec<CachePushJob>, ApiClientError> {
-    let mut url = format!("{}/cache-push-jobs?limit={}&offset={}", base_url(), limit, offset);
+pub async fn fetch_cache_push_jobs(
+    status: Option<&str>,
+    limit: i32,
+    offset: i32,
+) -> Result<Vec<CachePushJob>, ApiClientError> {
+    let mut url = format!(
+        "{}/cache-push-jobs?limit={}&offset={}",
+        base_url(),
+        limit,
+        offset
+    );
     if let Some(s) = status {
         url.push_str(&format!("&status={}", s));
     }
