@@ -98,17 +98,17 @@ pub fn RegisterView() -> Element {
                 return;
             }
 
-                // Registration successful - redirect to login
-                error_message.set(Some(
-                    "Registration successful. Redirecting to login...".to_string(),
-                ));
-                is_loading.set(false);
-                nav.replace("/login");
+            // Registration successful - redirect to login
+            error_message.set(Some(
+                "Registration successful. Redirecting to login...".to_string(),
+            ));
+            is_loading.set(false);
+            nav.replace("/login");
 
-                // Fallback hard redirect in case router navigation is not active yet.
-                if let Some(window) = web_sys::window() {
-                    let _ = window.location().set_href("/login");
-                }
+            // Fallback hard redirect in case router navigation is not active yet.
+            if let Some(window) = web_sys::window() {
+                let _ = window.location().set_href("/login");
+            }
         });
     };
 

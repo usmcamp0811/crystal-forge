@@ -3,10 +3,7 @@
 use dioxus::prelude::*;
 use uuid::Uuid;
 
-use crate::api::{
-    self,
-    models::BuilderStatus,
-};
+use crate::api::{self, models::BuilderStatus};
 use crate::components::builders::generate_ed25519_keypair;
 use crate::components::loading::LoadingSpinner;
 use crate::components::modals::ConfirmDialog;
@@ -17,8 +14,8 @@ mod edit_builder_modal_actions;
 #[path = "edit_builder_modal_sections.rs"]
 mod edit_builder_modal_sections;
 use edit_builder_modal_actions::{
-    apply_builder_public_key, build_update_request, delete_builder_permanently,
-    deactivate_builder, submit_builder_update,
+    apply_builder_public_key, build_update_request, deactivate_builder, delete_builder_permanently,
+    submit_builder_update,
 };
 use edit_builder_modal_sections::KeyRotationSection;
 

@@ -8,12 +8,12 @@ use crate::api::{
     client::fetch_recent_build_jobs,
     models::{BuildStatus as ApiBuildStatus, BuilderStatus},
 };
-use crate::components::layout::Card;
 use crate::components::builds::{
     BuildAction, BuildDetailPane, BuildItem, BuildQueuePane, BuildStatus, ConfirmActionModal,
     DetailTab, MetricsRow, PendingAction, QueueAction, QueueActionButton, WorkerAction, WorkerItem,
     WorkerStatus, WorkerStrip, selected_build_data,
 };
+use crate::components::layout::Card;
 use crate::theme;
 
 /// Builds control center page.
