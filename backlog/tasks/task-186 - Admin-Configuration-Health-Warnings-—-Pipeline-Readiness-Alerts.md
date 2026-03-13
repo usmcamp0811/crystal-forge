@@ -1,10 +1,10 @@
 ---
 id: TASK-186
 title: Admin Configuration Health Warnings — Pipeline Readiness Alerts
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-03-13 01:16'
-updated_date: '2026-03-13 01:21'
+updated_date: '2026-03-13 12:12'
 labels:
   - frontend
   - backend
@@ -19,7 +19,7 @@ references:
   - packages/web-ui/src/views/dashboard.rs
   - packages/web-ui/src/components/layout/sidebar.rs
   - packages/default/src/config/mod.rs
-priority: medium
+priority: high
 ---
 
 ## Description
@@ -124,3 +124,30 @@ The following pipeline readiness checks must be implemented, mapped to the eval-
 - [ ] #14 Unit tests exist for the config-health endpoint handler covering: all checks failing (empty instance), all checks passing (fully configured), partial configuration, and 403 for non-admin users.
 - [ ] #15 The health endpoint queries run efficiently using COUNT queries (not loading full entity lists) and use `tokio::try_join!` for parallel execution.
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+## Sprint-Ready Review Confirmed (2026-03-13)
+
+All fields verified against codebase before promotion to To Do.
+
+### Key pattern anchors found:
+- **RBAC guard**: `require_admin(pool, &headers)` from `handlers/api/rbac.rs` — use exact pattern from `dashboard.rs` handler
+- **Parallel queries**: `tokio::try_join!` with `sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM ...")` — see `queries/dashboard.rs`
+- **Route registration**: follows `.route("/api/v1/...", get(handler::fn))` pattern in `bin/server.rs`
+- **Model location**: new `ConfigHealthResponse` and `ConfigHealthCheck` structs go in `api/models.rs`
+- **API client**: new `fetch_config_health()` in `api/client.rs` using `fetch_json()` — follow `fetch_dashboard()` pattern
+- **Alert component**: `components/notifications/` already exists (has `toast.rs`) — add `alert_banner.rs` there; follow `Toast` component signature style
+- **App shell injection**: insert global notification bar after `DevModeBanner { placement: BannerPlacement::Top }` line in `app_shell.rs`
+- **Admin gate in frontend**: `state::auth::is_admin(&app_state.read().auth)` — confirmed present and tested
+- **Dashboard widget hook**: `default_widget_positions()` + `render_widget_content()` in `views/dashboard.rs` — add new widget ID there
+- **`evaluation_error_message`**: exists on commits table (`queries/commits.rs`) — health check query can COUNT flakes where latest commit has non-null `evaluation_error_message`
+- **Environment builder/cache**: `EnvironmentSummary` does NOT expose builder/cache counts; health endpoint derives these via independent COUNT queries on association tables — no model change needed for the endpoint itself
+
+### Clarification on AC #11 (flake eval errors):
+Query pattern: `COUNT(*) FROM flakes f JOIN commits c ON c.flake_id = f.id WHERE c.evaluation_error_message IS NOT NULL AND c.created_at = (SELECT MAX(...))` or equivalent latest-commit subquery.
+
+### No dependencies unmet.
+No schema migrations required. All checks derived from existing tables/counts.
+<!-- SECTION:PLAN:END -->
