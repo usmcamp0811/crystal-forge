@@ -17,7 +17,7 @@ dependencies:
   - TASK-65.2
   - TASK-65.3
 priority: high
-ordinal: 54000
+ordinal: 58000
 ---
 
 ## Description

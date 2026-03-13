@@ -15,7 +15,7 @@ dependencies:
   - TASK-8.3
 parent_task_id: TASK-8
 priority: high
-ordinal: 48000
+ordinal: 52000
 ---
 
 ## Description
@@ -37,10 +37,10 @@ Expected: All models compile, tests pass, no warnings
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [x] #1 #1 #1 All API models defined
-- [x] #2 #2 #2 Serde serialization works
-- [x] #3 #3 #3 Unit tests pass (16 tests)
-- [x] #4 #4 #4 Doc comments on all public types
+- [x] #1 #1 #1 #1 All API models defined
+- [x] #2 #2 #2 #2 Serde serialization works
+- [x] #3 #3 #3 #3 Unit tests pass (16 tests)
+- [x] #4 #4 #4 #4 Doc comments on all public types
 
 ## Implementation Notes
 

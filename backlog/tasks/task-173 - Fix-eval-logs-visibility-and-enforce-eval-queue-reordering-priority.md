@@ -15,7 +15,7 @@ dependencies:
 references:
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/151'
 priority: high
-ordinal: 5000
+ordinal: 9000
 ---
 
 ## Description

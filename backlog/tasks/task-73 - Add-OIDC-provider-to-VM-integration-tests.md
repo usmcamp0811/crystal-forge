@@ -15,7 +15,7 @@ dependencies:
   - TASK-65.2
   - TASK-72
 priority: medium
-ordinal: 63000
+ordinal: 67000
 ---
 
 ## Description

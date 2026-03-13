@@ -16,7 +16,7 @@ dependencies:
   - TASK-8.9
 parent_task_id: TASK-8
 priority: high
-ordinal: 19000
+ordinal: 23000
 ---
 
 ## Description

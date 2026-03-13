@@ -15,7 +15,7 @@ milestone: m-13
 dependencies: []
 parent_task_id: TASK-123
 priority: high
-ordinal: 3250
+ordinal: 6000
 ---
 
 ## Description

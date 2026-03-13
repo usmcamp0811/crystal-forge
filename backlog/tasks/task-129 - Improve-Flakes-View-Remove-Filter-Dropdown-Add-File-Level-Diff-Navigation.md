@@ -11,7 +11,7 @@ labels:
   - ux-improvement
 dependencies:
   - TASK-124
-ordinal: 72000
+ordinal: 76000
 ---
 
 ## Description

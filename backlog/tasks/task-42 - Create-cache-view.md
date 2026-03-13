@@ -1,11 +1,11 @@
 ---
 id: TASK-42
 title: Create cache view
-status: Review
+status: Done
 assignee:
   - KimiK2.5
 created_date: '2026-02-17 04:43'
-updated_date: '2026-03-11 12:45'
+updated_date: '2026-03-13 01:24'
 labels:
   - ui
   - web-ui
@@ -13,7 +13,7 @@ labels:
 milestone: m-4
 dependencies: []
 priority: medium
-ordinal: 2000
+ordinal: 500
 ---
 
 ## Description

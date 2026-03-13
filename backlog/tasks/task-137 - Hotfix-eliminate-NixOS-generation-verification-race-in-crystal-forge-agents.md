@@ -11,7 +11,7 @@ labels:
   - agent
   - nixos
 dependencies: []
-ordinal: 74000
+ordinal: 78000
 ---
 
 ## Description

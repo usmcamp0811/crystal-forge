@@ -21,7 +21,7 @@ references:
     client
   - packages/web-ui/src/components/builds/build_detail_pane.rs - log display UI
 priority: medium
-ordinal: 6000
+ordinal: 10000
 ---
 
 ## Description

@@ -17,7 +17,7 @@ dependencies:
   - TASK-8.9
 parent_task_id: TASK-8
 priority: high
-ordinal: 20000
+ordinal: 24000
 ---
 
 ## Description
@@ -43,12 +43,12 @@ Expected: `nix flake check` (or `nix build .#checks.x86_64-linux.web-ui`) passes
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 #1 #1 #1 `checks/web-ui/default.nix` exists and is discovered by Snowfall Lib
-- [ ] #2 #2 #2 #2 Check runs `dx build` successfully in a sandboxed derivation
-- [ ] #3 #3 #3 #3 Check verifies `index.html` exists in build output
-- [ ] #4 #4 #4 #4 Check verifies `.wasm` binary exists in build output
-- [ ] #5 #5 #5 #5 Check verifies `index.html` references the WASM loader
-- [ ] #6 #6 #6 #6 `nix build .#checks.x86_64-linux.web-ui` passes
+- [ ] #1 #1 #1 #1 #1 `checks/web-ui/default.nix` exists and is discovered by Snowfall Lib
+- [ ] #2 #2 #2 #2 #2 Check runs `dx build` successfully in a sandboxed derivation
+- [ ] #3 #3 #3 #3 #3 Check verifies `index.html` exists in build output
+- [ ] #4 #4 #4 #4 #4 Check verifies `.wasm` binary exists in build output
+- [ ] #5 #5 #5 #5 #5 Check verifies `index.html` references the WASM loader
+- [ ] #6 #6 #6 #6 #6 `nix build .#checks.x86_64-linux.web-ui` passes
 
 ## Implementation Notes
 
