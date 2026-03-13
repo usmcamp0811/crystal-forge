@@ -1,10 +1,10 @@
 ---
 id: TASK-187
 title: First-Time Admin Setup Wizard — Guided Onboarding Flow
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-03-13 01:16'
-updated_date: '2026-03-13 01:22'
+updated_date: '2026-03-13 12:08'
 labels:
   - frontend
   - backend
@@ -18,7 +18,7 @@ references:
   - packages/default/src/handlers/api/auth_status.rs
   - modules/nixos/crystal-forge/default.nix
   - docs/specs/00-system-overview.md
-priority: medium
+priority: high
 ---
 
 ## Description
@@ -158,3 +158,9 @@ The wizard guides the admin through these steps in dependency order (reflecting 
 - [ ] #15 Unit tests exist for the setup-progress endpoint covering: empty instance (no steps complete), partially configured, fully configured, and 403 for non-admin access.
 - [ ] #16 The wizard view is responsive and renders correctly on viewport widths from 768px to 1920px.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Moved to To Do by maintainer request on 2026-03-13 for immediate execution next.
+<!-- SECTION:NOTES:END -->
