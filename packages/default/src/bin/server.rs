@@ -1,14 +1,14 @@
 use anyhow::Context;
-use axum::http::{
-    header::{HeaderName, ACCEPT, CONTENT_TYPE},
-    HeaderValue, Method,
-};
 use axum::Extension;
-use axum::{
-    routing::{delete, get, patch, post, put},
-    Router,
+use axum::http::{
+    HeaderValue, Method,
+    header::{ACCEPT, CONTENT_TYPE, HeaderName},
 };
-use base64::{engine::general_purpose, Engine as _};
+use axum::{
+    Router,
+    routing::{delete, get, patch, post, put},
+};
+use base64::{Engine as _, engine::general_purpose};
 use crystal_forge::{
     auth::dev_mode::{
         ensure_bootstrap_oidc_admin_mapping, ensure_dev_users, ensure_local_bootstrap_admin,
@@ -20,14 +20,14 @@ use crystal_forge::{
         agent_request::CFState,
         api::{
             admin, auth_dev, auth_local, auth_oidc, auth_session, auth_status, auth_whoami,
-            builders, caches, commits, dashboard, deployment_policies, environments, flakes,
-            setup_wizard, systems,
+            builders, caches, commits, config_health, dashboard, deployment_policies, environments,
+            flakes, setup_wizard, systems,
         },
         status,
         webhook::webhook_handler,
     },
-    queries::derivations::reset_non_terminal_derivations,
     queries::cache_destinations::encrypt_plaintext_cache_secrets,
+    queries::derivations::reset_non_terminal_derivations,
     queue::QueueNotifier,
     server::memory_monitor_task,
     server::spawn_background_tasks,
@@ -336,6 +336,10 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/admin/setup-wizard/agent-acknowledge",
             post(setup_wizard::acknowledge_agent_step),
         )
+        .route(
+            "/api/v1/admin/config-health",
+            get(config_health::config_health),
+        )
         // Cache management endpoints
         .route(
             "/api/v1/caches",
@@ -347,10 +351,7 @@ async fn main() -> anyhow::Result<()> {
                 .put(caches::update_cache_destination)
                 .delete(caches::delete_cache_destination),
         )
-        .route(
-            "/api/v1/cache-push-jobs",
-            get(caches::list_cache_push_jobs),
-        )
+        .route("/api/v1/cache-push-jobs", get(caches::list_cache_push_jobs))
         .route(
             "/api/v1/cache-push-jobs/:id",
             get(caches::get_cache_push_job),

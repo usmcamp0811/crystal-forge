@@ -68,11 +68,14 @@ pub async fn create_build_jobs_for_commit(pool: &PgPool, commit_id: i32) -> Resu
     .context("Failed to create build jobs for commit")?;
 
     let count = result.rows_affected() as usize;
-    
+
     if count > 0 {
         info!("📋 Created {} build jobs for commit {}", count, commit_id);
     } else {
-        debug!("No new build jobs created for commit {} (already queued or no ready derivations)", commit_id);
+        debug!(
+            "No new build jobs created for commit {} (already queued or no ready derivations)",
+            commit_id
+        );
     }
 
     Ok(count)
@@ -90,10 +93,7 @@ pub async fn create_build_jobs_for_commit(pool: &PgPool, commit_id: i32) -> Resu
 ///
 /// # Returns
 /// Optional job UUID if work is available
-pub async fn get_next_job_for_builder(
-    pool: &PgPool,
-    builder_id: Uuid,
-) -> Result<Option<Uuid>> {
+pub async fn get_next_job_for_builder(pool: &PgPool, builder_id: Uuid) -> Result<Option<Uuid>> {
     let job = sqlx::query_scalar!(
         r#"
         WITH builder_environments AS (
@@ -140,11 +140,7 @@ pub async fn get_next_job_for_builder(
 }
 
 /// Mark a build job as successful.
-pub async fn mark_job_success(
-    pool: &PgPool,
-    job_id: Uuid,
-    logs: Option<&str>,
-) -> Result<()> {
+pub async fn mark_job_success(pool: &PgPool, job_id: Uuid, logs: Option<&str>) -> Result<()> {
     sqlx::query!(
         r#"
         UPDATE build_jobs
@@ -202,15 +198,12 @@ pub async fn mark_job_failed(
     if result.status == "queued" {
         info!(
             "🔄 Build job {} failed (attempt {}/{}), re-queued for retry",
-            job_id,
-            result.retry_count,
-            result.max_retries
+            job_id, result.retry_count, result.max_retries
         );
     } else {
         info!(
             "❌ Build job {} permanently failed after {} attempts",
-            job_id,
-            result.retry_count
+            job_id, result.retry_count
         );
     }
 

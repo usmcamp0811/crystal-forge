@@ -895,3 +895,40 @@ mod tests {
         );
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Admin Config Health DTOs — GET /api/v1/admin/config-health
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A single pipeline readiness check with its result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigHealthCheck {
+    /// Stable identifier for this check (e.g. `"no_flakes"`).
+    pub id: String,
+    /// Whether this check passed (no issue detected).
+    pub passed: bool,
+    /// Human-readable description shown to the admin when the check fails.
+    pub message: String,
+    /// URL path the admin can navigate to in order to resolve the issue.
+    pub action_url: String,
+}
+
+/// Top-level response for `GET /api/v1/admin/config-health`.
+///
+/// Aggregates all pipeline readiness checks into a single response so the
+/// UI can display a health overview without multiple round-trips.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigHealthResponse {
+    /// `true` if at least one flake is configured.
+    pub has_flakes: bool,
+    /// `true` if at least one environment exists.
+    pub has_environments: bool,
+    /// `true` if at least one builder is registered.
+    pub has_builders: bool,
+    /// `true` if at least one cache destination is configured.
+    pub has_cache_destinations: bool,
+    /// Total number of failing checks (`checks` entries where `passed == false`).
+    pub total_issues: u32,
+    /// Per-check details for all pipeline readiness checks.
+    pub checks: Vec<ConfigHealthCheck>,
+}

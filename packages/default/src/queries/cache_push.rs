@@ -417,12 +417,10 @@ pub async fn list_cache_push_jobs(
 
 /// Get a single cache push job by ID with derivation details
 pub async fn get_cache_push_job_detail(pool: &PgPool, job_id: i32) -> Result<Option<CachePushJob>> {
-    let job = sqlx::query_as::<_, CachePushJob>(
-        "SELECT * FROM cache_push_jobs WHERE id = $1"
-    )
-    .bind(job_id)
-    .fetch_optional(pool)
-    .await?;
+    let job = sqlx::query_as::<_, CachePushJob>("SELECT * FROM cache_push_jobs WHERE id = $1")
+        .bind(job_id)
+        .fetch_optional(pool)
+        .await?;
 
     Ok(job)
 }

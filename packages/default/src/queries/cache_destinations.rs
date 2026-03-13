@@ -1,4 +1,6 @@
-use crate::models::cache_destination::{CacheDestination, CreateCacheDestination, UpdateCacheDestination};
+use crate::models::cache_destination::{
+    CacheDestination, CreateCacheDestination, UpdateCacheDestination,
+};
 use crate::security::cache_secrets;
 use anyhow::Result;
 use sqlx::PgPool;
@@ -30,12 +32,11 @@ pub async fn list_cache_destinations(
 
 /// Get a single cache destination by ID
 pub async fn get_cache_destination(pool: &PgPool, id: i32) -> Result<Option<CacheDestination>> {
-    let destination = sqlx::query_as::<_, CacheDestination>(
-        "SELECT * FROM cache_destinations WHERE id = $1"
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await?;
+    let destination =
+        sqlx::query_as::<_, CacheDestination>("SELECT * FROM cache_destinations WHERE id = $1")
+            .bind(id)
+            .fetch_optional(pool)
+            .await?;
 
     destination.map(decrypt_destination_secrets).transpose()
 }
@@ -45,12 +46,11 @@ pub async fn get_cache_destination_by_name(
     pool: &PgPool,
     name: &str,
 ) -> Result<Option<CacheDestination>> {
-    let destination = sqlx::query_as::<_, CacheDestination>(
-        "SELECT * FROM cache_destinations WHERE name = $1"
-    )
-    .bind(name)
-    .fetch_optional(pool)
-    .await?;
+    let destination =
+        sqlx::query_as::<_, CacheDestination>("SELECT * FROM cache_destinations WHERE name = $1")
+            .bind(name)
+            .fetch_optional(pool)
+            .await?;
 
     destination.map(decrypt_destination_secrets).transpose()
 }
@@ -125,10 +125,12 @@ pub async fn create_cache_destination(
     // Start transaction
     let mut tx = pool.begin().await?;
 
-    let encrypted_s3_access_key_id = cache_secrets::encrypt_optional(create.s3_access_key_id.as_deref())?;
+    let encrypted_s3_access_key_id =
+        cache_secrets::encrypt_optional(create.s3_access_key_id.as_deref())?;
     let encrypted_s3_secret_access_key =
         cache_secrets::encrypt_optional(create.s3_secret_access_key.as_deref())?;
-    let encrypted_s3_session_token = cache_secrets::encrypt_optional(create.s3_session_token.as_deref())?;
+    let encrypted_s3_session_token =
+        cache_secrets::encrypt_optional(create.s3_session_token.as_deref())?;
     let encrypted_attic_token = cache_secrets::encrypt_optional(create.attic_token.as_deref())?;
 
     let destination = sqlx::query_as::<_, CacheDestination>(
@@ -177,7 +179,7 @@ pub async fn create_cache_destination(
         for env_id in env_ids {
             sqlx::query(
                 "INSERT INTO cache_destination_environments (cache_destination_id, environment_id) 
-                 VALUES ($1, $2)"
+                 VALUES ($1, $2)",
             )
             .bind(destination.id)
             .bind(env_id)
@@ -190,9 +192,15 @@ pub async fn create_cache_destination(
 
     let destination = decrypt_destination_secrets(destination)?;
 
-    debug!("Created cache destination: {} with {} environment assignments", 
-           destination.name,
-           create.environment_ids.as_ref().map(|e| e.len()).unwrap_or(0));
+    debug!(
+        "Created cache destination: {} with {} environment assignments",
+        destination.name,
+        create
+            .environment_ids
+            .as_ref()
+            .map(|e| e.len())
+            .unwrap_or(0)
+    );
     Ok(destination)
 }
 
@@ -280,7 +288,10 @@ pub async fn update_cache_destination(
         bind_count += 1;
     }
     if update.attic_ignore_upstream_cache_filter.is_some() {
-        updates.push(format!("attic_ignore_upstream_cache_filter = ${}", bind_count));
+        updates.push(format!(
+            "attic_ignore_upstream_cache_filter = ${}",
+            bind_count
+        ));
         bind_count += 1;
     }
     if update.attic_jobs.is_some() {
@@ -326,80 +337,81 @@ pub async fn update_cache_destination(
 
         let mut q = sqlx::query_as::<_, CacheDestination>(&query);
 
-    // Bind values in the same order as the updates
-    if let Some(ref name) = update.name {
-        q = q.bind(name);
-    }
-    if let Some(ref cache_type) = update.cache_type {
-        q = q.bind(cache_type);
-    }
-    if let Some(ref push_to) = update.push_to {
-        q = q.bind(push_to);
-    }
-    if let Some(enabled) = update.enabled {
-        q = q.bind(enabled);
-    }
-    if let Some(ref signing_key_path) = update.signing_key_path {
-        q = q.bind(signing_key_path);
-    }
-    if let Some(ref compression) = update.compression {
-        q = q.bind(compression);
-    }
-    if let Some(ref s3_region) = update.s3_region {
-        q = q.bind(s3_region);
-    }
-    if let Some(ref s3_profile) = update.s3_profile {
-        q = q.bind(s3_profile);
-    }
-    if let Some(ref s3_access_key_id) = update.s3_access_key_id {
-        let encrypted = cache_secrets::encrypt_secret(s3_access_key_id)?;
-        q = q.bind(encrypted);
-    }
-    if let Some(ref s3_secret_access_key) = update.s3_secret_access_key {
-        let encrypted = cache_secrets::encrypt_secret(s3_secret_access_key)?;
-        q = q.bind(encrypted);
-    }
-    if let Some(ref s3_session_token) = update.s3_session_token {
-        let encrypted = cache_secrets::encrypt_secret(s3_session_token)?;
-        q = q.bind(encrypted);
-    }
-    if let Some(ref s3_endpoint_url) = update.s3_endpoint_url {
-        q = q.bind(s3_endpoint_url);
-    }
-    if let Some(ref attic_token) = update.attic_token {
-        let encrypted = cache_secrets::encrypt_secret(attic_token)?;
-        q = q.bind(encrypted);
-    }
-    if let Some(ref attic_cache_name) = update.attic_cache_name {
-        q = q.bind(attic_cache_name);
-    }
-    if let Some(ref attic_public_key) = update.attic_public_key {
-        q = q.bind(attic_public_key);
-    }
-    if let Some(attic_ignore_upstream_cache_filter) = update.attic_ignore_upstream_cache_filter {
-        q = q.bind(attic_ignore_upstream_cache_filter);
-    }
-    if let Some(attic_jobs) = update.attic_jobs {
-        q = q.bind(attic_jobs);
-    }
-    if let Some(parallel_uploads) = update.parallel_uploads {
-        q = q.bind(parallel_uploads);
-    }
-    if let Some(max_retries) = update.max_retries {
-        q = q.bind(max_retries);
-    }
-    if let Some(retry_delay_seconds) = update.retry_delay_seconds {
-        q = q.bind(retry_delay_seconds);
-    }
-    if let Some(push_timeout_seconds) = update.push_timeout_seconds {
-        q = q.bind(push_timeout_seconds);
-    }
-    if let Some(force_repush) = update.force_repush {
-        q = q.bind(force_repush);
-    }
-    if let Some(require_sigs) = update.require_sigs {
-        q = q.bind(require_sigs);
-    }
+        // Bind values in the same order as the updates
+        if let Some(ref name) = update.name {
+            q = q.bind(name);
+        }
+        if let Some(ref cache_type) = update.cache_type {
+            q = q.bind(cache_type);
+        }
+        if let Some(ref push_to) = update.push_to {
+            q = q.bind(push_to);
+        }
+        if let Some(enabled) = update.enabled {
+            q = q.bind(enabled);
+        }
+        if let Some(ref signing_key_path) = update.signing_key_path {
+            q = q.bind(signing_key_path);
+        }
+        if let Some(ref compression) = update.compression {
+            q = q.bind(compression);
+        }
+        if let Some(ref s3_region) = update.s3_region {
+            q = q.bind(s3_region);
+        }
+        if let Some(ref s3_profile) = update.s3_profile {
+            q = q.bind(s3_profile);
+        }
+        if let Some(ref s3_access_key_id) = update.s3_access_key_id {
+            let encrypted = cache_secrets::encrypt_secret(s3_access_key_id)?;
+            q = q.bind(encrypted);
+        }
+        if let Some(ref s3_secret_access_key) = update.s3_secret_access_key {
+            let encrypted = cache_secrets::encrypt_secret(s3_secret_access_key)?;
+            q = q.bind(encrypted);
+        }
+        if let Some(ref s3_session_token) = update.s3_session_token {
+            let encrypted = cache_secrets::encrypt_secret(s3_session_token)?;
+            q = q.bind(encrypted);
+        }
+        if let Some(ref s3_endpoint_url) = update.s3_endpoint_url {
+            q = q.bind(s3_endpoint_url);
+        }
+        if let Some(ref attic_token) = update.attic_token {
+            let encrypted = cache_secrets::encrypt_secret(attic_token)?;
+            q = q.bind(encrypted);
+        }
+        if let Some(ref attic_cache_name) = update.attic_cache_name {
+            q = q.bind(attic_cache_name);
+        }
+        if let Some(ref attic_public_key) = update.attic_public_key {
+            q = q.bind(attic_public_key);
+        }
+        if let Some(attic_ignore_upstream_cache_filter) = update.attic_ignore_upstream_cache_filter
+        {
+            q = q.bind(attic_ignore_upstream_cache_filter);
+        }
+        if let Some(attic_jobs) = update.attic_jobs {
+            q = q.bind(attic_jobs);
+        }
+        if let Some(parallel_uploads) = update.parallel_uploads {
+            q = q.bind(parallel_uploads);
+        }
+        if let Some(max_retries) = update.max_retries {
+            q = q.bind(max_retries);
+        }
+        if let Some(retry_delay_seconds) = update.retry_delay_seconds {
+            q = q.bind(retry_delay_seconds);
+        }
+        if let Some(push_timeout_seconds) = update.push_timeout_seconds {
+            q = q.bind(push_timeout_seconds);
+        }
+        if let Some(force_repush) = update.force_repush {
+            q = q.bind(force_repush);
+        }
+        if let Some(require_sigs) = update.require_sigs {
+            q = q.bind(require_sigs);
+        }
 
         // Bind the ID for WHERE clause
         q = q.bind(id);
@@ -422,7 +434,7 @@ pub async fn update_cache_destination(
         for env_id in env_ids {
             sqlx::query(
                 "INSERT INTO cache_destination_environments (cache_destination_id, environment_id) 
-                 VALUES ($1, $2)"
+                 VALUES ($1, $2)",
             )
             .bind(id)
             .bind(env_id)
@@ -433,9 +445,7 @@ pub async fn update_cache_destination(
 
     tx.commit().await?;
 
-    let destination = destination
-        .map(decrypt_destination_secrets)
-        .transpose()?;
+    let destination = destination.map(decrypt_destination_secrets).transpose()?;
 
     if let Some(ref dest) = destination {
         debug!("Updated cache destination: {}", dest.name);
@@ -444,7 +454,10 @@ pub async fn update_cache_destination(
     Ok(destination)
 }
 
-fn validate_update_shape(current: &CacheDestination, update: &UpdateCacheDestination) -> Result<()> {
+fn validate_update_shape(
+    current: &CacheDestination,
+    update: &UpdateCacheDestination,
+) -> Result<()> {
     let merged = CreateCacheDestination {
         name: update.name.clone().unwrap_or_else(|| current.name.clone()),
         cache_type: update
@@ -461,8 +474,14 @@ fn validate_update_shape(current: &CacheDestination, update: &UpdateCacheDestina
             .compression
             .clone()
             .or_else(|| current.compression.clone()),
-        s3_region: update.s3_region.clone().or_else(|| current.s3_region.clone()),
-        s3_profile: update.s3_profile.clone().or_else(|| current.s3_profile.clone()),
+        s3_region: update
+            .s3_region
+            .clone()
+            .or_else(|| current.s3_region.clone()),
+        s3_profile: update
+            .s3_profile
+            .clone()
+            .or_else(|| current.s3_profile.clone()),
         s3_access_key_id: update
             .s3_access_key_id
             .clone()
@@ -524,12 +543,10 @@ pub async fn delete_cache_destination(pool: &PgPool, id: i32) -> Result<bool> {
 
 /// Update the last_used_at timestamp for a cache destination
 pub async fn update_cache_destination_last_used(pool: &PgPool, name: &str) -> Result<()> {
-    sqlx::query(
-        "UPDATE cache_destinations SET last_used_at = NOW() WHERE name = $1"
-    )
-    .bind(name)
-    .execute(pool)
-    .await?;
+    sqlx::query("UPDATE cache_destinations SET last_used_at = NOW() WHERE name = $1")
+        .bind(name)
+        .execute(pool)
+        .await?;
 
     debug!("Updated last_used_at for cache destination: {}", name);
     Ok(())
@@ -558,7 +575,7 @@ pub async fn assign_environments_to_cache(
     for env_id in environment_ids {
         sqlx::query(
             "INSERT INTO cache_destination_environments (cache_destination_id, environment_id) 
-             VALUES ($1, $2)"
+             VALUES ($1, $2)",
         )
         .bind(cache_id)
         .bind(env_id)
@@ -577,10 +594,12 @@ pub async fn assign_environments_to_cache(
 }
 
 pub async fn cache_destination_exists(pool: &PgPool, cache_id: i32) -> Result<bool> {
-    let exists = sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM cache_destinations WHERE id = $1)")
-        .bind(cache_id)
-        .fetch_one(pool)
-        .await?;
+    let exists = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM cache_destinations WHERE id = $1)",
+    )
+    .bind(cache_id)
+    .fetch_one(pool)
+    .await?;
     Ok(exists)
 }
 
@@ -589,7 +608,7 @@ pub async fn get_cache_environments(pool: &PgPool, cache_id: i32) -> Result<Vec<
     let environment_ids = sqlx::query_scalar::<_, uuid::Uuid>(
         "SELECT environment_id FROM cache_destination_environments 
          WHERE cache_destination_id = $1 
-         ORDER BY environment_id"
+         ORDER BY environment_id",
     )
     .bind(cache_id)
     .fetch_all(pool)
@@ -608,7 +627,7 @@ pub async fn get_caches_for_environment(
          LEFT JOIN cache_destination_environments cde ON cd.id = cde.cache_destination_id
          WHERE cd.enabled = true
            AND (cde.environment_id = $1 OR cde.environment_id IS NULL)
-         ORDER BY cd.name"
+         ORDER BY cd.name",
     )
     .bind(environment_id)
     .fetch_all(pool)
@@ -639,7 +658,7 @@ pub async fn filter_caches_by_environment(
                 "SELECT DISTINCT cd.* FROM cache_destinations cd
                  INNER JOIN cache_destination_environments cde ON cd.id = cde.cache_destination_id
                  WHERE cde.environment_id = $1
-                 ORDER BY cd.name"
+                 ORDER BY cd.name",
             )
             .bind(env_id)
             .fetch_all(pool)
@@ -729,7 +748,8 @@ mod tests {
         let mut update = empty_update();
         update.cache_type = Some("Attic".to_string());
 
-        let err = validate_update_shape(&current, &update).expect_err("must reject invalid Attic shape");
+        let err =
+            validate_update_shape(&current, &update).expect_err("must reject invalid Attic shape");
         assert!(
             err.to_string().contains("attic_cache_name is required")
                 || err.to_string().contains("attic_public_key is required")
@@ -758,7 +778,7 @@ pub async fn get_global_caches(pool: &PgPool) -> Result<Vec<CacheDestination>> {
          LEFT JOIN cache_destination_environments cde ON cd.id = cde.cache_destination_id
          WHERE cd.enabled = true
            AND cde.cache_destination_id IS NULL
-         ORDER BY cd.name"
+         ORDER BY cd.name",
     )
     .fetch_all(pool)
     .await?;

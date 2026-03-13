@@ -1,8 +1,8 @@
 use axum::{
+    Json,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
-    Json,
 };
 use serde::Deserialize;
 use sqlx::PgPool;
@@ -10,7 +10,9 @@ use url::Url;
 
 use crate::api::models::ApiError;
 use crate::handlers::api::rbac::{authenticated_user_roles, require_admin as require_admin_user};
-use crate::models::cache_destination::{CacheDestination, CreateCacheDestination, UpdateCacheDestination};
+use crate::models::cache_destination::{
+    CacheDestination, CreateCacheDestination, UpdateCacheDestination,
+};
 use crate::queries::{cache_destinations, cache_push};
 
 fn redact_cache_secrets(mut destination: CacheDestination) -> CacheDestination {
@@ -69,10 +71,8 @@ pub async fn list_cache_destinations(
 
     match cache_destinations::list_cache_destinations(&pool, query.enabled_only).await {
         Ok(destinations) => {
-            let redacted: Vec<CacheDestination> = destinations
-                .into_iter()
-                .map(redact_cache_secrets)
-                .collect();
+            let redacted: Vec<CacheDestination> =
+                destinations.into_iter().map(redact_cache_secrets).collect();
             (StatusCode::OK, Json(redacted)).into_response()
         }
         Err(e) => {
@@ -109,7 +109,9 @@ pub async fn get_cache_destination(
     };
 
     match cache_destinations::get_cache_destination(&pool, id).await {
-        Ok(Some(destination)) => (StatusCode::OK, Json(redact_cache_secrets(destination))).into_response(),
+        Ok(Some(destination)) => {
+            (StatusCode::OK, Json(redact_cache_secrets(destination))).into_response()
+        }
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(ApiError {
@@ -161,27 +163,34 @@ pub async fn create_cache_destination(
                 error: "error".to_string(),
                 message: e,
                 details: None,
-            })
+            }),
         )
             .into_response();
     }
 
     match cache_destinations::create_cache_destination(&pool, &create).await {
-        Ok(destination) => (StatusCode::CREATED, Json(redact_cache_secrets(destination))).into_response(),
+        Ok(destination) => {
+            (StatusCode::CREATED, Json(redact_cache_secrets(destination))).into_response()
+        }
         Err(e) => {
             tracing::error!("Failed to create cache destination: {:#}", e);
-            let error_msg = if e.to_string().contains("duplicate key") || e.to_string().contains("unique constraint") {
-                format!("Cache destination with name '{}' already exists", create.name)
+            let error_msg = if e.to_string().contains("duplicate key")
+                || e.to_string().contains("unique constraint")
+            {
+                format!(
+                    "Cache destination with name '{}' already exists",
+                    create.name
+                )
             } else {
                 "Failed to create cache destination".to_string()
             };
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiError {
-                error: "error".to_string(),
-                message: error_msg,
-                details: None,
-            })
+                Json(ApiError {
+                    error: "error".to_string(),
+                    message: error_msg,
+                    details: None,
+                }),
             )
                 .into_response()
         }
@@ -209,7 +218,9 @@ pub async fn update_cache_destination(
     }
 
     match cache_destinations::update_cache_destination(&pool, id, &update).await {
-        Ok(Some(destination)) => (StatusCode::OK, Json(redact_cache_secrets(destination))).into_response(),
+        Ok(Some(destination)) => {
+            (StatusCode::OK, Json(redact_cache_secrets(destination))).into_response()
+        }
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(ApiError {
@@ -402,7 +413,10 @@ pub async fn retry_cache_push_job(
             StatusCode::NOT_FOUND,
             Json(ApiError {
                 error: "error".to_string(),
-                message: format!("Cache push job {} not found or not in a retryable state", id),
+                message: format!(
+                    "Cache push job {} not found or not in a retryable state",
+                    id
+                ),
                 details: None,
             }),
         )
@@ -453,7 +467,10 @@ pub async fn cancel_cache_push_job(
             StatusCode::NOT_FOUND,
             Json(ApiError {
                 error: "error".to_string(),
-                message: format!("Cache push job {} not found or not in a cancellable state", id),
+                message: format!(
+                    "Cache push job {} not found or not in a cancellable state",
+                    id
+                ),
                 details: None,
             }),
         )
@@ -587,7 +604,6 @@ pub async fn bulk_cancel_cache_push_jobs(
         }
     }
 }
-
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Environment Assignment Handlers
@@ -725,12 +741,12 @@ pub async fn get_environment_caches_handler(
             .into_response();
     };
 
-    match crate::queries::cache_destinations::get_caches_for_environment(&pool, environment_id).await {
+    match crate::queries::cache_destinations::get_caches_for_environment(&pool, environment_id)
+        .await
+    {
         Ok(caches) => {
-            let redacted: Vec<CacheDestination> = caches
-                .into_iter()
-                .map(redact_cache_secrets)
-                .collect();
+            let redacted: Vec<CacheDestination> =
+                caches.into_iter().map(redact_cache_secrets).collect();
             (StatusCode::OK, Json(redacted)).into_response()
         }
         Err(e) => (

@@ -2,13 +2,15 @@
 
 use dioxus::prelude::*;
 
-use crate::api::models::{AuthContext, AuthMode, AuthUser, Role};
+use crate::api::client::fetch_config_health;
+use crate::api::models::{AuthContext, AuthMode, AuthUser, ConfigHealthResponse, Role};
 use crate::components::layout::sidebar::{
     MobileDrawer, SidebarContext, SidebarEdgeToggle, SidebarNav,
 };
 use crate::components::layout::TopBar;
 use crate::components::layout::{BannerPlacement, DevModeBanner};
 use crate::components::onboarding::OnboardingCoachPanel;
+use crate::components::notifications::{AlertBanner, AlertSeverity};
 use crate::routes::Route;
 use crate::state::app_state::{AppState, AuthFetchState};
 use crate::state::auth;
@@ -149,11 +151,72 @@ pub fn AppShell() -> Element {
         }
     }
 
+    // Config health state — only fetched for admin users.
+    let is_admin_user = auth::is_admin(&auth_context);
+    let mut health: Signal<Option<ConfigHealthResponse>> = use_signal(|| None);
+    let mut dismissed_key: Signal<Option<String>> = use_signal(|| None);
+
+    // Derive a stable hash key for the current set of failing check IDs so we
+    // can detect when the health status changes and re-show the banner.
+    let health_key = health.read().as_ref().map(|h| {
+        h.checks
+            .iter()
+            .filter(|c| !c.passed)
+            .map(|c| c.id.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
+    });
+
+    // Determine whether the global notification bar should be shown.
+    let show_health_bar = is_admin_user
+        && health
+            .read()
+            .as_ref()
+            .map(|h| h.total_issues > 0)
+            .unwrap_or(false)
+        && dismissed_key.read().as_deref() != health_key.as_deref();
+
+    // Fetch health data once when the admin is authenticated.
+    use_effect(move || {
+        if !is_admin_user {
+            return;
+        }
+        spawn(async move {
+            if let Ok(response) = fetch_config_health().await {
+                health.set(Some(response));
+            }
+        });
+    });
+
     rsx! {
         div {
             class: "min-h-screen {theme::surface::PAGE_BG} {theme::text::PRIMARY} flex flex-col overflow-x-hidden",
 
             DevModeBanner { placement: BannerPlacement::Top }
+
+            // Global admin config-health notification bar (admin only, dismissible per session key).
+            if show_health_bar {
+                if let Some(ref h) = *health.read() {
+                    div {
+                        class: "px-4 py-2 bg-amber-900/30 border-b border-amber-500/30",
+                        AlertBanner {
+                            severity: AlertSeverity::Warning,
+                            message: format!(
+                                "{} configuration issue{} detected — some pipeline stages may not function.",
+                                h.total_issues,
+                                if h.total_issues == 1 { "" } else { "s" }
+                            ),
+                            action_label: Some("View details on Dashboard".to_string()),
+                            action_url: Some("/".to_string()),
+                            on_dismiss: Some(EventHandler::new(move |_| {
+                                if let Some(key) = health_key.clone() {
+                                    dismissed_key.set(Some(key));
+                                }
+                            })),
+                        }
+                    }
+                }
+            }
 
             div {
                 class: "flex-1 flex min-h-0 relative",

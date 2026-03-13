@@ -17,15 +17,19 @@ use web_sys::console;
 use web_sys::{Node, window};
 
 use crate::api::client::{
-    create_flake, delete_flake, fetch_commit_diff, fetch_flake_timelines, fetch_flakes,
-    request_sync_all_flakes, request_sync_flake, update_flake,
+    create_flake, delete_flake, fetch_commit_diff, fetch_config_health, fetch_flake_timelines,
+    fetch_flakes, request_sync_all_flakes, request_sync_flake, update_flake,
 };
+use crate::api::models::ConfigHealthResponse;
 use crate::api::models::{
     BuildStatus as ApiBuildStatus, CreateFlakeRequest, FlakeRegistryItem, FlakeTimeline,
     UpdateFlakeRequest,
 };
 use crate::components::layout::Card;
+use crate::components::notifications::{AlertBanner, AlertSeverity};
 use crate::routes::Route;
+use crate::state::app_state::AppState;
+use crate::state::auth;
 use crate::theme;
 use crate::views::systems_mock::mock_system_details;
 
@@ -218,6 +222,22 @@ struct EditFlakeDraft {
 /// Flakes list with toggles and filters.
 #[component]
 pub fn FlakesListView() -> Element {
+    let app_state = use_context::<Signal<AppState>>();
+    let is_admin_user = auth::is_admin(&app_state.read().auth);
+
+    // Config health (admin only) — used for flake eval error banner.
+    let mut config_health: Signal<Option<ConfigHealthResponse>> = use_signal(|| None);
+    use_effect(move || {
+        if !is_admin_user {
+            return;
+        }
+        spawn(async move {
+            if let Ok(response) = fetch_config_health().await {
+                config_health.set(Some(response));
+            }
+        });
+    });
+
     let stored_view = LocalStorage::get::<String>(VIEW_PREF_KEY).ok();
     let mut view_mode = use_signal(|| FlakesViewMode::from_storage(stored_view));
     let query_view = prefers_view_from_query();
@@ -528,6 +548,18 @@ pub fn FlakesListView() -> Element {
                 p {
                     class: "text-xs px-3 py-2 rounded-lg border text-amber-100 cf-chip-warning",
                     "{message}"
+                }
+            }
+
+            // Admin-only: warn when any flake has eval errors on its latest commit.
+            if is_admin_user {
+                if let Some(ref health) = *config_health.read() {
+                    if health.checks.iter().any(|c| c.id == "flake_eval_errors" && !c.passed) {
+                        AlertBanner {
+                            severity: AlertSeverity::Warning,
+                            message: "One or more flakes have evaluation errors on their latest commit. Check flake configuration and commit history.".to_string(),
+                        }
+                    }
                 }
             }
 

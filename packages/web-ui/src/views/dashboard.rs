@@ -4,13 +4,15 @@ use chrono::Duration;
 use dioxus::prelude::*;
 use std::collections::HashSet;
 
-use crate::api::models::{BuildStatus, FlakeCommit, FlakeTimeline};
+use crate::api::client::fetch_config_health;
+use crate::api::models::{BuildStatus, ConfigHealthResponse, FlakeCommit, FlakeTimeline};
 use crate::components::dashboard::{
     BuildQueuePanel, BuildSummaryPanel, CveSummaryPanel, DeploymentStatusBreakdown,
     FleetHealthBreakdown, RecentDeploymentsList,
 };
 use crate::components::flake::FlakeTimelineWidget;
 use crate::components::layout::Card;
+use crate::components::notifications::{AlertBanner, AlertSeverity};
 use crate::components::stat_card::StatCard;
 use crate::components::widget_grid::{GridWidget, WidgetGrid};
 use crate::dashboard::adapter::{
@@ -18,6 +20,8 @@ use crate::dashboard::adapter::{
     load_dashboard_with_fallback, load_flake_timelines_with_fallback,
 };
 use crate::routes::Route;
+use crate::state::app_state::AppState;
+use crate::state::auth;
 use crate::theme;
 
 /// Global filter state for the dashboard - shared across all widgets.
@@ -115,6 +119,14 @@ fn default_widget_positions() -> Vec<WidgetPosition> {
             width: 2,
             height: 2,
         },
+        WidgetPosition {
+            id: "config-health",
+            title: "Pipeline Readiness",
+            col: 0,
+            row: 7,
+            width: 4,
+            height: 2,
+        },
     ]
 }
 
@@ -127,6 +139,22 @@ pub fn DashboardView() -> Element {
     let dashboard_notice = use_signal(|| None::<String>);
     let loading_dashboard = use_signal(|| true);
     let redirect_to_login = use_signal(|| false);
+
+    // Config health (admin only).
+    let app_state = use_context::<Signal<AppState>>();
+    let is_admin_user = auth::is_admin(&app_state.read().auth);
+    let mut config_health: Signal<Option<ConfigHealthResponse>> = use_signal(|| None);
+
+    use_effect(move || {
+        if !is_admin_user {
+            return;
+        }
+        spawn(async move {
+            if let Ok(response) = fetch_config_health().await {
+                config_health.set(Some(response));
+            }
+        });
+    });
 
     // Flake timelines state
     let flake_timelines = use_signal(Vec::<FlakeTimeline>::new);
@@ -400,6 +428,65 @@ pub fn DashboardView() -> Element {
                     flake_filter: filter_display.clone()
                 }
             },
+            "config-health" => {
+                if !is_admin_user {
+                    // Non-admins don't see this widget at all.
+                    return rsx! {};
+                }
+                let health_snapshot = config_health.read().clone();
+                match health_snapshot {
+                    None => rsx! {
+                        p {
+                            class: "text-xs {theme::text::SECONDARY}",
+                            "Checking pipeline readiness..."
+                        }
+                    },
+                    Some(ref h) if h.total_issues == 0 => rsx! {
+                        div {
+                            class: "flex items-center gap-2 text-emerald-400",
+                            svg {
+                                class: "w-5 h-5 shrink-0",
+                                fill: "none",
+                                stroke: "currentColor",
+                                view_box: "0 0 24 24",
+                                path {
+                                    stroke_linecap: "round",
+                                    stroke_linejoin: "round",
+                                    stroke_width: "2",
+                                    d: "M5 13l4 4L19 7",
+                                }
+                            }
+                            span {
+                                class: "text-sm font-medium",
+                                "All pipeline stages are configured and ready."
+                            }
+                        }
+                    },
+                    Some(ref h) => {
+                        let suffix = if h.total_issues == 1 { "" } else { "s" };
+                        let heading =
+                            format!("{} configuration issue{} detected", h.total_issues, suffix);
+                        rsx! {
+                            div {
+                                class: "space-y-2",
+                                p {
+                                    class: "text-xs font-semibold text-amber-300 uppercase tracking-wide mb-2",
+                                    "{heading}"
+                                }
+                                for check in h.checks.iter().filter(|c| !c.passed) {
+                                    AlertBanner {
+                                        key: "{check.id}",
+                                        severity: AlertSeverity::Warning,
+                                        message: check.message.clone(),
+                                        action_label: Some("Fix →".to_string()),
+                                        action_url: Some(check.action_url.clone()),
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             _ => rsx! { div { "Unknown widget" } },
         }
     };

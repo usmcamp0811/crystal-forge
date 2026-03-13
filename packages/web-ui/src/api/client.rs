@@ -383,6 +383,12 @@ pub async fn fetch_admin_users() -> Result<Vec<AdminUserSummary>, ApiClientError
     fetch_json(&url).await
 }
 
+/// Fetch pipeline readiness health checks (admin only).
+pub async fn fetch_config_health() -> Result<ConfigHealthResponse, ApiClientError> {
+    let url = format!("{}/admin/config-health", base_url());
+    fetch_json(&url).await
+}
+
 /// Fetch admin audit events.
 pub async fn fetch_admin_audit_events(
     params: &AdminAuditEventsParams,

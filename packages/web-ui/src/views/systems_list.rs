@@ -20,10 +20,13 @@ use crate::components::layout::Card;
 use crate::components::modals::{
     GeneratedKeyPair, KeyPairModal, RemoveSystemDialog, UpdatePublicKeyModal, generate_key_pair,
 };
+use crate::components::notifications::{AlertBanner, AlertSeverity};
 use crate::components::system::SystemCard;
 use crate::components::tables::SystemsTable;
 use crate::environments::adapter::load_environment_names_with_fallback;
 use crate::routes::Route;
+use crate::state::app_state::AppState;
+use crate::state::auth;
 use crate::systems::adapter::{
     create_system_via_api, deactivate_system_via_api, fallback_flake_names, fallback_systems,
     load_flake_names_with_fallback, load_systems_with_fallback, update_system_public_key_via_api,
@@ -58,6 +61,8 @@ const VIEW_PREF_KEY: &str = "crystal_forge.systems.view";
 #[component]
 pub fn SystemsListView() -> Element {
     let nav = navigator();
+    let app_state = use_context::<Signal<AppState>>();
+    let is_admin_user = auth::is_admin(&app_state.read().auth);
 
     let stored_view = LocalStorage::get::<String>(VIEW_PREF_KEY).ok();
     let mut view_mode = use_signal(|| ViewMode::from_storage(stored_view));
@@ -271,6 +276,29 @@ pub fn SystemsListView() -> Element {
                     div {
                         class: "rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-4 py-3 text-sm text-yellow-300",
                         "{notice}"
+                    }
+                }
+            }
+
+            // Admin-only contextual health warnings (no agent heartbeat).
+            if is_admin_user && !*loading.read() {
+                {
+                    let systems_snap = local_systems.read();
+                    let no_hb_count = systems_snap.iter().filter(|s| s.last_seen.is_none()).count();
+                    if no_hb_count > 0 {
+                        let suffix_s = if no_hb_count == 1 { "" } else { "s" };
+                        let suffix_v = if no_hb_count == 1 { "has" } else { "have" };
+                        let msg = format!(
+                            "{no_hb_count} system{suffix_s} {suffix_v} no agent heartbeat on record and cannot receive deployments."
+                        );
+                        rsx! {
+                            AlertBanner {
+                                severity: AlertSeverity::Warning,
+                                message: msg,
+                            }
+                        }
+                    } else {
+                        rsx! {}
                     }
                 }
             }

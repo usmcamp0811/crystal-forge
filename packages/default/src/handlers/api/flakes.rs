@@ -6,8 +6,8 @@ use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use sqlx::PgPool;
-use std::hash::{Hash, Hasher};
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use tracing::{error, warn};
 
 use crate::api::models::{
@@ -21,9 +21,9 @@ use crate::flake::commits::{
     get_commit_metadata, get_commit_nixos_configurations, infer_default_branch,
     sync_commits_for_repo,
 };
-use crate::queries::commits::insert_commit_with_metadata;
-use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_above};
 use crate::handlers::agent_request::CFState;
+use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_above};
+use crate::queries::commits::insert_commit_with_metadata;
 use crate::queries::flakes::{
     count_systems_for_flake, delete_flake_by_id, fetch_dashboard_flake_timelines,
     fetch_flake_timelines, get_flake_by_id, get_flake_by_name, insert_flake, list_flake_registry,
@@ -784,7 +784,15 @@ pub async fn sync_flake_handler(
     };
 
     if should_inject_mock_sync_commit() {
-        return match inject_mock_sync_commit(&pool, flake.id, &flake.name, &flake.repo_url, &flake.branch).await {
+        return match inject_mock_sync_commit(
+            &pool,
+            flake.id,
+            &flake.name,
+            &flake.repo_url,
+            &flake.branch,
+        )
+        .await
+        {
             Ok(mock_commit_hash) => {
                 state.queue_notifier.notify_eval_queue();
                 (
@@ -895,7 +903,10 @@ fn synthetic_mock_sync_hash(
     repo_url: &str,
     now: chrono::DateTime<chrono::Utc>,
 ) -> String {
-    let seed = format!("{flake_id}:{repo_url}:{}", now.timestamp_nanos_opt().unwrap_or_default());
+    let seed = format!(
+        "{flake_id}:{repo_url}:{}",
+        now.timestamp_nanos_opt().unwrap_or_default()
+    );
 
     let mut h1 = std::collections::hash_map::DefaultHasher::new();
     seed.hash(&mut h1);
