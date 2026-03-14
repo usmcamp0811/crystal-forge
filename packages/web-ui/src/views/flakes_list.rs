@@ -1680,7 +1680,7 @@ fn AddFlakeForm(
                     div {
                         class: "grid grid-cols-1 md:grid-cols-3 gap-4",
                         label {
-                            class: "space-y-2",
+                            class: "relative block space-y-2 overflow-visible",
                             span { class: "text-xs uppercase tracking-wide text-gray-500", "Flake Name" }
                             input {
                                 class: "w-full rounded-lg px-3 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
@@ -1697,7 +1697,7 @@ fn AddFlakeForm(
                             if show_name_callout() {
                                 div {
                                     "data-testid": "setup-coach-flake-field-name",
-                                    style: "position:relative; margin-top:10px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                    style: "position:absolute; left:0; top:calc(100% + 8px); width:min(340px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
                                     div {
                                         style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
                                     }
@@ -1707,7 +1707,7 @@ fn AddFlakeForm(
                             }
                         }
                         label {
-                            class: "space-y-2",
+                            class: "relative block space-y-2 overflow-visible",
                             span { class: "text-xs uppercase tracking-wide text-gray-500", "Repository URL" }
                             input {
                                 class: "w-full rounded-lg px-3 py-2 text-sm font-mono {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
@@ -1724,7 +1724,7 @@ fn AddFlakeForm(
                             if show_repo_callout() {
                                 div {
                                     "data-testid": "setup-coach-flake-field-repo",
-                                    style: "position:relative; margin-top:10px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                    style: "position:absolute; left:0; top:calc(100% + 8px); width:min(340px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
                                     div {
                                         style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
                                     }
@@ -1734,7 +1734,7 @@ fn AddFlakeForm(
                             }
                         }
                         label {
-                            class: "space-y-2",
+                            class: "relative block space-y-2 overflow-visible",
                             span { class: "text-xs uppercase tracking-wide text-gray-500", "Branch (optional)" }
                             input {
                                 class: "w-full rounded-lg px-3 py-2 text-sm font-mono {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
@@ -1751,7 +1751,7 @@ fn AddFlakeForm(
                             if show_branch_callout() {
                                 div {
                                     "data-testid": "setup-coach-flake-field-branch",
-                                    style: "position:relative; margin-top:10px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                    style: "position:absolute; left:0; top:calc(100% + 8px); width:min(340px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
                                     div {
                                         style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
                                     }

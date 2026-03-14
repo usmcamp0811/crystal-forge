@@ -118,6 +118,7 @@ pub fn AddBuilderModal(
                 // Error message
                 if let Some(err) = error_message() {
                     div {
+                        class: "relative overflow-visible",
                         class: "mb-4 p-3 bg-red-500/10 border border-red-500/30 rounded text-red-400 text-sm",
                         "{err}"
                     }
@@ -149,7 +150,7 @@ pub fn AddBuilderModal(
                         if show_name_callout() {
                             div {
                                 "data-testid": "setup-coach-builder-field-name",
-                                style: "position:relative; margin-top:10px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                style: "position:absolute; left:0; top:calc(100% + 8px); width:min(360px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
                                 div {
                                     style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
                                 }
@@ -163,6 +164,7 @@ pub fn AddBuilderModal(
                     div {
                         class: "border border-slate-700 rounded p-4 space-y-3",
                         div {
+                            class: "relative overflow-visible",
                             class: "flex items-center justify-between mb-2",
                             h3 {
                                 class: "text-sm font-medium {theme::text::PRIMARY}",
@@ -202,7 +204,7 @@ pub fn AddBuilderModal(
                             if show_public_key_callout() {
                                 div {
                                     "data-testid": "setup-coach-builder-field-public-key",
-                                    style: "position:relative; margin-top:10px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                    style: "position:absolute; left:0; top:calc(100% + 8px); width:min(420px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
                                     div {
                                         style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
                                     }
@@ -247,10 +249,10 @@ pub fn AddBuilderModal(
 
                     // Resource Limits
                     div {
-                        class: "grid grid-cols-3 gap-4",
+                        class: "relative grid grid-cols-3 gap-4 pt-24",
                         div {
                             class: "col-span-3 mb-3",
-                            style: "position:relative; margin-top:4px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                            style: "position:absolute; left:0; top:0; width:min(680px, 92vw); z-index:60; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
                             div {
                                 style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
                             }
@@ -309,6 +311,7 @@ pub fn AddBuilderModal(
 
                     // Environment assignments
                     div {
+                        class: "relative overflow-visible",
                         label {
                             class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
                             "Environment Assignments"
@@ -323,7 +326,7 @@ pub fn AddBuilderModal(
                             match &*env_data {
                                 Some(Ok(env_list)) => rsx! {
                                     div {
-                                        class: "border border-slate-700 rounded p-3 space-y-2 max-h-48 overflow-y-auto",
+                                        class: "relative border border-slate-700 rounded p-3 space-y-2 max-h-48 overflow-y-auto",
                                         if env_list.is_empty() {
                                             p {
                                                 class: "text-sm {theme::text::SECONDARY}",
@@ -362,7 +365,7 @@ pub fn AddBuilderModal(
                                     if show_environment_callout() {
                                         div {
                                             "data-testid": "setup-coach-builder-field-environments",
-                                            style: "position:relative; margin-top:10px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                            style: "position:absolute; left:0; top:calc(100% + 8px); width:min(420px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
                                             div {
                                                 style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
                                             }

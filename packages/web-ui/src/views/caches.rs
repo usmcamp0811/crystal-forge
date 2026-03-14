@@ -255,6 +255,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
                         div {
                             class: "flex-1 min-h-0 overflow-y-auto space-y-4 pr-1",
                             div {
+                                class: "relative overflow-visible",
                                 label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Name *" }
                                 input {
                                     class: if add_field_errors().contains_key("name") {
@@ -276,7 +277,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
                                 if show_cache_name_callout() {
                                     div {
                                         "data-testid": "setup-coach-cache-field-name",
-                                        style: "position:relative; margin-top:10px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                        style: "position:absolute; left:0; top:calc(100% + 8px); width:min(420px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
                                         div {
                                             style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
                                         }
@@ -305,6 +306,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
                             // Type-specific required fields
                             if add_type() == "Attic" {
                                 div {
+                                    class: "relative overflow-visible",
                                     div {
                                         class: "flex items-baseline justify-between gap-2",
                                         label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Cache Name (on Attic server) *" }
@@ -359,7 +361,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
                                     if show_cache_endpoint_callout() {
                                         div {
                                             "data-testid": "setup-coach-cache-field-endpoint",
-                                            style: "position:relative; margin-top:10px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                            style: "position:absolute; left:0; top:calc(100% + 8px); width:min(420px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
                                             div {
                                                 style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
                                             }
@@ -372,6 +374,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
                                     }
                                 }
                                 div {
+                                    class: "relative overflow-visible",
                                     div {
                                         class: "flex items-baseline justify-between gap-2",
                                         label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Attic Public Key *" }
@@ -453,7 +456,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
                                     if show_cache_endpoint_callout() {
                                         div {
                                             "data-testid": "setup-coach-cache-field-endpoint",
-                                            style: "position:relative; margin-top:10px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                            style: "position:absolute; left:0; top:calc(100% + 8px); width:min(420px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
                                             div {
                                                 style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
                                             }
@@ -616,6 +619,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
 
                             // Environment assignment
                             div {
+                                class: "relative overflow-visible",
                                 div {
                                     class: "flex items-baseline justify-between gap-2",
                                     label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Environments (optional)" }
@@ -659,7 +663,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
                                     if show_cache_env_callout() {
                                         div {
                                             "data-testid": "setup-coach-cache-field-environments",
-                                            style: "position:relative; margin-top:10px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                            style: "position:absolute; left:0; top:calc(100% + 8px); width:min(440px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
                                             div {
                                                 style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
                                             }

@@ -115,7 +115,7 @@ pub fn AddEnvironmentForm(props: AddEnvironmentFormProps) -> Element {
                     }
 
                     div {
-                        class: "rounded-lg border {theme::surface::CARD_BORDER} bg-gray-900/50 p-4 space-y-3",
+                        class: "relative rounded-lg border {theme::surface::CARD_BORDER} bg-gray-900/50 p-4 space-y-3 overflow-visible",
                         div {
                             class: "flex items-center justify-between gap-2",
                             p { class: "text-xs uppercase tracking-wide text-gray-500", "Required Policies (all mandatory)" }
@@ -127,9 +127,9 @@ pub fn AddEnvironmentForm(props: AddEnvironmentFormProps) -> Element {
                         }
                         div {
                             "data-testid": "setup-coach-environment-policies-callout",
-                            style: "position:relative; margin-top:10px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                            style: "position:absolute; right:12px; top:46px; width:min(420px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
                             div {
-                                style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                style: "position:absolute; top:-6px; right:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
                             }
                             p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
                             p { style: "margin:2px 0 0 0;", "Think of policies as safety rules for this environment." }
