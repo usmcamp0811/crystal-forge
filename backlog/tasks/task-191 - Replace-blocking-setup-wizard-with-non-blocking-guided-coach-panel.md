@@ -4,7 +4,7 @@ title: Replace blocking setup wizard with non-blocking guided coach panel
 status: Review
 assignee: []
 created_date: '2026-03-14 13:17'
-updated_date: '2026-03-14 19:38'
+updated_date: '2026-03-14 19:51'
 labels:
   - frontend
   - ux
@@ -278,5 +278,14 @@ Verification:
 - nix build .#checks.x86_64-linux.web-ui -L (37/37)
 
 Commit: b2eec0a1
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/165
+
+2026-03-14: Added first-run explanatory callout in Create Environment -> Required Policies section to clarify that policies are hard configuration-level requirements for deployments, and that required policies can be adjusted per environment later.
+
+Verification:
+- nix develop -c cargo check (packages/web-ui)
+- nix build .#checks.x86_64-linux.web-ui -L (37/37)
+
+Commit: 00c0e606
 MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/165
 <!-- SECTION:NOTES:END -->
