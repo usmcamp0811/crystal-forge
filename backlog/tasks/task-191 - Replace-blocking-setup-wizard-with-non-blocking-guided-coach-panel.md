@@ -4,7 +4,7 @@ title: Replace blocking setup wizard with non-blocking guided coach panel
 status: Review
 assignee: []
 created_date: '2026-03-14 13:17'
-updated_date: '2026-03-14 17:32'
+updated_date: '2026-03-14 18:09'
 labels:
   - frontend
   - ux
@@ -246,4 +246,16 @@ Verification: `nix develop -c cargo check` (packages/web-ui) passed.
 Verification: `nix build .#checks.x86_64-linux.web-ui -L` passed (37/37).
 
 Pushed follow-up commit: 4b4706c0 to MR !165.
+
+Unified onboarding callout styling to match the agent activation modal color system (blue background/border/text palette) across environments, flakes, builders, caches, and systems pages.
+
+Updated both page-level guidance callouts and click-target pointer bubbles; aligned pulse emphasis rings from violet to blue for visual consistency.
+
+No selector/test-id changes were made, preserving screenshot/test determinism.
+
+Verification: `nix develop -c cargo check` (packages/web-ui) passed.
+
+Verification: `nix build .#checks.x86_64-linux.web-ui -L` passed (37/37).
+
+Pushed follow-up commit: 8d6ff3be to MR !165.
 <!-- SECTION:NOTES:END -->
