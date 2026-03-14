@@ -276,9 +276,9 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
                                 if show_cache_name_callout() {
                                     div {
                                         "data-testid": "setup-coach-cache-field-name",
-                                        class: "mt-2 rounded-md border border-blue-400/70 bg-blue-900/90 px-3 py-2 shadow-[0_6px_18px_rgba(30,64,175,0.35)]",
-                                        p { class: "text-[11px] font-semibold uppercase tracking-wide text-blue-100", "Setup Coach" }
-                                        p { class: "mt-1 text-xs text-blue-100", "Choose a clear cache name (for example: primary-cache or edge-cache-eu) so teams know where artifacts are published." }
+                                        style: "margin-top:6px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                        p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
+                                        p { style: "margin:2px 0 0 0;", "Choose a clear cache name (for example: primary-cache or edge-cache-eu) so teams know where artifacts are published." }
                                     }
                                 }
                                 if let Some(err) = add_field_errors().get("name") {
@@ -356,9 +356,9 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
                                     if show_cache_endpoint_callout() {
                                         div {
                                             "data-testid": "setup-coach-cache-field-endpoint",
-                                            class: "mt-2 rounded-md border border-blue-400/70 bg-blue-900/90 px-3 py-2 shadow-[0_6px_18px_rgba(30,64,175,0.35)]",
-                                            p { class: "text-[11px] font-semibold uppercase tracking-wide text-blue-100", "Setup Coach" }
-                                            p { class: "mt-1 text-xs text-blue-100", "Set the cache server endpoint that systems/builders will push artifacts to." }
+                                            style: "margin-top:6px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                            p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
+                                            p { style: "margin:2px 0 0 0;", "Set the cache server endpoint that systems/builders will push artifacts to." }
                                         }
                                     }
                                     if let Some(err) = add_field_errors().get("push_to") {
@@ -447,9 +447,9 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
                                     if show_cache_endpoint_callout() {
                                         div {
                                             "data-testid": "setup-coach-cache-field-endpoint",
-                                            class: "mt-2 rounded-md border border-blue-400/70 bg-blue-900/90 px-3 py-2 shadow-[0_6px_18px_rgba(30,64,175,0.35)]",
-                                            p { class: "text-[11px] font-semibold uppercase tracking-wide text-blue-100", "Setup Coach" }
-                                            p { class: "mt-1 text-xs text-blue-100", "Use the full cache destination URL (HTTP/S or S3) where artifacts should be uploaded." }
+                                            style: "margin-top:6px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                            p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
+                                            p { style: "margin:2px 0 0 0;", "Use the full cache destination URL (HTTP/S or S3) where artifacts should be uploaded." }
                                         }
                                     }
                                     if let Some(err) = add_field_errors().get("push_to") {
@@ -650,9 +650,9 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
                                     if show_cache_env_callout() {
                                         div {
                                             "data-testid": "setup-coach-cache-field-environments",
-                                            class: "mt-2 rounded-md border border-blue-400/70 bg-blue-900/90 px-3 py-2 shadow-[0_6px_18px_rgba(30,64,175,0.35)]",
-                                            p { class: "text-[11px] font-semibold uppercase tracking-wide text-blue-100", "Setup Coach" }
-                                            p { class: "mt-1 text-xs text-blue-100", "Choose specific environments for targeted cache routing, or leave empty to make this a global cache for all environments." }
+                                            style: "margin-top:6px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                            p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
+                                            p { style: "margin:2px 0 0 0;", "Choose specific environments for targeted cache routing, or leave empty to make this a global cache for all environments." }
                                         }
                                     }
                                 } else {

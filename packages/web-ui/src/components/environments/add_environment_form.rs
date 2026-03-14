@@ -126,40 +126,12 @@ pub fn AddEnvironmentForm(props: AddEnvironmentFormProps) -> Element {
                             }
                         }
                         div {
-                            class: "relative mt-1",
                             "data-testid": "setup-coach-environment-policies-callout",
-                            style: "background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:9px 10px 10px 10px; box-shadow:0 8px 22px rgba(30,64,175,0.35);",
-                            div {
-                                class: "absolute -top-1 left-5 h-2.5 w-2.5 rotate-45",
-                                style: "background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75);",
-                            }
-                            div {
-                                class: "inline-flex items-center gap-2 rounded-full border border-blue-300/55 bg-blue-800/60 px-2 py-0.5",
-                                span {
-                                    class: "inline-flex h-4 w-4 items-center justify-center rounded-full border border-blue-200/70 text-[10px] font-bold text-blue-100",
-                                    "i"
-                                }
-                                span {
-                                    class: "text-[11px] font-semibold uppercase tracking-wide text-blue-100",
-                                    "Setup Coach Callout"
-                                }
-                            }
-                            p {
-                                class: "mt-2 text-[11px] font-semibold uppercase tracking-wide text-blue-100",
-                                "Setup Coach: Required Policies"
-                            }
-                            p {
-                                class: "mt-1 text-xs text-blue-100",
-                                "Think of policies as safety rules for this environment."
-                            }
-                            p {
-                                class: "mt-1 text-xs text-blue-100/90",
-                                "If a system does not meet these rules, deployment can be blocked until it does."
-                            }
-                            p {
-                                class: "mt-1 text-xs text-blue-200/95",
-                                "You can add or remove policies later for each environment."
-                            }
+                            style: "margin-top:6px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                            p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
+                            p { style: "margin:2px 0 0 0;", "Think of policies as safety rules for this environment." }
+                            p { style: "margin:2px 0 0 0;", "If a system does not meet these rules, deployment can be blocked until it does." }
+                            p { style: "margin:2px 0 0 0;", "You can add or remove policies later for each environment." }
                         }
                         div {
                             class: "flex flex-wrap gap-2",
