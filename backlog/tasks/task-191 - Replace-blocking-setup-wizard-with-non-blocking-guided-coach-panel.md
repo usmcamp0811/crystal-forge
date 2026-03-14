@@ -4,7 +4,7 @@ title: Replace blocking setup wizard with non-blocking guided coach panel
 status: Review
 assignee: []
 created_date: '2026-03-14 13:17'
-updated_date: '2026-03-14 21:57'
+updated_date: '2026-03-14 22:10'
 labels:
   - frontend
   - ux
@@ -359,5 +359,14 @@ Verification:
 - nix build .#checks.x86_64-linux.web-ui -L (37/37)
 
 Commit: 23a60ea6
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/165
+
+2026-03-14: Updated onboarding action callout lifecycle to be relevance-driven and non-repetitive. Action callouts now dismiss after initial action click on Environments (Add Environment), Flakes (Add Flake), Builders (Add Builder), Caches (Add Destination), and Systems (Add System). Create Environment Required Policies callout now dismisses when Choose Policies is clicked. Also moved Add Cache environments field callout above the field so it no longer covers Create/Cancel footer buttons.
+
+Verification:
+- nix develop -c cargo check (packages/web-ui)
+- nix build .#checks.x86_64-linux.web-ui -L (37/37)
+
+Commit: b2dc40e8
 MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/165
 <!-- SECTION:NOTES:END -->
