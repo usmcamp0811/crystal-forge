@@ -4,7 +4,7 @@ title: Replace blocking setup wizard with non-blocking guided coach panel
 status: Review
 assignee: []
 created_date: '2026-03-14 13:17'
-updated_date: '2026-03-14 23:23'
+updated_date: '2026-03-14 23:32'
 labels:
   - frontend
   - ux
@@ -397,5 +397,16 @@ Verification:
 - nix develop -c cargo check (packages/default)
 
 Commit: d7586e5f
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/165
+
+2026-03-14: Fixed builder creation success-path deserialization error in web-ui (`missing field id`). Root cause: client expected `BuilderDetail` for `POST /builders`, but backend returns `BuilderCreatedResponse` envelope (`{ builder, private_key, assigned_environment_ids }`).
+
+Updated web-ui API models/client to deserialize create-builder response as `BuilderCreatedResponse`.
+
+Verification:
+- nix develop -c cargo check (packages/web-ui)
+- nix build .#checks.x86_64-linux.web-ui -L (37/37)
+
+Commit: 8f54ae65
 MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/165
 <!-- SECTION:NOTES:END -->
