@@ -4,7 +4,7 @@ title: Replace blocking setup wizard with non-blocking guided coach panel
 status: Review
 assignee: []
 created_date: '2026-03-14 13:17'
-updated_date: '2026-03-14 17:20'
+updated_date: '2026-03-14 17:32'
 labels:
   - frontend
   - ux
@@ -234,4 +234,16 @@ Verification: `nix develop -c cargo check` (packages/web-ui) passed.
 Verification: `nix build .#checks.x86_64-linux.web-ui -L` passed (37/37).
 
 Pushed follow-up commit: 91081810 to MR !165.
+
+Fixed onboarding expectation gap: after first system creation in setup-coach flow, the UI now calls `set_setup_wizard_agent_acknowledged(true)` so Deploy Agent step turns complete/green automatically.
+
+Removed redundant coach footer action button (`Mark agent understood`) now that modal reminder + automatic acknowledgment handle this state transition.
+
+Updated agent-step helper text in coach panel to indicate automatic completion after first system setup.
+
+Verification: `nix develop -c cargo check` (packages/web-ui) passed.
+
+Verification: `nix build .#checks.x86_64-linux.web-ui -L` passed (37/37).
+
+Pushed follow-up commit: 4b4706c0 to MR !165.
 <!-- SECTION:NOTES:END -->
