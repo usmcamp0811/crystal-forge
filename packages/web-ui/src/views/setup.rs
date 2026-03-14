@@ -567,18 +567,50 @@ struct CompletionPanelProps {
 #[component]
 fn CompletionPanel(props: CompletionPanelProps) -> Element {
     rsx! {
-        div { class: "space-y-2 rounded-lg border border-emerald-500/40 bg-emerald-900/20 p-4",
-            h2 { class: "text-lg font-semibold text-emerald-100", "Setup Complete" }
-            p { class: "text-sm text-emerald-200/90", "All required setup steps are complete and agent deployment has been acknowledged." }
-            ul { class: "grid gap-2 text-sm text-emerald-100 md:grid-cols-2",
-                li { class: "rounded border border-emerald-400/30 bg-emerald-950/30 px-3 py-2", {format!("✓ Environments: {}", props.progress.environment.count)} }
-                li { class: "rounded border border-emerald-400/30 bg-emerald-950/30 px-3 py-2", {format!("✓ Flakes: {}", props.progress.flake.count)} }
-                li { class: "rounded border border-emerald-400/30 bg-emerald-950/30 px-3 py-2", {format!("✓ Builders: {}", props.progress.builder.count)} }
-                li { class: "rounded border border-emerald-400/30 bg-emerald-950/30 px-3 py-2", {format!("✓ Caches with environment: {}", props.progress.cache.count)} }
-                li { class: "rounded border border-emerald-400/30 bg-emerald-950/30 px-3 py-2", {format!("✓ Systems linked: {}", props.progress.system.count)} }
-                li { class: "rounded border border-emerald-400/30 bg-emerald-950/30 px-3 py-2", "✓ Agent step acknowledged" }
+        div {
+            class: "space-y-2 rounded-lg p-4",
+            style: "border:1px solid rgba(16,185,129,0.5); background:rgba(6,78,59,0.28);",
+            h2 { style: "font-size:1.125rem; font-weight:600; color:#a7f3d0;", "Setup Complete" }
+            p {
+                style: "font-size:0.875rem; color:#d1fae5;",
+                "All required setup steps are complete and agent deployment has been acknowledged."
             }
-            p { class: "text-sm text-emerald-200/90", "Select 'Get Started' to continue to the dashboard." }
+            ul { class: "grid gap-2 text-sm md:grid-cols-2", style: "color:#d1fae5;",
+                li {
+                    class: "rounded px-3 py-2",
+                    style: "border:1px solid rgba(52,211,153,0.45); background:rgba(6,78,59,0.35);",
+                    {format!("✓ Environments: {}", props.progress.environment.count)}
+                }
+                li {
+                    class: "rounded px-3 py-2",
+                    style: "border:1px solid rgba(52,211,153,0.45); background:rgba(6,78,59,0.35);",
+                    {format!("✓ Flakes: {}", props.progress.flake.count)}
+                }
+                li {
+                    class: "rounded px-3 py-2",
+                    style: "border:1px solid rgba(52,211,153,0.45); background:rgba(6,78,59,0.35);",
+                    {format!("✓ Builders: {}", props.progress.builder.count)}
+                }
+                li {
+                    class: "rounded px-3 py-2",
+                    style: "border:1px solid rgba(52,211,153,0.45); background:rgba(6,78,59,0.35);",
+                    {format!("✓ Caches with environment: {}", props.progress.cache.count)}
+                }
+                li {
+                    class: "rounded px-3 py-2",
+                    style: "border:1px solid rgba(52,211,153,0.45); background:rgba(6,78,59,0.35);",
+                    {format!("✓ Systems linked: {}", props.progress.system.count)}
+                }
+                li {
+                    class: "rounded px-3 py-2",
+                    style: "border:1px solid rgba(52,211,153,0.45); background:rgba(6,78,59,0.35);",
+                    "✓ Agent step acknowledged"
+                }
+            }
+            p {
+                style: "font-size:0.875rem; color:#d1fae5;",
+                "Select 'Get Started' to continue to the dashboard."
+            }
         }
     }
 }
