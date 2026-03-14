@@ -23,7 +23,9 @@ struct SetupWizardCounts {
     // Wildcard builders (no explicit env rows) are valid and can process
     // jobs from all environments, so this is a total builder count.
     builder_count: i64,
-    cache_with_environment: i64,
+    // Cache destinations can be scoped to environments or global.
+    // Either variant satisfies the setup step.
+    cache_destination_count: i64,
     system_with_links: i64,
 }
 
@@ -107,9 +109,8 @@ async fn load_counts(pool: &PgPool) -> anyhow::Result<SetupWizardCounts> {
         .fetch_one(pool)
         .await?;
 
-    let cache_with_environment = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(DISTINCT c.id)::bigint FROM cache_destinations c JOIN cache_destination_environments cde ON cde.cache_destination_id = c.id",
-    )
+    let cache_destination_count =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::bigint FROM cache_destinations")
     .fetch_one(pool)
     .await?;
 
@@ -123,7 +124,7 @@ async fn load_counts(pool: &PgPool) -> anyhow::Result<SetupWizardCounts> {
         environment,
         flake,
         builder_count,
-        cache_with_environment,
+        cache_destination_count,
         system_with_links,
     })
 }
@@ -146,8 +147,8 @@ fn build_progress_response(
         count: counts.builder_count,
     };
     let cache = SetupWizardStepStatus {
-        complete: counts.cache_with_environment > 0,
-        count: counts.cache_with_environment,
+        complete: counts.cache_destination_count > 0,
+        count: counts.cache_destination_count,
     };
     let system = SetupWizardStepStatus {
         complete: counts.system_with_links > 0,
@@ -208,7 +209,7 @@ mod tests {
             environment: 0,
             flake: 0,
             builder_count: 0,
-            cache_with_environment: 0,
+            cache_destination_count: 0,
             system_with_links: 0,
         };
 
@@ -227,7 +228,7 @@ mod tests {
             environment: 1,
             flake: 1,
             builder_count: 0,
-            cache_with_environment: 0,
+            cache_destination_count: 0,
             system_with_links: 0,
         };
 
@@ -246,7 +247,7 @@ mod tests {
             environment: 1,
             flake: 2,
             builder_count: 1,
-            cache_with_environment: 1,
+            cache_destination_count: 1,
             system_with_links: 3,
         };
 
@@ -258,6 +259,21 @@ mod tests {
         assert!(result.system.complete);
         assert!(result.agent_acknowledged);
         assert!(result.all_required_complete);
+    }
+
+    #[test]
+    fn setup_progress_cache_step_accepts_global_destination() {
+        let counts = SetupWizardCounts {
+            environment: 1,
+            flake: 1,
+            builder_count: 1,
+            cache_destination_count: 1,
+            system_with_links: 0,
+        };
+
+        let result = build_progress_response(counts, false, false);
+        assert!(result.cache.complete);
+        assert_eq!(result.cache.count, 1);
     }
 
     #[tokio::test]
