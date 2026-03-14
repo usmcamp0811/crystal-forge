@@ -42,11 +42,11 @@ pub fn CachesView() -> Element {
             if from_setup() {
                 div {
                     style: "background:rgba(109,40,217,0.2); border:1px solid rgba(139,92,246,0.5); border-radius:8px; padding:10px 16px; display:flex; align-items:center; justify-content:space-between; gap:12px;",
-                    span { style: "color:#e9d5ff; font-size:14px;", "← You came here from the Setup Wizard" }
+                    span { style: "color:#e9d5ff; font-size:14px;", "← You came here from the Setup Coach" }
                     a {
-                        href: "/setup",
+                        href: "/",
                         style: "color:#a78bfa; font-size:13px; font-weight:500; white-space:nowrap; text-decoration:underline;",
-                        "Back to Setup Wizard"
+                        "Back to Setup Coach"
                     }
                 }
             }

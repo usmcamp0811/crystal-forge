@@ -146,10 +146,16 @@ pub fn AdminView() -> Element {
                         onclick: move |_| {
                             spawn(async move {
                                 let _ = set_setup_wizard_dismissed(false).await;
-                                nav.push("/setup");
+                                if let Some(storage) = web_sys::window()
+                                    .and_then(|w| w.local_storage().ok())
+                                    .flatten()
+                                {
+                                    let _ = storage.set_item("cf.coach.collapsed", "false");
+                                }
+                                nav.push("/");
                             });
                         },
-                        "Re-run Setup Wizard"
+                        "Re-open Setup Coach"
                     }
                 }
                 p { class: "text-sm {theme::text::SECONDARY}", "Manage users, role assignments, and review recent security-sensitive actions." }

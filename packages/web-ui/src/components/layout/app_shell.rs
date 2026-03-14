@@ -8,6 +8,7 @@ use crate::components::layout::sidebar::{
     MobileDrawer, SidebarContext, SidebarEdgeToggle, SidebarNav,
 };
 use crate::components::layout::{BannerPlacement, DevModeBanner};
+use crate::components::onboarding::OnboardingCoachPanel;
 use crate::routes::Route;
 use crate::state::app_state::{AppState, AuthFetchState};
 use crate::state::auth;
@@ -176,6 +177,10 @@ pub fn AppShell() -> Element {
                             Outlet::<Route> {}
                         }
                     }
+                }
+
+                if auth::is_admin(&auth_context) {
+                    OnboardingCoachPanel {}
                 }
             }
 

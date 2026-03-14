@@ -150,12 +150,31 @@ in pkgs.testers.runNixOSTest {
     if ok_count == 0:
         raise Exception("All screenshots failed")
 
+    expected_onboarding = [
+      "06a-onboarding-coach-dashboard",
+      "06b-onboarding-environments-callout",
+      "06c-onboarding-flakes-callout",
+      "06d-onboarding-builders-callout",
+      "06e-onboarding-caches-callout",
+      "06f-onboarding-systems-callout",
+    ]
+    ok_names = {r["name"] for r in results if r.get("ok")}
+    missing_onboarding = [name for name in expected_onboarding if name not in ok_names]
+    if missing_onboarding:
+        raise Exception(f"Missing required onboarding screenshots: {missing_onboarding}")
+
     # Fail if critical auth + navigation checks failed
     critical_tests = [
       "01-login-page",
       "02-registration",
       "05-login-submit",
       "06-dashboard",
+      "06a-onboarding-coach-dashboard",
+      "06b-onboarding-environments-callout",
+      "06c-onboarding-flakes-callout",
+      "06d-onboarding-builders-callout",
+      "06e-onboarding-caches-callout",
+      "06f-onboarding-systems-callout",
       "07-sidebar-desktop-expanded",
       "08-sidebar-desktop-collapsed",
       "08b-sidebar-desktop-toggle-expand",

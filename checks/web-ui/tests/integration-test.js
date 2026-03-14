@@ -171,6 +171,41 @@ async function unrouteBuildsData(page) {
   await page.unroute("**/api/v1/build-jobs/recent*");
 }
 
+function mockSetupCoachProgress() {
+  return {
+    dismissed: false,
+    agent_acknowledged: false,
+    environment: { complete: false, count: 0 },
+    flake: { complete: false, count: 0 },
+    builder: { complete: false, count: 0 },
+    cache: { complete: false, count: 0 },
+    system: { complete: false, count: 0 },
+    all_required_complete: false,
+  };
+}
+
+async function routeSetupCoachData(page) {
+  await page.route("**/api/v1/admin/setup-progress*", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(mockSetupCoachProgress()),
+    });
+  });
+  await page.route("**/api/v1/admin/setup-wizard/dismiss*", async (route) => {
+    await route.fulfill({ status: 204, body: "" });
+  });
+  await page.route("**/api/v1/admin/setup-wizard/agent-acknowledge*", async (route) => {
+    await route.fulfill({ status: 204, body: "" });
+  });
+}
+
+async function unrouteSetupCoachData(page) {
+  await page.unroute("**/api/v1/admin/setup-progress*");
+  await page.unroute("**/api/v1/admin/setup-wizard/dismiss*");
+  await page.unroute("**/api/v1/admin/setup-wizard/agent-acknowledge*");
+}
+
 // Screenshot steps - executed in order
 const steps = [
   // ============================================================
@@ -241,8 +276,89 @@ const steps = [
     name: "06-dashboard",
     description: "Dashboard after login",
     action: async (page) => {
+      await routeSetupCoachData(page);
       await page.goto(`${baseUrl}/`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
+      await assertVisible(
+        page.locator("[data-testid='onboarding-coach-panel']"),
+        "Onboarding coach panel should be visible on dashboard",
+      );
+    },
+  },
+  {
+    name: "06a-onboarding-coach-dashboard",
+    description: "Non-blocking onboarding coach panel on dashboard",
+    action: async (page) => {
+      await page.goto(`${baseUrl}/`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1500);
+      await assertVisible(
+        page.locator("[data-testid='onboarding-coach-panel']"),
+        "Onboarding coach panel should be visible",
+      );
+      await assertVisible(
+        page.locator("[data-testid='onboarding-step-environment']"),
+        "Environment onboarding step should be visible",
+      );
+    },
+  },
+  {
+    name: "06b-onboarding-environments-callout",
+    description: "Coach step -> Environments page with contextual callout",
+    action: async (page) => {
+      await page.locator("[data-testid='onboarding-step-environment']").click();
+      await page.waitForTimeout(1500);
+      await assertVisible(
+        page.getByText("You came here from the Setup Coach").first(),
+        "Expected setup coach contextual callout on environments page",
+      );
+    },
+  },
+  {
+    name: "06c-onboarding-flakes-callout",
+    description: "Coach step -> Flakes page with contextual callout",
+    action: async (page) => {
+      await page.locator("[data-testid='onboarding-step-flake']").click();
+      await page.waitForTimeout(1500);
+      await assertVisible(
+        page.getByText("You came here from the Setup Coach").first(),
+        "Expected setup coach contextual callout on flakes page",
+      );
+    },
+  },
+  {
+    name: "06d-onboarding-builders-callout",
+    description: "Coach step -> Builders page with contextual callout",
+    action: async (page) => {
+      await page.locator("[data-testid='onboarding-step-builder']").click();
+      await page.waitForTimeout(1500);
+      await assertVisible(
+        page.getByText("You came here from the Setup Coach").first(),
+        "Expected setup coach contextual callout on builders page",
+      );
+    },
+  },
+  {
+    name: "06e-onboarding-caches-callout",
+    description: "Coach step -> Caches page with contextual callout",
+    action: async (page) => {
+      await page.locator("[data-testid='onboarding-step-cache']").click();
+      await page.waitForTimeout(1500);
+      await assertVisible(
+        page.getByText("You came here from the Setup Coach").first(),
+        "Expected setup coach contextual callout on caches page",
+      );
+    },
+  },
+  {
+    name: "06f-onboarding-systems-callout",
+    description: "Coach step -> Systems page with contextual callout",
+    action: async (page) => {
+      await page.locator("[data-testid='onboarding-step-system']").click();
+      await page.waitForTimeout(1500);
+      await assertVisible(
+        page.getByText("You came here from the Setup Coach").first(),
+        "Expected setup coach contextual callout on systems page",
+      );
     },
   },
   // ============================================================

@@ -2,7 +2,7 @@
 
 use dioxus::prelude::*;
 
-use crate::api::client::{fetch_setup_wizard_progress, fetch_whoami, local_login};
+use crate::api::client::{fetch_whoami, local_login};
 use crate::api::models::AuthMode;
 use crate::state::app_state::AppState;
 use crate::state::auth;
@@ -34,16 +34,6 @@ pub fn LoginView() -> Element {
                 // If already authenticated, update app state and redirect to dashboard
                 if context.is_authenticated {
                     app_state.write().auth = Some(context);
-                    let auth_ctx = app_state.read().auth.clone();
-                    if auth::is_admin(&auth_ctx) {
-                        if let Ok(progress) = fetch_setup_wizard_progress().await {
-                            if !progress.dismissed && !(progress.all_required_complete && progress.agent_acknowledged) {
-                                nav.push("/setup");
-                                return;
-                            }
-                        }
-                    }
-
                     nav.push("/");
                     return;
                 }
@@ -112,16 +102,6 @@ pub fn LoginView() -> Element {
                     // Refresh auth context
                     if let Ok(auth_context) = fetch_whoami().await {
                         app_state.write().auth = Some(auth_context);
-                    }
-
-                    let auth_ctx = app_state.read().auth.clone();
-                    if auth::is_admin(&auth_ctx) {
-                        if let Ok(progress) = fetch_setup_wizard_progress().await {
-                            if !progress.dismissed && !(progress.all_required_complete && progress.agent_acknowledged) {
-                                nav.push("/setup");
-                                return;
-                            }
-                        }
                     }
 
                     nav.push("/");
