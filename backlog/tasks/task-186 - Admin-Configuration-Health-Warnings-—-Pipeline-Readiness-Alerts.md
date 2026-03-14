@@ -4,7 +4,7 @@ title: Admin Configuration Health Warnings — Pipeline Readiness Alerts
 status: Review
 assignee: []
 created_date: '2026-03-13 01:16'
-updated_date: '2026-03-13 12:48'
+updated_date: '2026-03-14 13:36'
 labels:
   - frontend
   - backend
@@ -32,6 +32,8 @@ When a new admin stands up Crystal Forge for the first time, they create a syste
 ## Goal
 
 Admin users receive clear, actionable warnings about configuration gaps that prevent the deployment pipeline from functioning. Warnings appear in three locations: a dashboard health widget, contextual inline warnings on entity views, and a global notification bar. Warnings are visible only to Admin users.
+
+Feature-complete UI changes for this task must also produce screenshots tied to each affected feature surface. If existing UI-check or screenshot automation is insufficient, this task includes updating that workflow so the required screenshots can be captured deterministically and attached to the MR.
 
 ## Non-Goals
 
@@ -72,6 +74,8 @@ The following pipeline readiness checks must be implemented, mapped to the eval-
 - **Dashboard widget**: New widget added to `default_widget_positions()` and `render_widget_content()` in `dashboard.rs`. Renders a summary card showing pipeline readiness with a list of unresolved issues and action links.
 - **Contextual warnings**: Added to existing entity view components (`systems_list.rs`, `environments_list.rs`, `flakes_list.rs`) as `AlertBanner` instances above the entity list, rendered conditionally based on health data or entity-specific field checks.
 - **Admin-only visibility**: All warning rendering gated behind `is_admin(&app_state.read().auth)` check. Non-admin users see standard empty states unchanged.
+- **UI evidence**: The task must produce screenshots for each user-visible warning surface changed by this work (dashboard widget, global notification bar, systems warning state, environments warning state, flakes warning state). If existing `web-ui` check coverage cannot deterministically capture those states, update the relevant UI-check/screenshot mechanism as part of this task.
+- **MR usage**: Captured screenshots must be uploaded to GitLab and referenced from the MR description for this task.
 - **No new database tables or migrations required** — all health checks are derived from counts of existing entities and their associations.
 - **Contextual per-entity checks** (system.flake_id, environment builder/cache assignments) can use data already returned by existing list endpoints — no additional API calls needed for those.
 
@@ -87,6 +91,7 @@ The following pipeline readiness checks must be implemented, mapped to the eval-
 - `packages/web-ui/src/views/systems_list.rs` — contextual system warnings
 - `packages/web-ui/src/views/environments_list.rs` — contextual environment warnings
 - `packages/web-ui/src/views/flakes_list.rs` — contextual flake warnings
+- `packages/web-ui` UI-check / screenshot automation — updated if needed to capture the required evidence deterministically for MR use
 
 ## Risk Level
 
@@ -103,6 +108,7 @@ The following pipeline readiness checks must be implemented, mapped to the eval-
   - Notification bar dismisses on click and stays dismissed during session
   - Notification bar reappears after adding/removing entities that change health status
   - Contextual warnings appear on correct entity views
+- **UI Evidence**: Capture deterministic screenshots for every affected warning surface. If current UI-check coverage cannot produce them, extend it and rerun it so screenshots can be attached to the MR.
 - **Tier 2**: `nix flake check` — required since new API endpoint affects the server package
 <!-- SECTION:DESCRIPTION:END -->
 
@@ -123,6 +129,9 @@ The following pipeline readiness checks must be implemented, mapped to the eval-
 - [ ] #13 When all health checks pass (fully configured instance), no warnings appear anywhere — the dashboard widget is hidden, the notification bar is hidden, and no contextual banners render.
 - [ ] #14 Unit tests exist for the config-health endpoint handler covering: all checks failing (empty instance), all checks passing (fully configured), partial configuration, and 403 for non-admin users.
 - [ ] #15 The health endpoint queries run efficiently using COUNT queries (not loading full entity lists) and use `tokio::try_join!` for parallel execution.
+- [ ] #16 Feature-specific screenshots exist for each user-visible UI surface changed by this task: dashboard Pipeline Readiness widget, global notification bar, systems warning state, environments warning state, and flakes warning state.
+- [ ] #17 If current `web-ui` checks or screenshot tooling cannot capture the required states deterministically, the task updates that workflow so the screenshots can be generated reproducibly.
+- [ ] #18 The Merge Request for this task includes the captured UI screenshots as GitLab uploads referenced in the MR description.
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -159,4 +168,6 @@ LOCK: claude-sonnet-4-6 on reckless in ~/code/crystal-forge/TASK-186-admin-confi
 
 MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/163
 Verification: cargo check (web-ui) ✅, rustfmt --check ✅, handler unit tests included. Awaiting merge into dev.
+
+Requirement update: UI changes for this task now require feature-specific screenshots. If needed, extend the `web-ui` check/screenshot workflow to capture them deterministically, and use those screenshots in the MR.
 <!-- SECTION:NOTES:END -->
