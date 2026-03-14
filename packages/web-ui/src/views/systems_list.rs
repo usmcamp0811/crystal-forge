@@ -229,10 +229,21 @@ pub fn SystemsListView() -> Element {
 
             if let Some(ref reminder) = *onboarding_agent_reminder.read() {
                 div {
-                    "data-testid": "setup-coach-agent-runtime-reminder",
-                    style: "background:rgba(30,58,138,0.22); border:1px solid rgba(96,165,250,0.55); border-radius:10px; padding:12px 16px;",
-                    p { style: "margin:0; color:#dbeafe; font-weight:700; font-size:13px; letter-spacing:0.02em; text-transform:uppercase;", "Agent activation required" }
-                    p { style: "margin:6px 0 0 0; color:#bfdbfe; font-size:13px;", "{reminder}" }
+                    "data-testid": "setup-coach-agent-runtime-reminder-modal",
+                    style: "position:fixed; inset:0; z-index:90; background:rgba(2,6,23,0.62); display:flex; align-items:center; justify-content:center; padding:16px;",
+                    div {
+                        style: "width:min(620px, 100%); border:2px solid rgba(59,130,246,0.75); background:linear-gradient(160deg, rgba(30,41,59,0.98), rgba(30,64,175,0.94)); border-radius:14px; box-shadow:0 18px 46px rgba(15,23,42,0.65); padding:18px 18px 16px 18px;",
+                        p { style: "margin:0; color:#bfdbfe; font-weight:800; font-size:12px; letter-spacing:0.05em; text-transform:uppercase;", "Agent activation required" }
+                        p { style: "margin:8px 0 0 0; color:#eff6ff; font-size:14px; line-height:1.45;", "{reminder}" }
+                        div {
+                            style: "margin-top:14px; display:flex; justify-content:flex-end;",
+                            button {
+                                class: "px-3 py-2 rounded-lg text-sm font-semibold text-white {theme::interactive::PRIMARY_BTN}",
+                                onclick: move |_| onboarding_agent_reminder.set(None),
+                                "Got it"
+                            }
+                        }
+                    }
                 }
             }
 
@@ -334,6 +345,7 @@ pub fn SystemsListView() -> Element {
                             return;
                         }
                         let from_setup_active = from_setup();
+                        let first_system_in_setup = from_setup_active && local_systems.read().is_empty();
 
                         // Call backend API to create the system
                         spawn(async move {
@@ -367,7 +379,7 @@ pub fn SystemsListView() -> Element {
                                     draft.set(NewSystemDraft::new());
                                     add_error.set(None);
                                     show_add_form.set(false);
-                                    if from_setup_active {
+                                    if first_system_in_setup {
                                         onboarding_agent_reminder.set(Some(
                                             "System record created. Next, ensure this host config enables the Crystal Forge agent module, apply/rebuild that config, and confirm the agent service is running before expecting heartbeats or deployment status.".to_string(),
                                         ));
