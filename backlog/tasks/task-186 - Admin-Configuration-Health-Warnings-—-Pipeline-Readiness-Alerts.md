@@ -4,7 +4,7 @@ title: Admin Configuration Health Warnings — Pipeline Readiness Alerts
 status: In Progress
 assignee: []
 created_date: '2026-03-13 01:16'
-updated_date: '2026-03-14 14:49'
+updated_date: '2026-03-14 14:50'
 labels:
   - frontend
   - backend
@@ -168,4 +168,6 @@ MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/163
 Verification: cargo check (web-ui) ✅, rustfmt --check ✅, handler unit tests included. Awaiting merge into dev.
 
 Requirement update: UI changes for this task now require feature-specific screenshots. If needed, extend the `web-ui` check/screenshot workflow to capture them deterministically, and use those screenshots in the MR.
+
+LOCK: OpenCode on reckless in ~/code/crystal-forge/TASK-186-admin-config-health
 <!-- SECTION:NOTES:END -->
