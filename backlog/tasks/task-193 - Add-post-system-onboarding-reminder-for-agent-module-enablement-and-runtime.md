@@ -4,6 +4,7 @@ title: Add post-system onboarding reminder for agent module enablement and runti
 status: Backlog
 assignee: []
 created_date: '2026-03-14 16:52'
+updated_date: '2026-03-14 17:04'
 labels:
   - frontend
   - onboarding
@@ -38,3 +39,9 @@ The reminder should reduce first-time admin confusion and make the required next
 - [ ] #3 Reminder is visible enough for first-time admins and does not block normal navigation.
 - [ ] #4 Existing system creation behavior remains unchanged for non-onboarding flows.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Superseded by active implementation updates on TASK-191 per maintainer direction. Post-system onboarding reminder was implemented directly in TASK-191 / MR !165 (commit 52b6477e).
+<!-- SECTION:NOTES:END -->
