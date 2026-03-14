@@ -4,7 +4,7 @@ title: Replace blocking setup wizard with non-blocking guided coach panel
 status: Review
 assignee: []
 created_date: '2026-03-14 13:17'
-updated_date: '2026-03-14 18:09'
+updated_date: '2026-03-14 19:15'
 labels:
   - frontend
   - ux
@@ -258,4 +258,16 @@ Verification: `nix develop -c cargo check` (packages/web-ui) passed.
 Verification: `nix build .#checks.x86_64-linux.web-ui -L` passed (37/37).
 
 Pushed follow-up commit: 8d6ff3be to MR !165.
+
+Added field-level onboarding callouts in Add System, Add Flake, and Add Builder forms; each callout now auto-dismisses when the user focuses/edits that field.
+
+Raised flakes header target-callout layering (`z-[2101]` container + callout `z-index:2200`) so it stays above commit/size filter dropdown overlays.
+
+Added first-builder onboarding activation modal (`setup-coach-builder-runtime-reminder-modal`) mirroring system reminder semantics, shown only in setup-coach flow when creating the first builder.
+
+Verification: `nix develop -c cargo check` (packages/web-ui) passed.
+
+Verification: `nix build .#checks.x86_64-linux.web-ui -L` passed (37/37).
+
+Pushed follow-up commit: 987b056a to MR !165.
 <!-- SECTION:NOTES:END -->
