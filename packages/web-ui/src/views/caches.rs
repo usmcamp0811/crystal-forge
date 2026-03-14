@@ -33,13 +33,13 @@ enum CachesTab {
 #[component]
 pub fn CachesView() -> Element {
     let mut active_tab = use_signal(|| CachesTab::Destinations);
-    let from_setup = came_from_setup();
+    let from_setup = use_signal(came_from_setup);
 
     rsx! {
         div {
             class: "space-y-6",
 
-            if from_setup {
+            if from_setup() {
                 div {
                     style: "background:rgba(109,40,217,0.2); border:1px solid rgba(139,92,246,0.5); border-radius:8px; padding:10px 16px; display:flex; align-items:center; justify-content:space-between; gap:12px;",
                     span { style: "color:#e9d5ff; font-size:14px;", "← You came here from the Setup Wizard" }
