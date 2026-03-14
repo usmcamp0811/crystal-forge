@@ -26,6 +26,7 @@ pub fn AddBuilderModal(
     let mut error_message = use_signal(|| None::<String>);
     let mut show_name_callout = use_signal(|| show_onboarding_callouts);
     let mut show_public_key_callout = use_signal(|| show_onboarding_callouts);
+    let mut show_resource_callout = use_signal(|| show_onboarding_callouts);
     let mut show_environment_callout = use_signal(|| show_onboarding_callouts);
 
     // Fetch environments for multi-select
@@ -130,6 +131,7 @@ pub fn AddBuilderModal(
 
                     // Name
                     div {
+                        class: "relative overflow-visible",
                         label {
                             class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
                             "Builder Name"
@@ -147,7 +149,7 @@ pub fn AddBuilderModal(
                             },
                             disabled: is_submitting(),
                         }
-                        if show_name_callout() {
+                        if show_name_callout() && name().trim().is_empty() {
                             div {
                                 "data-testid": "setup-coach-builder-field-name",
                                 style: "position:absolute; left:0; top:calc(100% + 8px); width:min(360px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
@@ -184,6 +186,7 @@ pub fn AddBuilderModal(
 
                         // Public Key
                         div {
+                            class: "relative overflow-visible",
                             label {
                                 class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
                                 "Public Key"
@@ -201,7 +204,7 @@ pub fn AddBuilderModal(
                                 },
                                 disabled: is_submitting(),
                             }
-                            if show_public_key_callout() {
+                            if show_public_key_callout() && !name().trim().is_empty() && public_key().trim().is_empty() {
                                 div {
                                     "data-testid": "setup-coach-builder-field-public-key",
                                     style: "position:absolute; left:0; top:calc(100% + 8px); width:min(420px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
@@ -249,19 +252,18 @@ pub fn AddBuilderModal(
 
                     // Resource Limits
                     div {
-                        class: "relative grid grid-cols-3 gap-4 pt-24",
+                        class: if show_resource_callout()
+                            && !name().trim().is_empty()
+                            && !public_key().trim().is_empty()
+                            && max_cpu_cores().trim().is_empty()
+                            && max_memory_mb().trim().is_empty()
+                        {
+                            "relative grid grid-cols-3 gap-4 pb-28"
+                        } else {
+                            "relative grid grid-cols-3 gap-4"
+                        },
                         div {
-                            class: "col-span-3 mb-3",
-                            style: "position:absolute; left:0; top:0; width:min(680px, 92vw); z-index:60; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
-                            div {
-                                style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
-                            }
-                            p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
-                            p { style: "margin:2px 0 0 0;", "Leave CPU or memory empty only when this host is dedicated and heavily provisioned for builder workloads." }
-                            p { style: "margin:2px 0 0 0;", "Max Concurrent Jobs controls how many builds run at once. If CPU/memory are unlimited and concurrency is greater than 1, heavy builds (for example Firefox or Chromium) can exhaust resources and stall or fail repeatedly." }
-                            p { style: "margin:2px 0 0 0;", "Safer default: keep concurrency at 1 and set explicit CPU/memory limits close to what this host can sustain." }
-                        }
-                        div {
+                            class: "relative overflow-visible",
                             label {
                                 class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
                                 "Max CPU Cores"
@@ -272,8 +274,30 @@ pub fn AddBuilderModal(
                                 min: "1",
                                 placeholder: "Unlimited",
                                 value: "{max_cpu_cores}",
-                                oninput: move |e| max_cpu_cores.set(e.value()),
+                                onfocus: move |_| show_resource_callout.set(false),
+                                oninput: move |e| {
+                                    show_resource_callout.set(false);
+                                    max_cpu_cores.set(e.value())
+                                },
                                 disabled: is_submitting(),
+                            }
+                            if show_resource_callout()
+                                && !name().trim().is_empty()
+                                && !public_key().trim().is_empty()
+                                && max_cpu_cores().trim().is_empty()
+                                && max_memory_mb().trim().is_empty()
+                            {
+                                div {
+                                    "data-testid": "setup-coach-builder-resource-guidance-callout",
+                                    style: "position:absolute; left:0; top:calc(100% + 8px); width:min(680px, 92vw); z-index:60; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                    div {
+                                        style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                    }
+                                    p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
+                                    p { style: "margin:2px 0 0 0;", "Leave CPU or memory empty only when this host is dedicated and heavily provisioned for builder workloads." }
+                                    p { style: "margin:2px 0 0 0;", "Max Concurrent Jobs controls how many builds run at once. If CPU/memory are unlimited and concurrency is greater than 1, heavy builds (for example Firefox or Chromium) can exhaust resources and stall or fail repeatedly." }
+                                    p { style: "margin:2px 0 0 0;", "Safer default: keep concurrency at 1 and set explicit CPU/memory limits close to what this host can sustain." }
+                                }
                             }
                         }
                         div {
@@ -288,7 +312,11 @@ pub fn AddBuilderModal(
                                 step: "1024",
                                 placeholder: "Unlimited",
                                 value: "{max_memory_mb}",
-                                oninput: move |e| max_memory_mb.set(e.value()),
+                                onfocus: move |_| show_resource_callout.set(false),
+                                oninput: move |e| {
+                                    show_resource_callout.set(false);
+                                    max_memory_mb.set(e.value())
+                                },
                                 disabled: is_submitting(),
                             }
                         }
@@ -303,7 +331,11 @@ pub fn AddBuilderModal(
                                 r#type: "number",
                                 min: "1",
                                 value: "{max_concurrent_jobs}",
-                                oninput: move |e| max_concurrent_jobs.set(e.value()),
+                                onfocus: move |_| show_resource_callout.set(false),
+                                oninput: move |e| {
+                                    show_resource_callout.set(false);
+                                    max_concurrent_jobs.set(e.value())
+                                },
                                 disabled: is_submitting(),
                             }
                         }
@@ -362,7 +394,11 @@ pub fn AddBuilderModal(
                                             }
                                         }
                                     }
-                                    if show_environment_callout() {
+                                    if show_environment_callout()
+                                        && !name().trim().is_empty()
+                                        && !public_key().trim().is_empty()
+                                        && !show_resource_callout()
+                                    {
                                         div {
                                             "data-testid": "setup-coach-builder-field-environments",
                                             style: "position:absolute; left:0; top:calc(100% + 8px); width:min(420px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
