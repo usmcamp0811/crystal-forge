@@ -126,18 +126,23 @@ pub fn AddEnvironmentForm(props: AddEnvironmentFormProps) -> Element {
                             }
                         }
                         div {
-                            class: "rounded-md border border-blue-400/45 bg-blue-900/25 px-3 py-2 space-y-1",
+                            "data-testid": "setup-coach-environment-policies-callout",
+                            style: "background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px;",
                             p {
-                                class: "text-xs font-medium text-blue-100",
-                                "New here? Think of policies as required safety rules for this environment."
+                                class: "text-[11px] font-semibold uppercase tracking-wide text-blue-100",
+                                "Setup Coach: Required Policies"
                             }
                             p {
-                                class: "text-xs text-blue-100/90",
-                                "If a system in this environment does not meet these rules, deployment can be blocked until it does."
+                                class: "mt-1 text-xs text-blue-100",
+                                "Think of policies as safety rules for this environment."
                             }
                             p {
-                                class: "text-xs text-blue-200/90",
-                                "You can change this anytime by adding or removing policies per environment."
+                                class: "mt-1 text-xs text-blue-100/90",
+                                "If a system does not meet these rules, deployment can be blocked until it does."
+                            }
+                            p {
+                                class: "mt-1 text-xs text-blue-200/95",
+                                "You can add or remove policies later for each environment."
                             }
                         }
                         div {
