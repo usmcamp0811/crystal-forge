@@ -367,6 +367,7 @@ pub fn FlakesListView() -> Element {
     }
 
     let from_setup = use_signal(came_from_setup);
+    let mut dismiss_add_target_callout = use_signal(|| false);
 
     rsx! {
         div {
@@ -479,6 +480,9 @@ pub fn FlakesListView() -> Element {
                                 let next = !*show_add_form.read();
                                 show_add_form.set(next);
                                 add_error.set(None);
+                                if next {
+                                    dismiss_add_target_callout.set(true);
+                                }
                             },
                             if *show_add_form.read() {
                                 "Close"
@@ -486,7 +490,7 @@ pub fn FlakesListView() -> Element {
                                 "Add Flake"
                             }
                         }
-                        if from_setup() && !*show_add_form.read() {
+                        if from_setup() && !*show_add_form.read() && !dismiss_add_target_callout() {
                             div {
                                 "data-testid": "setup-coach-flakes-target-callout",
                                 style: "position:absolute; z-index:2200; right:0; top:calc(100% + 10px); background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; width:220px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",

@@ -61,6 +61,7 @@ pub fn AddEnvironmentForm(props: AddEnvironmentFormProps) -> Element {
     let on_cancel = props.on_cancel;
     let on_submit = props.on_submit;
     let on_choose_policies = props.on_choose_policies;
+    let mut show_policies_callout = use_signal(|| true);
 
     rsx! {
         Card {
@@ -121,20 +122,25 @@ pub fn AddEnvironmentForm(props: AddEnvironmentFormProps) -> Element {
                             p { class: "text-xs uppercase tracking-wide text-gray-500", "Required Policies (all mandatory)" }
                             button {
                                 class: "text-xs text-blue-300 hover:text-blue-200 px-2 py-1 rounded hover:bg-blue-500/10 transition-colors",
-                                onclick: move |_| on_choose_policies.call(()),
+                                onclick: move |_| {
+                                    show_policies_callout.set(false);
+                                    on_choose_policies.call(())
+                                },
                                 "Choose Policies"
                             }
                         }
-                        div {
-                            "data-testid": "setup-coach-environment-policies-callout",
-                            style: "position:absolute; right:12px; top:46px; width:min(420px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                        if show_policies_callout() {
                             div {
-                                style: "position:absolute; top:-6px; right:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                "data-testid": "setup-coach-environment-policies-callout",
+                                style: "position:absolute; right:12px; top:46px; width:min(420px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                div {
+                                    style: "position:absolute; top:-6px; right:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                }
+                                p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
+                                p { style: "margin:2px 0 0 0;", "Think of policies as safety rules for this environment." }
+                                p { style: "margin:2px 0 0 0;", "If a system does not meet these rules, deployment can be blocked until it does." }
+                                p { style: "margin:2px 0 0 0;", "You can add or remove policies later for each environment." }
                             }
-                            p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
-                            p { style: "margin:2px 0 0 0;", "Think of policies as safety rules for this environment." }
-                            p { style: "margin:2px 0 0 0;", "If a system does not meet these rules, deployment can be blocked until it does." }
-                            p { style: "margin:2px 0 0 0;", "You can add or remove policies later for each environment." }
                         }
                         div {
                             class: "flex flex-wrap gap-2",

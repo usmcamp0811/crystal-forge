@@ -10,6 +10,7 @@ use crate::theme;
 #[component]
 pub fn BuildersList(show_onboarding_hint: bool) -> Element {
     let mut show_add_modal = use_signal(|| false);
+    let mut dismiss_add_target_callout = use_signal(|| false);
     let mut edit_builder_id = use_signal(|| None::<uuid::Uuid>);
     let mut refresh_trigger = use_signal(|| 0);
     let mut onboarding_agent_reminder = use_signal(|| None::<String>);
@@ -55,15 +56,18 @@ pub fn BuildersList(show_onboarding_hint: bool) -> Element {
                 div {
                     class: "relative",
                     button {
-                        class: if show_onboarding_hint && !show_add_modal() {
+                        class: if show_onboarding_hint && !show_add_modal() && !dismiss_add_target_callout() {
                             "px-4 py-2 rounded-lg text-sm font-medium text-white transition-colors {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING} animate-pulse ring-2 ring-blue-300/70 ring-offset-2 ring-offset-slate-950"
                         } else {
                             "px-4 py-2 rounded-lg text-sm font-medium text-white transition-colors {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING}"
                         },
-                        onclick: move |_| show_add_modal.set(true),
+                        onclick: move |_| {
+                            dismiss_add_target_callout.set(true);
+                            show_add_modal.set(true)
+                        },
                         "➕ Add Builder"
                     }
-                    if show_onboarding_hint && !show_add_modal() {
+                    if show_onboarding_hint && !show_add_modal() && !dismiss_add_target_callout() {
                         div {
                             "data-testid": "setup-coach-builders-target-callout",
                             style: "position:absolute; right:0; top:calc(100% + 10px); background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; width:220px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",

@@ -126,6 +126,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
     let mut add_error = use_signal(|| None::<String>);
     let mut add_field_errors = use_signal(|| std::collections::HashMap::<String, String>::new());
     let mut add_submitting = use_signal(|| false);
+    let mut dismiss_add_target_callout = use_signal(|| false);
     let mut show_cache_name_callout = use_signal(|| false);
     let mut show_cache_endpoint_callout = use_signal(|| false);
     let mut show_cache_env_callout = use_signal(|| false);
@@ -133,6 +134,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
     // Fetch available environments for assignment
     let environments = use_resource(|| async move { client::fetch_environments().await });
     let show_add_target_callout = show_onboarding_hint
+        && !dismiss_add_target_callout()
         && !show_add_modal()
         && matches!(&*destinations.read_unchecked(), Some(Ok(dests)) if dests.is_empty());
 
@@ -156,6 +158,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
                             "px-4 py-2 rounded-lg text-sm font-medium {theme::interactive::PRIMARY_BTN}"
                         },
                         onclick: move |_| {
+                            dismiss_add_target_callout.set(true);
                             show_add_modal.set(true);
                             if show_onboarding_hint {
                                 show_cache_name_callout.set(true);
@@ -663,9 +666,9 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
                                     if show_cache_env_callout() {
                                         div {
                                             "data-testid": "setup-coach-cache-field-environments",
-                                            style: "position:absolute; left:0; top:calc(100% + 8px); width:min(440px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                            style: "position:absolute; left:0; bottom:calc(100% + 10px); width:min(440px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
                                             div {
-                                                style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                                style: "position:absolute; bottom:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-right:1px solid rgba(96,165,250,0.75); border-bottom:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
                                             }
                                             p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
                                             p { style: "margin:2px 0 0 0;", "Choose specific environments for targeted cache routing, or leave empty to make this a global cache for all environments." }
