@@ -88,7 +88,7 @@ pub fn AddSystemForm(
                                     show_hostname_callout.set(false);
                                 }
                             }
-                            if show_hostname_callout() {
+                            if show_hostname_callout() && draft.read().hostname.trim().is_empty() {
                                 div {
                                     "data-testid": "setup-coach-system-field-hostname",
                                     style: "position:absolute; left:0; top:calc(100% + 8px); width:min(340px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
@@ -124,7 +124,10 @@ pub fn AddSystemForm(
                                     "Generate"
                                 }
                             }
-                            if show_public_key_callout() {
+                            if show_public_key_callout()
+                                && !draft.read().hostname.trim().is_empty()
+                                && draft.read().public_key.trim().is_empty()
+                            {
                                 div {
                                     "data-testid": "setup-coach-system-field-public-key",
                                     style: "position:absolute; left:0; top:calc(100% + 8px); width:min(340px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
@@ -155,7 +158,11 @@ pub fn AddSystemForm(
                                     option { value: "{env}", "{env}" }
                                 }
                             }
-                            if show_environment_callout() {
+                            if show_environment_callout()
+                                && !draft.read().hostname.trim().is_empty()
+                                && !draft.read().public_key.trim().is_empty()
+                                && draft.read().environment.trim().is_empty()
+                            {
                                 div {
                                     "data-testid": "setup-coach-system-field-environment",
                                     style: "position:absolute; left:0; top:calc(100% + 8px); width:min(340px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
@@ -186,7 +193,12 @@ pub fn AddSystemForm(
                                     option { value: "{flake_name}", "{flake_name}" }
                                 }
                             }
-                            if show_flake_callout() {
+                            if show_flake_callout()
+                                && !draft.read().hostname.trim().is_empty()
+                                && !draft.read().public_key.trim().is_empty()
+                                && !draft.read().environment.trim().is_empty()
+                                && draft.read().flake_name.trim().is_empty()
+                            {
                                 div {
                                     "data-testid": "setup-coach-system-field-flake",
                                     style: "position:absolute; left:0; top:calc(100% + 8px); width:min(340px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
