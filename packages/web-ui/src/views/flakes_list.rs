@@ -470,7 +470,11 @@ pub fn FlakesListView() -> Element {
                     div {
                         class: "relative",
                         button {
-                            class: "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}",
+                            class: if from_setup() && !*show_add_form.read() {
+                                "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN} animate-pulse ring-2 ring-violet-300/70 ring-offset-2 ring-offset-slate-950"
+                            } else {
+                                "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}"
+                            },
                             onclick: move |_| {
                                 let next = !*show_add_form.read();
                                 show_add_form.set(next);
@@ -485,8 +489,12 @@ pub fn FlakesListView() -> Element {
                         if from_setup() && !*show_add_form.read() {
                             div {
                                 "data-testid": "setup-coach-flakes-target-callout",
-                                style: "position:absolute; right:0; top:calc(100% + 6px); background:rgba(46,16,101,0.96); border:1px solid rgba(196,181,253,0.5); border-radius:8px; padding:6px 10px; color:#ddd6fe; font-size:12px; white-space:nowrap;",
-                                "Click Add Flake"
+                                style: "position:absolute; right:0; top:calc(100% + 10px); background:rgba(30,41,59,0.96); border:1px solid rgba(167,139,250,0.6); border-radius:10px; padding:8px 10px; color:#ddd6fe; font-size:12px; width:220px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                div {
+                                    style: "position:absolute; top:-6px; right:18px; width:10px; height:10px; background:rgba(30,41,59,0.96); border-left:1px solid rgba(167,139,250,0.6); border-top:1px solid rgba(167,139,250,0.6); transform:rotate(45deg);"
+                                }
+                                p { style: "margin:0; color:#e9d5ff; font-weight:600;", "Next action" }
+                                p { style: "margin:2px 0 0 0;", "Click Add Flake to register your source repository." }
                             }
                         }
                     }
