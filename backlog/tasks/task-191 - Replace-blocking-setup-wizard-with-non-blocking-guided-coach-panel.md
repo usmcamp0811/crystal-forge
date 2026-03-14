@@ -4,7 +4,7 @@ title: Replace blocking setup wizard with non-blocking guided coach panel
 status: In Progress
 assignee: []
 created_date: '2026-03-14 13:17'
-updated_date: '2026-03-14 13:31'
+updated_date: '2026-03-14 13:56'
 labels:
   - frontend
   - ux
@@ -120,4 +120,20 @@ Moved to To Do per maintainer request for near-term follow-up after MR !164 merg
 Maintainer request: TASK-191 must include full setup-process screenshots, with web-ui check automation updated accordingly; screenshots are required MR evidence for this task.
 
 LOCK: OpenCode on reckless in ~/code/crystal-forge/TASK-191-non-blocking-onboarding-coach-panel
+
+Implemented non-blocking onboarding coach panel in web-ui and integrated it into app shell for admins.
+
+Replaced forced /setup redirects in login/register flows with normal app navigation while retaining onboarding context via coach step navigation + callout banners.
+
+Updated checks/web-ui integration flow to capture deterministic onboarding screenshots (06a-06f) and added required screenshot enforcement in checks/web-ui/default.nix.
+
+Fixed mobile sidebar screenshot flake by making coach panel responsive on small screens (bottom anchored + viewport-constrained width) so it no longer intercepts mobile nav toggle clicks.
+
+Verification: `nix develop -c cargo check` (packages/web-ui) passed.
+
+Verification: `nix develop -c cargo fmt -- --check` (packages/web-ui) passed.
+
+Verification: `nix build .#checks.x86_64-linux.web-ui -L` passed with 37/37 screenshot steps including `09c-sidebar-mobile-drawer`.
+
+Pushed branch: TASK-191-non-blocking-onboarding-coach-panel (commit e7680a45).
 <!-- SECTION:NOTES:END -->
