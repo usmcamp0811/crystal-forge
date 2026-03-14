@@ -4,7 +4,7 @@ title: Replace blocking setup wizard with non-blocking guided coach panel
 status: Review
 assignee: []
 created_date: '2026-03-14 13:17'
-updated_date: '2026-03-14 21:24'
+updated_date: '2026-03-14 21:57'
 labels:
   - frontend
   - ux
@@ -350,5 +350,14 @@ Verification:
 - nix build .#checks.x86_64-linux.web-ui -L (37/37)
 
 Commit: db8675e1
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/165
+
+2026-03-14: Refined Add Builder onboarding guidance to progression-by-relevance for first-time setup flow. Name callout now appears while name is empty; Public Key callout appears after name is set and key is missing; Resource guidance callout appears only after both required fields are filled, anchored under Max CPU Cores, and dismisses on interaction with CPU/Memory/Concurrency fields. Environment guidance now waits until required steps are complete and resource callout is dismissed.
+
+Verification:
+- nix develop -c cargo check (packages/web-ui)
+- nix build .#checks.x86_64-linux.web-ui -L (37/37)
+
+Commit: 23a60ea6
 MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/165
 <!-- SECTION:NOTES:END -->
