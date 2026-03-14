@@ -128,6 +128,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
     let mut add_submitting = use_signal(|| false);
     let mut dismiss_add_target_callout = use_signal(|| false);
     let mut show_cache_name_callout = use_signal(|| false);
+    let mut show_cache_type_callout = use_signal(|| false);
     let mut show_cache_endpoint_callout = use_signal(|| false);
     let mut show_cache_env_callout = use_signal(|| false);
 
@@ -162,8 +163,9 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
                             show_add_modal.set(true);
                             if show_onboarding_hint {
                                 show_cache_name_callout.set(true);
-                                show_cache_endpoint_callout.set(true);
-                                show_cache_env_callout.set(true);
+                                show_cache_type_callout.set(false);
+                                show_cache_endpoint_callout.set(false);
+                                show_cache_env_callout.set(false);
                             }
                         },
                         "+ Add Destination"
@@ -249,7 +251,13 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
                                 class: "{theme::text::SECONDARY} hover:{theme::text::PRIMARY} text-lg",
                                 title: "Close add cache destination modal",
                                 aria_label: "Close add cache destination modal",
-                                onclick: move |_| show_add_modal.set(false),
+                                onclick: move |_| {
+                                    show_add_modal.set(false);
+                                    show_cache_name_callout.set(false);
+                                    show_cache_type_callout.set(false);
+                                    show_cache_endpoint_callout.set(false);
+                                    show_cache_env_callout.set(false);
+                                },
                                 "✕"
                             }
                         }
@@ -270,8 +278,12 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
                                     value: add_name(),
                                     onfocus: move |_| show_cache_name_callout.set(false),
                                     oninput: move |evt| {
-                                        add_name.set(evt.value());
+                                        let value = evt.value();
+                                        add_name.set(value.clone());
                                         show_cache_name_callout.set(false);
+                                        if show_onboarding_hint && !value.trim().is_empty() {
+                                            show_cache_type_callout.set(true);
+                                        }
                                         let mut errors = add_field_errors();
                                         errors.remove("name");
                                         add_field_errors.set(errors);
@@ -294,15 +306,37 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
                             }
 
                             div {
+                                class: "relative overflow-visible",
                                 label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Type" }
                                 select {
                                     class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
                                     value: add_type(),
-                                    onchange: move |evt| add_type.set(evt.value()),
+                                    onfocus: move |_| show_cache_type_callout.set(false),
+                                    onchange: move |evt| {
+                                        add_type.set(evt.value());
+                                        show_cache_type_callout.set(false);
+                                        if show_onboarding_hint
+                                            && !add_name().trim().is_empty()
+                                            && add_push_to().trim().is_empty()
+                                        {
+                                            show_cache_endpoint_callout.set(true);
+                                        }
+                                    },
                                     option { class: "text-slate-900 bg-white", value: "Nix", "Nix" }
                                     option { class: "text-slate-900 bg-white", value: "Http", "Http" }
                                     option { class: "text-slate-900 bg-white", value: "S3", "S3" }
                                     option { class: "text-slate-900 bg-white", value: "Attic", "Attic" }
+                                }
+                                if show_cache_type_callout() && !add_name().trim().is_empty() {
+                                    div {
+                                        "data-testid": "setup-coach-cache-field-type",
+                                        style: "position:absolute; left:0; top:calc(100% + 8px); width:min(420px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                        div {
+                                            style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                        }
+                                        p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
+                                        p { style: "margin:2px 0 0 0;", "Choose a cache type. Nix/Http are simple URL-based endpoints, S3 is object storage, and Attic is a dedicated binary cache service." }
+                                    }
                                 }
                             }
 
@@ -352,10 +386,25 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
                                         },
                                         placeholder: "https://attic.example.com",
                                         value: add_push_to(),
-                                        onfocus: move |_| show_cache_endpoint_callout.set(false),
+                                        onfocus: move |_| {
+                                            show_cache_type_callout.set(false);
+                                            if show_onboarding_hint
+                                                && !add_name().trim().is_empty()
+                                                && add_push_to().trim().is_empty()
+                                            {
+                                                show_cache_endpoint_callout.set(true);
+                                            } else {
+                                                show_cache_endpoint_callout.set(false);
+                                            }
+                                        },
                                         oninput: move |evt| {
-                                            add_push_to.set(evt.value());
+                                            let value = evt.value();
+                                            add_push_to.set(value.clone());
+                                            show_cache_type_callout.set(false);
                                             show_cache_endpoint_callout.set(false);
+                                            if show_onboarding_hint && !value.trim().is_empty() {
+                                                show_cache_env_callout.set(true);
+                                            }
                                             let mut errors = add_field_errors();
                                             errors.remove("push_to");
                                             add_field_errors.set(errors);
@@ -447,10 +496,25 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
                                         },
                                         placeholder: "https://cache.example.com or s3://bucket",
                                         value: add_push_to(),
-                                        onfocus: move |_| show_cache_endpoint_callout.set(false),
+                                        onfocus: move |_| {
+                                            show_cache_type_callout.set(false);
+                                            if show_onboarding_hint
+                                                && !add_name().trim().is_empty()
+                                                && add_push_to().trim().is_empty()
+                                            {
+                                                show_cache_endpoint_callout.set(true);
+                                            } else {
+                                                show_cache_endpoint_callout.set(false);
+                                            }
+                                        },
                                         oninput: move |evt| {
-                                            add_push_to.set(evt.value());
+                                            let value = evt.value();
+                                            add_push_to.set(value.clone());
+                                            show_cache_type_callout.set(false);
                                             show_cache_endpoint_callout.set(false);
+                                            if show_onboarding_hint && !value.trim().is_empty() {
+                                                show_cache_env_callout.set(true);
+                                            }
                                             let mut errors = add_field_errors();
                                             errors.remove("push_to");
                                             add_field_errors.set(errors);
@@ -694,6 +758,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
                                     add_error.set(None);
                                     add_field_errors.set(std::collections::HashMap::new());
                                     show_cache_name_callout.set(false);
+                                    show_cache_type_callout.set(false);
                                     show_cache_endpoint_callout.set(false);
                                     show_cache_env_callout.set(false);
                                 },
