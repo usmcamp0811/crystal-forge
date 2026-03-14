@@ -4,7 +4,7 @@ title: Replace blocking setup wizard with non-blocking guided coach panel
 status: To Do
 assignee: []
 created_date: '2026-03-14 13:17'
-updated_date: '2026-03-14 13:17'
+updated_date: '2026-03-14 13:22'
 labels:
   - frontend
   - ux
@@ -94,10 +94,28 @@ Tier 1 manual:
 - [ ] #8 Manual onboarding flow can be completed without being blocked from normal app navigation.
 - [ ] #9 Existing setup progress and dismissal APIs remain backward compatible (or are updated with tests/docs if changed).
 - [ ] #10 Web-ui compile and formatting checks pass for touched files.
+- [ ] #11 Web UI checks include deterministic screenshot coverage for the full onboarding coach flow (entry, each checklist step context, completion state).
+- [ ] #12 The existing web-ui screenshot check pipeline is updated to capture onboarding coach-panel states and linked page callouts in sequence.
+- [ ] #13 Generated screenshots are attached to the merge request (via GitLab uploads) and referenced in the MR UI Changes section.
+- [ ] #14 Screenshot capture is reproducible in local/Nix CI runs and fails the check when expected onboarding screenshots are missing.
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Add/extend the `checks/web-ui` flow to script the complete onboarding sequence and save labeled screenshots for each phase.
+
+Store expected screenshot artifacts under the existing web-ui check conventions and enforce existence/consistency in the check result.
+
+Update MR workflow notes for this task: include all onboarding screenshots in the MR description using GitLab upload links.
+
+Validate end-to-end locally by running the updated web-ui check and confirming artifact outputs before opening MR.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
 Moved to To Do per maintainer request for near-term follow-up after MR !164 merge.
+
+Maintainer request: TASK-191 must include full setup-process screenshots, with web-ui check automation updated accordingly; screenshots are required MR evidence for this task.
 <!-- SECTION:NOTES:END -->
