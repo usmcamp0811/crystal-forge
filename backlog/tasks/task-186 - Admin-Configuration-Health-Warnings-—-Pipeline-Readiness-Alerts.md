@@ -4,7 +4,7 @@ title: Admin Configuration Health Warnings — Pipeline Readiness Alerts
 status: In Progress
 assignee: []
 created_date: '2026-03-13 01:16'
-updated_date: '2026-03-14 14:50'
+updated_date: '2026-03-14 17:35'
 labels:
   - frontend
   - backend
@@ -170,4 +170,12 @@ Verification: cargo check (web-ui) ✅, rustfmt --check ✅, handler unit tests 
 Requirement update: UI changes for this task now require feature-specific screenshots. If needed, extend the `web-ui` check/screenshot workflow to capture them deterministically, and use those screenshots in the MR.
 
 LOCK: OpenCode on reckless in ~/code/crystal-forge/TASK-186-admin-config-health
+
+Implemented remaining systems warning gap: systems list data now carries `flake_id` through backend and web-ui summaries, and the systems view shows an admin warning when one or more systems are not linked to a flake.
+
+Expanded `checks/web-ui/tests/integration-test.js` to capture feature-specific screenshots for config health surfaces: `06b-config-health-bar.png`, `06c-config-health-widget.png`, `12b-systems-config-warning.png`, `13b-flakes-config-warning.png`, and `14b-environments-config-warning.png`. Artifacts are present under `result/screenshots/` after `nix build .#checks.x86_64-linux.web-ui`.
+
+Verification run: `cargo check` passed for `packages/default` and `packages/web-ui`; targeted web-ui helper tests passed; touched Rust files pass `rustfmt --check`; `nix build .#checks.x86_64-linux.web-ui` passed and produced screenshots; `nix flake check` completed successfully.
+
+Verification caveat: `cargo clippy -- -D warnings` did not complete cleanly in this worktree because the repo currently has unrelated/pre-existing warning debt plus target cache rustc-version mismatch errors under clippy. MR screenshot upload/description update is still pending.
 <!-- SECTION:NOTES:END -->
