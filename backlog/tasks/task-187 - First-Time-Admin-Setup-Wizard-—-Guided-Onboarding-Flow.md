@@ -1,10 +1,10 @@
 ---
 id: TASK-187
 title: First-Time Admin Setup Wizard — Guided Onboarding Flow
-status: Review
+status: Done
 assignee: []
 created_date: '2026-03-13 01:16'
-updated_date: '2026-03-14 03:04'
+updated_date: '2026-03-14 13:20'
 labels:
   - frontend
   - backend
@@ -181,4 +181,8 @@ Known verification caveats: `cargo fmt -- --check` reports extensive pre-existin
 MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/164
 
 Status moved to Review after MR creation.
+
+MR !164 merged into dev by maintainer.
+
+Task worktree cleaned up: /home/mcamp/code/crystal-forge/TASK-187-first-time-admin-setup-wizard removed and worktree metadata pruned.
 <!-- SECTION:NOTES:END -->
