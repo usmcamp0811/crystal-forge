@@ -1,10 +1,10 @@
 ---
 id: TASK-191
 title: Replace blocking setup wizard with non-blocking guided coach panel
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-03-14 13:17'
-updated_date: '2026-03-14 13:22'
+updated_date: '2026-03-14 13:31'
 labels:
   - frontend
   - ux
@@ -118,4 +118,6 @@ Validate end-to-end locally by running the updated web-ui check and confirming a
 Moved to To Do per maintainer request for near-term follow-up after MR !164 merge.
 
 Maintainer request: TASK-191 must include full setup-process screenshots, with web-ui check automation updated accordingly; screenshots are required MR evidence for this task.
+
+LOCK: OpenCode on reckless in ~/code/crystal-forge/TASK-191-non-blocking-onboarding-coach-panel
 <!-- SECTION:NOTES:END -->
