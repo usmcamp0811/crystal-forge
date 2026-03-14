@@ -4,7 +4,7 @@ title: Replace blocking setup wizard with non-blocking guided coach panel
 status: Review
 assignee: []
 created_date: '2026-03-14 13:17'
-updated_date: '2026-03-14 15:00'
+updated_date: '2026-03-14 15:20'
 labels:
   - frontend
   - ux
@@ -174,4 +174,16 @@ Verification re-run: `nix develop -c cargo check` (packages/web-ui) passed.
 Verification re-run: `nix build .#checks.x86_64-linux.web-ui -L` passed (37/37).
 
 Pushed follow-up commit: a0d34e8e to MR !165.
+
+Refined click-target hints from chip-style labels to pointer callouts (bubble + anchor) for clearer guided-tour affordance.
+
+Added subtle pulse/ring emphasis on guided action buttons while onboarding callouts are active.
+
+Fixed cache-step behavior: Add Destination target callout now auto-hides once at least one cache destination exists, so guidance does not persist after completion.
+
+Verification re-run: `nix develop -c cargo check` (packages/web-ui) passed.
+
+Verification re-run: `nix build .#checks.x86_64-linux.web-ui -L` passed (37/37).
+
+Pushed follow-up commit: 6833befc to MR !165.
 <!-- SECTION:NOTES:END -->
