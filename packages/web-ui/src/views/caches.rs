@@ -86,7 +86,9 @@ pub fn CachesView() -> Element {
             // Tab content
             match active_tab() {
                 CachesTab::Destinations => rsx! {
-                    CacheDestinationsList {}
+                    CacheDestinationsList {
+                        show_onboarding_hint: from_setup(),
+                    }
                 },
                 CachesTab::PushJobs => rsx! {
                     CachePushJobsList {}
@@ -98,7 +100,7 @@ pub fn CachesView() -> Element {
 
 /// List of cache destinations with CRUD operations
 #[component]
-fn CacheDestinationsList() -> Element {
+fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
     let mut refresh_nonce = use_signal(|| 0_u32);
     let destinations = use_resource(move || {
         let _nonce = refresh_nonce();
@@ -139,12 +141,22 @@ fn CacheDestinationsList() -> Element {
                     class: "{theme::typography::SECTION_TITLE} {theme::text::PRIMARY}",
                     "Cache Destinations"
                 }
-                button {
-                    class: "px-4 py-2 rounded-lg text-sm font-medium {theme::interactive::PRIMARY_BTN}",
-                    onclick: move |_| {
-                        show_add_modal.set(true);
-                    },
-                    "+ Add Destination"
+                div {
+                    class: "relative",
+                    button {
+                        class: "px-4 py-2 rounded-lg text-sm font-medium {theme::interactive::PRIMARY_BTN}",
+                        onclick: move |_| {
+                            show_add_modal.set(true);
+                        },
+                        "+ Add Destination"
+                    }
+                    if show_onboarding_hint && !show_add_modal() {
+                        div {
+                            "data-testid": "setup-coach-caches-target-callout",
+                            style: "position:absolute; right:0; top:calc(100% + 6px); background:rgba(46,16,101,0.96); border:1px solid rgba(196,181,253,0.5); border-radius:8px; padding:6px 10px; color:#ddd6fe; font-size:12px; white-space:nowrap;",
+                            "Click Add Destination"
+                        }
+                    }
                 }
             }
 

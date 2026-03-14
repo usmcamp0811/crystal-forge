@@ -270,14 +270,24 @@ pub fn SystemsListView() -> Element {
                 }
                 div {
                     class: "flex items-center gap-3",
-                    button {
-                        class: "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}",
-                        onclick: move |_| {
-                            let next = !*show_add_form.read();
-                            show_add_form.set(next);
-                            add_error.set(None);
-                        },
-                        if *show_add_form.read() { "Close" } else { "Add System" }
+                    div {
+                        class: "relative",
+                        button {
+                            class: "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}",
+                            onclick: move |_| {
+                                let next = !*show_add_form.read();
+                                show_add_form.set(next);
+                                add_error.set(None);
+                            },
+                            if *show_add_form.read() { "Close" } else { "Add System" }
+                        }
+                        if from_setup() && !*show_add_form.read() {
+                            div {
+                                "data-testid": "setup-coach-systems-target-callout",
+                                style: "position:absolute; right:0; top:calc(100% + 6px); background:rgba(46,16,101,0.96); border:1px solid rgba(196,181,253,0.5); border-radius:8px; padding:6px 10px; color:#ddd6fe; font-size:12px; white-space:nowrap;",
+                                "Click Add System"
+                            }
+                        }
                     }
                     ViewToggle {
                         view_mode: *view_mode.read(),

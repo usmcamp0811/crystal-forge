@@ -83,7 +83,9 @@ pub fn BuildersView() -> Element {
             // Tab content
             match active_tab() {
                 BuildersTab::List => rsx! {
-                    BuildersList {}
+                    BuildersList {
+                        show_onboarding_hint: from_setup(),
+                    }
                 },
                 BuildersTab::Metrics => rsx! {
                     BuilderMetricsView {}

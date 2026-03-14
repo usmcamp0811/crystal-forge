@@ -467,17 +467,27 @@ pub fn FlakesListView() -> Element {
                         },
                         "Sync from Source"
                     }
-                    button {
-                        class: "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}",
-                        onclick: move |_| {
-                            let next = !*show_add_form.read();
-                            show_add_form.set(next);
-                            add_error.set(None);
-                        },
-                        if *show_add_form.read() {
-                            "Close"
-                        } else {
-                            "Add Flake"
+                    div {
+                        class: "relative",
+                        button {
+                            class: "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}",
+                            onclick: move |_| {
+                                let next = !*show_add_form.read();
+                                show_add_form.set(next);
+                                add_error.set(None);
+                            },
+                            if *show_add_form.read() {
+                                "Close"
+                            } else {
+                                "Add Flake"
+                            }
+                        }
+                        if from_setup() && !*show_add_form.read() {
+                            div {
+                                "data-testid": "setup-coach-flakes-target-callout",
+                                style: "position:absolute; right:0; top:calc(100% + 6px); background:rgba(46,16,101,0.96); border:1px solid rgba(196,181,253,0.5); border-radius:8px; padding:6px 10px; color:#ddd6fe; font-size:12px; white-space:nowrap;",
+                                "Click Add Flake"
+                            }
                         }
                     }
                     ViewToggle {

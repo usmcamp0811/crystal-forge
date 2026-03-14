@@ -8,7 +8,7 @@ use crate::components::loading::LoadingSpinner;
 use crate::theme;
 
 #[component]
-pub fn BuildersList() -> Element {
+pub fn BuildersList(show_onboarding_hint: bool) -> Element {
     let mut show_add_modal = use_signal(|| false);
     let mut edit_builder_id = use_signal(|| None::<uuid::Uuid>);
     let mut refresh_trigger = use_signal(|| 0);
@@ -44,10 +44,20 @@ pub fn BuildersList() -> Element {
                     class: "{theme::typography::SECTION_TITLE}",
                     "Registered Builders"
                 }
-                button {
-                    class: "px-4 py-2 rounded-lg text-sm font-medium text-white transition-colors {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING}",
-                    onclick: move |_| show_add_modal.set(true),
-                    "➕ Add Builder"
+                div {
+                    class: "relative",
+                    button {
+                        class: "px-4 py-2 rounded-lg text-sm font-medium text-white transition-colors {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING}",
+                        onclick: move |_| show_add_modal.set(true),
+                        "➕ Add Builder"
+                    }
+                    if show_onboarding_hint && !show_add_modal() {
+                        div {
+                            "data-testid": "setup-coach-builders-target-callout",
+                            style: "position:absolute; right:0; top:calc(100% + 6px); background:rgba(46,16,101,0.96); border:1px solid rgba(196,181,253,0.5); border-radius:8px; padding:6px 10px; color:#ddd6fe; font-size:12px; white-space:nowrap;",
+                            "Click Add Builder"
+                        }
+                    }
                 }
             }
 

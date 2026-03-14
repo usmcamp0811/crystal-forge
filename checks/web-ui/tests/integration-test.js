@@ -311,6 +311,10 @@ const steps = [
         page.locator("[data-testid='setup-coach-environments-callout']"),
         "Expected setup coach environments guidance callout",
       );
+      await assertVisible(
+        page.locator("[data-testid='setup-coach-environments-target-callout']"),
+        "Expected setup coach environments click-target callout",
+      );
     },
   },
   {
@@ -322,6 +326,10 @@ const steps = [
       await assertVisible(
         page.locator("[data-testid='setup-coach-flakes-callout']"),
         "Expected setup coach flakes guidance callout",
+      );
+      await assertVisible(
+        page.locator("[data-testid='setup-coach-flakes-target-callout']"),
+        "Expected setup coach flakes click-target callout",
       );
     },
   },
@@ -335,6 +343,10 @@ const steps = [
         page.locator("[data-testid='setup-coach-builders-callout']"),
         "Expected setup coach builders guidance callout",
       );
+      await assertVisible(
+        page.locator("[data-testid='setup-coach-builders-target-callout']"),
+        "Expected setup coach builders click-target callout",
+      );
     },
   },
   {
@@ -347,6 +359,10 @@ const steps = [
         page.locator("[data-testid='setup-coach-caches-callout']"),
         "Expected setup coach caches guidance callout",
       );
+      await assertVisible(
+        page.locator("[data-testid='setup-coach-caches-target-callout']"),
+        "Expected setup coach caches click-target callout",
+      );
     },
   },
   {
@@ -358,6 +374,10 @@ const steps = [
       await assertVisible(
         page.locator("[data-testid='setup-coach-systems-callout']"),
         "Expected systems onboarding guidance callout on systems page",
+      );
+      await assertVisible(
+        page.locator("[data-testid='setup-coach-systems-target-callout']"),
+        "Expected systems click-target callout for add system action",
       );
     },
   },
