@@ -1,9 +1,10 @@
 ---
 id: TASK-191
 title: Replace blocking setup wizard with non-blocking guided coach panel
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-03-14 13:17'
+updated_date: '2026-03-14 13:17'
 labels:
   - frontend
   - ux
@@ -94,3 +95,9 @@ Tier 1 manual:
 - [ ] #9 Existing setup progress and dismissal APIs remain backward compatible (or are updated with tests/docs if changed).
 - [ ] #10 Web-ui compile and formatting checks pass for touched files.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Moved to To Do per maintainer request for near-term follow-up after MR !164 merge.
+<!-- SECTION:NOTES:END -->
