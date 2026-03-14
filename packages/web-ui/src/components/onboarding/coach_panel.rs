@@ -245,7 +245,11 @@ pub fn OnboardingCoachPanel() -> Element {
                                                 "text-[11px] text-slate-400"
                                             },
                                             if step.id == "agent" {
-                                                if status.complete { "Acknowledged" } else { "Not acknowledged" }
+                                                if status.complete {
+                                                    "Acknowledged"
+                                                } else {
+                                                    "Opens systems guidance"
+                                                }
                                             } else if status.complete {
                                                 "Configured"
                                             } else {

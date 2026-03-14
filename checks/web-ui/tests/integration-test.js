@@ -356,8 +356,8 @@ const steps = [
       await page.locator("[data-testid='onboarding-step-system']").click();
       await page.waitForTimeout(1500);
       await assertVisible(
-        page.getByText("You came here from the Setup Coach").first(),
-        "Expected setup coach contextual callout on systems page",
+        page.locator("[data-testid='setup-coach-systems-callout']"),
+        "Expected systems onboarding guidance callout on systems page",
       );
     },
   },

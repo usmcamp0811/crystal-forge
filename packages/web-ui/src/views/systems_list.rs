@@ -214,11 +214,17 @@ pub fn SystemsListView() -> Element {
 
             if from_setup() {
                 div {
-                    style: "background:rgba(109,40,217,0.2); border:1px solid rgba(139,92,246,0.5); border-radius:8px; padding:10px 16px; display:flex; align-items:center; justify-content:space-between; gap:12px;",
-                    span { style: "color:#e9d5ff; font-size:14px;", "← You came here from the Setup Coach" }
+                    "data-testid": "setup-coach-systems-callout",
+                    style: "background:rgba(109,40,217,0.2); border:1px solid rgba(139,92,246,0.5); border-radius:8px; padding:12px 16px; display:flex; align-items:flex-start; justify-content:space-between; gap:12px;",
+                    div {
+                        style: "display:flex; flex-direction:column; gap:6px;",
+                        p { style: "color:#e9d5ff; font-size:14px; font-weight:600; margin:0;", "System + Agent setup" }
+                        p { style: "color:#ddd6fe; font-size:13px; margin:0;", "Use Add System to register a machine in this fleet." }
+                        p { style: "color:#c4b5fd; font-size:12px; margin:0;", "Agents are the lightweight clients installed on each system so Crystal Forge can evaluate and apply deployments." }
+                    }
                     a {
                         href: "/",
-                        style: "color:#a78bfa; font-size:13px; font-weight:500; white-space:nowrap; text-decoration:underline;",
+                        style: "color:#a78bfa; font-size:13px; font-weight:500; white-space:nowrap; text-decoration:underline; padding-top:2px;",
                         "Back to Setup Coach"
                     }
                 }
