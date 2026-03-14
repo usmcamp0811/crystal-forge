@@ -126,14 +126,18 @@ pub fn AddEnvironmentForm(props: AddEnvironmentFormProps) -> Element {
                             }
                         }
                         div {
-                            class: "rounded-md border border-blue-400/45 bg-blue-900/25 px-3 py-2",
+                            class: "rounded-md border {theme::surface::CARD_BORDER} bg-gray-950/40 px-3 py-2 space-y-1",
                             p {
-                                class: "text-xs text-blue-100/95",
-                                "Policies are hard requirements for this environment. They assert configuration-level conditions that systems must satisfy before deployment is considered valid."
+                                class: "text-xs font-medium {theme::text::SECONDARY}",
+                                "New here? Think of policies as required safety rules for this environment."
                             }
                             p {
-                                class: "mt-1 text-xs text-blue-200/90",
-                                "You can add or remove required policies for each environment later, so start with a safe baseline and tighten as your rollout matures."
+                                class: "text-xs {theme::text::MUTED}",
+                                "If a system in this environment does not meet these rules, deployment can be blocked until it does."
+                            }
+                            p {
+                                class: "text-xs {theme::text::MUTED}",
+                                "You can change this anytime by adding or removing policies per environment."
                             }
                         }
                         div {
