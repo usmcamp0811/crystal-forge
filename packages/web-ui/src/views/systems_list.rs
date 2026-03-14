@@ -271,7 +271,7 @@ pub fn SystemsListView() -> Element {
                 div {
                     class: "flex items-center gap-3",
                     div {
-                        class: "relative",
+                        class: "relative z-40",
                         button {
                             class: if from_setup() && !*show_add_form.read() {
                                 "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN} animate-pulse ring-2 ring-violet-300/70 ring-offset-2 ring-offset-slate-950"
@@ -288,7 +288,7 @@ pub fn SystemsListView() -> Element {
                         if from_setup() && !*show_add_form.read() {
                             div {
                                 "data-testid": "setup-coach-systems-target-callout",
-                                style: "position:absolute; right:0; top:calc(100% + 10px); background:rgba(30,41,59,0.96); border:1px solid rgba(167,139,250,0.6); border-radius:10px; padding:8px 10px; color:#ddd6fe; font-size:12px; width:220px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                style: "position:absolute; z-index:70; right:0; top:calc(100% + 10px); background:rgba(30,41,59,0.96); border:1px solid rgba(167,139,250,0.6); border-radius:10px; padding:8px 10px; color:#ddd6fe; font-size:12px; width:220px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
                                 div {
                                     style: "position:absolute; top:-6px; right:18px; width:10px; height:10px; background:rgba(30,41,59,0.96); border-left:1px solid rgba(167,139,250,0.6); border-top:1px solid rgba(167,139,250,0.6); transform:rotate(45deg);"
                                 }
