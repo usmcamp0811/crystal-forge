@@ -4,7 +4,7 @@ title: Replace blocking setup wizard with non-blocking guided coach panel
 status: Review
 assignee: []
 created_date: '2026-03-14 13:17'
-updated_date: '2026-03-14 15:20'
+updated_date: '2026-03-14 15:35'
 labels:
   - frontend
   - ux
@@ -186,4 +186,18 @@ Verification re-run: `nix develop -c cargo check` (packages/web-ui) passed.
 Verification re-run: `nix build .#checks.x86_64-linux.web-ui -L` passed (37/37).
 
 Pushed follow-up commit: 6833befc to MR !165.
+
+Adjusted setup-progress cache completion semantics to treat any cache destination (including global/unassigned) as completing the cache onboarding step.
+
+Updated `load_counts` in setup wizard handler to count `cache_destinations` directly instead of only env-assigned cache rows.
+
+Added unit test `setup_progress_cache_step_accepts_global_destination` to lock behavior.
+
+Verification: `nix develop -c cargo check` (packages/default) passed.
+
+Verification: `nix develop -c cargo test setup_progress_cache_step_accepts_global_destination` (packages/default) passed.
+
+Verification: `nix build .#checks.x86_64-linux.web-ui -L` passed (37/37).
+
+Pushed follow-up commit: 41e5f78a to MR !165.
 <!-- SECTION:NOTES:END -->
