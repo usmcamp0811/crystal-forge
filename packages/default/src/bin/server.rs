@@ -21,7 +21,7 @@ use crystal_forge::{
         api::{
             admin, auth_dev, auth_local, auth_oidc, auth_session, auth_status, auth_whoami,
             builders, caches, commits, dashboard, deployment_policies, environments, flakes,
-            systems,
+            setup_wizard, systems,
         },
         status,
         webhook::webhook_handler,
@@ -324,6 +324,18 @@ async fn main() -> anyhow::Result<()> {
             delete(admin::delete_oidc_mapping),
         )
         .route("/api/v1/admin/audit-events", get(admin::list_audit_events))
+        .route(
+            "/api/v1/admin/setup-progress",
+            get(setup_wizard::get_setup_progress),
+        )
+        .route(
+            "/api/v1/admin/setup-wizard/dismiss",
+            post(setup_wizard::dismiss_setup_wizard),
+        )
+        .route(
+            "/api/v1/admin/setup-wizard/agent-acknowledge",
+            post(setup_wizard::acknowledge_agent_step),
+        )
         // Cache management endpoints
         .route(
             "/api/v1/caches",

@@ -4,7 +4,7 @@ title: Component Isolation Surface + Fixture Foundation
 status: In Progress
 assignee: []
 created_date: '2026-03-13 01:51'
-updated_date: '2026-03-13 02:40'
+updated_date: '2026-03-13 02:56'
 labels:
   - frontend
   - ux
@@ -95,4 +95,16 @@ Medium — foundational structural changes; additive but can impact developer wo
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: codex on reckless in ~/code/crystal-forge/TASK-188.1-component-isolation-foundation
+
+Implementation started on branch `TASK-188.1-component-isolation-foundation` in dedicated worktree.
+
+Initial foundation delivered: new `showcase` module (`fixtures.rs`, `shell.rs`), `main.rs` module wiring, and `StyleGuideView` refactored into taxonomy-based isolation surface sections.
+
+Nix/Git tracking fix applied: staged new `src/showcase/*` files so Nix builds include them.
+
+Verification run:
+
+- `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml` ✅
+
+- `nix build .#checks.x86_64-linux.web-ui` ✅
 <!-- SECTION:NOTES:END -->

@@ -17,6 +17,7 @@ pub mod not_found;
 pub mod policies;
 pub mod policies_api;
 pub mod register;
+pub mod setup;
 pub mod style_guide;
 pub mod system_detail;
 pub mod systems;
