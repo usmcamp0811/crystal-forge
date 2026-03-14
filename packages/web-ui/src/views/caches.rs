@@ -126,6 +126,9 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
     let mut add_error = use_signal(|| None::<String>);
     let mut add_field_errors = use_signal(|| std::collections::HashMap::<String, String>::new());
     let mut add_submitting = use_signal(|| false);
+    let mut show_cache_name_callout = use_signal(|| false);
+    let mut show_cache_endpoint_callout = use_signal(|| false);
+    let mut show_cache_env_callout = use_signal(|| false);
 
     // Fetch available environments for assignment
     let environments = use_resource(|| async move { client::fetch_environments().await });
@@ -154,6 +157,11 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
                         },
                         onclick: move |_| {
                             show_add_modal.set(true);
+                            if show_onboarding_hint {
+                                show_cache_name_callout.set(true);
+                                show_cache_endpoint_callout.set(true);
+                                show_cache_env_callout.set(true);
+                            }
                         },
                         "+ Add Destination"
                     }
@@ -256,12 +264,21 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
                                     },
                                     placeholder: "main-cache",
                                     value: add_name(),
+                                    onfocus: move |_| show_cache_name_callout.set(false),
                                     oninput: move |evt| {
                                         add_name.set(evt.value());
+                                        show_cache_name_callout.set(false);
                                         let mut errors = add_field_errors();
                                         errors.remove("name");
                                         add_field_errors.set(errors);
                                     },
+                                }
+                                if show_cache_name_callout() {
+                                    p {
+                                        "data-testid": "setup-coach-cache-field-name",
+                                        style: "margin-top:6px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:8px; padding:6px 8px; color:#dbeafe; font-size:12px;",
+                                        "Choose a clear cache name (for example: primary-cache or edge-cache-eu) so teams know where artifacts are published."
+                                    }
                                 }
                                 if let Some(err) = add_field_errors().get("name") {
                                     p { class: "text-[11px] text-red-300 mt-1", "{err}" }
@@ -326,12 +343,21 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
                                         },
                                         placeholder: "https://attic.example.com",
                                         value: add_push_to(),
+                                        onfocus: move |_| show_cache_endpoint_callout.set(false),
                                         oninput: move |evt| {
                                             add_push_to.set(evt.value());
+                                            show_cache_endpoint_callout.set(false);
                                             let mut errors = add_field_errors();
                                             errors.remove("push_to");
                                             add_field_errors.set(errors);
                                         },
+                                    }
+                                    if show_cache_endpoint_callout() {
+                                        p {
+                                            "data-testid": "setup-coach-cache-field-endpoint",
+                                            style: "margin-top:6px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:8px; padding:6px 8px; color:#dbeafe; font-size:12px;",
+                                            "Set the cache server endpoint that systems/builders will push artifacts to."
+                                        }
                                     }
                                     if let Some(err) = add_field_errors().get("push_to") {
                                         p { class: "text-[11px] text-red-300 mt-1", "{err}" }
@@ -407,12 +433,21 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
                                         },
                                         placeholder: "https://cache.example.com or s3://bucket",
                                         value: add_push_to(),
+                                        onfocus: move |_| show_cache_endpoint_callout.set(false),
                                         oninput: move |evt| {
                                             add_push_to.set(evt.value());
+                                            show_cache_endpoint_callout.set(false);
                                             let mut errors = add_field_errors();
                                             errors.remove("push_to");
                                             add_field_errors.set(errors);
                                         },
+                                    }
+                                    if show_cache_endpoint_callout() {
+                                        p {
+                                            "data-testid": "setup-coach-cache-field-endpoint",
+                                            style: "margin-top:6px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:8px; padding:6px 8px; color:#dbeafe; font-size:12px;",
+                                            "Use the full cache destination URL (HTTP/S or S3) where artifacts should be uploaded."
+                                        }
                                     }
                                     if let Some(err) = add_field_errors().get("push_to") {
                                         p { class: "text-[11px] text-red-300 mt-1", "{err}" }
@@ -593,6 +628,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
                                                                 "px-2 py-1 text-xs rounded border {theme::surface::CARD_BORDER} {theme::text::MUTED} hover:{theme::text::SECONDARY}"
                                                             },
                                                             onclick: move |_| {
+                                                                show_cache_env_callout.set(false);
                                                                 let mut selected = add_environment_ids();
                                                                 if is_selected {
                                                                     selected.retain(|&id| id != env_id);
@@ -606,6 +642,13 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
                                                     }
                                                 }
                                             }
+                                        }
+                                    }
+                                    if show_cache_env_callout() {
+                                        p {
+                                            "data-testid": "setup-coach-cache-field-environments",
+                                            style: "margin-top:8px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:8px; padding:6px 8px; color:#dbeafe; font-size:12px;",
+                                            "Choose specific environments for targeted cache routing, or leave empty to make this a global cache for all environments."
                                         }
                                     }
                                 } else {
@@ -627,6 +670,9 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
                                     show_add_modal.set(false);
                                     add_error.set(None);
                                     add_field_errors.set(std::collections::HashMap::new());
+                                    show_cache_name_callout.set(false);
+                                    show_cache_endpoint_callout.set(false);
+                                    show_cache_env_callout.set(false);
                                 },
                                 "Cancel"
                             }

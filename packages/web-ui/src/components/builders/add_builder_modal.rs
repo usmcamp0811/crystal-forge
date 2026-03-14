@@ -241,6 +241,25 @@ pub fn AddBuilderModal(
                     div {
                         class: "grid grid-cols-3 gap-4",
                         div {
+                            class: "col-span-3 mb-3 rounded-lg border border-blue-400/45 bg-blue-900/25 p-3",
+                            p {
+                                class: "text-xs font-semibold uppercase tracking-wide text-blue-100",
+                                "Resource guidance"
+                            }
+                            p {
+                                class: "mt-1 text-xs text-blue-100/90",
+                                "Leave CPU or memory empty only when this host is dedicated and heavily provisioned for builder workloads."
+                            }
+                            p {
+                                class: "mt-1 text-xs text-blue-200/90",
+                                "Max Concurrent Jobs controls how many builds run at once. If CPU/memory are unlimited and concurrency is greater than 1, heavy builds (for example Firefox or Chromium) can exhaust resources and stall or fail repeatedly."
+                            }
+                            p {
+                                class: "mt-1 text-xs text-blue-200/90",
+                                "Safer default: keep concurrency at 1 and set explicit CPU/memory limits close to what this host can sustain."
+                            }
+                        }
+                        div {
                             label {
                                 class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
                                 "Max CPU Cores"
