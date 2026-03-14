@@ -4,7 +4,7 @@ title: Replace blocking setup wizard with non-blocking guided coach panel
 status: Review
 assignee: []
 created_date: '2026-03-14 13:17'
-updated_date: '2026-03-14 20:12'
+updated_date: '2026-03-14 20:23'
 labels:
   - frontend
   - ux
@@ -305,5 +305,14 @@ Verification:
 - nix build .#checks.x86_64-linux.web-ui -L (37/37)
 
 Commit: d8f87f4f
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/165
+
+2026-03-14: Addressed UX feedback that Required Policies text blended in. Reworked Create Environment guidance into an explicit onboarding callout container with strong blue themed styling, a clear callout heading, and structured beginner-focused lines.
+
+Verification:
+- nix develop -c cargo check (packages/web-ui)
+- nix build .#checks.x86_64-linux.web-ui -L (37/37)
+
+Commit: 053b3a2e
 MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/165
 <!-- SECTION:NOTES:END -->
