@@ -4,7 +4,7 @@ title: Replace blocking setup wizard with non-blocking guided coach panel
 status: Review
 assignee: []
 created_date: '2026-03-14 13:17'
-updated_date: '2026-03-14 21:04'
+updated_date: '2026-03-14 21:24'
 labels:
   - frontend
   - ux
@@ -341,5 +341,14 @@ Verification:
 - nix build .#checks.x86_64-linux.web-ui -L (37/37)
 
 Commit: ab7d3517
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/165
+
+2026-03-14: Updated setup form guidance blocks to true floating callouts by switching field guidance to absolute anchored popovers (high z-index, width-constrained, pointer notch) rather than in-flow blocks. Applied across environment required-policies guidance and builder/system/flake/cache form field callouts, plus builder resource guidance anchoring behavior.
+
+Verification:
+- nix develop -c cargo check (packages/web-ui)
+- nix build .#checks.x86_64-linux.web-ui -L (37/37)
+
+Commit: db8675e1
 MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/165
 <!-- SECTION:NOTES:END -->
