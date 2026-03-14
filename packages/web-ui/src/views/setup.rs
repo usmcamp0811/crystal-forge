@@ -67,6 +67,7 @@ pub fn SetupView() -> Element {
 
     let mut current_step = use_signal(|| WizardStep::Environment);
     let mut refresh = use_signal(|| 0_u64);
+    let mut action_error = use_signal(|| None::<String>);
 
     let progress = use_resource(move || async move {
         let _ = refresh();
@@ -154,6 +155,12 @@ pub fn SetupView() -> Element {
                     class: "max-w-xl rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-6 space-y-3",
                     h1 { class: "text-xl font-semibold {theme::text::PRIMARY}", "Setup Wizard Dismissed" }
                     p { class: "text-sm {theme::text::SECONDARY}", "You can re-run setup from Server Management at any time." }
+                    if let Some(message) = action_error() {
+                        p {
+                            class: "text-sm text-red-300 rounded-lg border border-red-500/40 bg-red-900/20 px-3 py-2",
+                            "{message}"
+                        }
+                    }
                     div { class: "flex gap-2",
                         button {
                             class: "rounded-lg px-3 py-2 text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}",
@@ -165,9 +172,17 @@ pub fn SetupView() -> Element {
                         button {
                             class: "rounded-lg px-3 py-2 text-sm font-medium border {theme::surface::CARD_BORDER} {theme::text::PRIMARY}",
                             onclick: move |_| {
+                                let mut action_error = action_error;
+                                let mut refresh = refresh;
                                 spawn(async move {
-                                    let _ = set_setup_wizard_dismissed(false).await;
-                                    refresh.set(refresh() + 1);
+                                    match set_setup_wizard_dismissed(false).await {
+                                        Ok(_) => {
+                                            action_error.set(None);
+                                            refresh.set(refresh() + 1);
+                                        }
+                                        Err(err) => action_error
+                                            .set(Some(format!("Failed to re-enable setup wizard: {err}"))),
+                                    }
                                 });
                             },
                             "Re-enable Wizard"
@@ -195,12 +210,27 @@ pub fn SetupView() -> Element {
                     button {
                         class: "rounded-lg px-3 py-2 text-sm font-medium border {theme::surface::CARD_BORDER} {theme::text::PRIMARY}",
                         onclick: move |_| {
+                            let mut action_error = action_error;
+                            let nav = nav.clone();
                             spawn(async move {
-                                let _ = set_setup_wizard_dismissed(true).await;
-                                nav.push("/");
+                                match set_setup_wizard_dismissed(true).await {
+                                    Ok(_) => {
+                                        action_error.set(None);
+                                        nav.push("/");
+                                    }
+                                    Err(err) => action_error
+                                        .set(Some(format!("Failed to skip setup: {err}"))),
+                                }
                             });
                         },
                         "Skip Setup"
+                    }
+                }
+
+                if let Some(message) = action_error() {
+                    div {
+                        class: "rounded-lg border border-red-500/40 bg-red-900/20 px-3 py-2 text-sm text-red-300",
+                        "{message}"
                     }
                 }
 
@@ -221,9 +251,18 @@ pub fn SetupView() -> Element {
                             step,
                             progress: progress_data.clone(),
                             on_ack_agent: move || {
+                                let mut action_error = action_error;
+                                let mut refresh = refresh;
                                 spawn(async move {
-                                    let _ = set_setup_wizard_agent_acknowledged(true).await;
-                                    refresh.set(refresh() + 1);
+                                    match set_setup_wizard_agent_acknowledged(true).await {
+                                        Ok(_) => {
+                                            action_error.set(None);
+                                            refresh.set(refresh() + 1);
+                                        }
+                                        Err(err) => action_error.set(Some(format!(
+                                            "Failed to save agent acknowledgment: {err}"
+                                        ))),
+                                    }
                                 });
                             },
                             on_refresh: move || refresh.set(refresh() + 1),
@@ -254,9 +293,18 @@ pub fn SetupView() -> Element {
                                 button {
                                     class: "rounded-lg px-3 py-2 text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}",
                                     onclick: move |_| {
+                                        let mut action_error = action_error;
+                                        let nav = nav.clone();
                                         spawn(async move {
-                                            let _ = set_setup_wizard_dismissed(true).await;
-                                            nav.push("/");
+                                            match set_setup_wizard_dismissed(true).await {
+                                                Ok(_) => {
+                                                    action_error.set(None);
+                                                    nav.push("/");
+                                                }
+                                                Err(err) => action_error.set(Some(format!(
+                                                    "Failed to finalize setup state: {err}"
+                                                ))),
+                                            }
                                         });
                                     },
                                     "Get Started"
@@ -367,7 +415,7 @@ fn StepPanel(props: StepPanelProps) -> Element {
             props.progress.flake.count,
         ),
         WizardStep::Builder => (
-            "Builders execute build jobs. Add a builder and assign it to an environment.",
+            "Builders execute build jobs. Add at least one builder (no explicit environment assignment means wildcard/all environments).",
             "/builders",
             props.progress.builder.complete,
             props.progress.builder.count,
@@ -525,7 +573,7 @@ fn CompletionPanel(props: CompletionPanelProps) -> Element {
             ul { class: "grid gap-2 text-sm text-emerald-100 md:grid-cols-2",
                 li { class: "rounded border border-emerald-400/30 bg-emerald-950/30 px-3 py-2", {format!("✓ Environments: {}", props.progress.environment.count)} }
                 li { class: "rounded border border-emerald-400/30 bg-emerald-950/30 px-3 py-2", {format!("✓ Flakes: {}", props.progress.flake.count)} }
-                li { class: "rounded border border-emerald-400/30 bg-emerald-950/30 px-3 py-2", {format!("✓ Builders with environment: {}", props.progress.builder.count)} }
+                li { class: "rounded border border-emerald-400/30 bg-emerald-950/30 px-3 py-2", {format!("✓ Builders: {}", props.progress.builder.count)} }
                 li { class: "rounded border border-emerald-400/30 bg-emerald-950/30 px-3 py-2", {format!("✓ Caches with environment: {}", props.progress.cache.count)} }
                 li { class: "rounded border border-emerald-400/30 bg-emerald-950/30 px-3 py-2", {format!("✓ Systems linked: {}", props.progress.system.count)} }
                 li { class: "rounded border border-emerald-400/30 bg-emerald-950/30 px-3 py-2", "✓ Agent step acknowledged" }

@@ -20,7 +20,9 @@ use crate::queries::users::{
 struct SetupWizardCounts {
     environment: i64,
     flake: i64,
-    builder_with_environment: i64,
+    // Wildcard builders (no explicit env rows) are valid and can process
+    // jobs from all environments, so this is a total builder count.
+    builder_count: i64,
     cache_with_environment: i64,
     system_with_links: i64,
 }
@@ -101,10 +103,9 @@ async fn load_counts(pool: &PgPool) -> anyhow::Result<SetupWizardCounts> {
 
     // A builder with no environment assignments is a wildcard builder that
     // handles jobs from all environments — it counts as fully configured.
-    let builder_with_environment =
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::bigint FROM builders")
-            .fetch_one(pool)
-            .await?;
+    let builder_count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::bigint FROM builders")
+        .fetch_one(pool)
+        .await?;
 
     let cache_with_environment = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(DISTINCT c.id)::bigint FROM cache_destinations c JOIN cache_destination_environments cde ON cde.cache_destination_id = c.id",
@@ -121,7 +122,7 @@ async fn load_counts(pool: &PgPool) -> anyhow::Result<SetupWizardCounts> {
     Ok(SetupWizardCounts {
         environment,
         flake,
-        builder_with_environment,
+        builder_count,
         cache_with_environment,
         system_with_links,
     })
@@ -141,8 +142,8 @@ fn build_progress_response(
         count: counts.flake,
     };
     let builder = SetupWizardStepStatus {
-        complete: counts.builder_with_environment > 0,
-        count: counts.builder_with_environment,
+        complete: counts.builder_count > 0,
+        count: counts.builder_count,
     };
     let cache = SetupWizardStepStatus {
         complete: counts.cache_with_environment > 0,
@@ -206,7 +207,7 @@ mod tests {
         let counts = SetupWizardCounts {
             environment: 0,
             flake: 0,
-            builder_with_environment: 0,
+            builder_count: 0,
             cache_with_environment: 0,
             system_with_links: 0,
         };
@@ -225,7 +226,7 @@ mod tests {
         let counts = SetupWizardCounts {
             environment: 1,
             flake: 1,
-            builder_with_environment: 0,
+            builder_count: 0,
             cache_with_environment: 0,
             system_with_links: 0,
         };
@@ -244,7 +245,7 @@ mod tests {
         let counts = SetupWizardCounts {
             environment: 1,
             flake: 2,
-            builder_with_environment: 1,
+            builder_count: 1,
             cache_with_environment: 1,
             system_with_links: 3,
         };
