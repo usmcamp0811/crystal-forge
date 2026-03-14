@@ -4,7 +4,7 @@ title: Replace blocking setup wizard with non-blocking guided coach panel
 status: Review
 assignee: []
 created_date: '2026-03-14 13:17'
-updated_date: '2026-03-14 20:23'
+updated_date: '2026-03-14 20:34'
 labels:
   - frontend
   - ux
@@ -314,5 +314,14 @@ Verification:
 - nix build .#checks.x86_64-linux.web-ui -L (37/37)
 
 Commit: 053b3a2e
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/165
+
+2026-03-14: Applied broader UX request to make onboarding helper text unmistakable callouts across setup forms. Converted field guidance in builder/system/flake/cache forms into explicit high-contrast setup-coach callout containers (heading + emphasized callout block), and upgraded builder Resource guidance block to the same callout treatment. Also fixed attribute order in environment policy callout block.
+
+Verification:
+- nix develop -c cargo check (packages/web-ui)
+- nix build .#checks.x86_64-linux.web-ui -L (37/37)
+
+Commit: 4f16cadd
 MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/165
 <!-- SECTION:NOTES:END -->
