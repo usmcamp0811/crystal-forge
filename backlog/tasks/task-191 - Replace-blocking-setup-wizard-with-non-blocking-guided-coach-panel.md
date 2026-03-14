@@ -4,7 +4,7 @@ title: Replace blocking setup wizard with non-blocking guided coach panel
 status: Review
 assignee: []
 created_date: '2026-03-14 13:17'
-updated_date: '2026-03-14 17:04'
+updated_date: '2026-03-14 17:20'
 labels:
   - frontend
   - ux
@@ -222,4 +222,16 @@ Verification: `nix develop -c cargo check` (packages/web-ui) passed.
 Verification: `nix build .#checks.x86_64-linux.web-ui -L` passed (37/37).
 
 Pushed follow-up commit: 52b6477e to MR !165.
+
+Promoted post-system onboarding reminder to high-visibility modal popup (`setup-coach-agent-runtime-reminder-modal`) with explicit dismissal action.
+
+Modal is gated to setup-coach context and only triggers when creating the first system in that onboarding run (`local_systems` empty before create).
+
+Reminder content continues to explicitly require agent module enablement, host config apply/rebuild, and running agent service before tracking appears.
+
+Verification: `nix develop -c cargo check` (packages/web-ui) passed.
+
+Verification: `nix build .#checks.x86_64-linux.web-ui -L` passed (37/37).
+
+Pushed follow-up commit: 91081810 to MR !165.
 <!-- SECTION:NOTES:END -->
