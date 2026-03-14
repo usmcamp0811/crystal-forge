@@ -4,7 +4,7 @@ title: Replace blocking setup wizard with non-blocking guided coach panel
 status: Review
 assignee: []
 created_date: '2026-03-14 13:17'
-updated_date: '2026-03-14 20:34'
+updated_date: '2026-03-14 20:47'
 labels:
   - frontend
   - ux
@@ -323,5 +323,14 @@ Verification:
 - nix build .#checks.x86_64-linux.web-ui -L (37/37)
 
 Commit: 4f16cadd
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/165
+
+2026-03-14: Addressed UX regression report on callout inconsistency. Normalized onboarding helper callouts across Create Environment, Add Builder, Add System, Register Flake, and Add Cache Destination to match the proven "Next action" callout style used near Add Environment (same visual weight, heading, spacing, border, and shadow). Removed over-styled variants introduced in prior pass.
+
+Verification:
+- nix develop -c cargo check (packages/web-ui)
+- nix build .#checks.x86_64-linux.web-ui -L (37/37)
+
+Commit: bc68cb2b
 MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/165
 <!-- SECTION:NOTES:END -->
