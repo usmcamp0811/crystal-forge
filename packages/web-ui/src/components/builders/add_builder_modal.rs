@@ -147,10 +147,11 @@ pub fn AddBuilderModal(
                             disabled: is_submitting(),
                         }
                         if show_name_callout() {
-                            p {
+                            div {
                                 "data-testid": "setup-coach-builder-field-name",
-                                style: "margin-top:6px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:8px; padding:6px 8px; color:#dbeafe; font-size:12px;",
-                                "Name this builder so operators can identify where builds run (for example: build-eu-west-1)."
+                                class: "mt-2 rounded-md border border-blue-400/70 bg-blue-900/90 px-3 py-2 shadow-[0_6px_18px_rgba(30,64,175,0.35)]",
+                                p { class: "text-[11px] font-semibold uppercase tracking-wide text-blue-100", "Setup Coach" }
+                                p { class: "mt-1 text-xs text-blue-100", "Name this builder so operators can identify where builds run (for example: build-eu-west-1)." }
                             }
                         }
                     }
@@ -196,10 +197,11 @@ pub fn AddBuilderModal(
                                 disabled: is_submitting(),
                             }
                             if show_public_key_callout() {
-                                p {
+                                div {
                                     "data-testid": "setup-coach-builder-field-public-key",
-                                    style: "margin-top:6px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:8px; padding:6px 8px; color:#dbeafe; font-size:12px;",
-                                    "Use the builder public key from the host's Crystal Forge builder config, or generate one and install the paired private key on the builder host."
+                                    class: "mt-2 rounded-md border border-blue-400/70 bg-blue-900/90 px-3 py-2 shadow-[0_6px_18px_rgba(30,64,175,0.35)]",
+                                    p { class: "text-[11px] font-semibold uppercase tracking-wide text-blue-100", "Setup Coach" }
+                                    p { class: "mt-1 text-xs text-blue-100", "Use the builder public key from the host's Crystal Forge builder config, or generate one and install the paired private key on the builder host." }
                                 }
                             }
                         }
@@ -241,21 +243,21 @@ pub fn AddBuilderModal(
                     div {
                         class: "grid grid-cols-3 gap-4",
                         div {
-                            class: "col-span-3 mb-3 rounded-lg border border-blue-400/45 bg-blue-900/25 p-3",
+                            class: "col-span-3 mb-3 rounded-lg border border-blue-400/70 bg-blue-900/90 p-3 shadow-[0_8px_22px_rgba(30,64,175,0.35)]",
                             p {
-                                class: "text-xs font-semibold uppercase tracking-wide text-blue-100",
-                                "Resource guidance"
+                                class: "text-[11px] font-semibold uppercase tracking-wide text-blue-100",
+                                "Setup Coach: Resource guidance"
                             }
                             p {
-                                class: "mt-1 text-xs text-blue-100/90",
+                                class: "mt-1 text-xs text-blue-100",
                                 "Leave CPU or memory empty only when this host is dedicated and heavily provisioned for builder workloads."
                             }
                             p {
-                                class: "mt-1 text-xs text-blue-200/90",
+                                class: "mt-1 text-xs text-blue-100/95",
                                 "Max Concurrent Jobs controls how many builds run at once. If CPU/memory are unlimited and concurrency is greater than 1, heavy builds (for example Firefox or Chromium) can exhaust resources and stall or fail repeatedly."
                             }
                             p {
-                                class: "mt-1 text-xs text-blue-200/90",
+                                class: "mt-1 text-xs text-blue-200/95",
                                 "Safer default: keep concurrency at 1 and set explicit CPU/memory limits close to what this host can sustain."
                             }
                         }
@@ -360,10 +362,11 @@ pub fn AddBuilderModal(
                                         }
                                     }
                                     if show_environment_callout() {
-                                        p {
+                                        div {
                                             "data-testid": "setup-coach-builder-field-environments",
-                                            style: "margin-top:8px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:8px; padding:6px 8px; color:#dbeafe; font-size:12px;",
-                                            "Select environments this builder should serve, or leave empty to allow all environments."
+                                            class: "mt-2 rounded-md border border-blue-400/70 bg-blue-900/90 px-3 py-2 shadow-[0_6px_18px_rgba(30,64,175,0.35)]",
+                                            p { class: "text-[11px] font-semibold uppercase tracking-wide text-blue-100", "Setup Coach" }
+                                            p { class: "mt-1 text-xs text-blue-100", "Select environments this builder should serve, or leave empty to allow all environments." }
                                         }
                                     }
                                 },

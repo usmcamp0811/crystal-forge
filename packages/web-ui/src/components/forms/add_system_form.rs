@@ -89,10 +89,11 @@ pub fn AddSystemForm(
                                 }
                             }
                             if show_hostname_callout() {
-                                p {
+                                div {
                                     "data-testid": "setup-coach-system-field-hostname",
-                                    style: "background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:8px; padding:6px 8px; color:#dbeafe; font-size:12px;",
-                                    "Set the host name used by this machine in your infrastructure config (for example: web-01)."
+                                    class: "rounded-md border border-blue-400/70 bg-blue-900/90 px-3 py-2 shadow-[0_6px_18px_rgba(30,64,175,0.35)]",
+                                    p { class: "text-[11px] font-semibold uppercase tracking-wide text-blue-100", "Setup Coach" }
+                                    p { class: "mt-1 text-xs text-blue-100", "Set the host name used by this machine in your infrastructure config (for example: web-01)." }
                                 }
                             }
                         }
@@ -121,10 +122,11 @@ pub fn AddSystemForm(
                                 }
                             }
                             if show_public_key_callout() {
-                                p {
+                                div {
                                     "data-testid": "setup-coach-system-field-public-key",
-                                    style: "background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:8px; padding:6px 8px; color:#dbeafe; font-size:12px;",
-                                    "Paste the Crystal Forge agent public key for this host, or generate one and install its private key on the target machine."
+                                    class: "rounded-md border border-blue-400/70 bg-blue-900/90 px-3 py-2 shadow-[0_6px_18px_rgba(30,64,175,0.35)]",
+                                    p { class: "text-[11px] font-semibold uppercase tracking-wide text-blue-100", "Setup Coach" }
+                                    p { class: "mt-1 text-xs text-blue-100", "Paste the Crystal Forge agent public key for this host, or generate one and install its private key on the target machine." }
                                 }
                             }
                         }
@@ -148,10 +150,11 @@ pub fn AddSystemForm(
                                 }
                             }
                             if show_environment_callout() {
-                                p {
+                                div {
                                     "data-testid": "setup-coach-system-field-environment",
-                                    style: "background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:8px; padding:6px 8px; color:#dbeafe; font-size:12px;",
-                                    "Choose where this system belongs (for example staging or production) so policies and deployments target it correctly."
+                                    class: "rounded-md border border-blue-400/70 bg-blue-900/90 px-3 py-2 shadow-[0_6px_18px_rgba(30,64,175,0.35)]",
+                                    p { class: "text-[11px] font-semibold uppercase tracking-wide text-blue-100", "Setup Coach" }
+                                    p { class: "mt-1 text-xs text-blue-100", "Choose where this system belongs (for example staging or production) so policies and deployments target it correctly." }
                                 }
                             }
                         }
@@ -175,10 +178,11 @@ pub fn AddSystemForm(
                                 }
                             }
                             if show_flake_callout() {
-                                p {
+                                div {
                                     "data-testid": "setup-coach-system-field-flake",
-                                    style: "background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:8px; padding:6px 8px; color:#dbeafe; font-size:12px;",
-                                    "Select the flake source this system should evaluate and deploy from."
+                                    class: "rounded-md border border-blue-400/70 bg-blue-900/90 px-3 py-2 shadow-[0_6px_18px_rgba(30,64,175,0.35)]",
+                                    p { class: "text-[11px] font-semibold uppercase tracking-wide text-blue-100", "Setup Coach" }
+                                    p { class: "mt-1 text-xs text-blue-100", "Select the flake source this system should evaluate and deploy from." }
                                 }
                             }
                         }

@@ -1695,10 +1695,11 @@ fn AddFlakeForm(
                                 },
                             }
                             if show_name_callout() {
-                                p {
+                                div {
                                     "data-testid": "setup-coach-flake-field-name",
-                                    style: "background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:8px; padding:6px 8px; color:#dbeafe; font-size:12px;",
-                                    "Use a stable name admins will recognize (for example: prod-core or edge-fleet)."
+                                    class: "rounded-md border border-blue-400/70 bg-blue-900/90 px-3 py-2 shadow-[0_6px_18px_rgba(30,64,175,0.35)]",
+                                    p { class: "text-[11px] font-semibold uppercase tracking-wide text-blue-100", "Setup Coach" }
+                                    p { class: "mt-1 text-xs text-blue-100", "Use a stable name admins will recognize (for example: prod-core or edge-fleet)." }
                                 }
                             }
                         }
@@ -1718,10 +1719,11 @@ fn AddFlakeForm(
                                 },
                             }
                             if show_repo_callout() {
-                                p {
+                                div {
                                     "data-testid": "setup-coach-flake-field-repo",
-                                    style: "background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:8px; padding:6px 8px; color:#dbeafe; font-size:12px;",
-                                    "Point to the Git repository that contains your flake outputs for systems to deploy."
+                                    class: "rounded-md border border-blue-400/70 bg-blue-900/90 px-3 py-2 shadow-[0_6px_18px_rgba(30,64,175,0.35)]",
+                                    p { class: "text-[11px] font-semibold uppercase tracking-wide text-blue-100", "Setup Coach" }
+                                    p { class: "mt-1 text-xs text-blue-100", "Point to the Git repository that contains your flake outputs for systems to deploy." }
                                 }
                             }
                         }
@@ -1741,10 +1743,11 @@ fn AddFlakeForm(
                                 },
                             }
                             if show_branch_callout() {
-                                p {
+                                div {
                                     "data-testid": "setup-coach-flake-field-branch",
-                                    style: "background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:8px; padding:6px 8px; color:#dbeafe; font-size:12px;",
-                                    "Optional: pick a branch if deployments should track something other than the repo default."
+                                    class: "rounded-md border border-blue-400/70 bg-blue-900/90 px-3 py-2 shadow-[0_6px_18px_rgba(30,64,175,0.35)]",
+                                    p { class: "text-[11px] font-semibold uppercase tracking-wide text-blue-100", "Setup Coach" }
+                                    p { class: "mt-1 text-xs text-blue-100", "Optional: pick a branch if deployments should track something other than the repo default." }
                                 }
                             }
                         }
