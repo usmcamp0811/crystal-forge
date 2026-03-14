@@ -4,7 +4,7 @@ title: Replace blocking setup wizard with non-blocking guided coach panel
 status: Review
 assignee: []
 created_date: '2026-03-14 13:17'
-updated_date: '2026-03-14 14:05'
+updated_date: '2026-03-14 14:16'
 labels:
   - frontend
   - ux
@@ -138,4 +138,16 @@ Verification: `nix build .#checks.x86_64-linux.web-ui -L` passed with 37/37 scre
 Pushed branch: TASK-191-non-blocking-onboarding-coach-panel (commit e7680a45).
 
 MR opened: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/165
+
+Follow-up UX fix: coach Agent step now routes to Systems (instead of attempting in-place acknowledge), matching guided flow expectations.
+
+Added systems-specific setup guidance callout explaining how to add a system and what agents are (`setup-coach-systems-callout`).
+
+Updated web-ui integration test step `06f-onboarding-systems-callout` to assert the new systems guidance callout by test id.
+
+Verification re-run: `nix develop -c cargo check` (packages/web-ui) passed.
+
+Verification re-run: `nix build .#checks.x86_64-linux.web-ui -L` passed (37/37).
+
+Pushed follow-up commit: 6a92a005 to MR !165.
 <!-- SECTION:NOTES:END -->
