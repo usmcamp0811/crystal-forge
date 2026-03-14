@@ -4,7 +4,7 @@ title: Replace blocking setup wizard with non-blocking guided coach panel
 status: Review
 assignee: []
 created_date: '2026-03-14 13:17'
-updated_date: '2026-03-14 16:04'
+updated_date: '2026-03-14 17:04'
 labels:
   - frontend
   - ux
@@ -210,4 +210,16 @@ Verification: `nix develop -c cargo check` (packages/web-ui) passed.
 Verification: `nix build .#checks.x86_64-linux.web-ui -L` passed (37/37).
 
 Pushed follow-up commit: 6cefdb1c to MR !165.
+
+Added post-create onboarding reminder on Systems page when creation happens in setup-coach context.
+
+Reminder explicitly instructs admins to enable the Crystal Forge agent module in host config, apply/rebuild host config, and ensure agent service is running before expecting telemetry/deploy status.
+
+Reminder rendered as non-blocking banner (`setup-coach-agent-runtime-reminder`) and scoped to onboarding flow only.
+
+Verification: `nix develop -c cargo check` (packages/web-ui) passed.
+
+Verification: `nix build .#checks.x86_64-linux.web-ui -L` passed (37/37).
+
+Pushed follow-up commit: 52b6477e to MR !165.
 <!-- SECTION:NOTES:END -->
