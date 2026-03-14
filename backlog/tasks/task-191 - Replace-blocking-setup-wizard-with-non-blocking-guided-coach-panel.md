@@ -4,7 +4,7 @@ title: Replace blocking setup wizard with non-blocking guided coach panel
 status: Review
 assignee: []
 created_date: '2026-03-14 13:17'
-updated_date: '2026-03-14 20:47'
+updated_date: '2026-03-14 21:04'
 labels:
   - frontend
   - ux
@@ -332,5 +332,14 @@ Verification:
 - nix build .#checks.x86_64-linux.web-ui -L (37/37)
 
 Commit: bc68cb2b
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/165
+
+2026-03-14: Applied explicit callout-anchor pass after UX feedback that form hints still read as cards. Added pointer-notch anchor cues to onboarding form hints while preserving the established Next action callout palette/typography, so each hint now visually reads as a callout rather than a generic bubble/card.
+
+Verification:
+- nix develop -c cargo check (packages/web-ui)
+- nix build .#checks.x86_64-linux.web-ui -L (37/37)
+
+Commit: ab7d3517
 MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/165
 <!-- SECTION:NOTES:END -->
