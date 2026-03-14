@@ -114,10 +114,10 @@ pub fn EnvironmentsListView() -> Element {
             if from_setup() {
                 div {
                     "data-testid": "setup-coach-environments-callout",
-                    style: "background:rgba(109,40,217,0.2); border:1px solid rgba(139,92,246,0.5); border-radius:8px; padding:12px 16px;",
-                    p { style: "color:#e9d5ff; font-size:12px; font-weight:700; margin:0; letter-spacing:0.03em; text-transform:uppercase;", "Setup Tour - Step 1 of 6" }
-                    p { style: "color:#e9d5ff; font-size:14px; font-weight:600; margin:4px 0 0 0;", "Create your first environment" }
-                    p { style: "color:#ddd6fe; font-size:13px; margin:4px 0 0 0;", "Use Add Environment to define a deployment boundary like staging or production." }
+                    style: "background:rgba(30,58,138,0.22); border:1px solid rgba(96,165,250,0.55); border-radius:8px; padding:12px 16px;",
+                    p { style: "color:#dbeafe; font-size:12px; font-weight:700; margin:0; letter-spacing:0.03em; text-transform:uppercase;", "Setup Tour - Step 1 of 6" }
+                    p { style: "color:#dbeafe; font-size:14px; font-weight:600; margin:4px 0 0 0;", "Create your first environment" }
+                    p { style: "color:#bfdbfe; font-size:13px; margin:4px 0 0 0;", "Use Add Environment to define a deployment boundary like staging or production." }
                 }
             }
 
@@ -140,7 +140,7 @@ pub fn EnvironmentsListView() -> Element {
                     class: "relative",
                     button {
                         class: if from_setup() && !*show_add_form.read() {
-                            "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN} animate-pulse ring-2 ring-violet-300/70 ring-offset-2 ring-offset-slate-950"
+                            "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN} animate-pulse ring-2 ring-blue-300/70 ring-offset-2 ring-offset-slate-950"
                         } else {
                             "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}"
                         },
@@ -154,11 +154,11 @@ pub fn EnvironmentsListView() -> Element {
                     if from_setup() && !*show_add_form.read() {
                         div {
                             "data-testid": "setup-coach-environments-target-callout",
-                            style: "position:absolute; right:0; top:calc(100% + 10px); background:rgba(30,41,59,0.96); border:1px solid rgba(167,139,250,0.6); border-radius:10px; padding:8px 10px; color:#ddd6fe; font-size:12px; width:220px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                            style: "position:absolute; right:0; top:calc(100% + 10px); background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; width:220px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
                             div {
-                                style: "position:absolute; top:-6px; right:18px; width:10px; height:10px; background:rgba(30,41,59,0.96); border-left:1px solid rgba(167,139,250,0.6); border-top:1px solid rgba(167,139,250,0.6); transform:rotate(45deg);"
+                                style: "position:absolute; top:-6px; right:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
                             }
-                            p { style: "margin:0; color:#e9d5ff; font-weight:600;", "Next action" }
+                            p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
                             p { style: "margin:2px 0 0 0;", "Click Add Environment to create your first environment." }
                         }
                     }
