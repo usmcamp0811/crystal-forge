@@ -1,10 +1,10 @@
 ---
 id: TASK-160
 title: Create Eval queue view with reordering support
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-03-02 16:22'
-updated_date: '2026-03-07 03:16'
+updated_date: '2026-03-14 13:23'
 labels: []
 dependencies: []
 priority: medium
@@ -209,4 +209,8 @@ Note: nix develop -c cargo check --manifest-path packages/default/Cargo.toml wit
 Committed and pushed MR-151 hardening updates.
 Commit: ee17bffd
 Push: TASK-160-eval-queue-view -> origin (GitLab HTTPS push using glab token auth).
+
+Status reconciliation: MR !151 is merged into dev.
+
+No active local task worktree found for TASK-160 during cleanup audit (already removed previously).
 <!-- SECTION:NOTES:END -->
