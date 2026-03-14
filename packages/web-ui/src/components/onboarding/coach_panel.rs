@@ -1,9 +1,7 @@
 use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 
-use crate::api::client::{
-    fetch_setup_wizard_progress, set_setup_wizard_agent_acknowledged, set_setup_wizard_dismissed,
-};
+use crate::api::client::{fetch_setup_wizard_progress, set_setup_wizard_dismissed};
 use crate::api::models::{SetupWizardProgressResponse, SetupWizardStepStatus};
 
 #[derive(Clone, Copy)]
@@ -248,7 +246,7 @@ pub fn OnboardingCoachPanel() -> Element {
                                                 if status.complete {
                                                     "Acknowledged"
                                                 } else {
-                                                    "Opens systems guidance"
+                                                    "Completes after first system setup"
                                                 }
                                             } else if status.complete {
                                                 "Configured"
@@ -273,26 +271,6 @@ pub fn OnboardingCoachPanel() -> Element {
                             "data-testid": "onboarding-coach-refresh",
                             onclick: move |_| refresh_tick.set(refresh_tick() + 1),
                             "Refresh"
-                        }
-                        button {
-                            class: "rounded px-2 py-1 text-xs font-medium text-slate-200 hover:bg-slate-800",
-                            "data-testid": "onboarding-coach-agent-ack",
-                            onclick: move |_| {
-                                let mut action_error = action_error;
-                                let mut refresh_tick = refresh_tick;
-                                spawn(async move {
-                                    match set_setup_wizard_agent_acknowledged(true).await {
-                                        Ok(_) => {
-                                            action_error.set(None);
-                                            refresh_tick.set(refresh_tick() + 1);
-                                        }
-                                        Err(err) => action_error.set(Some(format!(
-                                            "Failed to mark agent step acknowledged: {err}"
-                                        ))),
-                                    }
-                                });
-                            },
-                            "Mark agent understood"
                         }
                     }
                 }

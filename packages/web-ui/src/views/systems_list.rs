@@ -8,6 +8,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
 use web_sys::{Node, window};
 
+use crate::api::client::set_setup_wizard_agent_acknowledged;
 use crate::api::models::{
     CveSummary, DeploymentStatus, HealthStatus, PipelineStage, SystemSummary, SystemsListParams,
 };
@@ -380,6 +381,7 @@ pub fn SystemsListView() -> Element {
                                     add_error.set(None);
                                     show_add_form.set(false);
                                     if first_system_in_setup {
+                                        let _ = set_setup_wizard_agent_acknowledged(true).await;
                                         onboarding_agent_reminder.set(Some(
                                             "System record created. Next, ensure this host config enables the Crystal Forge agent module, apply/rebuild that config, and confirm the agent service is running before expecting heartbeats or deployment status.".to_string(),
                                         ));
