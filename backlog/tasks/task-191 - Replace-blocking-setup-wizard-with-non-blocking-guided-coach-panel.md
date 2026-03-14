@@ -4,7 +4,7 @@ title: Replace blocking setup wizard with non-blocking guided coach panel
 status: Review
 assignee: []
 created_date: '2026-03-14 13:17'
-updated_date: '2026-03-14 14:16'
+updated_date: '2026-03-14 14:48'
 labels:
   - frontend
   - ux
@@ -150,4 +150,16 @@ Verification re-run: `nix develop -c cargo check` (packages/web-ui) passed.
 Verification re-run: `nix build .#checks.x86_64-linux.web-ui -L` passed (37/37).
 
 Pushed follow-up commit: 6a92a005 to MR !165.
+
+Refined onboarding destination callouts to be tour-style/action-oriented (step labels + explicit action/why guidance), inspired by guided-tour UX rather than generic origin banners.
+
+Removed redundant 'Back to Setup Coach' links from destination callouts since the coach panel remains visible and non-blocking.
+
+Updated screenshot test assertions to use page-specific callout test IDs for deterministic validation.
+
+Verification re-run: `nix develop -c cargo check` (packages/web-ui) passed.
+
+Verification re-run: `nix build .#checks.x86_64-linux.web-ui -L` passed (37/37).
+
+Pushed follow-up commit: 80fd09ea to MR !165.
 <!-- SECTION:NOTES:END -->
