@@ -4,7 +4,7 @@ title: Replace blocking setup wizard with non-blocking guided coach panel
 status: Review
 assignee: []
 created_date: '2026-03-14 13:17'
-updated_date: '2026-03-14 14:48'
+updated_date: '2026-03-14 15:00'
 labels:
   - frontend
   - ux
@@ -162,4 +162,16 @@ Verification re-run: `nix develop -c cargo check` (packages/web-ui) passed.
 Verification re-run: `nix build .#checks.x86_64-linux.web-ui -L` passed (37/37).
 
 Pushed follow-up commit: 80fd09ea to MR !165.
+
+Added JupyterLab-tour-style click-target callouts adjacent to primary onboarding actions (Add Environment, Add Flake, Add Builder, Add Destination, Add System).
+
+Threaded onboarding hint state into Builders and Cache Destinations action areas so guidance appears directly on actionable controls.
+
+Extended onboarding screenshot assertions to verify both page-level guidance callouts and click-target callouts are visible per step.
+
+Verification re-run: `nix develop -c cargo check` (packages/web-ui) passed.
+
+Verification re-run: `nix build .#checks.x86_64-linux.web-ui -L` passed (37/37).
+
+Pushed follow-up commit: a0d34e8e to MR !165.
 <!-- SECTION:NOTES:END -->
