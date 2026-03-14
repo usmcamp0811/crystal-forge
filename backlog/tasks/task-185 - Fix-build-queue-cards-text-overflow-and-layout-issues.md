@@ -1,10 +1,10 @@
 ---
 id: TASK-185
 title: Fix build queue cards - text overflow and layout issues
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-03-13 01:01'
-updated_date: '2026-03-13 12:15'
+updated_date: '2026-03-14 13:23'
 labels:
   - web-ui
   - ux
@@ -167,4 +167,8 @@ Correction: MR !157 was closed because it accidentally targeted `main`. Active M
 Superseded prior MRs and opened clean scoped MR with full template + screenshot attachments: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/159
 
 Closed MR !157 (wrong target branch) and MR !158 (superseded by clean branch with only scoped changes).
+
+Status reconciliation: MR !159 is merged into dev.
+
+Worktree cleanup complete: /home/mcamp/code/crystal-forge/TASK-185-fix-build-queue-cards removed and worktree metadata pruned.
 <!-- SECTION:NOTES:END -->
