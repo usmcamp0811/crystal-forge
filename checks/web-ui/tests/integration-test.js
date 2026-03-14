@@ -308,8 +308,8 @@ const steps = [
       await page.locator("[data-testid='onboarding-step-environment']").click();
       await page.waitForTimeout(1500);
       await assertVisible(
-        page.getByText("You came here from the Setup Coach").first(),
-        "Expected setup coach contextual callout on environments page",
+        page.locator("[data-testid='setup-coach-environments-callout']"),
+        "Expected setup coach environments guidance callout",
       );
     },
   },
@@ -320,8 +320,8 @@ const steps = [
       await page.locator("[data-testid='onboarding-step-flake']").click();
       await page.waitForTimeout(1500);
       await assertVisible(
-        page.getByText("You came here from the Setup Coach").first(),
-        "Expected setup coach contextual callout on flakes page",
+        page.locator("[data-testid='setup-coach-flakes-callout']"),
+        "Expected setup coach flakes guidance callout",
       );
     },
   },
@@ -332,8 +332,8 @@ const steps = [
       await page.locator("[data-testid='onboarding-step-builder']").click();
       await page.waitForTimeout(1500);
       await assertVisible(
-        page.getByText("You came here from the Setup Coach").first(),
-        "Expected setup coach contextual callout on builders page",
+        page.locator("[data-testid='setup-coach-builders-callout']"),
+        "Expected setup coach builders guidance callout",
       );
     },
   },
@@ -344,8 +344,8 @@ const steps = [
       await page.locator("[data-testid='onboarding-step-cache']").click();
       await page.waitForTimeout(1500);
       await assertVisible(
-        page.getByText("You came here from the Setup Coach").first(),
-        "Expected setup coach contextual callout on caches page",
+        page.locator("[data-testid='setup-coach-caches-callout']"),
+        "Expected setup coach caches guidance callout",
       );
     },
   },

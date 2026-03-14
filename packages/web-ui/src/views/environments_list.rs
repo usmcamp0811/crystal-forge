@@ -113,13 +113,11 @@ pub fn EnvironmentsListView() -> Element {
 
             if from_setup() {
                 div {
-                    style: "background:rgba(109,40,217,0.2); border:1px solid rgba(139,92,246,0.5); border-radius:8px; padding:10px 16px; display:flex; align-items:center; justify-content:space-between; gap:12px;",
-                    span { style: "color:#e9d5ff; font-size:14px;", "← You came here from the Setup Coach" }
-                    a {
-                        href: "/",
-                        style: "color:#a78bfa; font-size:13px; font-weight:500; white-space:nowrap; text-decoration:underline;",
-                        "Back to Setup Coach"
-                    }
+                    "data-testid": "setup-coach-environments-callout",
+                    style: "background:rgba(109,40,217,0.2); border:1px solid rgba(139,92,246,0.5); border-radius:8px; padding:12px 16px;",
+                    p { style: "color:#e9d5ff; font-size:12px; font-weight:700; margin:0; letter-spacing:0.03em; text-transform:uppercase;", "Setup Tour - Step 1 of 6" }
+                    p { style: "color:#e9d5ff; font-size:14px; font-weight:600; margin:4px 0 0 0;", "Create your first environment" }
+                    p { style: "color:#ddd6fe; font-size:13px; margin:4px 0 0 0;", "Use Add Environment to define a deployment boundary like staging or production." }
                 }
             }
 
