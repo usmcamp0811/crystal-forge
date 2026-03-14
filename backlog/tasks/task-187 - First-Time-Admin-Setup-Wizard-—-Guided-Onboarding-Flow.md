@@ -1,10 +1,10 @@
 ---
 id: TASK-187
 title: First-Time Admin Setup Wizard — Guided Onboarding Flow
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-03-13 01:16'
-updated_date: '2026-03-13 12:58'
+updated_date: '2026-03-14 03:04'
 labels:
   - frontend
   - backend
@@ -177,4 +177,8 @@ Verification run: `nix develop -c env SQLX_OFFLINE=true cargo check -p crystal-f
 SQLx sync completed: started DB with `nix run .#devScripts.db-only -- -D up`, then `nix develop -c cargo sqlx prepare` in `packages/default` (pass).
 
 Known verification caveats: `cargo fmt -- --check` reports extensive pre-existing formatting diffs outside task scope; `cargo clippy -D warnings` currently not a clean gate in this branch/environment due existing repository warning baseline and toolchain/cache inconsistencies.
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/164
+
+Status moved to Review after MR creation.
 <!-- SECTION:NOTES:END -->
