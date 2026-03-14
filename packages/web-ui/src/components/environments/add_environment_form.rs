@@ -3,8 +3,8 @@
 use dioxus::prelude::*;
 
 use super::{
-    EnvironmentItem, NewEnvironmentDraft, PolicyOption, normalize_color_hex, normalize_optional,
-    required_policy_names,
+    normalize_color_hex, normalize_optional, required_policy_names, EnvironmentItem,
+    NewEnvironmentDraft, PolicyOption,
 };
 use crate::components::layout::Card;
 use crate::theme;
@@ -123,6 +123,17 @@ pub fn AddEnvironmentForm(props: AddEnvironmentFormProps) -> Element {
                                 class: "text-xs text-blue-300 hover:text-blue-200 px-2 py-1 rounded hover:bg-blue-500/10 transition-colors",
                                 onclick: move |_| on_choose_policies.call(()),
                                 "Choose Policies"
+                            }
+                        }
+                        div {
+                            class: "rounded-md border border-blue-400/45 bg-blue-900/25 px-3 py-2",
+                            p {
+                                class: "text-xs text-blue-100/95",
+                                "Policies are hard requirements for this environment. They assert configuration-level conditions that systems must satisfy before deployment is considered valid."
+                            }
+                            p {
+                                class: "mt-1 text-xs text-blue-200/90",
+                                "You can add or remove required policies for each environment later, so start with a safe baseline and tighten as your rollout matures."
                             }
                         }
                         div {
