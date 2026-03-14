@@ -8,7 +8,11 @@ use crate::components::builders::generate_ed25519_keypair;
 use crate::theme;
 
 #[component]
-pub fn AddBuilderModal(on_close: EventHandler<()>, on_success: EventHandler<()>) -> Element {
+pub fn AddBuilderModal(
+    on_close: EventHandler<()>,
+    on_success: EventHandler<()>,
+    show_onboarding_callouts: bool,
+) -> Element {
     let mut name = use_signal(|| String::new());
     let mut public_key = use_signal(|| String::new());
     let mut private_key = use_signal(|| String::new());
@@ -20,6 +24,9 @@ pub fn AddBuilderModal(on_close: EventHandler<()>, on_success: EventHandler<()>)
     let mut show_private_key = use_signal(|| false);
     let mut is_submitting = use_signal(|| false);
     let mut error_message = use_signal(|| None::<String>);
+    let mut show_name_callout = use_signal(|| show_onboarding_callouts);
+    let mut show_public_key_callout = use_signal(|| show_onboarding_callouts);
+    let mut show_environment_callout = use_signal(|| show_onboarding_callouts);
 
     // Fetch environments for multi-select
     let environments = use_resource(|| async move { api::client::fetch_environments().await });
@@ -132,8 +139,19 @@ pub fn AddBuilderModal(on_close: EventHandler<()>, on_success: EventHandler<()>)
                             r#type: "text",
                             placeholder: "e.g., builder-01",
                             value: "{name}",
-                            oninput: move |e| name.set(e.value()),
+                            onfocus: move |_| show_name_callout.set(false),
+                            oninput: move |e| {
+                                show_name_callout.set(false);
+                                name.set(e.value())
+                            },
                             disabled: is_submitting(),
+                        }
+                        if show_name_callout() {
+                            p {
+                                "data-testid": "setup-coach-builder-field-name",
+                                style: "margin-top:6px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:8px; padding:6px 8px; color:#dbeafe; font-size:12px;",
+                                "Name this builder so operators can identify where builds run (for example: build-eu-west-1)."
+                            }
                         }
                     }
 
@@ -170,8 +188,19 @@ pub fn AddBuilderModal(on_close: EventHandler<()>, on_success: EventHandler<()>)
                                 rows: "2",
                                 placeholder: "Base64-encoded public key",
                                 value: "{public_key}",
-                                oninput: move |e| public_key.set(e.value()),
+                                onfocus: move |_| show_public_key_callout.set(false),
+                                oninput: move |e| {
+                                    show_public_key_callout.set(false);
+                                    public_key.set(e.value())
+                                },
                                 disabled: is_submitting(),
+                            }
+                            if show_public_key_callout() {
+                                p {
+                                    "data-testid": "setup-coach-builder-field-public-key",
+                                    style: "margin-top:6px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:8px; padding:6px 8px; color:#dbeafe; font-size:12px;",
+                                    "Use the builder public key from the host's Crystal Forge builder config, or generate one and install the paired private key on the builder host."
+                                }
                             }
                         }
 
@@ -294,7 +323,10 @@ pub fn AddBuilderModal(on_close: EventHandler<()>, on_success: EventHandler<()>)
                                                                 id: "env-{env.id}",
                                                                 class: "rounded border-slate-600 text-blue-600 focus:ring-blue-500",
                                                                 checked: selected_environments().contains(&env.id),
-                                                                onchange: move |_| toggle_environment(env_id),
+                                                                onchange: move |_| {
+                                                                    show_environment_callout.set(false);
+                                                                    toggle_environment(env_id)
+                                                                },
                                                                 disabled: is_submitting(),
                                                             }
                                                             label {
@@ -306,6 +338,13 @@ pub fn AddBuilderModal(on_close: EventHandler<()>, on_success: EventHandler<()>)
                                                     }
                                                 }
                                             }
+                                        }
+                                    }
+                                    if show_environment_callout() {
+                                        p {
+                                            "data-testid": "setup-coach-builder-field-environments",
+                                            style: "margin-top:8px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:8px; padding:6px 8px; color:#dbeafe; font-size:12px;",
+                                            "Select environments this builder should serve, or leave empty to allow all environments."
                                         }
                                     }
                                 },

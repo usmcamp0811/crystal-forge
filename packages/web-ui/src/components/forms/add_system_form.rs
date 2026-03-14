@@ -52,7 +52,14 @@ pub fn AddSystemForm(
     environments: Vec<String>,
     /// Available flake names
     flake_names: Vec<String>,
+    /// Whether onboarding field callouts should be shown
+    show_onboarding_callouts: bool,
 ) -> Element {
+    let mut show_hostname_callout = use_signal(|| show_onboarding_callouts);
+    let mut show_public_key_callout = use_signal(|| show_onboarding_callouts);
+    let mut show_environment_callout = use_signal(|| show_onboarding_callouts);
+    let mut show_flake_callout = use_signal(|| show_onboarding_callouts);
+
     rsx! {
         crate::components::layout::Card {
             title: Some("Register System".to_string()),
@@ -73,10 +80,19 @@ pub fn AddSystemForm(
                                 class: "w-full rounded-lg px-3 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
                                 value: "{draft.read().hostname}",
                                 placeholder: "atlas-09",
+                                onfocus: move |_| show_hostname_callout.set(false),
                                 oninput: move |evt| {
                                     let mut next = draft.read().clone();
                                     next.hostname = evt.value();
                                     draft.set(next);
+                                    show_hostname_callout.set(false);
+                                }
+                            }
+                            if show_hostname_callout() {
+                                p {
+                                    "data-testid": "setup-coach-system-field-hostname",
+                                    style: "background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:8px; padding:6px 8px; color:#dbeafe; font-size:12px;",
+                                    "Set the host name used by this machine in your infrastructure config (for example: web-01)."
                                 }
                             }
                         }
@@ -90,16 +106,25 @@ pub fn AddSystemForm(
                                     class: "w-full rounded-lg px-3 py-2 text-sm font-mono {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
                                     value: "{draft.read().public_key}",
                                     placeholder: "base64 public key",
+                                    onfocus: move |_| show_public_key_callout.set(false),
                                     oninput: move |evt| {
                                         let mut next = draft.read().clone();
                                         next.public_key = evt.value();
                                         draft.set(next);
+                                        show_public_key_callout.set(false);
                                     }
                                 }
                                 button {
                                     class: "px-3 py-2 rounded-lg text-xs font-medium border border-gray-600 text-gray-200 hover:bg-gray-700 transition",
                                     onclick: move |_| on_generate_keys.call(()),
                                     "Generate"
+                                }
+                            }
+                            if show_public_key_callout() {
+                                p {
+                                    "data-testid": "setup-coach-system-field-public-key",
+                                    style: "background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:8px; padding:6px 8px; color:#dbeafe; font-size:12px;",
+                                    "Paste the Crystal Forge agent public key for this host, or generate one and install its private key on the target machine."
                                 }
                             }
                         }
@@ -110,14 +135,23 @@ pub fn AddSystemForm(
                             select {
                                 class: "w-full rounded-lg px-3 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
                                 value: "{draft.read().environment}",
+                                onfocus: move |_| show_environment_callout.set(false),
                                 onchange: move |evt| {
                                     let mut next = draft.read().clone();
                                     next.environment = evt.value();
                                     draft.set(next);
+                                    show_environment_callout.set(false);
                                 },
                                 option { value: "", "Select environment" }
                                 for env in environments {
                                     option { value: "{env}", "{env}" }
+                                }
+                            }
+                            if show_environment_callout() {
+                                p {
+                                    "data-testid": "setup-coach-system-field-environment",
+                                    style: "background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:8px; padding:6px 8px; color:#dbeafe; font-size:12px;",
+                                    "Choose where this system belongs (for example staging or production) so policies and deployments target it correctly."
                                 }
                             }
                         }
@@ -128,14 +162,23 @@ pub fn AddSystemForm(
                             select {
                                 class: "w-full rounded-lg px-3 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
                                 value: "{draft.read().flake_name}",
+                                onfocus: move |_| show_flake_callout.set(false),
                                 onchange: move |evt| {
                                     let mut next = draft.read().clone();
                                     next.flake_name = evt.value();
                                     draft.set(next);
+                                    show_flake_callout.set(false);
                                 },
                                 option { value: "", "Select flake" }
                                 for flake_name in flake_names {
                                     option { value: "{flake_name}", "{flake_name}" }
+                                }
+                            }
+                            if show_flake_callout() {
+                                p {
+                                    "data-testid": "setup-coach-system-field-flake",
+                                    style: "background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:8px; padding:6px 8px; color:#dbeafe; font-size:12px;",
+                                    "Select the flake source this system should evaluate and deploy from."
                                 }
                             }
                         }

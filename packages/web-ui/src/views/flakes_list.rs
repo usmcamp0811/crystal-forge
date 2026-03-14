@@ -468,7 +468,7 @@ pub fn FlakesListView() -> Element {
                         "Sync from Source"
                     }
                     div {
-                        class: "relative",
+                        class: "relative z-[2101]",
                         button {
                             class: if from_setup() && !*show_add_form.read() {
                                 "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN} animate-pulse ring-2 ring-blue-300/70 ring-offset-2 ring-offset-slate-950"
@@ -489,7 +489,7 @@ pub fn FlakesListView() -> Element {
                         if from_setup() && !*show_add_form.read() {
                             div {
                                 "data-testid": "setup-coach-flakes-target-callout",
-                                style: "position:absolute; right:0; top:calc(100% + 10px); background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; width:220px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                style: "position:absolute; z-index:2200; right:0; top:calc(100% + 10px); background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; width:220px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
                                 div {
                                     style: "position:absolute; top:-6px; right:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
                                 }
@@ -531,6 +531,7 @@ pub fn FlakesListView() -> Element {
                 AddFlakeForm {
                     draft: draft,
                     error: add_error,
+                    show_onboarding_callouts: from_setup(),
                     on_cancel: move |_| {
                         draft.set(NewFlakeDraft {
                             name: String::new(),
@@ -1658,9 +1659,14 @@ fn FriendlyDiffViewer(diff: String) -> Element {
 fn AddFlakeForm(
     draft: Signal<NewFlakeDraft>,
     error: Signal<Option<String>>,
+    show_onboarding_callouts: bool,
     on_submit: EventHandler<()>,
     on_cancel: EventHandler<()>,
 ) -> Element {
+    let mut show_name_callout = use_signal(|| show_onboarding_callouts);
+    let mut show_repo_callout = use_signal(|| show_onboarding_callouts);
+    let mut show_branch_callout = use_signal(|| show_onboarding_callouts);
+
     rsx! {
         Card {
             title: Some("Register Flake".to_string()),
@@ -1680,11 +1686,20 @@ fn AddFlakeForm(
                                 class: "w-full rounded-lg px-3 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
                                 value: "{draft.read().name}",
                                 placeholder: "prod-core",
+                                onfocus: move |_| show_name_callout.set(false),
                                 oninput: move |evt| {
                                     let mut next = draft.read().clone();
                                     next.name = evt.value();
                                     draft.set(next);
+                                    show_name_callout.set(false);
                                 },
+                            }
+                            if show_name_callout() {
+                                p {
+                                    "data-testid": "setup-coach-flake-field-name",
+                                    style: "background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:8px; padding:6px 8px; color:#dbeafe; font-size:12px;",
+                                    "Use a stable name admins will recognize (for example: prod-core or edge-fleet)."
+                                }
                             }
                         }
                         label {
@@ -1694,11 +1709,20 @@ fn AddFlakeForm(
                                 class: "w-full rounded-lg px-3 py-2 text-sm font-mono {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
                                 value: "{draft.read().repo_url}",
                                 placeholder: "https://github.com/org/repo",
+                                onfocus: move |_| show_repo_callout.set(false),
                                 oninput: move |evt| {
                                     let mut next = draft.read().clone();
                                     next.repo_url = evt.value();
                                     draft.set(next);
+                                    show_repo_callout.set(false);
                                 },
+                            }
+                            if show_repo_callout() {
+                                p {
+                                    "data-testid": "setup-coach-flake-field-repo",
+                                    style: "background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:8px; padding:6px 8px; color:#dbeafe; font-size:12px;",
+                                    "Point to the Git repository that contains your flake outputs for systems to deploy."
+                                }
                             }
                         }
                         label {
@@ -1708,11 +1732,20 @@ fn AddFlakeForm(
                                 class: "w-full rounded-lg px-3 py-2 text-sm font-mono {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
                                 value: "{draft.read().branch}",
                                 placeholder: "main",
+                                onfocus: move |_| show_branch_callout.set(false),
                                 oninput: move |evt| {
                                     let mut next = draft.read().clone();
                                     next.branch = evt.value();
                                     draft.set(next);
+                                    show_branch_callout.set(false);
                                 },
+                            }
+                            if show_branch_callout() {
+                                p {
+                                    "data-testid": "setup-coach-flake-field-branch",
+                                    style: "background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:8px; padding:6px 8px; color:#dbeafe; font-size:12px;",
+                                    "Optional: pick a branch if deployments should track something other than the repo default."
+                                }
                             }
                         }
                     }

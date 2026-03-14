@@ -334,6 +334,7 @@ pub fn SystemsListView() -> Element {
                 AddSystemForm {
                     draft: draft,
                     error: add_error,
+                    show_onboarding_callouts: from_setup(),
                     on_cancel: move |_| {
                         draft.set(NewSystemDraft::new());
                         add_error.set(None);
