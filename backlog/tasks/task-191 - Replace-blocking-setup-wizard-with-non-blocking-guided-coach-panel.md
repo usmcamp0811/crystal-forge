@@ -4,7 +4,7 @@ title: Replace blocking setup wizard with non-blocking guided coach panel
 status: Review
 assignee: []
 created_date: '2026-03-14 13:17'
-updated_date: '2026-03-14 15:35'
+updated_date: '2026-03-14 16:04'
 labels:
   - frontend
   - ux
@@ -200,4 +200,14 @@ Verification: `nix develop -c cargo test setup_progress_cache_step_accepts_globa
 Verification: `nix build .#checks.x86_64-linux.web-ui -L` passed (37/37).
 
 Pushed follow-up commit: 41e5f78a to MR !165.
+
+Fixed systems page target callout layering so it renders above health/deployment filter dropdown overlays.
+
+Applied stacking-context update in `packages/web-ui/src/views/systems_list.rs` (`relative z-40` container + callout `z-index:70`).
+
+Verification: `nix develop -c cargo check` (packages/web-ui) passed.
+
+Verification: `nix build .#checks.x86_64-linux.web-ui -L` passed (37/37).
+
+Pushed follow-up commit: 6cefdb1c to MR !165.
 <!-- SECTION:NOTES:END -->
