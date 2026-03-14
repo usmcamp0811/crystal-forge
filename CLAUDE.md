@@ -275,6 +275,9 @@ YOU MUST STOP AND REPORT.
 Verification MUST be proportional to the task.
 
 You MUST choose verification commands that are sufficient to prove the acceptance criteria, while minimizing unnecessary work.
+If you are working a UI feature you MUST capture a screenshot of the new feature in your MR; this screenshot MUST come from
+the `web-ui` check. If the check does not capture the feature the `web-ui` check must be updated to do so. If possible 
+the `web-ui` check SHOULD assert that the intended UI functionality occurs.
 
 ## TIER 0: FAST LOCAL CONFIDENCE (DEFAULT DURING IMPLEMENTATION)
 
