@@ -17,10 +17,17 @@ use crate::routes::Route;
 use crate::theme;
 
 fn came_from_setup() -> bool {
-    web_sys::window()
-        .and_then(|w| w.location().search().ok())
-        .map(|q| q.contains("from=setup"))
-        .unwrap_or(false)
+    if let Some(storage) = web_sys::window()
+        .and_then(|w| w.local_storage().ok())
+        .flatten()
+    {
+        let flag = storage.get_item("cf.from_setup").ok().flatten();
+        if flag.as_deref() == Some("1") {
+            let _ = storage.remove_item("cf.from_setup");
+            return true;
+        }
+    }
+    false
 }
 
 #[component]

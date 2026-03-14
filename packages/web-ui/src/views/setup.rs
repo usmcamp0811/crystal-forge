@@ -482,9 +482,22 @@ fn StepPanel(props: StepPanelProps) -> Element {
                     "Mark as understood"
                 }
             } else {
-                a {
+                button {
                     class: "inline-flex rounded-lg px-3 py-2 text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}",
-                    href: "{href}?from=setup",
+                    onclick: move |_| {
+                        // Store a flag in localStorage so the destination view
+                        // knows the user came from the wizard (Dioxus router
+                        // strips query params so ?from=setup doesn't survive).
+                        if let Some(storage) = web_sys::window()
+                            .and_then(|w| w.local_storage().ok())
+                            .flatten()
+                        {
+                            let _ = storage.set_item("cf.from_setup", "1");
+                        }
+                        if let Some(window) = web_sys::window() {
+                            let _ = window.location().set_href(href);
+                        }
+                    },
                     "Open related page →"
                 }
             }
