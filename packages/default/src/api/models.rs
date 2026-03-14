@@ -666,6 +666,34 @@ pub struct OidcGroupMapping {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetupWizardStepStatus {
+    pub complete: bool,
+    pub count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetupWizardProgressResponse {
+    pub dismissed: bool,
+    pub agent_acknowledged: bool,
+    pub environment: SetupWizardStepStatus,
+    pub flake: SetupWizardStepStatus,
+    pub builder: SetupWizardStepStatus,
+    pub cache: SetupWizardStepStatus,
+    pub system: SetupWizardStepStatus,
+    pub all_required_complete: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetupWizardDismissRequest {
+    pub dismissed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetupWizardAcknowledgeAgentRequest {
+    pub acknowledged: bool,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Error Response
 // ─────────────────────────────────────────────────────────────────────────────

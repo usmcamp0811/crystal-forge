@@ -130,6 +130,58 @@ pub async fn update_password_hash_by_user_id(
         .bind(password_hash)
         .bind(user_id)
         .execute(pool)
-        .await?;
+    .await?;
+    Ok(())
+}
+
+pub async fn get_setup_wizard_dismissed(pool: &PgPool, user_id: Uuid) -> Result<bool> {
+    let value = sqlx::query_scalar::<_, bool>(
+        "SELECT COALESCE(setup_wizard_dismissed, false) FROM users WHERE id = $1",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?
+    .unwrap_or(false);
+
+    Ok(value)
+}
+
+pub async fn set_setup_wizard_dismissed(pool: &PgPool, user_id: Uuid, dismissed: bool) -> Result<()> {
+    sqlx::query(
+        "UPDATE users SET setup_wizard_dismissed = $1, updated_at = NOW() WHERE id = $2",
+    )
+    .bind(dismissed)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+pub async fn get_setup_wizard_agent_acknowledged(pool: &PgPool, user_id: Uuid) -> Result<bool> {
+    let value = sqlx::query_scalar::<_, bool>(
+        "SELECT COALESCE(setup_wizard_agent_acknowledged, false) FROM users WHERE id = $1",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?
+    .unwrap_or(false);
+
+    Ok(value)
+}
+
+pub async fn set_setup_wizard_agent_acknowledged(
+    pool: &PgPool,
+    user_id: Uuid,
+    acknowledged: bool,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE users SET setup_wizard_agent_acknowledged = $1, updated_at = NOW() WHERE id = $2",
+    )
+    .bind(acknowledged)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+
     Ok(())
 }

@@ -29,6 +29,20 @@ use crate::routes::Route;
 use crate::theme;
 use crate::views::systems_mock::mock_system_details;
 
+fn came_from_setup() -> bool {
+    if let Some(storage) = web_sys::window()
+        .and_then(|w| w.local_storage().ok())
+        .flatten()
+    {
+        let flag = storage.get_item("cf.from_setup").ok().flatten();
+        if flag.as_deref() == Some("1") {
+            let _ = storage.remove_item("cf.from_setup");
+            return true;
+        }
+    }
+    false
+}
+
 const VIEW_PREF_KEY: &str = "crystal_forge.flakes.view";
 const FLAKE_TABLE_SCHEMA_NOTE: &str = "flakes(name, repo_url UNIQUE, branch)";
 
@@ -352,10 +366,25 @@ pub fn FlakesListView() -> Element {
         });
     }
 
+    let from_setup = use_signal(came_from_setup);
+
     rsx! {
         div {
             class: "space-y-6",
             id: "{container_id}",
+
+            if from_setup() {
+                div {
+                    style: "background:rgba(109,40,217,0.2); border:1px solid rgba(139,92,246,0.5); border-radius:8px; padding:10px 16px; display:flex; align-items:center; justify-content:space-between; gap:12px;",
+                    span { style: "color:#e9d5ff; font-size:14px;", "← You came here from the Setup Wizard" }
+                    a {
+                        href: "/setup",
+                        style: "color:#a78bfa; font-size:13px; font-weight:500; white-space:nowrap; text-decoration:underline;",
+                        "Back to Setup Wizard"
+                    }
+                }
+            }
+
             header {
                 class: "flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between",
                 div {
