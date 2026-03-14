@@ -1,10 +1,10 @@
 ---
 id: TASK-191
 title: Replace blocking setup wizard with non-blocking guided coach panel
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-03-14 13:17'
-updated_date: '2026-03-14 13:56'
+updated_date: '2026-03-14 14:05'
 labels:
   - frontend
   - ux
@@ -136,4 +136,6 @@ Verification: `nix develop -c cargo fmt -- --check` (packages/web-ui) passed.
 Verification: `nix build .#checks.x86_64-linux.web-ui -L` passed with 37/37 screenshot steps including `09c-sidebar-mobile-drawer`.
 
 Pushed branch: TASK-191-non-blocking-onboarding-coach-panel (commit e7680a45).
+
+MR opened: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/165
 <!-- SECTION:NOTES:END -->
