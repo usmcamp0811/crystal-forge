@@ -1142,6 +1142,16 @@ pub struct BuilderDetail {
     pub assigned_environment_ids: Vec<Uuid>,
 }
 
+/// Response returned when creating a builder.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuilderCreatedResponse {
+    pub builder: BuilderDetail,
+    #[serde(default)]
+    pub private_key: Option<String>,
+    #[serde(default)]
+    pub assigned_environment_ids: Vec<Uuid>,
+}
+
 /// Create builder request
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateBuilderRequest {

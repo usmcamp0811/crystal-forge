@@ -480,7 +480,7 @@ pub async fn fetch_builder(id: &Uuid) -> Result<BuilderDetail, ApiClientError> {
 /// Create a new builder (admin only)
 pub async fn create_builder(
     request: &CreateBuilderRequest,
-) -> Result<BuilderDetail, ApiClientError> {
+) -> Result<BuilderCreatedResponse, ApiClientError> {
     let url = format!("{}/builders", base_url());
     send_json_with_csrf("POST", &url, Some(request)).await
 }
