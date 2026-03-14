@@ -4,7 +4,7 @@ title: Replace blocking setup wizard with non-blocking guided coach panel
 status: Review
 assignee: []
 created_date: '2026-03-14 13:17'
-updated_date: '2026-03-14 19:15'
+updated_date: '2026-03-14 19:38'
 labels:
   - frontend
   - ux
@@ -270,4 +270,13 @@ Verification: `nix develop -c cargo check` (packages/web-ui) passed.
 Verification: `nix build .#checks.x86_64-linux.web-ui -L` passed (37/37).
 
 Pushed follow-up commit: 987b056a to MR !165.
+
+2026-03-14: Added onboarding guidance inside Add Cache Destination modal with field-level callouts for name, endpoint, and environments, each auto-dismissing on interaction/input. Added explicit resource/concurrency warning block in Add Builder modal to prevent overload misconfiguration during first-time setup.
+
+Verification:
+- nix develop -c cargo check (packages/web-ui)
+- nix build .#checks.x86_64-linux.web-ui -L (37/37)
+
+Commit: b2eec0a1
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/165
 <!-- SECTION:NOTES:END -->
