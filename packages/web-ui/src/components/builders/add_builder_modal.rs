@@ -149,7 +149,10 @@ pub fn AddBuilderModal(
                         if show_name_callout() {
                             div {
                                 "data-testid": "setup-coach-builder-field-name",
-                                style: "margin-top:6px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                style: "position:relative; margin-top:10px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                div {
+                                    style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                }
                                 p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
                                 p { style: "margin:2px 0 0 0;", "Name this builder so operators can identify where builds run (for example: build-eu-west-1)." }
                             }
@@ -199,7 +202,10 @@ pub fn AddBuilderModal(
                             if show_public_key_callout() {
                                 div {
                                     "data-testid": "setup-coach-builder-field-public-key",
-                                    style: "margin-top:6px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                    style: "position:relative; margin-top:10px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                    div {
+                                        style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                    }
                                     p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
                                     p { style: "margin:2px 0 0 0;", "Use the builder public key from the host's Crystal Forge builder config, or generate one and install the paired private key on the builder host." }
                                 }
@@ -244,7 +250,10 @@ pub fn AddBuilderModal(
                         class: "grid grid-cols-3 gap-4",
                         div {
                             class: "col-span-3 mb-3",
-                            style: "background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                            style: "position:relative; margin-top:4px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                            div {
+                                style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                            }
                             p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
                             p { style: "margin:2px 0 0 0;", "Leave CPU or memory empty only when this host is dedicated and heavily provisioned for builder workloads." }
                             p { style: "margin:2px 0 0 0;", "Max Concurrent Jobs controls how many builds run at once. If CPU/memory are unlimited and concurrency is greater than 1, heavy builds (for example Firefox or Chromium) can exhaust resources and stall or fail repeatedly." }
@@ -353,7 +362,10 @@ pub fn AddBuilderModal(
                                     if show_environment_callout() {
                                         div {
                                             "data-testid": "setup-coach-builder-field-environments",
-                                            style: "margin-top:6px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                            style: "position:relative; margin-top:10px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                            div {
+                                                style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                            }
                                             p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
                                             p { style: "margin:2px 0 0 0;", "Select environments this builder should serve, or leave empty to allow all environments." }
                                         }

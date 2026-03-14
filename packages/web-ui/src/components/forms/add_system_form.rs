@@ -91,7 +91,10 @@ pub fn AddSystemForm(
                             if show_hostname_callout() {
                                 div {
                                     "data-testid": "setup-coach-system-field-hostname",
-                                    style: "margin-top:6px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                    style: "position:relative; margin-top:10px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                    div {
+                                        style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                    }
                                     p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
                                     p { style: "margin:2px 0 0 0;", "Set the host name used by this machine in your infrastructure config (for example: web-01)." }
                                 }
@@ -124,7 +127,10 @@ pub fn AddSystemForm(
                             if show_public_key_callout() {
                                 div {
                                     "data-testid": "setup-coach-system-field-public-key",
-                                    style: "margin-top:6px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                    style: "position:relative; margin-top:10px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                    div {
+                                        style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                    }
                                     p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
                                     p { style: "margin:2px 0 0 0;", "Paste the Crystal Forge agent public key for this host, or generate one and install its private key on the target machine." }
                                 }
@@ -152,7 +158,10 @@ pub fn AddSystemForm(
                             if show_environment_callout() {
                                 div {
                                     "data-testid": "setup-coach-system-field-environment",
-                                    style: "margin-top:6px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                    style: "position:relative; margin-top:10px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                    div {
+                                        style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                    }
                                     p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
                                     p { style: "margin:2px 0 0 0;", "Choose where this system belongs (for example staging or production) so policies and deployments target it correctly." }
                                 }
@@ -180,7 +189,10 @@ pub fn AddSystemForm(
                             if show_flake_callout() {
                                 div {
                                     "data-testid": "setup-coach-system-field-flake",
-                                    style: "margin-top:6px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                    style: "position:relative; margin-top:10px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                    div {
+                                        style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                    }
                                     p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
                                     p { style: "margin:2px 0 0 0;", "Select the flake source this system should evaluate and deploy from." }
                                 }

@@ -1697,7 +1697,10 @@ fn AddFlakeForm(
                             if show_name_callout() {
                                 div {
                                     "data-testid": "setup-coach-flake-field-name",
-                                    style: "margin-top:6px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                    style: "position:relative; margin-top:10px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                    div {
+                                        style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                    }
                                     p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
                                     p { style: "margin:2px 0 0 0;", "Use a stable name admins will recognize (for example: prod-core or edge-fleet)." }
                                 }
@@ -1721,7 +1724,10 @@ fn AddFlakeForm(
                             if show_repo_callout() {
                                 div {
                                     "data-testid": "setup-coach-flake-field-repo",
-                                    style: "margin-top:6px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                    style: "position:relative; margin-top:10px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                    div {
+                                        style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                    }
                                     p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
                                     p { style: "margin:2px 0 0 0;", "Point to the Git repository that contains your flake outputs for systems to deploy." }
                                 }
@@ -1745,7 +1751,10 @@ fn AddFlakeForm(
                             if show_branch_callout() {
                                 div {
                                     "data-testid": "setup-coach-flake-field-branch",
-                                    style: "margin-top:6px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                    style: "position:relative; margin-top:10px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                    div {
+                                        style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                    }
                                     p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
                                     p { style: "margin:2px 0 0 0;", "Optional: pick a branch if deployments should track something other than the repo default." }
                                 }

@@ -276,7 +276,10 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
                                 if show_cache_name_callout() {
                                     div {
                                         "data-testid": "setup-coach-cache-field-name",
-                                        style: "margin-top:6px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                        style: "position:relative; margin-top:10px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                        div {
+                                            style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                        }
                                         p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
                                         p { style: "margin:2px 0 0 0;", "Choose a clear cache name (for example: primary-cache or edge-cache-eu) so teams know where artifacts are published." }
                                     }
@@ -356,7 +359,10 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
                                     if show_cache_endpoint_callout() {
                                         div {
                                             "data-testid": "setup-coach-cache-field-endpoint",
-                                            style: "margin-top:6px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                            style: "position:relative; margin-top:10px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                            div {
+                                                style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                            }
                                             p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
                                             p { style: "margin:2px 0 0 0;", "Set the cache server endpoint that systems/builders will push artifacts to." }
                                         }
@@ -447,7 +453,10 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
                                     if show_cache_endpoint_callout() {
                                         div {
                                             "data-testid": "setup-coach-cache-field-endpoint",
-                                            style: "margin-top:6px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                            style: "position:relative; margin-top:10px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                            div {
+                                                style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                            }
                                             p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
                                             p { style: "margin:2px 0 0 0;", "Use the full cache destination URL (HTTP/S or S3) where artifacts should be uploaded." }
                                         }
@@ -650,7 +659,10 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
                                     if show_cache_env_callout() {
                                         div {
                                             "data-testid": "setup-coach-cache-field-environments",
-                                            style: "margin-top:6px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                            style: "position:relative; margin-top:10px; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                            div {
+                                                style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                            }
                                             p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
                                             p { style: "margin:2px 0 0 0;", "Choose specific environments for targeted cache routing, or leave empty to make this a global cache for all environments." }
                                         }
