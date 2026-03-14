@@ -4,7 +4,7 @@ title: Replace blocking setup wizard with non-blocking guided coach panel
 status: Review
 assignee: []
 created_date: '2026-03-14 13:17'
-updated_date: '2026-03-14 22:10'
+updated_date: '2026-03-14 23:00'
 labels:
   - frontend
   - ux
@@ -368,5 +368,14 @@ Verification:
 - nix build .#checks.x86_64-linux.web-ui -L (37/37)
 
 Commit: b2dc40e8
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/165
+
+2026-03-14: Refined Add Cache Destination modal guidance to progressive first-time flow and added missing cache-type onboarding guidance. Callouts now sequence by relevance as users fill the form: Name -> Type -> Endpoint -> Environments. Added new Cache Type callout explaining backend options (Nix/Http/S3/Attic). Endpoint handlers now dismiss type callout and reveal environments guidance only after endpoint input begins. Close/cancel actions clear all cache modal callout states.
+
+Verification:
+- nix develop -c cargo check (packages/web-ui)
+- nix build .#checks.x86_64-linux.web-ui -L (37/37)
+
+Commit: e21f38d8
 MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/165
 <!-- SECTION:NOTES:END -->
