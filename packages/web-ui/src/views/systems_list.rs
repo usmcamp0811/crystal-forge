@@ -8,6 +8,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
 use web_sys::{Node, window};
 
+use crate::api::client::set_setup_wizard_agent_acknowledged;
 use crate::api::models::{
     CveSummary, DeploymentStatus, HealthStatus, PipelineStage, SystemSummary, SystemsListParams,
 };
@@ -28,6 +29,20 @@ use crate::systems::adapter::{
     load_flake_names_with_fallback, load_systems_with_fallback, update_system_public_key_via_api,
 };
 use crate::theme;
+
+fn came_from_setup() -> bool {
+    if let Some(storage) = web_sys::window()
+        .and_then(|w| w.local_storage().ok())
+        .flatten()
+    {
+        let flag = storage.get_item("cf.from_setup").ok().flatten();
+        if flag.as_deref() == Some("1") {
+            let _ = storage.remove_item("cf.from_setup");
+            return true;
+        }
+    }
+    false
+}
 
 #[path = "systems_list_helpers.rs"]
 mod systems_list_helpers;
@@ -167,6 +182,7 @@ pub fn SystemsListView() -> Element {
     let mut show_key_modal = use_signal(|| false);
     let mut generated_keys = use_signal(|| None::<GeneratedKeyPair>);
     let mut update_key_error = use_signal(|| None::<String>);
+    let mut onboarding_agent_reminder = use_signal(|| None::<String>);
 
     let current_systems = local_systems.read().clone();
     let environments = unique_environments(&current_systems);
@@ -191,10 +207,47 @@ pub fn SystemsListView() -> Element {
 
     let registered_flakes_for_submit = registered_flakes.clone();
 
+    let from_setup = use_signal(came_from_setup);
+    let mut dismiss_add_target_callout = use_signal(|| false);
+
     rsx! {
         div {
             class: "space-y-6",
             id: "{container_id}",
+
+            if from_setup() {
+                div {
+                    "data-testid": "setup-coach-systems-callout",
+                    style: "background:rgba(30,58,138,0.22); border:1px solid rgba(96,165,250,0.55); border-radius:8px; padding:12px 16px;",
+                    div {
+                        style: "display:flex; flex-direction:column; gap:6px;",
+                        p { style: "color:#dbeafe; font-size:12px; font-weight:700; margin:0; letter-spacing:0.03em; text-transform:uppercase;", "Setup Tour - Step 5 of 6" }
+                        p { style: "color:#dbeafe; font-size:14px; font-weight:600; margin:0;", "Register a system and its agent" }
+                        p { style: "color:#bfdbfe; font-size:13px; margin:0;", "Use Add System to register a machine in this fleet and connect it to environment + flake." }
+                        p { style: "color:#93c5fd; font-size:12px; margin:0;", "Agents are lightweight clients installed on systems so Crystal Forge can evaluate and apply deployments." }
+                    }
+                }
+            }
+
+            if let Some(ref reminder) = *onboarding_agent_reminder.read() {
+                div {
+                    "data-testid": "setup-coach-agent-runtime-reminder-modal",
+                    style: "position:fixed; inset:0; z-index:90; background:rgba(2,6,23,0.62); display:flex; align-items:center; justify-content:center; padding:16px;",
+                    div {
+                        style: "width:min(620px, 100%); border:2px solid rgba(59,130,246,0.75); background:linear-gradient(160deg, rgba(30,41,59,0.98), rgba(30,64,175,0.94)); border-radius:14px; box-shadow:0 18px 46px rgba(15,23,42,0.65); padding:18px 18px 16px 18px;",
+                        p { style: "margin:0; color:#bfdbfe; font-weight:800; font-size:12px; letter-spacing:0.05em; text-transform:uppercase;", "Agent activation required" }
+                        p { style: "margin:8px 0 0 0; color:#eff6ff; font-size:14px; line-height:1.45;", "{reminder}" }
+                        div {
+                            style: "margin-top:14px; display:flex; justify-content:flex-end;",
+                            button {
+                                class: "px-3 py-2 rounded-lg text-sm font-semibold text-white {theme::interactive::PRIMARY_BTN}",
+                                onclick: move |_| onboarding_agent_reminder.set(None),
+                                "Got it"
+                            }
+                        }
+                    }
+                }
+            }
 
             // API fallback notice banner (shown when using mock data)
             if let Some(ref notice) = *api_notice.read() {
@@ -240,14 +293,35 @@ pub fn SystemsListView() -> Element {
                 }
                 div {
                     class: "flex items-center gap-3",
-                    button {
-                        class: "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}",
-                        onclick: move |_| {
-                            let next = !*show_add_form.read();
-                            show_add_form.set(next);
-                            add_error.set(None);
-                        },
-                        if *show_add_form.read() { "Close" } else { "Add System" }
+                    div {
+                        class: "relative z-40",
+                        button {
+                            class: if from_setup() && !*show_add_form.read() {
+                                "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN} animate-pulse ring-2 ring-blue-300/70 ring-offset-2 ring-offset-slate-950"
+                            } else {
+                                "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}"
+                            },
+                            onclick: move |_| {
+                                let next = !*show_add_form.read();
+                                show_add_form.set(next);
+                                add_error.set(None);
+                                if next {
+                                    dismiss_add_target_callout.set(true);
+                                }
+                            },
+                            if *show_add_form.read() { "Close" } else { "Add System" }
+                        }
+                        if from_setup() && !*show_add_form.read() && !dismiss_add_target_callout() {
+                            div {
+                                "data-testid": "setup-coach-systems-target-callout",
+                                style: "position:absolute; z-index:70; right:0; top:calc(100% + 10px); background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; width:220px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                div {
+                                    style: "position:absolute; top:-6px; right:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                }
+                                p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
+                                p { style: "margin:2px 0 0 0;", "Click Add System to register your first managed machine." }
+                            }
+                        }
                     }
                     ViewToggle {
                         view_mode: *view_mode.read(),
@@ -264,6 +338,8 @@ pub fn SystemsListView() -> Element {
                 AddSystemForm {
                     draft: draft,
                     error: add_error,
+                    show_onboarding_callouts: from_setup(),
+                    key_modal_open: *show_key_modal.read(),
                     on_cancel: move |_| {
                         draft.set(NewSystemDraft::new());
                         add_error.set(None);
@@ -275,6 +351,8 @@ pub fn SystemsListView() -> Element {
                             add_error.set(Some(message));
                             return;
                         }
+                        let from_setup_active = from_setup();
+                        let first_system_in_setup = from_setup_active && local_systems.read().is_empty();
 
                         // Call backend API to create the system
                         spawn(async move {
@@ -308,6 +386,12 @@ pub fn SystemsListView() -> Element {
                                     draft.set(NewSystemDraft::new());
                                     add_error.set(None);
                                     show_add_form.set(false);
+                                    if first_system_in_setup {
+                                        let _ = set_setup_wizard_agent_acknowledged(true).await;
+                                        onboarding_agent_reminder.set(Some(
+                                            "System record created. Next, ensure this host config enables the Crystal Forge agent module, apply/rebuild that config, and confirm the agent service is running before expecting heartbeats or deployment status.".to_string(),
+                                        ));
+                                    }
                                 }
                                 Err(error_message) => {
                                     add_error.set(Some(error_message));

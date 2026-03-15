@@ -980,6 +980,34 @@ pub struct AdminUpdateUserRequest {
     pub password: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetupWizardStepStatus {
+    pub complete: bool,
+    pub count: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetupWizardProgressResponse {
+    pub dismissed: bool,
+    pub agent_acknowledged: bool,
+    pub environment: SetupWizardStepStatus,
+    pub flake: SetupWizardStepStatus,
+    pub builder: SetupWizardStepStatus,
+    pub cache: SetupWizardStepStatus,
+    pub system: SetupWizardStepStatus,
+    pub all_required_complete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetupWizardDismissRequest {
+    pub dismissed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetupWizardAcknowledgeAgentRequest {
+    pub acknowledged: bool,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Development Auth DTOs
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1110,6 +1138,16 @@ pub struct BuilderDetail {
     pub last_heartbeat_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub assigned_environment_ids: Vec<Uuid>,
+}
+
+/// Response returned when creating a builder.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuilderCreatedResponse {
+    pub builder: BuilderDetail,
+    #[serde(default)]
+    pub private_key: Option<String>,
     #[serde(default)]
     pub assigned_environment_ids: Vec<Uuid>,
 }

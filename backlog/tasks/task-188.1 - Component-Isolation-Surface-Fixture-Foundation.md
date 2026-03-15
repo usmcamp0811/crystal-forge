@@ -1,10 +1,10 @@
 ---
 id: TASK-188.1
 title: Component Isolation Surface + Fixture Foundation
-status: Review
+status: In Progress
 assignee: []
 created_date: '2026-03-13 01:51'
-updated_date: '2026-03-13 12:24'
+updated_date: '2026-03-13 02:56'
 labels:
   - frontend
   - ux
@@ -82,13 +82,13 @@ Medium — foundational structural changes; additive but can impact developer wo
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [x] #1 A canonical in-repo component isolation surface is implemented and routed (expanded `/style-guide` or dedicated showcase route).
-- [x] #2 The isolation surface has a structured navigation taxonomy for at least: primitives, composites, and page-widgets.
-- [x] #3 A shared typed fixture strategy is implemented in a centralized location and used by showcase demos.
-- [x] #4 A reusable state-matrix shell/pattern exists to display component states consistently.
-- [x] #5 A reusable responsive preview wrapper exists to test at least mobile and desktop breakpoints.
-- [x] #6 The isolation surface is discoverable from UI navigation or clearly linked from contributor-facing docs.
-- [x] #7 The isolation foundation compiles and runs without introducing regressions to existing routes/views.
+- [ ] #1 A canonical in-repo component isolation surface is implemented and routed (expanded `/style-guide` or dedicated showcase route).
+- [ ] #2 The isolation surface has a structured navigation taxonomy for at least: primitives, composites, and page-widgets.
+- [ ] #3 A shared typed fixture strategy is implemented in a centralized location and used by showcase demos.
+- [ ] #4 A reusable state-matrix shell/pattern exists to display component states consistently.
+- [ ] #5 A reusable responsive preview wrapper exists to test at least mobile and desktop breakpoints.
+- [ ] #6 The isolation surface is discoverable from UI navigation or clearly linked from contributor-facing docs.
+- [ ] #7 The isolation foundation compiles and runs without introducing regressions to existing routes/views.
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -107,20 +107,4 @@ Verification run:
 - `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml` ✅
 
 - `nix build .#checks.x86_64-linux.web-ui` ✅
-
-MR opened: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/162
-
-Branch: `TASK-188.1-component-isolation-foundation`
-
-Commit: `72aa84ef`
-
-Verification executed:
-
-- `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml` ✅
-
-- `nix build .#checks.x86_64-linux.web-ui` ✅
-
-- `nix flake check` ✅
-
-UI screenshot attached to MR via GitLab uploads API (`13-style-guide.png`).
 <!-- SECTION:NOTES:END -->

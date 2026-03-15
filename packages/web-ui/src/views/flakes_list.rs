@@ -29,6 +29,20 @@ use crate::routes::Route;
 use crate::theme;
 use crate::views::systems_mock::mock_system_details;
 
+fn came_from_setup() -> bool {
+    if let Some(storage) = web_sys::window()
+        .and_then(|w| w.local_storage().ok())
+        .flatten()
+    {
+        let flag = storage.get_item("cf.from_setup").ok().flatten();
+        if flag.as_deref() == Some("1") {
+            let _ = storage.remove_item("cf.from_setup");
+            return true;
+        }
+    }
+    false
+}
+
 const VIEW_PREF_KEY: &str = "crystal_forge.flakes.view";
 const FLAKE_TABLE_SCHEMA_NOTE: &str = "flakes(name, repo_url UNIQUE, branch)";
 
@@ -352,10 +366,24 @@ pub fn FlakesListView() -> Element {
         });
     }
 
+    let from_setup = use_signal(came_from_setup);
+    let mut dismiss_add_target_callout = use_signal(|| false);
+
     rsx! {
         div {
             class: "space-y-6",
             id: "{container_id}",
+
+            if from_setup() {
+                div {
+                    "data-testid": "setup-coach-flakes-callout",
+                    style: "background:rgba(30,58,138,0.22); border:1px solid rgba(96,165,250,0.55); border-radius:8px; padding:12px 16px;",
+                    p { style: "color:#dbeafe; font-size:12px; font-weight:700; margin:0; letter-spacing:0.03em; text-transform:uppercase;", "Setup Tour - Step 2 of 6" }
+                    p { style: "color:#dbeafe; font-size:14px; font-weight:600; margin:4px 0 0 0;", "Register a flake source" }
+                    p { style: "color:#bfdbfe; font-size:13px; margin:4px 0 0 0;", "Use Add Flake to track the repo and branch your systems should deploy." }
+                }
+            }
+
             header {
                 class: "flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between",
                 div {
@@ -440,17 +468,38 @@ pub fn FlakesListView() -> Element {
                         },
                         "Sync from Source"
                     }
-                    button {
-                        class: "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}",
-                        onclick: move |_| {
-                            let next = !*show_add_form.read();
-                            show_add_form.set(next);
-                            add_error.set(None);
-                        },
-                        if *show_add_form.read() {
-                            "Close"
-                        } else {
-                            "Add Flake"
+                    div {
+                        class: "relative z-[2101]",
+                        button {
+                            class: if from_setup() && !*show_add_form.read() {
+                                "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN} animate-pulse ring-2 ring-blue-300/70 ring-offset-2 ring-offset-slate-950"
+                            } else {
+                                "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}"
+                            },
+                            onclick: move |_| {
+                                let next = !*show_add_form.read();
+                                show_add_form.set(next);
+                                add_error.set(None);
+                                if next {
+                                    dismiss_add_target_callout.set(true);
+                                }
+                            },
+                            if *show_add_form.read() {
+                                "Close"
+                            } else {
+                                "Add Flake"
+                            }
+                        }
+                        if from_setup() && !*show_add_form.read() && !dismiss_add_target_callout() {
+                            div {
+                                "data-testid": "setup-coach-flakes-target-callout",
+                                style: "position:absolute; z-index:2200; right:0; top:calc(100% + 10px); background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; width:220px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                div {
+                                    style: "position:absolute; top:-6px; right:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                }
+                                p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
+                                p { style: "margin:2px 0 0 0;", "Click Add Flake to register your source repository." }
+                            }
                         }
                     }
                     ViewToggle {
@@ -486,6 +535,7 @@ pub fn FlakesListView() -> Element {
                 AddFlakeForm {
                     draft: draft,
                     error: add_error,
+                    show_onboarding_callouts: from_setup(),
                     on_cancel: move |_| {
                         draft.set(NewFlakeDraft {
                             name: String::new(),
@@ -1613,9 +1663,14 @@ fn FriendlyDiffViewer(diff: String) -> Element {
 fn AddFlakeForm(
     draft: Signal<NewFlakeDraft>,
     error: Signal<Option<String>>,
+    show_onboarding_callouts: bool,
     on_submit: EventHandler<()>,
     on_cancel: EventHandler<()>,
 ) -> Element {
+    let mut show_name_callout = use_signal(|| show_onboarding_callouts);
+    let mut show_repo_callout = use_signal(|| show_onboarding_callouts);
+    let mut show_branch_callout = use_signal(|| show_onboarding_callouts);
+
     rsx! {
         Card {
             title: Some("Register Flake".to_string()),
@@ -1629,45 +1684,91 @@ fn AddFlakeForm(
                     div {
                         class: "grid grid-cols-1 md:grid-cols-3 gap-4",
                         label {
-                            class: "space-y-2",
+                            class: "relative block space-y-2 overflow-visible",
                             span { class: "text-xs uppercase tracking-wide text-gray-500", "Flake Name" }
                             input {
                                 class: "w-full rounded-lg px-3 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
                                 value: "{draft.read().name}",
                                 placeholder: "prod-core",
+                                onfocus: move |_| show_name_callout.set(false),
                                 oninput: move |evt| {
                                     let mut next = draft.read().clone();
                                     next.name = evt.value();
                                     draft.set(next);
+                                    show_name_callout.set(false);
                                 },
+                            }
+                            if show_name_callout() && draft.read().name.trim().is_empty() {
+                                div {
+                                    "data-testid": "setup-coach-flake-field-name",
+                                    style: "position:absolute; left:0; top:calc(100% + 8px); width:min(340px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                    div {
+                                        style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                    }
+                                    p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
+                                    p { style: "margin:2px 0 0 0;", "Use a stable name admins will recognize (for example: prod-core or edge-fleet)." }
+                                }
                             }
                         }
                         label {
-                            class: "space-y-2",
+                            class: "relative block space-y-2 overflow-visible",
                             span { class: "text-xs uppercase tracking-wide text-gray-500", "Repository URL" }
                             input {
                                 class: "w-full rounded-lg px-3 py-2 text-sm font-mono {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
                                 value: "{draft.read().repo_url}",
                                 placeholder: "https://github.com/org/repo",
+                                onfocus: move |_| show_repo_callout.set(false),
                                 oninput: move |evt| {
                                     let mut next = draft.read().clone();
                                     next.repo_url = evt.value();
                                     draft.set(next);
+                                    show_repo_callout.set(false);
                                 },
+                            }
+                            if show_repo_callout()
+                                && !draft.read().name.trim().is_empty()
+                                && draft.read().repo_url.trim().is_empty()
+                            {
+                                div {
+                                    "data-testid": "setup-coach-flake-field-repo",
+                                    style: "position:absolute; left:0; top:calc(100% + 8px); width:min(340px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                    div {
+                                        style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                    }
+                                    p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
+                                    p { style: "margin:2px 0 0 0;", "Point to the Git repository that contains your flake outputs for systems to deploy." }
+                                }
                             }
                         }
                         label {
-                            class: "space-y-2",
+                            class: "relative block space-y-2 overflow-visible",
                             span { class: "text-xs uppercase tracking-wide text-gray-500", "Branch (optional)" }
                             input {
                                 class: "w-full rounded-lg px-3 py-2 text-sm font-mono {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
                                 value: "{draft.read().branch}",
                                 placeholder: "main",
+                                onfocus: move |_| show_branch_callout.set(false),
                                 oninput: move |evt| {
                                     let mut next = draft.read().clone();
                                     next.branch = evt.value();
                                     draft.set(next);
+                                    show_branch_callout.set(false);
                                 },
+                            }
+                            if show_branch_callout()
+                                && !draft.read().name.trim().is_empty()
+                                && !draft.read().repo_url.trim().is_empty()
+                                && draft.read().branch.trim().is_empty()
+                            {
+                                div {
+                                    "data-testid": "setup-coach-flake-field-branch",
+                                    style: "position:absolute; left:0; top:calc(100% + 8px); width:min(340px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                    div {
+                                        style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                    }
+                                    p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
+                                    p { style: "margin:2px 0 0 0;", "Optional: pick a branch if deployments should track something other than the repo default." }
+                                }
                             }
                         }
                     }

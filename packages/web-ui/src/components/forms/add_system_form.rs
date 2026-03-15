@@ -52,7 +52,17 @@ pub fn AddSystemForm(
     environments: Vec<String>,
     /// Available flake names
     flake_names: Vec<String>,
+    /// Whether onboarding field callouts should be shown
+    show_onboarding_callouts: bool,
+    /// Whether the key generation modal is currently open (suppresses callouts while open)
+    #[props(default = false)]
+    key_modal_open: bool,
 ) -> Element {
+    let mut show_hostname_callout = use_signal(|| show_onboarding_callouts);
+    let mut show_public_key_callout = use_signal(|| show_onboarding_callouts);
+    let mut show_environment_callout = use_signal(|| show_onboarding_callouts);
+    let mut show_flake_callout = use_signal(|| show_onboarding_callouts);
+
     rsx! {
         crate::components::layout::Card {
             title: Some("Register System".to_string()),
@@ -67,22 +77,35 @@ pub fn AddSystemForm(
                         class: "grid grid-cols-1 md:grid-cols-2 gap-4",
                         // Hostname
                         label {
-                            class: "space-y-2",
+                            class: "relative block space-y-2 overflow-visible",
                             span { class: "text-xs uppercase tracking-wide text-gray-500", "Hostname" }
                             input {
                                 class: "w-full rounded-lg px-3 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
                                 value: "{draft.read().hostname}",
                                 placeholder: "atlas-09",
+                                onfocus: move |_| show_hostname_callout.set(false),
                                 oninput: move |evt| {
                                     let mut next = draft.read().clone();
                                     next.hostname = evt.value();
                                     draft.set(next);
+                                    show_hostname_callout.set(false);
+                                }
+                            }
+                            if show_hostname_callout() && !key_modal_open && draft.read().hostname.trim().is_empty() {
+                                div {
+                                    "data-testid": "setup-coach-system-field-hostname",
+                                    style: "position:absolute; left:0; top:calc(100% + 8px); width:min(340px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                    div {
+                                        style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                    }
+                                    p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
+                                    p { style: "margin:2px 0 0 0;", "Set the host name used by this machine in your infrastructure config (for example: web-01)." }
                                 }
                             }
                         }
                         // Public Key
                         label {
-                            class: "space-y-2",
+                            class: "relative block space-y-2 overflow-visible",
                             span { class: "text-xs uppercase tracking-wide text-gray-500", "Public Key" }
                             div {
                                 class: "flex gap-2",
@@ -90,52 +113,106 @@ pub fn AddSystemForm(
                                     class: "w-full rounded-lg px-3 py-2 text-sm font-mono {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
                                     value: "{draft.read().public_key}",
                                     placeholder: "base64 public key",
+                                    onfocus: move |_| show_public_key_callout.set(false),
                                     oninput: move |evt| {
                                         let mut next = draft.read().clone();
                                         next.public_key = evt.value();
                                         draft.set(next);
+                                        show_public_key_callout.set(false);
                                     }
                                 }
-                                button {
-                                    class: "px-3 py-2 rounded-lg text-xs font-medium border border-gray-600 text-gray-200 hover:bg-gray-700 transition",
-                                    onclick: move |_| on_generate_keys.call(()),
-                                    "Generate"
+                                 button {
+                                     class: "px-3 py-2 rounded-lg text-xs font-medium border border-gray-600 text-gray-200 hover:bg-gray-700 transition",
+                                     onclick: move |_| on_generate_keys.call(()),
+                                     "Generate"
+                                 }
+                            }
+                            if show_public_key_callout()
+                                && !key_modal_open
+                                && !draft.read().hostname.trim().is_empty()
+                                && draft.read().public_key.trim().is_empty()
+                            {
+                                div {
+                                    "data-testid": "setup-coach-system-field-public-key",
+                                    style: "position:absolute; left:0; top:calc(100% + 8px); width:min(340px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                    div {
+                                        style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                    }
+                                    p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
+                                    p { style: "margin:2px 0 0 0;", "Paste the Crystal Forge agent public key for this host, or generate one and install its private key on the target machine." }
                                 }
                             }
                         }
                         // Environment
                         label {
-                            class: "space-y-2",
+                            class: "relative block space-y-2 overflow-visible",
                             span { class: "text-xs uppercase tracking-wide text-gray-500", "Environment" }
                             select {
                                 class: "w-full rounded-lg px-3 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
                                 value: "{draft.read().environment}",
+                                onfocus: move |_| show_environment_callout.set(false),
                                 onchange: move |evt| {
                                     let mut next = draft.read().clone();
                                     next.environment = evt.value();
                                     draft.set(next);
+                                    show_environment_callout.set(false);
                                 },
                                 option { value: "", "Select environment" }
                                 for env in environments {
                                     option { value: "{env}", "{env}" }
                                 }
                             }
+                            if show_environment_callout()
+                                && !key_modal_open
+                                && !draft.read().hostname.trim().is_empty()
+                                && !draft.read().public_key.trim().is_empty()
+                                && draft.read().environment.trim().is_empty()
+                            {
+                                div {
+                                    "data-testid": "setup-coach-system-field-environment",
+                                    style: "position:absolute; left:0; top:calc(100% + 8px); width:min(340px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                    div {
+                                        style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                    }
+                                    p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
+                                    p { style: "margin:2px 0 0 0;", "Choose where this system belongs (for example staging or production) so policies and deployments target it correctly." }
+                                }
+                            }
                         }
                         // Flake Name
                         label {
-                            class: "space-y-2",
+                            class: "relative block space-y-2 overflow-visible",
                             span { class: "text-xs uppercase tracking-wide text-gray-500", "Flake Name" }
                             select {
                                 class: "w-full rounded-lg px-3 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
                                 value: "{draft.read().flake_name}",
+                                onfocus: move |_| show_flake_callout.set(false),
                                 onchange: move |evt| {
                                     let mut next = draft.read().clone();
                                     next.flake_name = evt.value();
                                     draft.set(next);
+                                    show_flake_callout.set(false);
                                 },
                                 option { value: "", "Select flake" }
                                 for flake_name in flake_names {
                                     option { value: "{flake_name}", "{flake_name}" }
+                                }
+                            }
+                            if show_flake_callout()
+                                && !key_modal_open
+                                && !draft.read().hostname.trim().is_empty()
+                                && !draft.read().public_key.trim().is_empty()
+                                && !draft.read().environment.trim().is_empty()
+                                && draft.read().flake_name.trim().is_empty()
+                            {
+                                div {
+                                    "data-testid": "setup-coach-system-field-flake",
+                                    style: "position:absolute; left:0; top:calc(100% + 8px); width:min(340px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                    div {
+                                        style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                    }
+                                    p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
+                                    p { style: "margin:2px 0 0 0;", "Select the flake source this system should evaluate and deploy from." }
                                 }
                             }
                         }

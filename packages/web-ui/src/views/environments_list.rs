@@ -16,6 +16,20 @@ use crate::environments::adapter::{
 use crate::routes::Route;
 use crate::theme;
 
+fn came_from_setup() -> bool {
+    if let Some(storage) = web_sys::window()
+        .and_then(|w| w.local_storage().ok())
+        .flatten()
+    {
+        let flag = storage.get_item("cf.from_setup").ok().flatten();
+        if flag.as_deref() == Some("1") {
+            let _ = storage.remove_item("cf.from_setup");
+            return true;
+        }
+    }
+    false
+}
+
 #[component]
 pub fn EnvironmentsListView() -> Element {
     let mut policy_library_state = use_signal(policy_library);
@@ -91,9 +105,22 @@ pub fn EnvironmentsListView() -> Element {
     let items = environments.read().clone();
     let policy_library_for_add = policy_library_state.read().clone();
 
+    let from_setup = use_signal(came_from_setup);
+    let mut dismiss_add_target_callout = use_signal(|| false);
+
     rsx! {
         div {
             class: "space-y-6",
+
+            if from_setup() {
+                div {
+                    "data-testid": "setup-coach-environments-callout",
+                    style: "background:rgba(30,58,138,0.22); border:1px solid rgba(96,165,250,0.55); border-radius:8px; padding:12px 16px;",
+                    p { style: "color:#dbeafe; font-size:12px; font-weight:700; margin:0; letter-spacing:0.03em; text-transform:uppercase;", "Setup Tour - Step 1 of 6" }
+                    p { style: "color:#dbeafe; font-size:14px; font-weight:600; margin:4px 0 0 0;", "Create your first environment" }
+                    p { style: "color:#bfdbfe; font-size:13px; margin:4px 0 0 0;", "Use Add Environment to define a deployment boundary like staging or production." }
+                }
+            }
 
             // API fallback notice banner
             if let Some(notice) = api_notice.read().clone() {
@@ -110,14 +137,35 @@ pub fn EnvironmentsListView() -> Element {
                     h1 { class: "{theme::typography::PAGE_TITLE}", "Environment Registry" }
                     p { class: "text-sm {theme::text::SECONDARY}", "Group systems by deployment domain and define required deployment policy baselines." }
                 }
-                button {
-                    class: "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}",
-                    onclick: move |_| {
-                        let next = !*show_add_form.read();
-                        show_add_form.set(next);
-                        add_error.set(None);
-                    },
-                    if *show_add_form.read() { "Close" } else { "Add Environment" }
+                div {
+                    class: "relative",
+                    button {
+                        class: if from_setup() && !*show_add_form.read() {
+                            "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN} animate-pulse ring-2 ring-blue-300/70 ring-offset-2 ring-offset-slate-950"
+                        } else {
+                            "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}"
+                        },
+                        onclick: move |_| {
+                            let next = !*show_add_form.read();
+                            show_add_form.set(next);
+                            add_error.set(None);
+                            if next {
+                                dismiss_add_target_callout.set(true);
+                            }
+                        },
+                        if *show_add_form.read() { "Close" } else { "Add Environment" }
+                    }
+                    if from_setup() && !*show_add_form.read() && !dismiss_add_target_callout() {
+                        div {
+                            "data-testid": "setup-coach-environments-target-callout",
+                            style: "position:absolute; right:0; top:calc(100% + 10px); background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; width:220px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                            div {
+                                style: "position:absolute; top:-6px; right:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                            }
+                            p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
+                            p { style: "margin:2px 0 0 0;", "Click Add Environment to create your first environment." }
+                        }
+                    }
                 }
             }
 

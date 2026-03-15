@@ -87,21 +87,7 @@ pub async fn create_builder(
         .await
         .map_err(|e| {
             tracing::error!("Failed to create builder: {}", e);
-            // Return validation errors as 400, others as 500
-            if e.to_string().contains("Invalid public key")
-                || e.to_string().contains("must be exactly 32 bytes")
-                || e.to_string().contains("Failed to decode base64")
-            {
-                (
-                    StatusCode::BAD_REQUEST,
-                    format!("Invalid public key: {}", e),
-                )
-            } else {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Failed to create builder".to_string(),
-                )
-            }
+            map_create_builder_error(&e)
         })?;
 
     // Get environment IDs for response
@@ -112,6 +98,45 @@ pub async fn create_builder(
         private_key: private_key_option,
         assigned_environment_ids,
     }))
+}
+
+fn map_create_builder_error(error: &anyhow::Error) -> (StatusCode, String) {
+    let message = error.to_string();
+
+    if message.contains("Invalid public key")
+        || message.contains("must be exactly 32 bytes")
+        || message.contains("Failed to decode base64")
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid public key: {}", error),
+        );
+    }
+
+    if message.contains("builders_name_key")
+        || (message.contains("duplicate key value violates unique constraint")
+            && message.contains("builders"))
+    {
+        return (
+            StatusCode::CONFLICT,
+            "Builder name already exists".to_string(),
+        );
+    }
+
+    if message.contains("builder_environment_assignments_environment_id_fkey")
+        || (message.contains("violates foreign key constraint")
+            && message.contains("environment_id"))
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            "One or more selected environments do not exist".to_string(),
+        );
+    }
+
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Failed to create builder".to_string(),
+    )
 }
 
 /// GET /api/v1/builders - List all builders (admin-only)
@@ -1013,6 +1038,10 @@ async fn record_build_stream_message(state: &CFState, job_id: Uuid, msg: &BuildS
 
 #[cfg(test)]
 mod tests {
+    use anyhow::anyhow;
+    use axum::http::StatusCode;
+
+    use super::map_create_builder_error;
     use super::BuildStreamMessage;
 
     #[test]
@@ -1025,5 +1054,43 @@ mod tests {
             parsed.is_err(),
             "untagged JSON should not be accepted as a valid stream frame"
         );
+    }
+
+    #[test]
+    fn create_builder_duplicate_name_maps_to_conflict() {
+        let error = anyhow!("duplicate key value violates unique constraint \"builders_name_key\"");
+        let (status, body) = map_create_builder_error(&error);
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body, "Builder name already exists");
+    }
+
+    #[test]
+    fn create_builder_invalid_environment_maps_to_bad_request() {
+        let error = anyhow!(
+            "insert or update on table \"builder_environment_assignments\" violates foreign key constraint \"builder_environment_assignments_environment_id_fkey\"",
+        );
+        let (status, body) = map_create_builder_error(&error);
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body, "One or more selected environments do not exist");
+    }
+
+    #[test]
+    fn create_builder_invalid_public_key_maps_to_bad_request() {
+        let error = anyhow!("Invalid public key format");
+        let (status, body) = map_create_builder_error(&error);
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.starts_with("Invalid public key:"));
+    }
+
+    #[test]
+    fn create_builder_unexpected_error_maps_to_internal_server_error() {
+        let error = anyhow!("database connection timeout");
+        let (status, body) = map_create_builder_error(&error);
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body, "Failed to create builder");
     }
 }

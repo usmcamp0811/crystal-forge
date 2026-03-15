@@ -4,7 +4,8 @@ use std::collections::HashMap;
 
 use crate::api::client::{
     create_admin_user, delete_admin_oidc_mapping, delete_admin_user, fetch_admin_audit_events,
-    fetch_admin_oidc_mappings, fetch_admin_users, update_admin_user, upsert_admin_oidc_mapping,
+    fetch_admin_oidc_mappings, fetch_admin_users, set_setup_wizard_dismissed, update_admin_user,
+    upsert_admin_oidc_mapping,
 };
 use crate::api::models::{
     AdminAuditEventsParams, AdminCreateUserRequest, AdminUpdateUserRequest,
@@ -17,6 +18,7 @@ const AUDIT_PER_PAGE: i64 = 20;
 
 #[component]
 pub fn AdminView() -> Element {
+    let nav = navigator();
     let mut users = use_signal(Vec::<AdminUserSummary>::new);
     let mut user_drafts = use_signal(HashMap::<String, UserEditDraft>::new);
 
@@ -136,7 +138,26 @@ pub fn AdminView() -> Element {
             class: "space-y-6",
             header {
                 class: "space-y-2",
-                h1 { class: "{theme::typography::PAGE_TITLE}", "Server Management" }
+                div {
+                    class: "flex flex-wrap items-center justify-between gap-2",
+                    h1 { class: "{theme::typography::PAGE_TITLE}", "Server Management" }
+                    button {
+                        class: "rounded-lg px-3 py-2 text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}",
+                        onclick: move |_| {
+                            spawn(async move {
+                                let _ = set_setup_wizard_dismissed(false).await;
+                                if let Some(storage) = web_sys::window()
+                                    .and_then(|w| w.local_storage().ok())
+                                    .flatten()
+                                {
+                                    let _ = storage.set_item("cf.coach.collapsed", "false");
+                                }
+                                nav.push("/");
+                            });
+                        },
+                        "Re-open Setup Coach"
+                    }
+                }
                 p { class: "text-sm {theme::text::SECONDARY}", "Manage users, role assignments, and review recent security-sensitive actions." }
             }
 

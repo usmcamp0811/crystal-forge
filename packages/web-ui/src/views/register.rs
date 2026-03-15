@@ -98,16 +98,17 @@ pub fn RegisterView() -> Element {
                 return;
             }
 
-            // Registration successful - redirect to login
+            // Registration successful - continue into the main app.
+            // Onboarding is now non-blocking and shown via the coach panel.
             error_message.set(Some(
-                "Registration successful. Redirecting to login...".to_string(),
+                "Registration successful. Redirecting to dashboard...".to_string(),
             ));
             is_loading.set(false);
-            nav.replace("/login");
+            nav.replace("/");
 
             // Fallback hard redirect in case router navigation is not active yet.
             if let Some(window) = web_sys::window() {
-                let _ = window.location().set_href("/login");
+                let _ = window.location().set_href("/");
             }
         });
     };

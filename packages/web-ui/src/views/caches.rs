@@ -9,6 +9,20 @@ use crate::api::models::{
 };
 use crate::theme;
 
+fn came_from_setup() -> bool {
+    if let Some(storage) = web_sys::window()
+        .and_then(|w| w.local_storage().ok())
+        .flatten()
+    {
+        let flag = storage.get_item("cf.from_setup").ok().flatten();
+        if flag.as_deref() == Some("1") {
+            let _ = storage.remove_item("cf.from_setup");
+            return true;
+        }
+    }
+    false
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum CachesTab {
     Destinations,
@@ -19,10 +33,21 @@ enum CachesTab {
 #[component]
 pub fn CachesView() -> Element {
     let mut active_tab = use_signal(|| CachesTab::Destinations);
+    let from_setup = use_signal(came_from_setup);
 
     rsx! {
         div {
             class: "space-y-6",
+
+            if from_setup() {
+                div {
+                    "data-testid": "setup-coach-caches-callout",
+                    style: "background:rgba(30,58,138,0.22); border:1px solid rgba(96,165,250,0.55); border-radius:8px; padding:12px 16px;",
+                    p { style: "color:#dbeafe; font-size:12px; font-weight:700; margin:0; letter-spacing:0.03em; text-transform:uppercase;", "Setup Tour - Step 4 of 6" }
+                    p { style: "color:#dbeafe; font-size:14px; font-weight:600; margin:4px 0 0 0;", "Add a binary cache" }
+                    p { style: "color:#bfdbfe; font-size:13px; margin:4px 0 0 0;", "Create a cache destination and assign environments so outputs can be distributed." }
+                }
+            }
 
             header {
                 class: "flex flex-col gap-4",
@@ -61,7 +86,9 @@ pub fn CachesView() -> Element {
             // Tab content
             match active_tab() {
                 CachesTab::Destinations => rsx! {
-                    CacheDestinationsList {}
+                    CacheDestinationsList {
+                        show_onboarding_hint: from_setup(),
+                    }
                 },
                 CachesTab::PushJobs => rsx! {
                     CachePushJobsList {}
@@ -73,7 +100,7 @@ pub fn CachesView() -> Element {
 
 /// List of cache destinations with CRUD operations
 #[component]
-fn CacheDestinationsList() -> Element {
+fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
     let mut refresh_nonce = use_signal(|| 0_u32);
     let destinations = use_resource(move || {
         let _nonce = refresh_nonce();
@@ -99,9 +126,18 @@ fn CacheDestinationsList() -> Element {
     let mut add_error = use_signal(|| None::<String>);
     let mut add_field_errors = use_signal(|| std::collections::HashMap::<String, String>::new());
     let mut add_submitting = use_signal(|| false);
+    let mut dismiss_add_target_callout = use_signal(|| false);
+    let mut show_cache_name_callout = use_signal(|| false);
+    let mut show_cache_type_callout = use_signal(|| false);
+    let mut show_cache_endpoint_callout = use_signal(|| false);
+    let mut show_cache_env_callout = use_signal(|| false);
 
     // Fetch available environments for assignment
     let environments = use_resource(|| async move { client::fetch_environments().await });
+    let show_add_target_callout = show_onboarding_hint
+        && !dismiss_add_target_callout()
+        && !show_add_modal()
+        && matches!(&*destinations.read_unchecked(), Some(Ok(dests)) if dests.is_empty());
 
     rsx! {
         div {
@@ -114,12 +150,37 @@ fn CacheDestinationsList() -> Element {
                     class: "{theme::typography::SECTION_TITLE} {theme::text::PRIMARY}",
                     "Cache Destinations"
                 }
-                button {
-                    class: "px-4 py-2 rounded-lg text-sm font-medium {theme::interactive::PRIMARY_BTN}",
-                    onclick: move |_| {
-                        show_add_modal.set(true);
-                    },
-                    "+ Add Destination"
+                div {
+                    class: "relative",
+                    button {
+                        class: if show_add_target_callout {
+                            "px-4 py-2 rounded-lg text-sm font-medium {theme::interactive::PRIMARY_BTN} animate-pulse ring-2 ring-blue-300/70 ring-offset-2 ring-offset-slate-950"
+                        } else {
+                            "px-4 py-2 rounded-lg text-sm font-medium {theme::interactive::PRIMARY_BTN}"
+                        },
+                        onclick: move |_| {
+                            dismiss_add_target_callout.set(true);
+                            show_add_modal.set(true);
+                            if show_onboarding_hint {
+                                show_cache_name_callout.set(true);
+                                show_cache_type_callout.set(false);
+                                show_cache_endpoint_callout.set(false);
+                                show_cache_env_callout.set(false);
+                            }
+                        },
+                        "+ Add Destination"
+                    }
+                    if show_add_target_callout {
+                        div {
+                            "data-testid": "setup-coach-caches-target-callout",
+                            style: "position:absolute; right:0; top:calc(100% + 10px); background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; width:220px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                            div {
+                                style: "position:absolute; top:-6px; right:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                            }
+                            p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
+                            p { style: "margin:2px 0 0 0;", "Click Add Destination to create your first cache endpoint." }
+                        }
+                    }
                 }
             }
 
@@ -190,7 +251,13 @@ fn CacheDestinationsList() -> Element {
                                 class: "{theme::text::SECONDARY} hover:{theme::text::PRIMARY} text-lg",
                                 title: "Close add cache destination modal",
                                 aria_label: "Close add cache destination modal",
-                                onclick: move |_| show_add_modal.set(false),
+                                onclick: move |_| {
+                                    show_add_modal.set(false);
+                                    show_cache_name_callout.set(false);
+                                    show_cache_type_callout.set(false);
+                                    show_cache_endpoint_callout.set(false);
+                                    show_cache_env_callout.set(false);
+                                },
                                 "✕"
                             }
                         }
@@ -199,6 +266,7 @@ fn CacheDestinationsList() -> Element {
                         div {
                             class: "flex-1 min-h-0 overflow-y-auto space-y-4 pr-1",
                             div {
+                                class: "relative overflow-visible",
                                 label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Name *" }
                                 input {
                                     class: if add_field_errors().contains_key("name") {
@@ -208,12 +276,29 @@ fn CacheDestinationsList() -> Element {
                                     },
                                     placeholder: "main-cache",
                                     value: add_name(),
+                                    onfocus: move |_| show_cache_name_callout.set(false),
                                     oninput: move |evt| {
-                                        add_name.set(evt.value());
+                                        let value = evt.value();
+                                        add_name.set(value.clone());
+                                        show_cache_name_callout.set(false);
+                                        if show_onboarding_hint && !value.trim().is_empty() {
+                                            show_cache_type_callout.set(true);
+                                        }
                                         let mut errors = add_field_errors();
                                         errors.remove("name");
                                         add_field_errors.set(errors);
                                     },
+                                }
+                                if show_cache_name_callout() {
+                                    div {
+                                        "data-testid": "setup-coach-cache-field-name",
+                                        style: "position:absolute; left:0; top:calc(100% + 8px); width:min(420px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                        div {
+                                            style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                        }
+                                        p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
+                                        p { style: "margin:2px 0 0 0;", "Choose a clear cache name (for example: primary-cache or edge-cache-eu) so teams know where artifacts are published." }
+                                    }
                                 }
                                 if let Some(err) = add_field_errors().get("name") {
                                     p { class: "text-[11px] text-red-300 mt-1", "{err}" }
@@ -221,21 +306,44 @@ fn CacheDestinationsList() -> Element {
                             }
 
                             div {
+                                class: "relative overflow-visible",
                                 label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Type" }
                                 select {
                                     class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
                                     value: add_type(),
-                                    onchange: move |evt| add_type.set(evt.value()),
+                                    onfocus: move |_| show_cache_type_callout.set(false),
+                                    onchange: move |evt| {
+                                        add_type.set(evt.value());
+                                        show_cache_type_callout.set(false);
+                                        if show_onboarding_hint
+                                            && !add_name().trim().is_empty()
+                                            && add_push_to().trim().is_empty()
+                                        {
+                                            show_cache_endpoint_callout.set(true);
+                                        }
+                                    },
                                     option { class: "text-slate-900 bg-white", value: "Nix", "Nix" }
                                     option { class: "text-slate-900 bg-white", value: "Http", "Http" }
                                     option { class: "text-slate-900 bg-white", value: "S3", "S3" }
                                     option { class: "text-slate-900 bg-white", value: "Attic", "Attic" }
+                                }
+                                if show_cache_type_callout() && !add_name().trim().is_empty() {
+                                    div {
+                                        "data-testid": "setup-coach-cache-field-type",
+                                        style: "position:absolute; left:0; top:calc(100% + 8px); width:min(420px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                        div {
+                                            style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                        }
+                                        p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
+                                        p { style: "margin:2px 0 0 0;", "Choose a cache type. Nix/Http are simple URL-based endpoints, S3 is object storage, and Attic is a dedicated binary cache service." }
+                                    }
                                 }
                             }
 
                             // Type-specific required fields
                             if add_type() == "Attic" {
                                 div {
+                                    class: "relative overflow-visible",
                                     div {
                                         class: "flex items-baseline justify-between gap-2",
                                         label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Cache Name (on Attic server) *" }
@@ -278,18 +386,47 @@ fn CacheDestinationsList() -> Element {
                                         },
                                         placeholder: "https://attic.example.com",
                                         value: add_push_to(),
+                                        onfocus: move |_| {
+                                            show_cache_type_callout.set(false);
+                                            if show_onboarding_hint
+                                                && !add_name().trim().is_empty()
+                                                && add_push_to().trim().is_empty()
+                                            {
+                                                show_cache_endpoint_callout.set(true);
+                                            } else {
+                                                show_cache_endpoint_callout.set(false);
+                                            }
+                                        },
                                         oninput: move |evt| {
-                                            add_push_to.set(evt.value());
+                                            let value = evt.value();
+                                            add_push_to.set(value.clone());
+                                            show_cache_type_callout.set(false);
+                                            show_cache_endpoint_callout.set(false);
+                                            if show_onboarding_hint && !value.trim().is_empty() {
+                                                show_cache_env_callout.set(true);
+                                            }
                                             let mut errors = add_field_errors();
                                             errors.remove("push_to");
                                             add_field_errors.set(errors);
                                         },
+                                    }
+                                    if show_cache_endpoint_callout() {
+                                        div {
+                                            "data-testid": "setup-coach-cache-field-endpoint",
+                                            style: "position:absolute; left:0; top:calc(100% + 8px); width:min(420px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                            div {
+                                                style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                            }
+                                            p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
+                                            p { style: "margin:2px 0 0 0;", "Set the cache server endpoint that systems/builders will push artifacts to." }
+                                        }
                                     }
                                     if let Some(err) = add_field_errors().get("push_to") {
                                         p { class: "text-[11px] text-red-300 mt-1", "{err}" }
                                     }
                                 }
                                 div {
+                                    class: "relative overflow-visible",
                                     div {
                                         class: "flex items-baseline justify-between gap-2",
                                         label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Attic Public Key *" }
@@ -359,12 +496,40 @@ fn CacheDestinationsList() -> Element {
                                         },
                                         placeholder: "https://cache.example.com or s3://bucket",
                                         value: add_push_to(),
+                                        onfocus: move |_| {
+                                            show_cache_type_callout.set(false);
+                                            if show_onboarding_hint
+                                                && !add_name().trim().is_empty()
+                                                && add_push_to().trim().is_empty()
+                                            {
+                                                show_cache_endpoint_callout.set(true);
+                                            } else {
+                                                show_cache_endpoint_callout.set(false);
+                                            }
+                                        },
                                         oninput: move |evt| {
-                                            add_push_to.set(evt.value());
+                                            let value = evt.value();
+                                            add_push_to.set(value.clone());
+                                            show_cache_type_callout.set(false);
+                                            show_cache_endpoint_callout.set(false);
+                                            if show_onboarding_hint && !value.trim().is_empty() {
+                                                show_cache_env_callout.set(true);
+                                            }
                                             let mut errors = add_field_errors();
                                             errors.remove("push_to");
                                             add_field_errors.set(errors);
                                         },
+                                    }
+                                    if show_cache_endpoint_callout() {
+                                        div {
+                                            "data-testid": "setup-coach-cache-field-endpoint",
+                                            style: "position:absolute; left:0; top:calc(100% + 8px); width:min(420px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                            div {
+                                                style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                            }
+                                            p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
+                                            p { style: "margin:2px 0 0 0;", "Use the full cache destination URL (HTTP/S or S3) where artifacts should be uploaded." }
+                                        }
                                     }
                                     if let Some(err) = add_field_errors().get("push_to") {
                                         p { class: "text-[11px] text-red-300 mt-1", "{err}" }
@@ -521,6 +686,7 @@ fn CacheDestinationsList() -> Element {
 
                             // Environment assignment
                             div {
+                                class: "relative overflow-visible",
                                 div {
                                     class: "flex items-baseline justify-between gap-2",
                                     label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Environments (optional)" }
@@ -545,6 +711,7 @@ fn CacheDestinationsList() -> Element {
                                                                 "px-2 py-1 text-xs rounded border {theme::surface::CARD_BORDER} {theme::text::MUTED} hover:{theme::text::SECONDARY}"
                                                             },
                                                             onclick: move |_| {
+                                                                show_cache_env_callout.set(false);
                                                                 let mut selected = add_environment_ids();
                                                                 if is_selected {
                                                                     selected.retain(|&id| id != env_id);
@@ -558,6 +725,17 @@ fn CacheDestinationsList() -> Element {
                                                     }
                                                 }
                                             }
+                                        }
+                                    }
+                                    if show_cache_env_callout() {
+                                        div {
+                                            "data-testid": "setup-coach-cache-field-environments",
+                                            style: "position:absolute; left:0; bottom:calc(100% + 10px); width:min(440px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                            div {
+                                                style: "position:absolute; bottom:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-right:1px solid rgba(96,165,250,0.75); border-bottom:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                            }
+                                            p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
+                                            p { style: "margin:2px 0 0 0;", "Choose specific environments for targeted cache routing, or leave empty to make this a global cache for all environments." }
                                         }
                                     }
                                 } else {
@@ -579,6 +757,10 @@ fn CacheDestinationsList() -> Element {
                                     show_add_modal.set(false);
                                     add_error.set(None);
                                     add_field_errors.set(std::collections::HashMap::new());
+                                    show_cache_name_callout.set(false);
+                                    show_cache_type_callout.set(false);
+                                    show_cache_endpoint_callout.set(false);
+                                    show_cache_env_callout.set(false);
                                 },
                                 "Cancel"
                             }

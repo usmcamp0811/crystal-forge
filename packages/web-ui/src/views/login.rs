@@ -5,6 +5,7 @@ use dioxus::prelude::*;
 use crate::api::client::{fetch_whoami, local_login};
 use crate::api::models::AuthMode;
 use crate::state::app_state::AppState;
+use crate::state::auth;
 use crate::theme;
 
 /// Unified login view.
@@ -102,7 +103,7 @@ pub fn LoginView() -> Element {
                     if let Ok(auth_context) = fetch_whoami().await {
                         app_state.write().auth = Some(auth_context);
                     }
-                    // Redirect to dashboard
+
                     nav.push("/");
                 }
                 Err(e) => {

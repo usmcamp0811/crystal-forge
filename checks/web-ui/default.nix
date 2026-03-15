@@ -150,12 +150,57 @@ in pkgs.testers.runNixOSTest {
     if ok_count == 0:
         raise Exception("All screenshots failed")
 
+    expected_onboarding = [
+      "06a-onboarding-coach-dashboard",
+      "06b-onboarding-environments-callout",
+      "06b2-onboarding-environments-form-callouts",
+      "06b3-onboarding-environments-create",
+      "06c-onboarding-flakes-callout",
+      "06c2-onboarding-flakes-form-callouts",
+      "06c3-onboarding-flakes-create",
+      "06d-onboarding-builders-callout",
+      "06d2-onboarding-builders-form-callouts",
+      "06d3-onboarding-builders-create",
+      "06e-onboarding-caches-callout",
+      "06e2-onboarding-caches-form-callouts",
+      "06e3-onboarding-caches-create",
+      "06f-onboarding-systems-callout",
+      "06f2-onboarding-systems-form-callouts",
+      "06f3-onboarding-systems-keygen",
+      "06f4-onboarding-systems-create",
+      "06g-onboarding-coach-minimized",
+      "06h-onboarding-coach-all-configured",
+    ]
+    ok_names = {r["name"] for r in results if r.get("ok")}
+    missing_onboarding = [name for name in expected_onboarding if name not in ok_names]
+    if missing_onboarding:
+        raise Exception(f"Missing required onboarding screenshots: {missing_onboarding}")
+
     # Fail if critical auth + navigation checks failed
     critical_tests = [
       "01-login-page",
       "02-registration",
       "05-login-submit",
       "06-dashboard",
+      "06a-onboarding-coach-dashboard",
+      "06b-onboarding-environments-callout",
+      "06b2-onboarding-environments-form-callouts",
+      "06b3-onboarding-environments-create",
+      "06c-onboarding-flakes-callout",
+      "06c2-onboarding-flakes-form-callouts",
+      "06c3-onboarding-flakes-create",
+      "06d-onboarding-builders-callout",
+      "06d2-onboarding-builders-form-callouts",
+      "06d3-onboarding-builders-create",
+      "06e-onboarding-caches-callout",
+      "06e2-onboarding-caches-form-callouts",
+      "06e3-onboarding-caches-create",
+      "06f-onboarding-systems-callout",
+      "06f2-onboarding-systems-form-callouts",
+      "06f3-onboarding-systems-keygen",
+      "06f4-onboarding-systems-create",
+      "06g-onboarding-coach-minimized",
+      "06h-onboarding-coach-all-configured",
       "07-sidebar-desktop-expanded",
       "08-sidebar-desktop-collapsed",
       "08b-sidebar-desktop-toggle-expand",

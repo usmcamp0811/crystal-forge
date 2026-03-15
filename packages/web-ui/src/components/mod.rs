@@ -35,6 +35,7 @@ pub mod flake;
 pub mod forms;
 pub mod modals;
 pub mod notifications;
+pub mod onboarding;
 pub mod policy;
 pub mod system;
 pub mod tables;
@@ -59,6 +60,7 @@ pub use layout::{AppShell, Card, SidebarNav, TopBar};
 pub use loading::{ErrorMessage, LoadingSpinner};
 pub use modals::{ConfirmDialog, RollbackConfirmDialog, SyncConfirmDialog};
 pub use notifications::Toast;
+pub use onboarding::OnboardingCoachPanel;
 pub use stat_card::StatCard;
 pub use status_badge::{DeploymentBadge, HealthBadge};
 pub use system::{
