@@ -1,10 +1,10 @@
 ---
 id: TASK-191
 title: Replace blocking setup wizard with non-blocking guided coach panel
-status: Review
+status: Done
 assignee: []
 created_date: '2026-03-14 13:17'
-updated_date: '2026-03-15 18:19'
+updated_date: '2026-03-15 20:17'
 labels:
   - frontend
   - ux
@@ -453,4 +453,12 @@ Verification:
 
 Commit: 68bfa9e4
 MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/165
+
+2026-03-15: MR !165 merged into dev. Worktree removed and pruned. Task marked Done.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+MR !165 merged into dev on 2026-03-15.\n\nAll acceptance criteria satisfied:\n- Non-blocking floating coach panel replaces forced setup wizard\n- Progressive field-level callouts across all 5 setup forms\n- Minimized state as a styled tab below the topbar\n- Real DB writes for environment/builder/cache verified in CI\n- 50/50 screenshot steps passing including 19 dedicated onboarding steps\n- All flake checks green (web-ui, server, database, builder, s3_cache, oidc-auth, dashboard, attic_cache)\n- Worktree cleaned up.
+<!-- SECTION:FINAL_SUMMARY:END -->
