@@ -4,7 +4,7 @@ title: Admin Configuration Health Warnings — Pipeline Readiness Alerts
 status: In Progress
 assignee: []
 created_date: '2026-03-13 01:16'
-updated_date: '2026-03-14 17:35'
+updated_date: '2026-03-15 23:54'
 labels:
   - frontend
   - backend
@@ -178,4 +178,10 @@ Expanded `checks/web-ui/tests/integration-test.js` to capture feature-specific s
 Verification run: `cargo check` passed for `packages/default` and `packages/web-ui`; targeted web-ui helper tests passed; touched Rust files pass `rustfmt --check`; `nix build .#checks.x86_64-linux.web-ui` passed and produced screenshots; `nix flake check` completed successfully.
 
 Verification caveat: `cargo clippy -- -D warnings` did not complete cleanly in this worktree because the repo currently has unrelated/pre-existing warning debt plus target cache rustc-version mismatch errors under clippy. MR screenshot upload/description update is still pending.
+
+Post-rebase verification: started the dev DB with `nix run .#devScripts.db-only -- up -D`, then reran `nix develop -c cargo check --manifest-path packages/default/Cargo.toml` (pass) and `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml` (pass).
+
+Post-rebase UI evidence verification: `nix build .#checks.x86_64-linux.web-ui` rebuilt successfully and required TASK-186 screenshots remain available in `result/screenshots/`: `06b-config-health-bar.png`, `06c-config-health-widget.png`, `12b-systems-config-warning.png`, `13b-flakes-config-warning.png`, `14b-environments-config-warning.png`.
+
+Remaining blocker: GitLab authentication in this environment is still invalid (`glab` auth returns `invalid_grant` / upload attempts return `401`), so MR screenshot upload/update is prepared but not yet executable from this session.
 <!-- SECTION:NOTES:END -->
