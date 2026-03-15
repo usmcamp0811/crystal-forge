@@ -155,15 +155,32 @@ pub fn OnboardingCoachPanel() -> Element {
     .filter(|v| *v)
     .count();
 
+    // Minimized: small floating bubble
+    if collapsed() {
+        return rsx! {
+            button {
+                class: "fixed z-40 top-20 right-4 rounded-full shadow-2xl flex items-center gap-2 px-3 py-2",
+                "data-testid": "onboarding-coach-panel",
+                style: "background:rgba(15,23,42,0.96); border:1px solid rgba(124,58,237,0.55); color:#c4b5fd;",
+                onclick: move |_| {
+                    collapsed.set(false);
+                    store_collapsed(false);
+                },
+                span { style: "font-size:14px; line-height:1;", "⚙" }
+                span { style: "font-size:12px; font-weight:600; color:#c4b5fd;", "Setup" }
+                span {
+                    style: "font-size:11px; color:#94a3b8; background:rgba(124,58,237,0.25); border-radius:99px; padding:1px 7px;",
+                    "{required_completed}/6"
+                }
+            }
+        };
+    }
+
     rsx! {
         aside {
             class: "fixed z-40 top-20 right-4 rounded-xl border shadow-2xl max-sm:top-auto max-sm:bottom-4 max-sm:left-4 max-sm:right-4",
             "data-testid": "onboarding-coach-panel",
-            style: if collapsed() {
-                "width:min(220px, calc(100vw - 2rem)); border:1px solid rgba(124,58,237,0.45); background:rgba(15,23,42,0.96);"
-            } else {
-                "width:min(360px, calc(100vw - 2rem)); border:1px solid rgba(124,58,237,0.45); background:rgba(15,23,42,0.96);"
-            },
+            style: "width:min(280px, calc(100vw - 2rem)); border:1px solid rgba(124,58,237,0.45); background:rgba(15,23,42,0.96);",
 
             div {
                 class: "flex items-center justify-between px-3 py-2 border-b",
@@ -177,11 +194,10 @@ pub fn OnboardingCoachPanel() -> Element {
                         class: "rounded px-2 py-1 text-xs font-medium text-slate-200 hover:bg-slate-800",
                         "data-testid": "onboarding-coach-collapse",
                         onclick: move |_| {
-                            let next = !collapsed();
-                            collapsed.set(next);
-                            store_collapsed(next);
+                            collapsed.set(true);
+                            store_collapsed(true);
                         },
-                        if collapsed() { "Expand" } else { "Minimize" }
+                        "Minimize"
                     }
                     button {
                         class: "rounded px-2 py-1 text-xs font-medium text-red-200 hover:bg-red-900/40",
@@ -205,8 +221,7 @@ pub fn OnboardingCoachPanel() -> Element {
                 }
             }
 
-            if !collapsed() {
-                div { class: "p-3 space-y-2",
+            div { class: "p-3 space-y-2",
                     if let Some(message) = action_error() {
                         div {
                             class: "rounded-md border border-red-500/50 bg-red-900/30 px-2 py-1 text-xs text-red-200",
@@ -274,7 +289,8 @@ pub fn OnboardingCoachPanel() -> Element {
                         }
                     }
                 }
-            }
         }
     }
 }
+
+
