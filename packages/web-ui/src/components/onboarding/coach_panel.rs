@@ -227,7 +227,7 @@ pub fn OnboardingCoachPanel() -> Element {
                                         "border:1px solid rgba(100,116,139,0.55); background:rgba(30,41,59,0.75);"
                                     },
                                     onclick: move |_| route_from_step(step),
-                                    div { class: "flex-1 min-w-0",
+                                    div { class: "flex-1 min-w-0", style: "text-align:left;",
                                         p {
                                             class: if status.complete {
                                                 "text-sm font-medium text-emerald-200"
