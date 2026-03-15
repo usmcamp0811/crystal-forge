@@ -219,7 +219,7 @@ pub fn OnboardingCoachPanel() -> Element {
                             let status = step_status(step, &progress_data);
                             rsx! {
                                 button {
-                                    class: "w-full rounded-lg px-3 py-2 text-left border flex items-center justify-between gap-2",
+                                    class: "w-full rounded-lg px-3 py-2 text-left border flex items-start justify-between gap-2",
                                     "data-testid": "onboarding-step-{step.id}",
                                     style: if status.complete {
                                         "border:1px solid rgba(16,185,129,0.6); background:rgba(6,95,70,0.35);"
