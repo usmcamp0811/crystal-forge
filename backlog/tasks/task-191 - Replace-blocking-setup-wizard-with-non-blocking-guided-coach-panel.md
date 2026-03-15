@@ -4,7 +4,7 @@ title: Replace blocking setup wizard with non-blocking guided coach panel
 status: Review
 assignee: []
 created_date: '2026-03-14 13:17'
-updated_date: '2026-03-15 01:54'
+updated_date: '2026-03-15 02:30'
 labels:
   - frontend
   - ux
@@ -422,5 +422,17 @@ Verification:
 - nix build .#checks.x86_64-linux.web-ui -L (37/37)
 
 Commit: 5b43875a
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/165
+
+2026-03-15: Fixed Add System key-generation overlap issue where onboarding field callouts rendered above the key modal. The Generate button handler now dismisses all Add System onboarding callouts before opening the key modal.
+
+File:
+- packages/web-ui/src/components/forms/add_system_form.rs
+
+Verification:
+- nix develop -c cargo check (packages/web-ui)
+- nix build .#checks.x86_64-linux.web-ui -L (37/37)
+
+Commit: c45782e0
 MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/165
 <!-- SECTION:NOTES:END -->
