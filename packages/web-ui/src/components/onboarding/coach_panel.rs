@@ -155,19 +155,19 @@ pub fn OnboardingCoachPanel() -> Element {
     .filter(|v| *v)
     .count();
 
-    // Minimized: small square-ish button in top-right
+    // Minimized: compact tab anchored to the top-right just below the top bar
     if collapsed() {
         return rsx! {
             button {
-                class: "fixed z-40 top-20 right-4 shadow-2xl flex flex-col items-center justify-center gap-0.5",
                 "data-testid": "onboarding-coach-panel",
-                style: "width:44px; height:44px; border-radius:10px; background:rgba(15,23,42,0.96); border:1px solid rgba(124,58,237,0.55);",
                 onclick: move |_| {
                     collapsed.set(false);
                     store_collapsed(false);
                 },
-                span { style: "font-size:16px; line-height:1;", "⚙" }
-                span { style: "font-size:10px; font-weight:600; color:#94a3b8; line-height:1;", "{required_completed}/6" }
+                style: "position:fixed; top:64px; right:0; z-index:40; display:flex; align-items:center; gap:6px; padding:6px 12px 6px 10px; border-radius:0 0 0 8px; background:rgba(15,23,42,0.96); border:1px solid rgba(96,165,250,0.5); border-right:none; border-top:none; box-shadow:0 4px 12px rgba(15,23,42,0.5); cursor:pointer;",
+                span { style: "font-size:13px; line-height:1;", "🧭" }
+                span { style: "font-size:12px; font-weight:600; color:#bfdbfe; line-height:1; white-space:nowrap;", "Setup Guide" }
+                span { style: "font-size:11px; color:#64748b; line-height:1; white-space:nowrap;", "{required_completed}/6" }
             }
         };
     }
