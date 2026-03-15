@@ -1,7 +1,6 @@
 //! Top bar layout component.
 
 use dioxus::prelude::*;
-
 use crate::api::client;
 use crate::components::layout::sidebar::SidebarContext;
 use crate::state::app_state::AppState;
@@ -35,6 +34,21 @@ pub fn TopBar(title: String) -> Element {
     let toggle_drawer = move |_| {
         is_mobile_drawer_open.set(!is_mobile_drawer_open());
     };
+
+    // Measure the topbar's bottom edge after mount and write it as --coach-top so the
+    // floating coach panel always sits directly below the topbar regardless of any
+    // banners or other elements above it in the layout.
+    use_effect(move || {
+        let _ = js_sys::eval(
+            "(() => { \
+                const h = document.querySelector('header'); \
+                if (h) { \
+                    const b = h.getBoundingClientRect().bottom; \
+                    if (b > 0) document.documentElement.style.setProperty('--coach-top', b + 'px'); \
+                } \
+            })()"
+        );
+    });
 
     rsx! {
         header {

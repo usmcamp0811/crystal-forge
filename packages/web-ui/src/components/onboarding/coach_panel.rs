@@ -155,7 +155,7 @@ pub fn OnboardingCoachPanel() -> Element {
     .filter(|v| *v)
     .count();
 
-    // Minimized: slim tab hanging off the right edge, just below the top bar
+    // Minimized: slim tab anchored top-right of the content column, just below the topbar
     if collapsed() {
         return rsx! {
             button {
@@ -164,19 +164,19 @@ pub fn OnboardingCoachPanel() -> Element {
                     collapsed.set(false);
                     store_collapsed(false);
                 },
-                style: "position:fixed; top:64px; right:0; z-index:38; display:flex; align-items:center; gap:6px; padding:6px 12px 6px 10px; border-radius:0 0 0 8px; background:rgba(15,23,42,0.96); border:1px solid rgba(96,165,250,0.5); border-right:none; border-top:none; box-shadow:0 4px 12px rgba(15,23,42,0.5); cursor:pointer;",
+                style: "position:fixed; top:var(--coach-top, 64px); right:0; z-index:50; display:flex; align-items:center; gap:6px; padding:6px 12px 6px 10px; border-radius:0 0 0 10px; background:linear-gradient(135deg, rgba(124,58,237,0.95), rgba(59,130,246,0.92)); border:1px solid rgba(167,139,250,0.7); border-right:none; border-top:none; box-shadow:0 4px 16px rgba(124,58,237,0.4); cursor:pointer;",
                 span { style: "font-size:13px; line-height:1;", "🧭" }
-                span { style: "font-size:12px; font-weight:600; color:#bfdbfe; line-height:1; white-space:nowrap;", "Setup Guide" }
-                span { style: "font-size:11px; color:#64748b; line-height:1; white-space:nowrap;", "{required_completed}/6" }
+                span { style: "font-size:12px; font-weight:700; color:#ffffff; line-height:1; white-space:nowrap;", "Setup Guide" }
+                span { style: "font-size:11px; font-weight:600; color:rgba(255,255,255,0.75); line-height:1; white-space:nowrap;", "{required_completed}/6" }
             }
         };
     }
 
     rsx! {
         aside {
-            class: "fixed z-40 rounded-xl border shadow-2xl",
+            class: "fixed z-50 rounded-xl border shadow-2xl",
             "data-testid": "onboarding-coach-panel",
-            style: "top:64px; right:1rem; width:min(280px, calc(100vw - 2rem)); border:1px solid rgba(124,58,237,0.45); background:rgba(15,23,42,0.96);",
+            style: "top:var(--coach-top, 64px); right:1rem; width:min(280px, calc(100vw - 2rem)); border:1px solid rgba(124,58,237,0.45); background:rgba(15,23,42,0.96);",
 
             div {
                 class: "flex items-center justify-between px-3 py-2 border-b",
