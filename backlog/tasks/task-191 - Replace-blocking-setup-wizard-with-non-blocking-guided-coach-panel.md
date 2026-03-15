@@ -4,7 +4,7 @@ title: Replace blocking setup wizard with non-blocking guided coach panel
 status: Review
 assignee: []
 created_date: '2026-03-14 13:17'
-updated_date: '2026-03-14 23:32'
+updated_date: '2026-03-15 01:54'
 labels:
   - frontend
   - ux
@@ -408,5 +408,19 @@ Verification:
 - nix build .#checks.x86_64-linux.web-ui -L (37/37)
 
 Commit: 8f54ae65
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/165
+
+2026-03-15: Fixed Add Flake onboarding field callout sequencing in `AddFlakeForm` so hints render progressively instead of all at once.
+
+New gating behavior:
+- Name callout only while name is empty
+- Repository callout only after name is set and repo URL is empty
+- Branch callout only after name+repo are set and branch is empty
+
+Verification:
+- nix develop -c cargo check (packages/web-ui)
+- nix build .#checks.x86_64-linux.web-ui -L (37/37)
+
+Commit: 5b43875a
 MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/165
 <!-- SECTION:NOTES:END -->
