@@ -227,31 +227,34 @@ pub fn OnboardingCoachPanel() -> Element {
                                         "border:1px solid rgba(100,116,139,0.55); background:rgba(30,41,59,0.75);"
                                     },
                                     onclick: move |_| route_from_step(step),
-                                    // Label
-                                    span {
-                                        class: if status.complete {
-                                            "text-sm font-medium text-emerald-200 flex-1 min-w-0"
-                                        } else {
-                                            "text-sm font-medium text-slate-200 flex-1 min-w-0"
-                                        },
-                                        "{step.label}"
-                                    }
-                                    // Inline status badge
-                                    span {
-                                        class: if status.complete {
-                                            "text-[10px] font-semibold px-1.5 py-0.5 rounded-full shrink-0 bg-emerald-900/60 text-emerald-300 border border-emerald-600/40"
-                                        } else {
-                                            "text-[10px] font-semibold px-1.5 py-0.5 rounded-full shrink-0 bg-slate-700/60 text-slate-400 border border-slate-600/40"
-                                        },
-                                        if step.id == "agent" {
-                                            if status.complete { "Done" } else { "Pending" }
-                                        } else if status.complete {
-                                            "Configured"
-                                        } else {
-                                            "Pending"
+                                    div { class: "flex-1 min-w-0",
+                                        p {
+                                            class: if status.complete {
+                                                "text-sm font-medium text-emerald-200"
+                                            } else {
+                                                "text-sm font-medium text-slate-200"
+                                            },
+                                            "{step.label}"
+                                        }
+                                        p {
+                                            class: if status.complete {
+                                                "text-[11px] text-emerald-300"
+                                            } else {
+                                                "text-[11px] text-slate-400"
+                                            },
+                                            if step.id == "agent" {
+                                                if status.complete {
+                                                    "Acknowledged"
+                                                } else {
+                                                    "Completes after first system setup"
+                                                }
+                                            } else if status.complete {
+                                                "Configured"
+                                            } else {
+                                                "Pending"
+                                            }
                                         }
                                     }
-                                    // Icon
                                     if status.complete {
                                         span { class: "text-emerald-300 text-sm shrink-0", "✓" }
                                     } else {
