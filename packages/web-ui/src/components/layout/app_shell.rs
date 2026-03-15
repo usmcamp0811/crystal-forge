@@ -3,10 +3,10 @@
 use dioxus::prelude::*;
 
 use crate::api::models::{AuthContext, AuthMode, AuthUser, Role};
-use crate::components::layout::TopBar;
 use crate::components::layout::sidebar::{
     MobileDrawer, SidebarContext, SidebarEdgeToggle, SidebarNav,
 };
+use crate::components::layout::TopBar;
 use crate::components::layout::{BannerPlacement, DevModeBanner};
 use crate::components::onboarding::OnboardingCoachPanel;
 use crate::routes::Route;
