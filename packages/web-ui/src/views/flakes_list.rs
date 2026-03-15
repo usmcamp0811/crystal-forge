@@ -1698,7 +1698,7 @@ fn AddFlakeForm(
                                     show_name_callout.set(false);
                                 },
                             }
-                            if show_name_callout() {
+                            if show_name_callout() && draft.read().name.trim().is_empty() {
                                 div {
                                     "data-testid": "setup-coach-flake-field-name",
                                     style: "position:absolute; left:0; top:calc(100% + 8px); width:min(340px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
@@ -1725,7 +1725,10 @@ fn AddFlakeForm(
                                     show_repo_callout.set(false);
                                 },
                             }
-                            if show_repo_callout() {
+                            if show_repo_callout()
+                                && !draft.read().name.trim().is_empty()
+                                && draft.read().repo_url.trim().is_empty()
+                            {
                                 div {
                                     "data-testid": "setup-coach-flake-field-repo",
                                     style: "position:absolute; left:0; top:calc(100% + 8px); width:min(340px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
@@ -1752,7 +1755,11 @@ fn AddFlakeForm(
                                     show_branch_callout.set(false);
                                 },
                             }
-                            if show_branch_callout() {
+                            if show_branch_callout()
+                                && !draft.read().name.trim().is_empty()
+                                && !draft.read().repo_url.trim().is_empty()
+                                && draft.read().branch.trim().is_empty()
+                            {
                                 div {
                                     "data-testid": "setup-coach-flake-field-branch",
                                     style: "position:absolute; left:0; top:calc(100% + 8px); width:min(340px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
