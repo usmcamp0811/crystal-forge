@@ -4,7 +4,7 @@ title: Replace blocking setup wizard with non-blocking guided coach panel
 status: Review
 assignee: []
 created_date: '2026-03-14 13:17'
-updated_date: '2026-03-15 02:30'
+updated_date: '2026-03-15 18:19'
 labels:
   - frontend
   - ux
@@ -434,5 +434,23 @@ Verification:
 - nix build .#checks.x86_64-linux.web-ui -L (37/37)
 
 Commit: c45782e0
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/165
+
+2026-03-15: Expanded web-ui screenshot check from 37 to 50 steps with full end-to-end onboarding walkthrough.
+
+New coverage:
+- 19 onboarding steps (06a-06h including sub-steps)
+- Progressive field callout assertions for every form (env/flake/builder/cache/system)
+- Real DB creation for environment, builder, cache destination
+- Key modal suppressing callouts (system form)
+- Minimized coach tab state (06g)
+- All-steps-Configured final state (06h)
+
+All 19 onboarding screenshots uploaded to MR via GitLab uploads API.
+
+Verification:
+- nix build .#checks.x86_64-linux.web-ui -L passed 50/50
+
+Commit: 68bfa9e4
 MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/165
 <!-- SECTION:NOTES:END -->
