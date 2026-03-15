@@ -164,7 +164,7 @@ pub fn OnboardingCoachPanel() -> Element {
                     collapsed.set(false);
                     store_collapsed(false);
                 },
-                style: "position:fixed; top:64px; right:0; z-index:40; display:flex; align-items:center; gap:6px; padding:6px 12px 6px 10px; border-radius:0 0 0 8px; background:rgba(15,23,42,0.96); border:1px solid rgba(96,165,250,0.5); border-right:none; border-top:none; box-shadow:0 4px 12px rgba(15,23,42,0.5); cursor:pointer;",
+                style: "position:fixed; top:80px; right:0; z-index:38; display:flex; align-items:center; gap:6px; padding:6px 12px 6px 10px; border-radius:0 0 0 8px; background:rgba(15,23,42,0.96); border:1px solid rgba(96,165,250,0.5); border-right:none; border-top:none; box-shadow:0 4px 12px rgba(15,23,42,0.5); cursor:pointer;",
                 span { style: "font-size:13px; line-height:1;", "🧭" }
                 span { style: "font-size:12px; font-weight:600; color:#bfdbfe; line-height:1; white-space:nowrap;", "Setup Guide" }
                 span { style: "font-size:11px; color:#64748b; line-height:1; white-space:nowrap;", "{required_completed}/6" }
