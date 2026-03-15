@@ -120,7 +120,13 @@ pub fn AddSystemForm(
                                 }
                                 button {
                                     class: "px-3 py-2 rounded-lg text-xs font-medium border border-gray-600 text-gray-200 hover:bg-gray-700 transition",
-                                    onclick: move |_| on_generate_keys.call(()),
+                                    onclick: move |_| {
+                                        show_hostname_callout.set(false);
+                                        show_public_key_callout.set(false);
+                                        show_environment_callout.set(false);
+                                        show_flake_callout.set(false);
+                                        on_generate_keys.call(());
+                                    },
                                     "Generate"
                                 }
                             }
