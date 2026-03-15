@@ -54,6 +54,9 @@ pub fn AddSystemForm(
     flake_names: Vec<String>,
     /// Whether onboarding field callouts should be shown
     show_onboarding_callouts: bool,
+    /// Whether the key generation modal is currently open (suppresses callouts while open)
+    #[props(default = false)]
+    key_modal_open: bool,
 ) -> Element {
     let mut show_hostname_callout = use_signal(|| show_onboarding_callouts);
     let mut show_public_key_callout = use_signal(|| show_onboarding_callouts);
@@ -88,7 +91,7 @@ pub fn AddSystemForm(
                                     show_hostname_callout.set(false);
                                 }
                             }
-                            if show_hostname_callout() && draft.read().hostname.trim().is_empty() {
+                            if show_hostname_callout() && !key_modal_open && draft.read().hostname.trim().is_empty() {
                                 div {
                                     "data-testid": "setup-coach-system-field-hostname",
                                     style: "position:absolute; left:0; top:calc(100% + 8px); width:min(340px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
@@ -118,19 +121,14 @@ pub fn AddSystemForm(
                                         show_public_key_callout.set(false);
                                     }
                                 }
-                                button {
-                                    class: "px-3 py-2 rounded-lg text-xs font-medium border border-gray-600 text-gray-200 hover:bg-gray-700 transition",
-                                    onclick: move |_| {
-                                        show_hostname_callout.set(false);
-                                        show_public_key_callout.set(false);
-                                        show_environment_callout.set(false);
-                                        show_flake_callout.set(false);
-                                        on_generate_keys.call(());
-                                    },
-                                    "Generate"
-                                }
+                                 button {
+                                     class: "px-3 py-2 rounded-lg text-xs font-medium border border-gray-600 text-gray-200 hover:bg-gray-700 transition",
+                                     onclick: move |_| on_generate_keys.call(()),
+                                     "Generate"
+                                 }
                             }
                             if show_public_key_callout()
+                                && !key_modal_open
                                 && !draft.read().hostname.trim().is_empty()
                                 && draft.read().public_key.trim().is_empty()
                             {
@@ -165,6 +163,7 @@ pub fn AddSystemForm(
                                 }
                             }
                             if show_environment_callout()
+                                && !key_modal_open
                                 && !draft.read().hostname.trim().is_empty()
                                 && !draft.read().public_key.trim().is_empty()
                                 && draft.read().environment.trim().is_empty()
@@ -200,6 +199,7 @@ pub fn AddSystemForm(
                                 }
                             }
                             if show_flake_callout()
+                                && !key_modal_open
                                 && !draft.read().hostname.trim().is_empty()
                                 && !draft.read().public_key.trim().is_empty()
                                 && !draft.read().environment.trim().is_empty()

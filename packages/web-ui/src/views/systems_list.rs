@@ -339,6 +339,7 @@ pub fn SystemsListView() -> Element {
                     draft: draft,
                     error: add_error,
                     show_onboarding_callouts: from_setup(),
+                    key_modal_open: *show_key_modal.read(),
                     on_cancel: move |_| {
                         draft.set(NewSystemDraft::new());
                         add_error.set(None);
