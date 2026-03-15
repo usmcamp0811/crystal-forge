@@ -155,23 +155,19 @@ pub fn OnboardingCoachPanel() -> Element {
     .filter(|v| *v)
     .count();
 
-    // Minimized: small floating bubble
+    // Minimized: small square-ish button in top-right
     if collapsed() {
         return rsx! {
             button {
-                class: "fixed z-40 top-20 right-4 rounded-full shadow-2xl flex items-center gap-2 px-3 py-2",
+                class: "fixed z-40 top-20 right-4 shadow-2xl flex flex-col items-center justify-center gap-0.5",
                 "data-testid": "onboarding-coach-panel",
-                style: "background:rgba(15,23,42,0.96); border:1px solid rgba(124,58,237,0.55); color:#c4b5fd;",
+                style: "width:44px; height:44px; border-radius:10px; background:rgba(15,23,42,0.96); border:1px solid rgba(124,58,237,0.55);",
                 onclick: move |_| {
                     collapsed.set(false);
                     store_collapsed(false);
                 },
-                span { style: "font-size:14px; line-height:1;", "⚙" }
-                span { style: "font-size:12px; font-weight:600; color:#c4b5fd;", "Setup" }
-                span {
-                    style: "font-size:11px; color:#94a3b8; background:rgba(124,58,237,0.25); border-radius:99px; padding:1px 7px;",
-                    "{required_completed}/6"
-                }
+                span { style: "font-size:16px; line-height:1;", "⚙" }
+                span { style: "font-size:10px; font-weight:600; color:#94a3b8; line-height:1;", "{required_completed}/6" }
             }
         };
     }
