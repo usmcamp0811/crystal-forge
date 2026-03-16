@@ -39,13 +39,13 @@ pub fn AlertBanner(
         icon_glyph,
     ) = match severity {
         AlertSeverity::Warning => (
-            "border-orange-400/55 shadow-[0_0_0_1px_rgba(251,146,60,0.08)]",
-            "bg-gradient-to-r from-orange-950/90 via-orange-900/65 to-amber-900/45",
-            "text-orange-200",
-            "text-orange-50",
-            "text-orange-200",
-            "hover:bg-orange-300/12",
-            "bg-orange-300/18 border border-orange-200/10",
+            "border-amber-300/70 shadow-[0_0_0_1px_rgba(252,211,77,0.12)]",
+            "bg-gradient-to-r from-amber-950 via-amber-900/80 to-yellow-900/55",
+            "text-amber-200",
+            "text-amber-50",
+            "text-amber-200",
+            "hover:bg-amber-300/14",
+            "bg-amber-300/22 border border-amber-200/20",
             "!",
         ),
         AlertSeverity::Info => (
