@@ -3,10 +3,10 @@ id: TASK-193
 title: >-
   Update README and create onboarding documentation for guided coach tour
   workflow
-status: Review
+status: Done
 assignee: []
 created_date: '2026-03-16 01:02'
-updated_date: '2026-03-16 02:06'
+updated_date: '2026-03-16 02:49'
 labels:
   - documentation
   - onboarding
@@ -256,6 +256,10 @@ Repositioned Attic as the primary production cache backend with rationale
 Clarified S3 use case is better for archival/backup rather than active caching
 
 Commit: 0a6ddaa6
+
+MR !166 merged into dev
+
+Task complete and ready for worktree cleanup
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
