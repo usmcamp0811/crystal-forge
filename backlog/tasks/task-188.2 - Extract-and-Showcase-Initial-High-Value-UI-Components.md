@@ -1,10 +1,10 @@
 ---
 id: TASK-188.2
 title: Extract and Showcase Initial High-Value UI Components
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-03-13 01:52'
-updated_date: '2026-03-13 12:15'
+updated_date: '2026-03-16 23:35'
 labels:
   - frontend
   - ux
@@ -99,3 +99,9 @@ Medium — extraction can introduce regressions if boundaries are unclear; mitig
 - [ ] #7 Any newly created reusable component includes an isolation demo entry at the time it is introduced in this task.
 - [ ] #8 Component extraction stays within scope of presentation/composition and does not change deployment/build/system business logic.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: Claude (OpenCode) on gray in ~/code/crystal-forge/TASK-188.2-extract-showcase-components
+<!-- SECTION:NOTES:END -->
