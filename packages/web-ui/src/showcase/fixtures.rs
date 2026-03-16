@@ -3,6 +3,9 @@
 //! All fixtures are static, deterministic, and reusable across showcase demos
 //! to ensure consistent visual testing and isolation development.
 
+use crate::api::models::{BuildQueueItem, BuildStatus};
+use chrono::{DateTime, Utc};
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct StatCardFixture {
     pub label: &'static str,
@@ -168,6 +171,94 @@ pub fn build_fixtures() -> Vec<BuildFixture> {
             commit_short: "h7i8j9k",
             status: "failed",
             started_at: "45 minutes ago",
+        },
+    ]
+}
+
+/// Helper to create a fixed datetime for deterministic fixtures.
+fn mock_datetime() -> DateTime<Utc> {
+    "2026-03-16T12:00:00Z".parse().unwrap()
+}
+
+/// Create BuildQueueItem fixtures for showcase demos with all states.
+pub fn build_queue_item_fixtures() -> Vec<BuildQueueItem> {
+    let base_time = mock_datetime();
+
+    vec![
+        // Building state
+        BuildQueueItem {
+            job_id: None,
+            system_id: None,
+            hostname: "web-server-1".to_string(),
+            flake_name: "infrastructure".to_string(),
+            commit_hash: "a1b2c3d".to_string(),
+            commit_message: Some("feat: add user authentication module".to_string()),
+            status: BuildStatus::Building,
+            builder_name: Some("builder-1".to_string()),
+            queued_at: base_time - chrono::Duration::minutes(15),
+            started_at: Some(base_time - chrono::Duration::minutes(12)),
+            elapsed_secs: Some(720), // 12 minutes
+            logs: None,
+        },
+        // Queued state (next in queue)
+        BuildQueueItem {
+            job_id: None,
+            system_id: None,
+            hostname: "db-primary".to_string(),
+            flake_name: "infrastructure".to_string(),
+            commit_hash: "f7e8d9c".to_string(),
+            commit_message: Some("fix: database connection pooling".to_string()),
+            status: BuildStatus::Queued,
+            builder_name: None,
+            queued_at: base_time - chrono::Duration::minutes(5),
+            started_at: None,
+            elapsed_secs: None,
+            logs: None,
+        },
+        // Queued state (second in queue)
+        BuildQueueItem {
+            job_id: None,
+            system_id: None,
+            hostname: "staging-app".to_string(),
+            flake_name: "web-services".to_string(),
+            commit_hash: "b2c3d4e".to_string(),
+            commit_message: Some("chore: update dependencies".to_string()),
+            status: BuildStatus::Queued,
+            builder_name: None,
+            queued_at: base_time - chrono::Duration::minutes(3),
+            started_at: None,
+            elapsed_secs: None,
+            logs: None,
+        },
+        // Building state with long commit message (overflow test)
+        BuildQueueItem {
+            job_id: None,
+            system_id: None,
+            hostname: "production-worker-node-with-very-long-hostname".to_string(),
+            flake_name: "monitoring-stack".to_string(),
+            commit_hash: "c3d4e5f".to_string(),
+            commit_message: Some("feat: implement comprehensive monitoring dashboard with real-time metrics, alerting, and historical data visualization".to_string()),
+            status: BuildStatus::Building,
+            builder_name: Some("builder-2".to_string()),
+            queued_at: base_time - chrono::Duration::minutes(8),
+            started_at: Some(base_time - chrono::Duration::minutes(6)),
+            elapsed_secs: Some(360), // 6 minutes
+            logs: None,
+        },
+        // Queued state with no commit message (empty content test)
+        BuildQueueItem {
+            job_id: None,
+            system_id: None,
+            hostname: "dev-machine".to_string(),
+            flake_name: "development".to_string(),
+            commit_hash: "d4e5f6a".to_string(),
+            commit_message: None,
+            status: BuildStatus::Queued,
+            builder_name: None,
+            queued_at: base_time - chrono::Duration::minutes(1),
+            started_at: None,
+            elapsed_secs: None,
+            logs: None,
         },
     ]
 }

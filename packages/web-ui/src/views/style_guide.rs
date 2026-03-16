@@ -3,12 +3,13 @@
 use dioxus::prelude::*;
 
 use crate::api::models::{DeploymentStatus, HealthStatus};
+use crate::components::dashboard::BuildQueueRow;
 use crate::components::filters::{ViewMode, ViewToggle};
 use crate::components::status_badge::{DeploymentBadge, HealthBadge};
-use crate::showcase::fixtures::{stat_card_fixtures, timeline_fixtures};
+use crate::showcase::fixtures::{build_queue_item_fixtures, stat_card_fixtures, timeline_fixtures};
 use crate::showcase::shell::{
-    DESKTOP_WIDTH, MOBILE_WIDTH, ResponsiveGrid, ResponsivePreview, ShowcaseSection, StateMatrix,
-    StateTile, TABLET_WIDTH, VariantGroup,
+    ResponsiveGrid, ResponsivePreview, ShowcaseSection, StateMatrix, StateTile, VariantGroup,
+    DESKTOP_WIDTH, MOBILE_WIDTH, TABLET_WIDTH,
 };
 use crate::theme::{self, presets};
 
@@ -192,6 +193,94 @@ pub fn StyleGuideView() -> Element {
                         div { class: "p-4 space-y-3",
                             p { class: "text-xs {theme::text::MUTED}", "View toggle in tablet context" }
                             ViewToggleDemo { initial_mode: ViewMode::Cards }
+                        }
+                    }
+                }
+            }
+
+            ShowcaseSection {
+                title: "Dashboard Components",
+                description: "High-value reusable components extracted from dashboard, builds, and systems views with complete state coverage.",
+
+                StateMatrix { title: "BuildQueueRow - All States",
+                    {
+                        let queue_items = build_queue_item_fixtures();
+                        rsx! {
+                            StateTile { label: "building (active)",
+                                BuildQueueRow {
+                                    item: queue_items[0].clone(),
+                                    position_label: Some("Active".to_string())
+                                }
+                            }
+                            StateTile { label: "queued (next)",
+                                BuildQueueRow {
+                                    item: queue_items[1].clone(),
+                                    position_label: Some("Next".to_string())
+                                }
+                            }
+                            StateTile { label: "queued (#2)",
+                                BuildQueueRow {
+                                    item: queue_items[2].clone(),
+                                    position_label: Some("Queued #2".to_string())
+                                }
+                            }
+                            StateTile { label: "overflow (long text)",
+                                BuildQueueRow {
+                                    item: queue_items[3].clone(),
+                                    position_label: Some("Active".to_string())
+                                }
+                            }
+                            StateTile { label: "empty message",
+                                BuildQueueRow {
+                                    item: queue_items[4].clone(),
+                                    position_label: None
+                                }
+                            }
+                        }
+                    }
+                }
+
+                ResponsiveGrid {
+                    ResponsivePreview {
+                        label: "mobile (375px)",
+                        width_class: MOBILE_WIDTH,
+                        {
+                            let queue_items = build_queue_item_fixtures();
+                            rsx! {
+                                div { class: "space-y-2",
+                                    BuildQueueRow {
+                                        item: queue_items[0].clone(),
+                                        position_label: Some("Active".to_string())
+                                    }
+                                    BuildQueueRow {
+                                        item: queue_items[1].clone(),
+                                        position_label: Some("Next".to_string())
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    ResponsivePreview {
+                        label: "desktop (1024px)",
+                        width_class: DESKTOP_WIDTH,
+                        {
+                            let queue_items = build_queue_item_fixtures();
+                            rsx! {
+                                div { class: "space-y-2",
+                                    BuildQueueRow {
+                                        item: queue_items[0].clone(),
+                                        position_label: Some("Active".to_string())
+                                    }
+                                    BuildQueueRow {
+                                        item: queue_items[1].clone(),
+                                        position_label: Some("Next".to_string())
+                                    }
+                                    BuildQueueRow {
+                                        item: queue_items[3].clone(),
+                                        position_label: Some("Queued #3".to_string())
+                                    }
+                                }
+                            }
                         }
                     }
                 }
