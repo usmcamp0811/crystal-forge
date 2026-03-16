@@ -1,7 +1,7 @@
 ---
 id: TASK-156
 title: Add completed builds view to build queue UI
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-03-02 04:41'
 labels:
