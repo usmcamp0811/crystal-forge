@@ -1,10 +1,10 @@
 ---
 id: TASK-186
 title: Admin Configuration Health Warnings — Pipeline Readiness Alerts
-status: Review
+status: In Progress
 assignee: []
 created_date: '2026-03-13 01:16'
-updated_date: '2026-03-14 13:36'
+updated_date: '2026-03-16 00:29'
 labels:
   - frontend
   - backend
@@ -164,10 +164,32 @@ No schema migrations required. All checks derived from existing tables/counts.
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-LOCK: claude-sonnet-4-6 on reckless in ~/code/crystal-forge/TASK-186-admin-config-health
-
 MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/163
 Verification: cargo check (web-ui) ✅, rustfmt --check ✅, handler unit tests included. Awaiting merge into dev.
 
 Requirement update: UI changes for this task now require feature-specific screenshots. If needed, extend the `web-ui` check/screenshot workflow to capture them deterministically, and use those screenshots in the MR.
+
+LOCK: OpenCode on reckless in ~/code/crystal-forge/TASK-186-admin-config-health
+
+Implemented remaining systems warning gap: systems list data now carries `flake_id` through backend and web-ui summaries, and the systems view shows an admin warning when one or more systems are not linked to a flake.
+
+Expanded `checks/web-ui/tests/integration-test.js` to capture feature-specific screenshots for config health surfaces: `06b-config-health-bar.png`, `06c-config-health-widget.png`, `12b-systems-config-warning.png`, `13b-flakes-config-warning.png`, and `14b-environments-config-warning.png`. Artifacts are present under `result/screenshots/` after `nix build .#checks.x86_64-linux.web-ui`.
+
+Verification run: `cargo check` passed for `packages/default` and `packages/web-ui`; targeted web-ui helper tests passed; touched Rust files pass `rustfmt --check`; `nix build .#checks.x86_64-linux.web-ui` passed and produced screenshots; `nix flake check` completed successfully.
+
+Verification caveat: `cargo clippy -- -D warnings` did not complete cleanly in this worktree because the repo currently has unrelated/pre-existing warning debt plus target cache rustc-version mismatch errors under clippy. MR screenshot upload/description update is still pending.
+
+Post-rebase verification: started the dev DB with `nix run .#devScripts.db-only -- up -D`, then reran `nix develop -c cargo check --manifest-path packages/default/Cargo.toml` (pass) and `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml` (pass).
+
+Post-rebase UI evidence verification: `nix build .#checks.x86_64-linux.web-ui` rebuilt successfully and required TASK-186 screenshots remain available in `result/screenshots/`: `06b-config-health-bar.png`, `06c-config-health-widget.png`, `12b-systems-config-warning.png`, `13b-flakes-config-warning.png`, `14b-environments-config-warning.png`.
+
+Remaining blocker: GitLab authentication in this environment is still invalid (`glab` auth returns `invalid_grant` / upload attempts return `401`), so MR screenshot upload/update is prepared but not yet executable from this session.
+
+MR 163 updated with a refreshed description and uploaded UI evidence for all required TASK-186 warning surfaces. GitLab upload markdown added for: global notification bar, dashboard widget, systems warning, flakes warning, and environments warning.
+
+Current MR state is still `has_conflicts=true` because the rebased local branch has not been pushed yet from this session. Local verification on the rebased worktree remains green for `cargo check` (server + web-ui), `nix build .#checks.x86_64-linux.web-ui`, and `nix flake check`.
+
+Reviewed the generated TASK-186 screenshots directly and found the warning banner icon styling was broken (oversized icon collapsing banner text/layout). Fixed `packages/web-ui/src/components/notifications/alert_banner.rs` by replacing the fragile SVG warning icon with a fixed-size badge layout, then regenerated screenshots and confirmed the banners render correctly across dashboard, global bar, systems, flakes, and environments surfaces.
+
+Pushed follow-up commit `2af5b5e7` (`fix(web-ui): stabilize admin warning banner layout`). Refreshed the screenshot uploads in MR 163 and updated the MR description to reference the corrected images. MR 163 is now mergeable and its pipeline is running on `2af5b5e7`.
 <!-- SECTION:NOTES:END -->
