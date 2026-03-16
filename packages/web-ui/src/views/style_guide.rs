@@ -14,8 +14,8 @@ use crate::showcase::fixtures::{
     stat_card_fixtures, system_summary_fixtures, timeline_fixtures,
 };
 use crate::showcase::shell::{
-    ResponsiveGrid, ResponsivePreview, ShowcaseSection, StateMatrix, StateTile, VariantGroup,
-    DESKTOP_WIDTH, MOBILE_WIDTH, TABLET_WIDTH, WIDE_WIDTH,
+    DESKTOP_WIDTH, MOBILE_WIDTH, ResponsiveGrid, ResponsivePreview, ShowcaseSection, StateMatrix,
+    StateTile, TABLET_WIDTH, VariantGroup, WIDE_WIDTH,
 };
 use crate::theme::{self, presets};
 
