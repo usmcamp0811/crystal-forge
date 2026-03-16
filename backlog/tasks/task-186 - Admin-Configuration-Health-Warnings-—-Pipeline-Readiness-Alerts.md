@@ -1,10 +1,10 @@
 ---
 id: TASK-186
 title: Admin Configuration Health Warnings — Pipeline Readiness Alerts
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-03-13 01:16'
-updated_date: '2026-03-16 23:16'
+updated_date: '2026-03-16 23:44'
 labels:
   - frontend
   - backend
@@ -196,4 +196,6 @@ Pushed follow-up commit `2af5b5e7` (`fix(web-ui): stabilize admin warning banner
 Follow-up review fix: centralized admin `config-health` into shared `AppState` and removed repeated per-view fetches from `AppShell`, `DashboardView`, `EnvironmentsListView`, and `FlakesListView`. The shell now guards the fetch so admin config health is loaded once and reused across views instead of each component issuing its own request.
 
 Verification for the refactor: `cargo check --target wasm32-unknown-unknown` passes for `packages/web-ui`. GitLab MR `!163` now has a successful head pipeline instead of `Pipelines 0` (`https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2387920433`). Pushed follow-up commit `bc5b675d` (`fix(web-ui): share admin config health state`).
+
+MR `!163` has been merged into `dev` (`merged_at`: 2026-03-16T23:37:09.315Z, merge commit `4d2e1b7ee2a4a6fc9c6ab3630778c0f77bf3d170`). Verified against `origin/dev` before task finalization.
 <!-- SECTION:NOTES:END -->
