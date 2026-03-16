@@ -110,7 +110,7 @@ impl Route {
             Route::CvesView { .. } => "CVEs".to_string(),
             Route::PoliciesView { .. } => "Deployment Policies".to_string(),
             Route::AdminView { .. } => "Server Management".to_string(),
-            Route::StyleGuideView { .. } => "Style Guide".to_string(),
+            Route::StyleGuideView { .. } => "Component Showcase".to_string(),
             Route::LoginView { .. } => "Sign In".to_string(),
             Route::RegisterView { .. } => "Register".to_string(),
             Route::SetupView { .. } => "Setup Wizard".to_string(),
