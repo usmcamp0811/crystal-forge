@@ -3,7 +3,7 @@ id: TASK-193
 title: >-
   Update README and create onboarding documentation for guided coach tour
   workflow
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-03-16 01:02'
 updated_date: '2026-03-16 01:03'
@@ -209,3 +209,9 @@ No Tier 2 verification needed (documentation only, no code changes).
 - [ ] #14 All external links in documentation are valid and point to correct resources
 - [ ] #15 Onboarding guide includes troubleshooting section covering common first-time setup issues (coach not appearing, agent not connecting, etc.)
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: Claude (OpenCode) on gray in ~/code/crystal-forge/TASK-193-onboarding-docs
+<!-- SECTION:NOTES:END -->
