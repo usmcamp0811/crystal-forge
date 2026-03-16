@@ -16,8 +16,8 @@ use chrono::{Duration, Utc};
 use uuid::Uuid;
 
 use crate::api::client::{
-    ApiClientError, create_system, deactivate_system, fetch_flakes, fetch_system, fetch_systems,
-    update_system_public_key,
+    create_system, deactivate_system, fetch_flakes, fetch_system, fetch_systems,
+    update_system_public_key, ApiClientError,
 };
 use crate::api::models::{
     CreateSystemRequest, CveSummary, DeploymentStatus, HealthStatus, PaginatedResponse,
@@ -234,6 +234,7 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
             id: Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
             hostname: "atlas-01".to_string(),
             environment: Some("production".to_string()),
+            flake_id: Some(1),
             primary_ip: Some("10.0.1.10".to_string()),
             health_status: HealthStatus::Healthy,
             deployment_status: DeploymentStatus::UpToDate,
@@ -252,6 +253,7 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
             id: Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap(),
             hostname: "atlas-02".to_string(),
             environment: Some("production".to_string()),
+            flake_id: Some(1),
             primary_ip: Some("10.0.1.11".to_string()),
             health_status: HealthStatus::Healthy,
             deployment_status: DeploymentStatus::Behind,
@@ -270,6 +272,7 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
             id: Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap(),
             hostname: "staging-01".to_string(),
             environment: Some("staging".to_string()),
+            flake_id: Some(2),
             primary_ip: Some("10.0.2.10".to_string()),
             health_status: HealthStatus::Warning,
             deployment_status: DeploymentStatus::Behind,
@@ -288,6 +291,7 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
             id: Uuid::parse_str("00000000-0000-0000-0000-000000000004").unwrap(),
             hostname: "dev-box".to_string(),
             environment: Some("development".to_string()),
+            flake_id: None,
             primary_ip: Some("10.0.3.20".to_string()),
             health_status: HealthStatus::Offline,
             deployment_status: DeploymentStatus::NeverDeployed,

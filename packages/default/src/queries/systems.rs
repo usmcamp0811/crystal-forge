@@ -270,6 +270,7 @@ pub struct SystemListRow {
     pub id: Uuid,
     pub hostname: String,
     pub environment: Option<String>,
+    pub flake_id: Option<i32>,
     pub primary_ip_address: Option<String>,
     pub health_status: String,
     pub deployment_status: String,
@@ -285,10 +286,14 @@ pub struct SystemListRow {
 
 /// Fetch all active systems from view_system_list
 pub async fn list_systems_from_view(pool: &PgPool) -> Result<Vec<SystemListRow>> {
-    let rows =
-        sqlx::query_as::<_, SystemListRow>("SELECT * FROM view_system_list ORDER BY hostname")
-            .fetch_all(pool)
-            .await?;
+    let rows = sqlx::query_as::<_, SystemListRow>(
+        "SELECT vsl.*, s.flake_id
+         FROM view_system_list vsl
+         JOIN systems s ON s.id = vsl.id
+         ORDER BY vsl.hostname",
+    )
+    .fetch_all(pool)
+    .await?;
     Ok(rows)
 }
 
@@ -392,7 +397,10 @@ pub async fn list_systems_scoped(
         // No filters - simple case
         (None, None, _, _) => {
             sqlx::query_as::<_, SystemListRow>(&format!(
-                "SELECT * FROM view_system_list ORDER BY {} OFFSET $1 LIMIT $2",
+                "SELECT vsl.*, s.flake_id
+                 FROM view_system_list vsl
+                 JOIN systems s ON s.id = vsl.id
+                 ORDER BY {} OFFSET $1 LIMIT $2",
                 order_by
             ))
             .bind(pagination.offset as i32)
@@ -403,7 +411,10 @@ pub async fn list_systems_scoped(
         // Only search filter
         (Some(_), None, _, _) => {
             sqlx::query_as::<_, SystemListRow>(&format!(
-                "SELECT * FROM view_system_list WHERE hostname ILIKE $1 ORDER BY {} OFFSET $2 LIMIT $3",
+                "SELECT vsl.*, s.flake_id
+                 FROM view_system_list vsl
+                 JOIN systems s ON s.id = vsl.id
+                 WHERE vsl.hostname ILIKE $1 ORDER BY {} OFFSET $2 LIMIT $3",
                 order_by
             ))
             .bind(search_bind.as_deref().unwrap())
@@ -415,7 +426,10 @@ pub async fn list_systems_scoped(
         // Only environment filter
         (None, Some(_), _, _) => {
             sqlx::query_as::<_, SystemListRow>(&format!(
-                "SELECT * FROM view_system_list WHERE environment ILIKE $1 ORDER BY {} OFFSET $2 LIMIT $3",
+                "SELECT vsl.*, s.flake_id
+                 FROM view_system_list vsl
+                 JOIN systems s ON s.id = vsl.id
+                 WHERE vsl.environment ILIKE $1 ORDER BY {} OFFSET $2 LIMIT $3",
                 order_by
             ))
             .bind(env_bind.as_deref().unwrap())
@@ -427,7 +441,10 @@ pub async fn list_systems_scoped(
         // Both search and environment filters
         (Some(_), Some(_), _, _) => {
             sqlx::query_as::<_, SystemListRow>(&format!(
-                "SELECT * FROM view_system_list WHERE hostname ILIKE $1 AND environment ILIKE $2 ORDER BY {} OFFSET $3 LIMIT $4",
+                "SELECT vsl.*, s.flake_id
+                 FROM view_system_list vsl
+                 JOIN systems s ON s.id = vsl.id
+                 WHERE vsl.hostname ILIKE $1 AND vsl.environment ILIKE $2 ORDER BY {} OFFSET $3 LIMIT $4",
                 order_by
             ))
             .bind(search_bind.as_deref().unwrap())

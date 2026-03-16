@@ -32,7 +32,9 @@ pub async fn list_deployment_policies(
 }
 
 /// List all enabled deployment policies for evaluator execution.
-pub async fn list_enabled_deployment_policies(pool: &PgPool) -> Result<Vec<DeploymentPolicyRecord>> {
+pub async fn list_enabled_deployment_policies(
+    pool: &PgPool,
+) -> Result<Vec<DeploymentPolicyRecord>> {
     let policies = sqlx::query_as::<_, DeploymentPolicyRecord>(
         r#"
         SELECT id, name, description, policy_type, config, enabled, created_at, updated_at
@@ -154,23 +156,21 @@ pub async fn check_policy_name_exists(
     exclude_id: Option<&Uuid>,
 ) -> Result<bool> {
     let count: i64 = match exclude_id {
-        Some(id) => {
-            sqlx::query_scalar(
-                "SELECT COUNT(*) FROM deployment_policies WHERE LOWER(name) = LOWER($1) AND id != $2",
-            )
-            .bind(name)
-            .bind(id)
-            .fetch_one(pool)
-            .await
-            .context("Failed to check policy name existence")?
-        }
-        None => {
-            sqlx::query_scalar("SELECT COUNT(*) FROM deployment_policies WHERE LOWER(name) = LOWER($1)")
-                .bind(name)
-                .fetch_one(pool)
-                .await
-                .context("Failed to check policy name existence")?
-        }
+        Some(id) => sqlx::query_scalar(
+            "SELECT COUNT(*) FROM deployment_policies WHERE LOWER(name) = LOWER($1) AND id != $2",
+        )
+        .bind(name)
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .context("Failed to check policy name existence")?,
+        None => sqlx::query_scalar(
+            "SELECT COUNT(*) FROM deployment_policies WHERE LOWER(name) = LOWER($1)",
+        )
+        .bind(name)
+        .fetch_one(pool)
+        .await
+        .context("Failed to check policy name existence")?,
     };
 
     Ok(count > 0)
@@ -187,38 +187,34 @@ pub async fn check_policy_content_exists(
     exclude_id: Option<&Uuid>,
 ) -> Result<bool> {
     let count: i64 = match exclude_id {
-        Some(id) => {
-            sqlx::query_scalar(
-                r#"
+        Some(id) => sqlx::query_scalar(
+            r#"
                 SELECT COUNT(*)
                 FROM deployment_policies
                 WHERE policy_type = $1
                   AND config = $2
                   AND id != $3
                 "#,
-            )
-            .bind(policy_type)
-            .bind(config)
-            .bind(id)
-            .fetch_one(pool)
-            .await
-            .context("Failed to check policy content existence")?
-        }
-        None => {
-            sqlx::query_scalar(
-                r#"
+        )
+        .bind(policy_type)
+        .bind(config)
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .context("Failed to check policy content existence")?,
+        None => sqlx::query_scalar(
+            r#"
                 SELECT COUNT(*)
                 FROM deployment_policies
                 WHERE policy_type = $1
                   AND config = $2
                 "#,
-            )
-            .bind(policy_type)
-            .bind(config)
-            .fetch_one(pool)
-            .await
-            .context("Failed to check policy content existence")?
-        }
+        )
+        .bind(policy_type)
+        .bind(config)
+        .fetch_one(pool)
+        .await
+        .context("Failed to check policy content existence")?,
     };
 
     Ok(count > 0)
@@ -226,13 +222,12 @@ pub async fn check_policy_content_exists(
 
 /// Check if a policy is in use by any environments or systems
 pub async fn check_policy_in_use(pool: &PgPool, policy_id: &Uuid) -> Result<bool> {
-    let env_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM environment_policies WHERE policy_id = $1",
-    )
-    .bind(policy_id)
-    .fetch_one(pool)
-    .await
-    .context("Failed to check environment_policies")?;
+    let env_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM environment_policies WHERE policy_id = $1")
+            .bind(policy_id)
+            .fetch_one(pool)
+            .await
+            .context("Failed to check environment_policies")?;
 
     if env_count > 0 {
         return Ok(true);

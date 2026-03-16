@@ -1,16 +1,16 @@
 //! Commit-related API handlers.
 
 use axum::{
+    Json,
     extract::{
-        ws::{Message, WebSocket},
         Path, State, WebSocketUpgrade,
+        ws::{Message, WebSocket},
     },
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
-    Json,
 };
 use serde::{Deserialize, Serialize};
-use tokio::time::{interval, Duration};
+use tokio::time::{Duration, interval};
 
 use crate::api::models::{ApiError, EvalQueueItem, EvalQueueSummary, ReorderEvalQueueRequest};
 use crate::handlers::agent_request::CFState;

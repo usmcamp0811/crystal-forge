@@ -4,16 +4,19 @@ use dioxus::prelude::*;
 use uuid::Uuid;
 
 use crate::components::environments::{
-    AddEnvironmentForm, EditEnvironmentDraft, EditEnvironmentModal, EditRequirementsModal,
-    EnvironmentCard, EnvironmentItem, NewEnvironmentDraft, PolicyPickerModal,
-    RemoveEnvironmentDialog, environment_name_for_id, normalize_color_hex, normalize_optional,
-    policy_library, required_agent_policy_id, validate_environment, validate_environment_edit,
+    environment_name_for_id, normalize_color_hex, normalize_optional, policy_library,
+    required_agent_policy_id, validate_environment, validate_environment_edit, AddEnvironmentForm,
+    EditEnvironmentDraft, EditEnvironmentModal, EditRequirementsModal, EnvironmentCard,
+    EnvironmentItem, NewEnvironmentDraft, PolicyPickerModal, RemoveEnvironmentDialog,
 };
+use crate::components::notifications::{AlertBanner, AlertSeverity};
 use crate::environments::adapter::{
     create_environment_via_api, delete_environment_via_api, load_environments_with_fallback,
     load_policies_with_fallback, update_environment_policies_via_api, update_environment_via_api,
 };
 use crate::routes::Route;
+use crate::state::app_state::AppState;
+use crate::state::auth;
 use crate::theme;
 
 fn came_from_setup() -> bool {
@@ -32,8 +35,14 @@ fn came_from_setup() -> bool {
 
 #[component]
 pub fn EnvironmentsListView() -> Element {
+    let app_state = use_context::<Signal<AppState>>();
+    let is_admin_user = auth::is_admin(&app_state.read().auth);
+
     let mut policy_library_state = use_signal(policy_library);
     let default_required_policy = required_agent_policy_id(&policy_library_state.read());
+
+    // Shared config health (admin only) — used for contextual environment warnings.
+    let config_health = app_state.read().config_health.clone();
 
     // Seed initial state from the backend API; fall back to deterministic mock
     // on error. The rest of the component's local-state CRUD (add/edit/remove)
@@ -128,6 +137,28 @@ pub fn EnvironmentsListView() -> Element {
                     class: "flex items-center gap-2 px-4 py-3 rounded-lg border text-yellow-100 text-sm cf-chip-olive",
                     span { class: "shrink-0", "⚠" }
                     span { "{notice}" }
+                }
+            }
+
+            // Admin-only contextual environment warnings from config health.
+            if is_admin_user {
+                if let Some(ref health) = config_health {
+                    if !health.has_builders {
+                        AlertBanner {
+                            severity: AlertSeverity::Warning,
+                            message: "No builder is registered. Builds for systems in any environment won't be processed.".to_string(),
+                            action_label: Some("Add a builder".to_string()),
+                            action_url: Some("/builders".to_string()),
+                        }
+                    }
+                    if !health.has_cache_destinations {
+                        AlertBanner {
+                            severity: AlertSeverity::Warning,
+                            message: "No cache destination is configured. Builds for environments won't be deployable.".to_string(),
+                            action_label: Some("Add a cache".to_string()),
+                            action_url: Some("/caches".to_string()),
+                        }
+                    }
                 }
             }
 

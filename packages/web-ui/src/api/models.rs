@@ -276,6 +276,8 @@ pub struct SystemSummary {
     pub id: Uuid,
     pub hostname: String,
     pub environment: Option<String>,
+    #[serde(default)]
+    pub flake_id: Option<i32>,
     /// Primary IP from agent heartbeat. Not included in server list responses
     /// (use [`SystemNetworkInfo`] in [`SystemDetail`] for full network info).
     /// Defaults to `None` for compatibility with the backend DTO.
@@ -1322,4 +1324,34 @@ pub struct CachePushJob {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BulkJobAction {
     pub job_ids: Vec<i32>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Admin Config Health DTOs — GET /api/v1/admin/config-health
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A single pipeline readiness check result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConfigHealthCheck {
+    /// Stable identifier for this check (e.g. `"no_flakes"`).
+    pub id: String,
+    /// Whether this check passed (no issue detected).
+    pub passed: bool,
+    /// Human-readable description shown when the check fails.
+    pub message: String,
+    /// URL path the admin can navigate to in order to resolve the issue.
+    pub action_url: String,
+}
+
+/// Top-level response for `GET /api/v1/admin/config-health`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConfigHealthResponse {
+    pub has_flakes: bool,
+    pub has_environments: bool,
+    pub has_builders: bool,
+    pub has_cache_destinations: bool,
+    /// Total number of failing checks.
+    pub total_issues: u32,
+    /// Per-check details for all pipeline readiness checks.
+    pub checks: Vec<ConfigHealthCheck>,
 }

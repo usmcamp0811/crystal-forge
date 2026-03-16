@@ -4,9 +4,9 @@ use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
 use std::rc::Rc;
 use uuid::Uuid;
-use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
-use web_sys::{Node, window};
+use wasm_bindgen::JsCast;
+use web_sys::{window, Node};
 
 use crate::api::client::set_setup_wizard_agent_acknowledged;
 use crate::api::models::{
@@ -15,15 +15,18 @@ use crate::api::models::{
 use crate::components::filters::{
     DeploymentFilterDropdown, EnvironmentFilterDropdown, HealthFilterDropdown, ViewMode, ViewToggle,
 };
-use crate::components::forms::{AddSystemForm, NewSystemDraft, validate_new_system};
+use crate::components::forms::{validate_new_system, AddSystemForm, NewSystemDraft};
 use crate::components::layout::Card;
 use crate::components::modals::{
-    GeneratedKeyPair, KeyPairModal, RemoveSystemDialog, UpdatePublicKeyModal, generate_key_pair,
+    generate_key_pair, GeneratedKeyPair, KeyPairModal, RemoveSystemDialog, UpdatePublicKeyModal,
 };
+use crate::components::notifications::{AlertBanner, AlertSeverity};
 use crate::components::system::SystemCard;
 use crate::components::tables::SystemsTable;
 use crate::environments::adapter::load_environment_names_with_fallback;
 use crate::routes::Route;
+use crate::state::app_state::AppState;
+use crate::state::auth;
 use crate::systems::adapter::{
     create_system_via_api, deactivate_system_via_api, fallback_flake_names, fallback_systems,
     load_flake_names_with_fallback, load_systems_with_fallback, update_system_public_key_via_api,
@@ -48,8 +51,8 @@ fn came_from_setup() -> bool {
 mod systems_list_helpers;
 use systems_list_helpers::{
     matches_deployment, matches_environment, matches_health, matches_search, normalize_optional,
-    normalize_policy, prefers_view_from_query, remove_system_by_id, unique_environments,
-    update_key_for_system,
+    normalize_policy, prefers_view_from_query, remove_system_by_id, systems_missing_flake_count,
+    systems_missing_heartbeat_count, unique_environments, update_key_for_system,
 };
 
 const VIEW_PREF_KEY: &str = "crystal_forge.systems.view";
@@ -58,6 +61,8 @@ const VIEW_PREF_KEY: &str = "crystal_forge.systems.view";
 #[component]
 pub fn SystemsListView() -> Element {
     let nav = navigator();
+    let app_state = use_context::<Signal<AppState>>();
+    let is_admin_user = auth::is_admin(&app_state.read().auth);
 
     let stored_view = LocalStorage::get::<String>(VIEW_PREF_KEY).ok();
     let mut view_mode = use_signal(|| ViewMode::from_storage(stored_view));
@@ -275,6 +280,51 @@ pub fn SystemsListView() -> Element {
                 }
             }
 
+            // Admin-only contextual health warnings (no agent heartbeat).
+            if is_admin_user && !*loading.read() {
+                {
+                    let systems_snap = local_systems.read();
+                    let no_flake_count = systems_missing_flake_count(&systems_snap);
+                    if no_flake_count > 0 {
+                        let suffix_s = if no_flake_count == 1 { "" } else { "s" };
+                        let suffix_v = if no_flake_count == 1 { "is" } else { "are" };
+                        let msg = format!(
+                            "{no_flake_count} system{suffix_s} {suffix_v} not linked to a flake and won't be included in evaluations."
+                        );
+                        rsx! {
+                            AlertBanner {
+                                severity: AlertSeverity::Warning,
+                                message: msg,
+                                action_label: Some("Link a flake".to_string()),
+                                action_url: Some("/flakes".to_string()),
+                            }
+                        }
+                    } else {
+                        rsx! {}
+                    }
+                }
+
+                {
+                    let systems_snap = local_systems.read();
+                    let no_hb_count = systems_missing_heartbeat_count(&systems_snap);
+                    if no_hb_count > 0 {
+                        let suffix_s = if no_hb_count == 1 { "" } else { "s" };
+                        let suffix_v = if no_hb_count == 1 { "has" } else { "have" };
+                        let msg = format!(
+                            "{no_hb_count} system{suffix_s} {suffix_v} no agent heartbeat on record and cannot receive deployments."
+                        );
+                        rsx! {
+                            AlertBanner {
+                                severity: AlertSeverity::Warning,
+                                message: msg,
+                            }
+                        }
+                    } else {
+                        rsx! {}
+                    }
+                }
+            }
+
             // Loading spinner (shown during initial fetch)
             if *loading.read() {
                 div {
@@ -369,6 +419,7 @@ pub fn SystemsListView() -> Element {
                                         id: detail.id,
                                         hostname: detail.hostname,
                                         environment: detail.environment,
+                                        flake_id: detail.flake.as_ref().map(|flake| flake.id),
                                         primary_ip: detail.network.primary_ip,
                                         health_status: detail.health_status,
                                         deployment_status: detail.deployment_status,

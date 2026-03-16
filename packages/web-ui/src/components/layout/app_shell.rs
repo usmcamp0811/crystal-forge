@@ -2,15 +2,17 @@
 
 use dioxus::prelude::*;
 
+use crate::api::client::fetch_config_health;
 use crate::api::models::{AuthContext, AuthMode, AuthUser, Role};
 use crate::components::layout::sidebar::{
     MobileDrawer, SidebarContext, SidebarEdgeToggle, SidebarNav,
 };
 use crate::components::layout::TopBar;
 use crate::components::layout::{BannerPlacement, DevModeBanner};
+use crate::components::notifications::{AlertBanner, AlertSeverity};
 use crate::components::onboarding::OnboardingCoachPanel;
 use crate::routes::Route;
-use crate::state::app_state::{AppState, AuthFetchState};
+use crate::state::app_state::{AppState, AuthFetchState, ConfigHealthFetchState};
 use crate::state::auth;
 use crate::theme;
 
@@ -149,6 +151,77 @@ pub fn AppShell() -> Element {
         }
     }
 
+    // Shared config health state — fetched once for admin users and reused by views.
+    let is_admin_user = auth::is_admin(&auth_context);
+    let mut dismissed_key: Signal<Option<String>> = use_signal(|| None);
+    let shared_health = app_state.read().config_health.clone();
+
+    // Derive a stable hash key for the current set of failing check IDs so we
+    // can detect when the health status changes and re-show the banner.
+    let health_key = shared_health.as_ref().map(|h| {
+        h.checks
+            .iter()
+            .filter(|c| !c.passed)
+            .map(|c| c.id.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
+    });
+
+    // Determine whether the global notification bar should be shown.
+    let show_health_bar = is_admin_user
+        && shared_health
+            .as_ref()
+            .map(|h| h.total_issues > 0)
+            .unwrap_or(false)
+        && dismissed_key.read().as_deref() != health_key.as_deref();
+
+    // Fetch health data once when the admin is authenticated.
+    use_effect(move || {
+        if !is_admin_user {
+            let mut state = app_state.write();
+            if state.config_health.is_some()
+                || !matches!(
+                    state.config_health_fetch_state,
+                    ConfigHealthFetchState::Idle
+                )
+            {
+                state.config_health = None;
+                state.config_health_fetch_state = ConfigHealthFetchState::Idle;
+            }
+            return;
+        }
+
+        let should_fetch = {
+            let state = app_state.read();
+            state.config_health.is_none()
+                && matches!(
+                    state.config_health_fetch_state,
+                    ConfigHealthFetchState::Idle | ConfigHealthFetchState::Error
+                )
+        };
+
+        if !should_fetch {
+            return;
+        }
+
+        app_state.write().config_health_fetch_state = ConfigHealthFetchState::Loading;
+
+        spawn(async move {
+            let response = fetch_config_health().await;
+            let mut state = app_state.write();
+            match response {
+                Ok(response) => {
+                    state.config_health = Some(response);
+                    state.config_health_fetch_state = ConfigHealthFetchState::Loaded;
+                }
+                Err(_) => {
+                    state.config_health = None;
+                    state.config_health_fetch_state = ConfigHealthFetchState::Error;
+                }
+            }
+        });
+    });
+
     rsx! {
         div {
             class: "min-h-screen {theme::surface::PAGE_BG} {theme::text::PRIMARY} flex flex-col overflow-x-hidden",
@@ -165,6 +238,29 @@ pub fn AppShell() -> Element {
                 div {
                     class: "flex-1 flex flex-col min-w-0",
                     TopBar { title: current_route.title() }
+                    if show_health_bar {
+                        if let Some(ref h) = shared_health {
+                            div {
+                                class: "px-6 py-4 border-b border-amber-300/35 bg-gradient-to-r from-amber-950/90 via-amber-900/45 to-yellow-950/20 shadow-[inset_0_1px_0_rgba(252,211,77,0.16)]",
+                                style: "background: linear-gradient(180deg, rgba(120, 53, 15, 0.34), rgba(120, 53, 15, 0.18)); border-bottom-color: rgba(245, 158, 11, 0.28);",
+                                AlertBanner {
+                                    severity: AlertSeverity::Warning,
+                                    message: format!(
+                                        "{} configuration issue{} detected — some pipeline stages may not function.",
+                                        h.total_issues,
+                                        if h.total_issues == 1 { "" } else { "s" }
+                                    ),
+                                    action_label: Some("View details on Dashboard".to_string()),
+                                    action_url: Some("/".to_string()),
+                                    on_dismiss: Some(EventHandler::new(move |_| {
+                                        if let Some(key) = health_key.clone() {
+                                            dismissed_key.set(Some(key));
+                                        }
+                                    })),
+                                }
+                            }
+                        }
+                    }
                     main {
                         class: "flex-1 overflow-auto {theme::spacing::PAGE_PADDING}",
                         if should_show_admin_denied(&current_route, &auth_context) {

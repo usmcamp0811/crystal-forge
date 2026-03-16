@@ -92,6 +92,20 @@ pub fn unique_environments(systems: &[SystemSummary]) -> Vec<String> {
     envs
 }
 
+pub fn systems_missing_flake_count(systems: &[SystemSummary]) -> usize {
+    systems
+        .iter()
+        .filter(|system| system.flake_id.is_none())
+        .count()
+}
+
+pub fn systems_missing_heartbeat_count(systems: &[SystemSummary]) -> usize {
+    systems
+        .iter()
+        .filter(|system| system.last_seen.is_none())
+        .count()
+}
+
 pub fn prefers_view_from_query() -> Option<ViewMode> {
     None
 }
@@ -105,6 +119,7 @@ mod tests {
             id: Uuid::parse_str("00000000-0000-0000-0000-0000000000aa").expect("valid uuid"),
             hostname: "sample-host".to_string(),
             environment: environment.map(ToString::to_string),
+            flake_id: Some(1),
             primary_ip: None,
             health_status: HealthStatus::Healthy,
             deployment_status: DeploymentStatus::UpToDate,
@@ -144,5 +159,21 @@ mod tests {
     fn matches_environment_rejects_unscoped_system_when_filtering() {
         let system = sample_system(None);
         assert!(!matches_environment(&system, &["production".to_string()]));
+    }
+
+    #[test]
+    fn counts_systems_missing_flake_links() {
+        let mut with_missing_flake = sample_system(Some("production"));
+        with_missing_flake.flake_id = None;
+        let systems = vec![sample_system(Some("production")), with_missing_flake];
+        assert_eq!(systems_missing_flake_count(&systems), 1);
+    }
+
+    #[test]
+    fn counts_systems_missing_heartbeats() {
+        let mut with_missing_heartbeat = sample_system(Some("production"));
+        with_missing_heartbeat.last_seen = None;
+        let systems = vec![sample_system(Some("production")), with_missing_heartbeat];
+        assert_eq!(systems_missing_heartbeat_count(&systems), 1);
     }
 }

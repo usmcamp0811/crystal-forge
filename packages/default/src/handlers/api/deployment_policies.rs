@@ -82,14 +82,10 @@ fn validate_policy_config(policy_type: &str, config: &Value) -> Result<(), (Stat
             }
         }
         "require_packages" => {
-            let packages = obj
-                .get("packages")
-                .and_then(|v| v.as_array())
-                .ok_or((
-                    StatusCode::BAD_REQUEST,
-                    "require_packages policy requires config.packages as a non-empty array"
-                        .to_string(),
-                ))?;
+            let packages = obj.get("packages").and_then(|v| v.as_array()).ok_or((
+                StatusCode::BAD_REQUEST,
+                "require_packages policy requires config.packages as a non-empty array".to_string(),
+            ))?;
 
             if packages.is_empty() {
                 return Err((
@@ -183,19 +179,16 @@ pub async fn list_deployment_policies(
         })?;
 
     // Fetch policies from database
-    let policies = deployment_policies::list_deployment_policies(
-        &state.pool,
-        params.limit,
-        params.offset,
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!("Failed to list deployment policies: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to retrieve deployment policies".to_string(),
-        )
-    })?;
+    let policies =
+        deployment_policies::list_deployment_policies(&state.pool, params.limit, params.offset)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to list deployment policies: {}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to retrieve deployment policies".to_string(),
+                )
+            })?;
 
     Ok(Json(DeploymentPoliciesListResponse {
         policies,
@@ -286,15 +279,16 @@ pub async fn create_deployment_policy(
     validate_policy_config(&request.policy_type, &request.config)?;
 
     // Check if policy name already exists
-    let name_exists = deployment_policies::check_policy_name_exists(&state.pool, &request.name, None)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to check policy name existence: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to validate policy name".to_string(),
-            )
-        })?;
+    let name_exists =
+        deployment_policies::check_policy_name_exists(&state.pool, &request.name, None)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to check policy name existence: {}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to validate policy name".to_string(),
+                )
+            })?;
 
     if name_exists {
         return Err((
@@ -500,20 +494,19 @@ pub async fn update_deployment_policy(
     }
 
     // Update policy
-    let policy =
-        deployment_policies::update_deployment_policy(&state.pool, &policy_id, &request)
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to update deployment policy {}: {}", policy_id, e);
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Failed to update deployment policy".to_string(),
-                )
-            })?
-            .ok_or((
-                StatusCode::NOT_FOUND,
-                "Deployment policy not found".to_string(),
-            ))?;
+    let policy = deployment_policies::update_deployment_policy(&state.pool, &policy_id, &request)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to update deployment policy {}: {}", policy_id, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to update deployment policy".to_string(),
+            )
+        })?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            "Deployment policy not found".to_string(),
+        ))?;
 
     Ok(Json(policy))
 }
@@ -641,7 +634,7 @@ mod tests {
             config: serde_json::json!({"expression": "true"}),
             enabled: Some(true),
         };
-        
+
         deployment_policies::create_deployment_policy(pool, &request)
             .await
             .unwrap()
@@ -655,7 +648,7 @@ mod tests {
         let policies = deployment_policies::list_deployment_policies(&pool, 100, 0)
             .await
             .unwrap();
-        
+
         // May have seed data, just verify it doesn't error
         assert!(policies.len() >= 0);
     }
@@ -664,7 +657,7 @@ mod tests {
     #[ignore = "requires live postgres"]
     async fn test_list_includes_disabled_policies() {
         let pool = test_pool().await;
-        
+
         // Create an enabled policy
         let enabled_request = CreateDeploymentPolicyRequest {
             name: "Enabled Test Policy".to_string(),
@@ -676,7 +669,7 @@ mod tests {
         deployment_policies::create_deployment_policy(&pool, &enabled_request)
             .await
             .unwrap();
-        
+
         // Create a disabled policy
         let disabled_request = CreateDeploymentPolicyRequest {
             name: "Disabled Test Policy".to_string(),
@@ -688,16 +681,20 @@ mod tests {
         deployment_policies::create_deployment_policy(&pool, &disabled_request)
             .await
             .unwrap();
-        
+
         // List all policies
         let policies = deployment_policies::list_deployment_policies(&pool, 100, 0)
             .await
             .unwrap();
-        
+
         // Verify both policies are in the list
-        let enabled_found = policies.iter().any(|p| p.name == "Enabled Test Policy" && p.enabled);
-        let disabled_found = policies.iter().any(|p| p.name == "Disabled Test Policy" && !p.enabled);
-        
+        let enabled_found = policies
+            .iter()
+            .any(|p| p.name == "Enabled Test Policy" && p.enabled);
+        let disabled_found = policies
+            .iter()
+            .any(|p| p.name == "Disabled Test Policy" && !p.enabled);
+
         assert!(enabled_found, "Enabled policy should be in the list");
         assert!(disabled_found, "Disabled policy should be in the list");
     }
@@ -752,10 +749,11 @@ mod tests {
             enabled: Some(false),
         };
 
-        let updated = deployment_policies::update_deployment_policy(&pool, &policy_id, &update_request)
-            .await
-            .unwrap()
-            .expect("Policy should exist after update");
+        let updated =
+            deployment_policies::update_deployment_policy(&pool, &policy_id, &update_request)
+                .await
+                .unwrap()
+                .expect("Policy should exist after update");
 
         assert_eq!(updated.name, "Updated Name");
         assert_eq!(updated.description, Some("Updated description".to_string()));
@@ -797,7 +795,7 @@ mod tests {
         };
 
         let result = deployment_policies::create_deployment_policy(&pool, &request).await;
-        
+
         // Should fail due to duplicate name
         assert!(result.is_err());
     }
@@ -820,22 +818,22 @@ mod tests {
     #[ignore = "requires live postgres"]
     async fn test_count_deployment_policies() {
         let pool = test_pool().await;
-        
+
         // Get initial count
         let initial_count = deployment_policies::count_deployment_policies(&pool)
             .await
             .unwrap();
-        
+
         // Create 3 test policies
         create_test_policy(&pool, "Count Test 1").await;
         create_test_policy(&pool, "Count Test 2").await;
         create_test_policy(&pool, "Count Test 3").await;
-        
+
         // Verify count increased by 3
         let new_count = deployment_policies::count_deployment_policies(&pool)
             .await
             .unwrap();
-        
+
         assert_eq!(new_count, initial_count + 3);
     }
 
@@ -843,24 +841,27 @@ mod tests {
     #[ignore = "requires live postgres"]
     async fn test_pagination_total_is_accurate() {
         let pool = test_pool().await;
-        
+
         // Create multiple policies (more than one page)
         for i in 1..=5 {
             create_test_policy(&pool, &format!("Pagination Test {}", i)).await;
         }
-        
+
         // Get total count
         let total = deployment_policies::count_deployment_policies(&pool)
             .await
             .unwrap();
-        
+
         // Fetch with limit smaller than total
         let policies = deployment_policies::list_deployment_policies(&pool, 2, 0)
             .await
             .unwrap();
-        
+
         // Verify we got a limited page but total represents all policies
         assert_eq!(policies.len(), 2, "Should return 2 policies per page");
-        assert!(total >= 5, "Total should include all policies, not just the page size");
+        assert!(
+            total >= 5,
+            "Total should include all policies, not just the page size"
+        );
     }
 }

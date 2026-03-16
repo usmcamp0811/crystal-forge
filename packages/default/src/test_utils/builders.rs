@@ -546,6 +546,7 @@ impl SystemSummaryBuilder {
             id: self.id,
             hostname: self.hostname.clone(),
             environment: self.environment.clone(),
+            flake_id: Some(1),
             health_status: self.health_status,
             deployment_status: self.deployment_status,
             pipeline_stage: self.pipeline_stage,

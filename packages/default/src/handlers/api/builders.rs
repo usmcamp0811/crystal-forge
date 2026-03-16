@@ -6,7 +6,10 @@
 
 use axum::{
     Json,
-    extract::{Path, State, ws::{WebSocket, WebSocketUpgrade, Message}},
+    extract::{
+        Path, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
@@ -762,14 +765,18 @@ const BUILD_LOG_HISTORY_BUFFER: usize = 4000;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum BuildStreamMessage {
-    Log { message: String },
+    Log {
+        message: String,
+    },
     Metrics {
         cpu_percent: f32,
         ram_used_mb: u64,
         ram_total_mb: u64,
         timestamp: String,
     },
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 enum BuildLogStreamPrincipal {
@@ -806,7 +813,10 @@ async fn authorize_build_log_stream(
     headers: &HeaderMap,
     job_id: Uuid,
 ) -> Result<BuildLogStreamPrincipal, StatusCode> {
-    if require_viewer_or_above(&state.pool, headers).await.is_some() {
+    if require_viewer_or_above(&state.pool, headers)
+        .await
+        .is_some()
+    {
         return Ok(BuildLogStreamPrincipal::Viewer);
     }
 
@@ -866,7 +876,11 @@ async fn handle_log_stream(
             let mut rx = tx.subscribe();
             while let Ok(frame) = rx.recv().await {
                 if let Err(e) = socket.send(Message::Text(frame)).await {
-                    tracing::debug!("Viewer build-log websocket closed for job {}: {}", job_id, e);
+                    tracing::debug!(
+                        "Viewer build-log websocket closed for job {}: {}",
+                        job_id,
+                        e
+                    );
                     break;
                 }
             }
@@ -894,8 +908,9 @@ async fn handle_log_stream(
                             Ok(message) => message,
                             Err(_) => {
                                 let error = BuildStreamMessage::Error {
-                                    message: "invalid websocket payload; expected typed JSON message"
-                                        .to_string(),
+                                    message:
+                                        "invalid websocket payload; expected typed JSON message"
+                                            .to_string(),
                                 };
                                 let _ = send_build_stream_message(&mut socket, &error).await;
                                 break;

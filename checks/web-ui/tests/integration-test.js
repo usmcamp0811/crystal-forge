@@ -206,6 +206,183 @@ async function unrouteSetupCoachData(page) {
   await page.unroute("**/api/v1/admin/setup-wizard/agent-acknowledge*");
 }
 
+function mockConfigHealthResponse(overrides = {}) {
+  const response = {
+    has_flakes: true,
+    has_environments: true,
+    has_builders: true,
+    has_cache_destinations: true,
+    total_issues: 0,
+    checks: [],
+    ...overrides,
+  };
+
+  if (!response.checks.length) {
+    response.checks = [
+      {
+        id: "no_flakes",
+        passed: response.has_flakes,
+        message:
+          "No flakes are being watched. Add a flake to begin evaluating NixOS configurations.",
+        action_url: "/flakes",
+      },
+      {
+        id: "no_environments",
+        passed: response.has_environments,
+        message:
+          "No environments exist. Environments are required to organize systems, builders, and caches.",
+        action_url: "/environments",
+      },
+      {
+        id: "no_builders",
+        passed: response.has_builders,
+        message:
+          "No builders are registered. Derivations will be evaluated but never built.",
+        action_url: "/builders",
+      },
+      {
+        id: "no_cache_destinations",
+        passed: response.has_cache_destinations,
+        message:
+          "No cache destinations configured. Builds will succeed but agents won't be able to pull deployments.",
+        action_url: "/caches",
+      },
+      {
+        id: "flake_eval_errors",
+        passed: true,
+        message:
+          "One or more flakes have evaluation errors on their latest commit. Check flake configuration.",
+        action_url: "/flakes",
+      },
+    ];
+  }
+
+  response.total_issues = response.checks.filter((check) => !check.passed).length;
+  return response;
+}
+
+async function routeConfigHealth(page, response) {
+  await page.route("**/api/v1/admin/config-health*", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(response),
+    });
+  });
+}
+
+async function unrouteConfigHealth(page) {
+  await page.unroute("**/api/v1/admin/config-health*");
+}
+
+async function routeSystemsWarningData(page) {
+  const items = [
+    {
+      id: "00000000-0000-0000-0000-0000000000a1",
+      hostname: "warning-system-01",
+      environment: "production",
+      flake_id: null,
+      primary_ip: "10.10.0.10",
+      health_status: "warning",
+      deployment_status: "never_deployed",
+      pipeline_stage: "ready_for_build",
+      cve_counts: { critical: 0, high: 0, medium: 1, low: 2 },
+      nixos_version: "24.11",
+      last_seen: null,
+      deployment_policy: "manual",
+    },
+  ];
+
+  await page.route("**/api/v1/systems*", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ items, total: items.length, page: 1, per_page: 50 }),
+    });
+  });
+}
+
+async function unrouteSystemsWarningData(page) {
+  await page.unroute("**/api/v1/systems*");
+}
+
+async function routeEnvironmentWarningData(page) {
+  const environments = [
+    {
+      id: "00000000-0000-0000-0000-0000000000b1",
+      name: "Production",
+      description: "Primary deployment environment",
+      color_hex: "#2563EB",
+      is_active: true,
+      system_count: 3,
+    },
+  ];
+  const policies = [
+    {
+      id: "00000000-0000-0000-0000-0000000000c1",
+      name: "required-agent",
+      description: "Required agent baseline",
+      policy_type: "required_agent",
+      config: {},
+      enabled: true,
+    },
+  ];
+
+  await page.route("**/api/v1/environments*", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(environments),
+    });
+  });
+
+  await page.route("**/api/v1/policies*", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(policies),
+    });
+  });
+}
+
+async function unrouteEnvironmentWarningData(page) {
+  await page.unroute("**/api/v1/environments*");
+  await page.unroute("**/api/v1/policies*");
+}
+
+async function routeFlakeWarningData(page) {
+  const flakes = [
+    {
+      id: 41,
+      name: "platform-core",
+      repo_url: "https://gitlab.com/crystal-forge/platform-core.git",
+      branch: "main",
+      system_count: 2,
+    },
+  ];
+
+  await page.route("**/api/v1/flakes/timelines*", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([]),
+    });
+  });
+
+  await page.route("**/api/v1/flakes", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(flakes),
+    });
+  });
+}
+
+async function unrouteFlakeWarningData(page) {
+  await page.unroute("**/api/v1/flakes/timelines*");
+  await page.unroute("**/api/v1/flakes");
+}
+
 // Screenshot steps - executed in order
 const steps = [
   // ============================================================
@@ -940,6 +1117,44 @@ const steps = [
       await page.unroute("**/api/v1/admin/setup-progress*");
     },
   },
+  {
+    name: "06b-config-health-bar",
+    description: "Dashboard top notification bar for admin config health issues",
+    action: async (page) => {
+      await routeConfigHealth(
+        page,
+        mockConfigHealthResponse({
+          has_flakes: false,
+          has_builders: false,
+        }),
+      );
+      await page.goto(`${baseUrl}/`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2000);
+      await page.getByText(/configuration issues detected/i).first().waitFor({ timeout: 5000 });
+      await page.evaluate(() => window.scrollTo(0, 0));
+      await unrouteConfigHealth(page);
+    },
+  },
+  {
+    name: "06c-config-health-widget",
+    description: "Dashboard Pipeline Readiness widget with actionable warning links",
+    action: async (page) => {
+      await routeConfigHealth(
+        page,
+        mockConfigHealthResponse({
+          has_flakes: false,
+          has_builders: false,
+          has_cache_destinations: false,
+        }),
+      );
+      await page.goto(`${baseUrl}/`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2000);
+      await page.getByText("Pipeline Readiness").first().waitFor({ timeout: 5000 });
+      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+      await page.waitForTimeout(500);
+      await unrouteConfigHealth(page);
+    },
+  },
   // ============================================================
   // RESPONSIVE SIDEBAR SCREENSHOTS
   // Each step clears localStorage first so state is deterministic.
@@ -1193,6 +1408,22 @@ const steps = [
     },
   },
   {
+    name: "12b-systems-config-warning",
+    description: "Systems warning state for missing flake linkage and agent heartbeat",
+    action: async (page) => {
+      await routeConfigHealth(page, mockConfigHealthResponse());
+      await routeSystemsWarningData(page);
+      await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2000);
+      await page
+        .getByText(/not linked to a flake and won't be included in evaluations/i)
+        .first()
+        .waitFor({ timeout: 5000 });
+      await unrouteSystemsWarningData(page);
+      await unrouteConfigHealth(page);
+    },
+  },
+  {
     name: "13-flakes",
     description: "Flakes registry",
     action: async (page) => {
@@ -1201,11 +1432,86 @@ const steps = [
     },
   },
   {
+    name: "13b-flakes-config-warning",
+    description: "Flakes warning state for latest evaluation errors",
+    action: async (page) => {
+      await routeConfigHealth(
+        page,
+        mockConfigHealthResponse({
+          checks: [
+            {
+              id: "no_flakes",
+              passed: true,
+              message:
+                "No flakes are being watched. Add a flake to begin evaluating NixOS configurations.",
+              action_url: "/flakes",
+            },
+            {
+              id: "no_environments",
+              passed: true,
+              message:
+                "No environments exist. Environments are required to organize systems, builders, and caches.",
+              action_url: "/environments",
+            },
+            {
+              id: "no_builders",
+              passed: true,
+              message:
+                "No builders are registered. Derivations will be evaluated but never built.",
+              action_url: "/builders",
+            },
+            {
+              id: "no_cache_destinations",
+              passed: true,
+              message:
+                "No cache destinations configured. Builds will succeed but agents won't be able to pull deployments.",
+              action_url: "/caches",
+            },
+            {
+              id: "flake_eval_errors",
+              passed: false,
+              message:
+                "One or more flakes have evaluation errors on their latest commit. Check flake configuration.",
+              action_url: "/flakes",
+            },
+          ],
+        }),
+      );
+      await routeFlakeWarningData(page);
+      await page.goto(`${baseUrl}/flakes`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2000);
+      await page.getByText(/latest commit/i).first().waitFor({ timeout: 5000 });
+      await page.evaluate(() => window.scrollTo(0, 140));
+      await unrouteFlakeWarningData(page);
+      await unrouteConfigHealth(page);
+    },
+  },
+  {
     name: "14-environments",
     description: "Environments registry",
     action: async (page) => {
       await page.goto(`${baseUrl}/environments`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
+    },
+  },
+  {
+    name: "14b-environments-config-warning",
+    description: "Environments warning state for missing builder and cache assignments",
+    action: async (page) => {
+      await routeConfigHealth(
+        page,
+        mockConfigHealthResponse({
+          has_builders: false,
+          has_cache_destinations: false,
+        }),
+      );
+      await routeEnvironmentWarningData(page);
+      await page.goto(`${baseUrl}/environments`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2000);
+      await page.getByText(/No builder is registered/i).first().waitFor({ timeout: 5000 });
+      await page.evaluate(() => window.scrollTo(0, 140));
+      await unrouteEnvironmentWarningData(page);
+      await unrouteConfigHealth(page);
     },
   },
   {
