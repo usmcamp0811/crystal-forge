@@ -6,7 +6,7 @@ title: >-
 status: Review
 assignee: []
 created_date: '2026-03-16 01:02'
-updated_date: '2026-03-16 01:14'
+updated_date: '2026-03-16 02:06'
 labels:
   - documentation
   - onboarding
@@ -246,6 +246,16 @@ README.md updated with Guided Onboarding Coach section and reference in Quick St
 Target audience: sysadmins with average NixOS skills
 
 Verification complete: all screenshots exist, links valid, markdown formatting correct
+
+Updated cache section based on feedback: Attic is now recommended for production over S3
+
+Added detailed explanation of S3 caching issues (Nix client caching, no auto-reinterrogation of S3 cache)
+
+Repositioned Attic as the primary production cache backend with rationale
+
+Clarified S3 use case is better for archival/backup rather than active caching
+
+Commit: 0a6ddaa6
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
