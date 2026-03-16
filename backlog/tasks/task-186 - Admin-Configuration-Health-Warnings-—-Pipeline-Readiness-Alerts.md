@@ -4,7 +4,7 @@ title: Admin Configuration Health Warnings — Pipeline Readiness Alerts
 status: In Progress
 assignee: []
 created_date: '2026-03-13 01:16'
-updated_date: '2026-03-16 00:07'
+updated_date: '2026-03-16 00:29'
 labels:
   - frontend
   - backend
@@ -188,4 +188,8 @@ Remaining blocker: GitLab authentication in this environment is still invalid (`
 MR 163 updated with a refreshed description and uploaded UI evidence for all required TASK-186 warning surfaces. GitLab upload markdown added for: global notification bar, dashboard widget, systems warning, flakes warning, and environments warning.
 
 Current MR state is still `has_conflicts=true` because the rebased local branch has not been pushed yet from this session. Local verification on the rebased worktree remains green for `cargo check` (server + web-ui), `nix build .#checks.x86_64-linux.web-ui`, and `nix flake check`.
+
+Reviewed the generated TASK-186 screenshots directly and found the warning banner icon styling was broken (oversized icon collapsing banner text/layout). Fixed `packages/web-ui/src/components/notifications/alert_banner.rs` by replacing the fragile SVG warning icon with a fixed-size badge layout, then regenerated screenshots and confirmed the banners render correctly across dashboard, global bar, systems, flakes, and environments surfaces.
+
+Pushed follow-up commit `2af5b5e7` (`fix(web-ui): stabilize admin warning banner layout`). Refreshed the screenshot uploads in MR 163 and updated the MR description to reference the corrected images. MR 163 is now mergeable and its pipeline is running on `2af5b5e7`.
 <!-- SECTION:NOTES:END -->
