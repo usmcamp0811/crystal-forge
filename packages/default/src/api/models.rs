@@ -274,6 +274,7 @@ pub struct SystemSummary {
     pub id: Uuid,
     pub hostname: String,
     pub environment: Option<String>,
+    pub flake_id: Option<i32>,
     pub health_status: HealthStatus,
     pub deployment_status: DeploymentStatus,
     pub pipeline_stage: Option<PipelineStage>,

@@ -276,6 +276,8 @@ pub struct SystemSummary {
     pub id: Uuid,
     pub hostname: String,
     pub environment: Option<String>,
+    #[serde(default)]
+    pub flake_id: Option<i32>,
     /// Primary IP from agent heartbeat. Not included in server list responses
     /// (use [`SystemNetworkInfo`] in [`SystemDetail`] for full network info).
     /// Defaults to `None` for compatibility with the backend DTO.

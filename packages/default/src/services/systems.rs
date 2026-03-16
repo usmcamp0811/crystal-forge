@@ -282,6 +282,7 @@ fn list_row_to_summary(row: queries::SystemListRow) -> SystemSummary {
         id: row.id,
         hostname: row.hostname,
         environment: row.environment,
+        flake_id: row.flake_id,
         health_status: parse_health_status(&row.health_status),
         deployment_status: parse_deployment_status(&row.deployment_status),
         pipeline_stage: Some(parse_pipeline_stage(&row.pipeline_stage)),
