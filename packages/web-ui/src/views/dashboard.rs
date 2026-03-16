@@ -4,8 +4,7 @@ use chrono::Duration;
 use dioxus::prelude::*;
 use std::collections::HashSet;
 
-use crate::api::client::fetch_config_health;
-use crate::api::models::{BuildStatus, ConfigHealthResponse, FlakeCommit, FlakeTimeline};
+use crate::api::models::{BuildStatus, FlakeCommit, FlakeTimeline};
 use crate::components::dashboard::{
     BuildQueuePanel, BuildSummaryPanel, CveSummaryPanel, DeploymentStatusBreakdown,
     FleetHealthBreakdown, RecentDeploymentsList,
@@ -140,21 +139,10 @@ pub fn DashboardView() -> Element {
     let loading_dashboard = use_signal(|| true);
     let redirect_to_login = use_signal(|| false);
 
-    // Config health (admin only).
+    // Shared config health (admin only).
     let app_state = use_context::<Signal<AppState>>();
     let is_admin_user = auth::is_admin(&app_state.read().auth);
-    let mut config_health: Signal<Option<ConfigHealthResponse>> = use_signal(|| None);
-
-    use_effect(move || {
-        if !is_admin_user {
-            return;
-        }
-        spawn(async move {
-            if let Ok(response) = fetch_config_health().await {
-                config_health.set(Some(response));
-            }
-        });
-    });
+    let config_health = app_state.read().config_health.clone();
 
     // Flake timelines state
     let flake_timelines = use_signal(Vec::<FlakeTimeline>::new);
@@ -433,7 +421,7 @@ pub fn DashboardView() -> Element {
                     // Non-admins don't see this widget at all.
                     return rsx! {};
                 }
-                let health_snapshot = config_health.read().clone();
+                let health_snapshot = config_health.clone();
                 match health_snapshot {
                     None => rsx! {
                         p {

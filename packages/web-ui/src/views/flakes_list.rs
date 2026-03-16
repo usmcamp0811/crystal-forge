@@ -8,19 +8,18 @@ use gloo_storage::{LocalStorage, Storage};
 #[cfg(target_arch = "wasm32")]
 use js_sys::Object;
 use uuid::Uuid;
+use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::JsCast;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsValue;
-use wasm_bindgen::prelude::Closure;
 #[cfg(target_arch = "wasm32")]
 use web_sys::console;
-use web_sys::{Node, window};
+use web_sys::{window, Node};
 
 use crate::api::client::{
-    create_flake, delete_flake, fetch_commit_diff, fetch_config_health, fetch_flake_timelines,
-    fetch_flakes, request_sync_all_flakes, request_sync_flake, update_flake,
+    create_flake, delete_flake, fetch_commit_diff, fetch_flake_timelines, fetch_flakes,
+    request_sync_all_flakes, request_sync_flake, update_flake,
 };
-use crate::api::models::ConfigHealthResponse;
 use crate::api::models::{
     BuildStatus as ApiBuildStatus, CreateFlakeRequest, FlakeRegistryItem, FlakeTimeline,
     UpdateFlakeRequest,
@@ -225,18 +224,8 @@ pub fn FlakesListView() -> Element {
     let app_state = use_context::<Signal<AppState>>();
     let is_admin_user = auth::is_admin(&app_state.read().auth);
 
-    // Config health (admin only) — used for flake eval error banner.
-    let mut config_health: Signal<Option<ConfigHealthResponse>> = use_signal(|| None);
-    use_effect(move || {
-        if !is_admin_user {
-            return;
-        }
-        spawn(async move {
-            if let Ok(response) = fetch_config_health().await {
-                config_health.set(Some(response));
-            }
-        });
-    });
+    // Shared config health (admin only) — used for flake eval error banner.
+    let config_health = app_state.read().config_health.clone();
 
     let stored_view = LocalStorage::get::<String>(VIEW_PREF_KEY).ok();
     let mut view_mode = use_signal(|| FlakesViewMode::from_storage(stored_view));
@@ -553,7 +542,7 @@ pub fn FlakesListView() -> Element {
 
             // Admin-only: warn when any flake has eval errors on its latest commit.
             if is_admin_user {
-                if let Some(ref health) = *config_health.read() {
+                if let Some(ref health) = config_health {
                     if health.checks.iter().any(|c| c.id == "flake_eval_errors" && !c.passed) {
                         AlertBanner {
                             severity: AlertSeverity::Warning,
@@ -1106,7 +1095,7 @@ fn FlakeHistoryExplorer(
     selected_commit_hash: Signal<Option<String>>,
     timelines: Vec<FlakeTimeline>,
 ) -> Element {
-    use crate::hooks::websocket::{SystemEvalStatus, use_websocket_eval_stream};
+    use crate::hooks::websocket::{use_websocket_eval_stream, SystemEvalStatus};
     let navigator = use_navigator();
 
     let history = build_flake_history(&timelines);

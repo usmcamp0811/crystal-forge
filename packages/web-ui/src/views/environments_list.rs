@@ -3,13 +3,11 @@
 use dioxus::prelude::*;
 use uuid::Uuid;
 
-use crate::api::client::fetch_config_health;
-use crate::api::models::ConfigHealthResponse;
 use crate::components::environments::{
-    AddEnvironmentForm, EditEnvironmentDraft, EditEnvironmentModal, EditRequirementsModal,
-    EnvironmentCard, EnvironmentItem, NewEnvironmentDraft, PolicyPickerModal,
-    RemoveEnvironmentDialog, environment_name_for_id, normalize_color_hex, normalize_optional,
-    policy_library, required_agent_policy_id, validate_environment, validate_environment_edit,
+    environment_name_for_id, normalize_color_hex, normalize_optional, policy_library,
+    required_agent_policy_id, validate_environment, validate_environment_edit, AddEnvironmentForm,
+    EditEnvironmentDraft, EditEnvironmentModal, EditRequirementsModal, EnvironmentCard,
+    EnvironmentItem, NewEnvironmentDraft, PolicyPickerModal, RemoveEnvironmentDialog,
 };
 use crate::components::notifications::{AlertBanner, AlertSeverity};
 use crate::environments::adapter::{
@@ -43,18 +41,8 @@ pub fn EnvironmentsListView() -> Element {
     let mut policy_library_state = use_signal(policy_library);
     let default_required_policy = required_agent_policy_id(&policy_library_state.read());
 
-    // Config health (admin only) — used for contextual environment warnings.
-    let mut config_health: Signal<Option<ConfigHealthResponse>> = use_signal(|| None);
-    use_effect(move || {
-        if !is_admin_user {
-            return;
-        }
-        spawn(async move {
-            if let Ok(response) = fetch_config_health().await {
-                config_health.set(Some(response));
-            }
-        });
-    });
+    // Shared config health (admin only) — used for contextual environment warnings.
+    let config_health = app_state.read().config_health.clone();
 
     // Seed initial state from the backend API; fall back to deterministic mock
     // on error. The rest of the component's local-state CRUD (add/edit/remove)
@@ -154,7 +142,7 @@ pub fn EnvironmentsListView() -> Element {
 
             // Admin-only contextual environment warnings from config health.
             if is_admin_user {
-                if let Some(ref health) = *config_health.read() {
+                if let Some(ref health) = config_health {
                     if !health.has_builders {
                         AlertBanner {
                             severity: AlertSeverity::Warning,
