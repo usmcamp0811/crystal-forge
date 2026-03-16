@@ -3,13 +3,19 @@
 use dioxus::prelude::*;
 
 use crate::api::models::{DeploymentStatus, HealthStatus};
-use crate::components::dashboard::BuildQueueRow;
+use crate::components::charts::{DonutChartWithLegend, DonutSegment};
+use crate::components::dashboard::{BuildQueueRow, BuildSummaryPanel, RecentDeploymentRow};
 use crate::components::filters::{ViewMode, ViewToggle};
+use crate::components::stat_card::StatCard;
 use crate::components::status_badge::{DeploymentBadge, HealthBadge};
-use crate::showcase::fixtures::{build_queue_item_fixtures, stat_card_fixtures, timeline_fixtures};
+use crate::components::system::SystemCard;
+use crate::showcase::fixtures::{
+    build_queue_item_fixtures, build_queue_summary_fixture, recent_deployment_fixtures,
+    stat_card_fixtures, system_summary_fixtures, timeline_fixtures,
+};
 use crate::showcase::shell::{
-    ResponsiveGrid, ResponsivePreview, ShowcaseSection, StateMatrix, StateTile, VariantGroup,
-    DESKTOP_WIDTH, MOBILE_WIDTH, TABLET_WIDTH,
+    DESKTOP_WIDTH, MOBILE_WIDTH, ResponsiveGrid, ResponsivePreview, ShowcaseSection, StateMatrix,
+    StateTile, TABLET_WIDTH, VariantGroup, WIDE_WIDTH,
 };
 use crate::theme::{self, presets};
 
@@ -279,6 +285,314 @@ pub fn StyleGuideView() -> Element {
                                         item: queue_items[3].clone(),
                                         position_label: Some("Queued #3".to_string())
                                     }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                StateMatrix { title: "StatCard - Semantic States",
+                    {
+                        rsx! {
+                            StateTile { label: "default (neutral)",
+                                StatCard {
+                                    label: "Total Systems".to_string(),
+                                    value: "24".to_string(),
+                                    color_class: "".to_string()
+                                }
+                            }
+                            StateTile { label: "success (green)",
+                                StatCard {
+                                    label: "Healthy Systems".to_string(),
+                                    value: "18".to_string(),
+                                    color_class: "text-green-400".to_string()
+                                }
+                            }
+                            StateTile { label: "warning (amber)",
+                                StatCard {
+                                    label: "Policy Failures".to_string(),
+                                    value: "3".to_string(),
+                                    color_class: "text-amber-400".to_string()
+                                }
+                            }
+                            StateTile { label: "danger (red)",
+                                StatCard {
+                                    label: "Critical CVEs".to_string(),
+                                    value: "12".to_string(),
+                                    color_class: "text-red-400".to_string()
+                                }
+                            }
+                            StateTile { label: "info (blue)",
+                                StatCard {
+                                    label: "Active Builds".to_string(),
+                                    value: "6".to_string(),
+                                    color_class: "text-blue-400".to_string()
+                                }
+                            }
+                            StateTile { label: "large value",
+                                StatCard {
+                                    label: "Total Deployments".to_string(),
+                                    value: "1,247".to_string(),
+                                    color_class: "".to_string()
+                                }
+                            }
+                        }
+                    }
+                }
+
+                StateMatrix { title: "SystemCard - Health & Deployment States",
+                    {
+                        let systems = system_summary_fixtures();
+                        rsx! {
+                            StateTile { label: "healthy + up-to-date",
+                                SystemCard {
+                                    system: systems[0].clone(),
+                                    on_remove: move |_| {},
+                                    on_update_key: move |_| {}
+                                }
+                            }
+                            StateTile { label: "warning + behind",
+                                SystemCard {
+                                    system: systems[1].clone(),
+                                    on_remove: move |_| {},
+                                    on_update_key: move |_| {}
+                                }
+                            }
+                            StateTile { label: "critical + never deployed",
+                                SystemCard {
+                                    system: systems[2].clone(),
+                                    on_remove: move |_| {},
+                                    on_update_key: move |_| {}
+                                }
+                            }
+                            StateTile { label: "offline + unknown",
+                                SystemCard {
+                                    system: systems[3].clone(),
+                                    on_remove: move |_| {},
+                                    on_update_key: move |_| {}
+                                }
+                            }
+                            StateTile { label: "overflow (long hostname)",
+                                SystemCard {
+                                    system: systems[4].clone(),
+                                    on_remove: move |_| {},
+                                    on_update_key: move |_| {}
+                                }
+                            }
+                            StateTile { label: "building state",
+                                SystemCard {
+                                    system: systems[5].clone(),
+                                    on_remove: move |_| {},
+                                    on_update_key: move |_| {}
+                                }
+                            }
+                        }
+                    }
+                }
+
+                ResponsiveGrid {
+                    ResponsivePreview {
+                        label: "mobile (375px)",
+                        width_class: MOBILE_WIDTH,
+                        {
+                            let systems = system_summary_fixtures();
+                            rsx! {
+                                div { class: "space-y-3",
+                                    SystemCard {
+                                        system: systems[0].clone(),
+                                        on_remove: move |_| {},
+                                        on_update_key: move |_| {}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    ResponsivePreview {
+                        label: "tablet (768px)",
+                        width_class: TABLET_WIDTH,
+                        {
+                            let systems = system_summary_fixtures();
+                            rsx! {
+                                div { class: "grid grid-cols-2 gap-3",
+                                    SystemCard {
+                                        system: systems[0].clone(),
+                                        on_remove: move |_| {},
+                                        on_update_key: move |_| {}
+                                    }
+                                    SystemCard {
+                                        system: systems[1].clone(),
+                                        on_remove: move |_| {},
+                                        on_update_key: move |_| {}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    ResponsivePreview {
+                        label: "desktop (1024px)",
+                        width_class: DESKTOP_WIDTH,
+                        {
+                            let systems = system_summary_fixtures();
+                            rsx! {
+                                div { class: "grid grid-cols-3 gap-3",
+                                    SystemCard {
+                                        system: systems[0].clone(),
+                                        on_remove: move |_| {},
+                                        on_update_key: move |_| {}
+                                    }
+                                    SystemCard {
+                                        system: systems[1].clone(),
+                                        on_remove: move |_| {},
+                                        on_update_key: move |_| {}
+                                    }
+                                    SystemCard {
+                                        system: systems[2].clone(),
+                                        on_remove: move |_| {},
+                                        on_update_key: move |_| {}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                StateMatrix { title: "RecentDeploymentRow - Deployment States",
+                    {
+                        let deployments = recent_deployment_fixtures();
+                        rsx! {
+                            StateTile { label: "up-to-date (recent)",
+                                RecentDeploymentRow {
+                                    deployment: deployments[0].clone()
+                                }
+                            }
+                            StateTile { label: "behind (older)",
+                                RecentDeploymentRow {
+                                    deployment: deployments[1].clone()
+                                }
+                            }
+                            StateTile { label: "overflow (long message)",
+                                RecentDeploymentRow {
+                                    deployment: deployments[2].clone()
+                                }
+                            }
+                            StateTile { label: "no commit message",
+                                RecentDeploymentRow {
+                                    deployment: deployments[3].clone()
+                                }
+                            }
+                            StateTile { label: "just deployed",
+                                RecentDeploymentRow {
+                                    deployment: deployments[4].clone()
+                                }
+                            }
+                        }
+                    }
+                }
+
+                StateMatrix { title: "BuildSummaryPanel - Queue States",
+                    {
+                        rsx! {
+                            StateTile { label: "active builds + queue",
+                                div { class: "w-96 h-64",
+                                    BuildSummaryPanel {
+                                        queue: build_queue_summary_fixture(),
+                                        flake_filter: None
+                                    }
+                                }
+                            }
+                            StateTile { label: "with flake filter",
+                                div { class: "w-96 h-64",
+                                    BuildSummaryPanel {
+                                        queue: build_queue_summary_fixture(),
+                                        flake_filter: Some("infrastructure".to_string())
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                StateMatrix { title: "DonutChartWithLegend - Visual Data",
+                    {
+                        rsx! {
+                            StateTile { label: "health distribution",
+                                div { class: "w-96 h-48",
+                                    DonutChartWithLegend {
+                                        segments: vec![
+                                            DonutSegment {
+                                                percent: 60.0,
+                                                color: "#10b981",
+                                                label: "Healthy",
+                                                count: 18,
+                                                systems: vec!["web-server-1".to_string(), "web-server-2".to_string(), "db-primary".to_string()],
+                                            },
+                                            DonutSegment {
+                                                percent: 25.0,
+                                                color: "#f59e0b",
+                                                label: "Warning",
+                                                count: 5,
+                                                systems: vec!["staging-app".to_string(), "dev-machine".to_string()],
+                                            },
+                                            DonutSegment {
+                                                percent: 15.0,
+                                                color: "#ef4444",
+                                                label: "Critical",
+                                                count: 1,
+                                                systems: vec!["legacy-server".to_string()],
+                                            },
+                                        ],
+                                        center_value: 24,
+                                        center_label: "SYSTEMS"
+                                    }
+                                }
+                            }
+                            StateTile { label: "build queue",
+                                div { class: "w-96 h-48",
+                                    DonutChartWithLegend {
+                                        segments: vec![
+                                            DonutSegment {
+                                                percent: 40.0,
+                                                color: "#42ff65",
+                                                label: "Building",
+                                                count: 2,
+                                                systems: vec!["web-server-1".to_string(), "db-primary".to_string()],
+                                            },
+                                            DonutSegment {
+                                                percent: 60.0,
+                                                color: "#e57c00",
+                                                label: "Queued",
+                                                count: 3,
+                                                systems: vec!["staging-app".to_string(), "api-gateway".to_string(), "worker-01".to_string()],
+                                            },
+                                        ],
+                                        center_value: 5,
+                                        center_label: "BUILDS"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                StateMatrix { title: "Status Badges - All States",
+                    {
+                        rsx! {
+                            StateTile { label: "health badges",
+                                div { class: "flex flex-wrap gap-2",
+                                    HealthBadge { status: HealthStatus::Healthy }
+                                    HealthBadge { status: HealthStatus::Warning }
+                                    HealthBadge { status: HealthStatus::Critical }
+                                    HealthBadge { status: HealthStatus::Offline }
+                                }
+                            }
+                            StateTile { label: "deployment badges",
+                                div { class: "flex flex-wrap gap-2",
+                                    DeploymentBadge { status: DeploymentStatus::UpToDate }
+                                    DeploymentBadge { status: DeploymentStatus::Behind }
+                                    DeploymentBadge { status: DeploymentStatus::Ahead }
+                                    DeploymentBadge { status: DeploymentStatus::NeverDeployed }
+                                    DeploymentBadge { status: DeploymentStatus::NoCommitsAvailable }
+                                    DeploymentBadge { status: DeploymentStatus::Unknown }
                                 }
                             }
                         }
