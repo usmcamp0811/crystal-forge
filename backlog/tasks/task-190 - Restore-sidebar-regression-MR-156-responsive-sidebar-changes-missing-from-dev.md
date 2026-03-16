@@ -1,9 +1,10 @@
 ---
 id: TASK-190
 title: 'Restore sidebar regression: MR-156 responsive sidebar changes missing from dev'
-status: Backlog
+status: Cancelled
 assignee: []
 created_date: '2026-03-13 02:17'
+updated_date: '2026-03-16 23:15'
 labels:
   - regression
   - web-ui
@@ -13,6 +14,7 @@ dependencies: []
 references:
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/156'
 priority: high
+ordinal: 3000
 ---
 
 ## Description
