@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-03-16 01:02'
-updated_date: '2026-03-16 01:03'
+updated_date: '2026-03-16 01:13'
 labels:
   - documentation
   - onboarding
@@ -214,4 +214,20 @@ No Tier 2 verification needed (documentation only, no code changes).
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: Claude (OpenCode) on gray in ~/code/crystal-forge/TASK-193-onboarding-docs
+
+Created comprehensive onboarding guide (docs/onboarding-guide.md) with 6-step walkthrough mirroring coach panel flow
+
+Added 19 onboarding screenshots (06a-06h series) from web-ui integration tests to docs/screenshots/
+
+Updated README.md to include Guided Onboarding Coach section in What's New
+
+Added reference to onboarding guide in README Quick Start section
+
+All screenshots sourced from automated web-ui check (nix build .#checks.x86_64-linux.web-ui)
+
+Onboarding guide includes: Prerequisites, Before You Begin, 6-step guided tour, After Onboarding, Troubleshooting
+
+Guide written for sysadmins with average NixOS skills (no assumed expert knowledge)
+
+Commit: 9a0fb56d
 <!-- SECTION:NOTES:END -->
