@@ -4,7 +4,7 @@ title: Admin Configuration Health Warnings — Pipeline Readiness Alerts
 status: In Progress
 assignee: []
 created_date: '2026-03-13 01:16'
-updated_date: '2026-03-15 23:54'
+updated_date: '2026-03-16 00:07'
 labels:
   - frontend
   - backend
@@ -184,4 +184,8 @@ Post-rebase verification: started the dev DB with `nix run .#devScripts.db-only 
 Post-rebase UI evidence verification: `nix build .#checks.x86_64-linux.web-ui` rebuilt successfully and required TASK-186 screenshots remain available in `result/screenshots/`: `06b-config-health-bar.png`, `06c-config-health-widget.png`, `12b-systems-config-warning.png`, `13b-flakes-config-warning.png`, `14b-environments-config-warning.png`.
 
 Remaining blocker: GitLab authentication in this environment is still invalid (`glab` auth returns `invalid_grant` / upload attempts return `401`), so MR screenshot upload/update is prepared but not yet executable from this session.
+
+MR 163 updated with a refreshed description and uploaded UI evidence for all required TASK-186 warning surfaces. GitLab upload markdown added for: global notification bar, dashboard widget, systems warning, flakes warning, and environments warning.
+
+Current MR state is still `has_conflicts=true` because the rebased local branch has not been pushed yet from this session. Local verification on the rebased worktree remains green for `cargo check` (server + web-ui), `nix build .#checks.x86_64-linux.web-ui`, and `nix flake check`.
 <!-- SECTION:NOTES:END -->
