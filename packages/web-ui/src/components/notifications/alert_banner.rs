@@ -37,16 +37,24 @@ pub fn AlertBanner(
         dismiss_hover_class,
         icon_bg_class,
         icon_glyph,
+        container_style,
+        icon_style,
+        text_style,
+        action_style,
     ) = match severity {
         AlertSeverity::Warning => (
-            "border-amber-300/70 shadow-[0_0_0_1px_rgba(252,211,77,0.12)]",
-            "bg-gradient-to-r from-amber-950 via-amber-900/80 to-yellow-900/55",
-            "text-amber-200",
-            "text-amber-50",
-            "text-amber-200",
+            "",
+            "",
+            "",
+            "",
+            "",
             "hover:bg-amber-300/14",
-            "bg-amber-300/22 border border-amber-200/20",
+            "",
             "!",
+            "border-color: rgba(245, 158, 11, 0.7); background: linear-gradient(135deg, rgba(120, 53, 15, 0.92), rgba(146, 64, 14, 0.78) 55%, rgba(113, 63, 18, 0.7)); box-shadow: inset 0 1px 0 rgba(253, 230, 138, 0.14), 0 0 0 1px rgba(245, 158, 11, 0.08);",
+            "background: rgba(245, 158, 11, 0.18); color: rgb(254, 243, 199); border: 1px solid rgba(252, 211, 77, 0.22);",
+            "color: rgb(255, 251, 235);",
+            "color: rgb(253, 230, 138);",
         ),
         AlertSeverity::Info => (
             "border-blue-500/40",
@@ -57,18 +65,23 @@ pub fn AlertBanner(
             "hover:bg-blue-500/10",
             "bg-blue-400/15",
             "i",
+            "",
+            "",
+            "",
+            "",
         ),
     };
 
     rsx! {
         div {
             class: "flex items-start gap-3 rounded-xl border px-4 py-3 {border_class} {bg_class}",
+            style: "{container_style}",
             role: "alert",
 
             // Severity icon
             div {
                 class: "shrink-0 rounded-full {icon_class} {icon_bg_class}",
-                style: "width: 1.5rem; min-width: 1.5rem; height: 1.5rem; margin-top: 0.125rem; display: flex; align-items: center; justify-content: center; font-size: 0.875rem; line-height: 1; font-weight: 700;",
+                style: "width: 1.5rem; min-width: 1.5rem; height: 1.5rem; margin-top: 0.125rem; display: flex; align-items: center; justify-content: center; font-size: 0.875rem; line-height: 1; font-weight: 700; {icon_style}",
             "{icon_glyph}"
             }
 
@@ -78,12 +91,13 @@ pub fn AlertBanner(
                 style: "display: flex; flex-direction: column; gap: 0.35rem;",
                 p {
                     class: "text-sm leading-6 {text_class}",
-                    style: "margin: 0;",
+                    style: "margin: 0; {text_style}",
                     "{message}"
                 }
                 if let (Some(label), Some(url)) = (action_label, action_url) {
                     a {
                         class: "text-sm font-medium underline underline-offset-2 transition-opacity hover:opacity-80 {action_class}",
+                        style: "{action_style}",
                         href: "{url}",
                         "{label}"
                     }

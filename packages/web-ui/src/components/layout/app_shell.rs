@@ -208,6 +208,7 @@ pub fn AppShell() -> Element {
                         if let Some(ref h) = *health.read() {
                             div {
                                 class: "px-6 py-4 border-b border-amber-300/35 bg-gradient-to-r from-amber-950/90 via-amber-900/45 to-yellow-950/20 shadow-[inset_0_1px_0_rgba(252,211,77,0.16)]",
+                                style: "background: linear-gradient(180deg, rgba(120, 53, 15, 0.34), rgba(120, 53, 15, 0.18)); border-bottom-color: rgba(245, 158, 11, 0.28);",
                                 AlertBanner {
                                     severity: AlertSeverity::Warning,
                                     message: format!(

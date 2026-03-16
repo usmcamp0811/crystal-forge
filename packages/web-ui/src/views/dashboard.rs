@@ -469,14 +469,17 @@ pub fn DashboardView() -> Element {
                         rsx! {
                             div {
                                 class: "space-y-3 rounded-xl border border-amber-300/35 bg-gradient-to-br from-amber-950/75 via-amber-900/30 to-yellow-950/10 p-4 shadow-[inset_0_1px_0_rgba(252,211,77,0.08)]",
+                                style: "background: linear-gradient(180deg, rgba(120, 53, 15, 0.32), rgba(120, 53, 15, 0.12)); border-color: rgba(245, 158, 11, 0.3); box-shadow: inset 0 1px 0 rgba(253, 230, 138, 0.08);",
                                 div {
                                     class: "flex items-center gap-2",
                                     div {
                                         class: "flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-amber-300/22 text-xs font-bold text-amber-100 border border-amber-200/20",
+                                        style: "background: rgba(245, 158, 11, 0.18); color: rgb(254, 243, 199); border-color: rgba(252, 211, 77, 0.22);",
                                         "!"
                                     }
                                     p {
                                         class: "text-xs font-semibold text-amber-100 uppercase tracking-[0.18em]",
+                                        style: "color: rgb(253, 230, 138);",
                                         "{heading}"
                                     }
                                 }
