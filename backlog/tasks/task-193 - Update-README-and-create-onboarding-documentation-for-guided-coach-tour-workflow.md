@@ -247,3 +247,62 @@ Target audience: sysadmins with average NixOS skills
 
 Verification complete: all screenshots exist, links valid, markdown formatting correct
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+## Summary
+
+Successfully created comprehensive onboarding documentation that mirrors the 6-step guided coach tour implemented in TASK-191.
+
+## Deliverables
+
+### 1. docs/onboarding-guide.md (905 lines)
+
+Complete step-by-step walkthrough covering:
+- Introduction and prerequisites
+- Before You Begin (server requirements, database, initial config)
+- The Guided Setup Coach (how it works, states)
+- Step 1: Create Environment (deployment policies, required STIG controls)
+- Step 2: Add Flake (repository formats, branch tracking)
+- Step 3: Register Builder (resource allocation, activation instructions)
+- Step 4: Configure Cache (S3, Attic, Nix, HTTP backends)
+- Step 5: Register System (key generation, deployment policies)
+- Step 6: Deploy Agent (NixOS module enablement, verification)
+- After Onboarding (next steps, common tasks)
+- Troubleshooting (coach issues, agent connectivity, common mistakes)
+
+### 2. README.md Updates
+
+- Added "Guided Onboarding Coach" section in What's New with screenshot
+- Added reference to onboarding guide in Quick Start section
+- All existing sections preserved
+
+### 3. Screenshots (19 images)
+
+- 06a-06h series showing complete onboarding flow
+- Coach panel states (dashboard, minimized, all-configured)
+- Page-level callouts for all 6 steps
+- Progressive form field callouts for all 5 entity types
+- Key generation and agent reminder modals
+
+All screenshots sourced from automated web-ui integration test for reproducibility.
+
+## Acceptance Criteria: 15/15 Satisfied
+
+✅ All criteria met (README updates, guide structure, screenshots, code examples, target audience, troubleshooting)
+
+## Verification
+
+- All screenshots exist in docs/screenshots/
+- All markdown links valid
+- Standard markdown formatting
+- Guide reviewed for clarity and target audience appropriateness
+- Total documentation added: ~900 lines
+
+## MR
+
+https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/166
+
+Ready for review and merge.
+<!-- SECTION:FINAL_SUMMARY:END -->
