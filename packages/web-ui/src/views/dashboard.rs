@@ -468,15 +468,15 @@ pub fn DashboardView() -> Element {
                             format!("{} configuration issue{} detected", h.total_issues, suffix);
                         rsx! {
                             div {
-                                class: "space-y-3 rounded-xl border border-amber-500/25 bg-gradient-to-br from-amber-950/35 via-amber-900/10 to-transparent p-4",
+                                class: "space-y-3 rounded-xl border border-orange-400/30 bg-gradient-to-br from-orange-950/55 via-orange-900/20 to-transparent p-4",
                                 div {
                                     class: "flex items-center gap-2",
                                     div {
-                                        class: "flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-amber-300/15 text-xs font-bold text-amber-300 border border-amber-300/10",
+                                        class: "flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-orange-300/18 text-xs font-bold text-orange-200 border border-orange-200/10",
                                         "!"
                                     }
                                     p {
-                                        class: "text-xs font-semibold text-amber-200 uppercase tracking-[0.18em]",
+                                        class: "text-xs font-semibold text-orange-100 uppercase tracking-[0.18em]",
                                         "{heading}"
                                     }
                                 }
