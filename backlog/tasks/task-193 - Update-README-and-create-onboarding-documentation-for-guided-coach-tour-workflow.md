@@ -3,9 +3,10 @@ id: TASK-193
 title: >-
   Update README and create onboarding documentation for guided coach tour
   workflow
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-03-16 01:02'
+updated_date: '2026-03-16 01:03'
 labels:
   - documentation
   - onboarding
