@@ -3,9 +3,13 @@
 use dioxus::prelude::*;
 
 use crate::api::models::{DeploymentStatus, HealthStatus};
+use crate::components::filters::{ViewMode, ViewToggle};
 use crate::components::status_badge::{DeploymentBadge, HealthBadge};
 use crate::showcase::fixtures::{stat_card_fixtures, timeline_fixtures};
-use crate::showcase::shell::{ResponsivePreview, ShowcaseSection, StateMatrix, StateTile};
+use crate::showcase::shell::{
+    ResponsiveGrid, ResponsivePreview, ShowcaseSection, StateMatrix, StateTile, VariantGroup,
+    DESKTOP_WIDTH, MOBILE_WIDTH, TABLET_WIDTH,
+};
 use crate::theme::{self, presets};
 
 #[component]
@@ -158,6 +162,40 @@ pub fn StyleGuideView() -> Element {
                     }
                 }
             }
+
+            ShowcaseSection {
+                title: "Interactive Components",
+                description: "Components with user interaction patterns, demonstrated with state management.",
+                VariantGroup { title: "View Toggle States",
+                    StateMatrix { title: "ViewToggle - Interactive State Demo",
+                        StateTile { label: "table active",
+                            ViewToggleDemo { initial_mode: ViewMode::Table }
+                        }
+                        StateTile { label: "cards active",
+                            ViewToggleDemo { initial_mode: ViewMode::Cards }
+                        }
+                    }
+                }
+
+                ResponsiveGrid {
+                    ResponsivePreview {
+                        label: "mobile (375px)",
+                        width_class: MOBILE_WIDTH,
+                        div { class: "p-4 space-y-3",
+                            p { class: "text-xs {theme::text::MUTED}", "View toggle in mobile context" }
+                            ViewToggleDemo { initial_mode: ViewMode::Table }
+                        }
+                    }
+                    ResponsivePreview {
+                        label: "tablet (768px)",
+                        width_class: TABLET_WIDTH,
+                        div { class: "p-4 space-y-3",
+                            p { class: "text-xs {theme::text::MUTED}", "View toggle in tablet context" }
+                            ViewToggleDemo { initial_mode: ViewMode::Cards }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -283,6 +321,7 @@ fn timeline_status_style(status: &str) -> (&'static str, &'static str) {
     match status {
         "evaluating" => (theme::health::WARNING_TEXT, theme::health::WARNING_BG),
         "ready for build" => (theme::deployment::AHEAD_TEXT, theme::deployment::AHEAD_BG),
+        "building" => (theme::deployment::AHEAD_TEXT, theme::deployment::AHEAD_BG),
         "build complete" => (
             theme::deployment::UP_TO_DATE_TEXT,
             theme::deployment::UP_TO_DATE_BG,
@@ -292,5 +331,26 @@ fn timeline_status_style(status: &str) -> (&'static str, &'static str) {
             theme::deployment::UNKNOWN_TEXT,
             theme::deployment::UNKNOWN_BG,
         ),
+    }
+}
+
+#[component]
+fn ViewToggleDemo(initial_mode: ViewMode) -> Element {
+    let mut view_mode = use_signal(|| initial_mode);
+    let mode_text = match *view_mode.read() {
+        ViewMode::Table => "Table",
+        ViewMode::Cards => "Cards",
+    };
+
+    rsx! {
+        div { class: "space-y-2",
+            ViewToggle {
+                view_mode: *view_mode.read(),
+                on_change: move |mode| view_mode.set(mode)
+            }
+            p { class: "text-xs {theme::text::MUTED}",
+                "Current: {mode_text}"
+            }
+        }
     }
 }
