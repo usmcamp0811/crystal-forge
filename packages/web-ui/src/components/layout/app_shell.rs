@@ -9,8 +9,8 @@ use crate::components::layout::sidebar::{
 };
 use crate::components::layout::TopBar;
 use crate::components::layout::{BannerPlacement, DevModeBanner};
-use crate::components::onboarding::OnboardingCoachPanel;
 use crate::components::notifications::{AlertBanner, AlertSeverity};
+use crate::components::onboarding::OnboardingCoachPanel;
 use crate::routes::Route;
 use crate::state::app_state::{AppState, AuthFetchState};
 use crate::state::auth;
@@ -194,30 +194,6 @@ pub fn AppShell() -> Element {
 
             DevModeBanner { placement: BannerPlacement::Top }
 
-            // Global admin config-health notification bar (admin only, dismissible per session key).
-            if show_health_bar {
-                if let Some(ref h) = *health.read() {
-                    div {
-                        class: "px-4 py-2 bg-amber-900/30 border-b border-amber-500/30",
-                        AlertBanner {
-                            severity: AlertSeverity::Warning,
-                            message: format!(
-                                "{} configuration issue{} detected — some pipeline stages may not function.",
-                                h.total_issues,
-                                if h.total_issues == 1 { "" } else { "s" }
-                            ),
-                            action_label: Some("View details on Dashboard".to_string()),
-                            action_url: Some("/".to_string()),
-                            on_dismiss: Some(EventHandler::new(move |_| {
-                                if let Some(key) = health_key.clone() {
-                                    dismissed_key.set(Some(key));
-                                }
-                            })),
-                        }
-                    }
-                }
-            }
-
             div {
                 class: "flex-1 flex min-h-0 relative",
 
@@ -228,6 +204,28 @@ pub fn AppShell() -> Element {
                 div {
                     class: "flex-1 flex flex-col min-w-0",
                     TopBar { title: current_route.title() }
+                    if show_health_bar {
+                        if let Some(ref h) = *health.read() {
+                            div {
+                                class: "px-6 py-4 border-b border-amber-500/25 bg-gradient-to-r from-amber-950/70 via-amber-900/35 to-transparent shadow-[inset_0_1px_0_rgba(251,191,36,0.08)]",
+                                AlertBanner {
+                                    severity: AlertSeverity::Warning,
+                                    message: format!(
+                                        "{} configuration issue{} detected — some pipeline stages may not function.",
+                                        h.total_issues,
+                                        if h.total_issues == 1 { "" } else { "s" }
+                                    ),
+                                    action_label: Some("View details on Dashboard".to_string()),
+                                    action_url: Some("/".to_string()),
+                                    on_dismiss: Some(EventHandler::new(move |_| {
+                                        if let Some(key) = health_key.clone() {
+                                            dismissed_key.set(Some(key));
+                                        }
+                                    })),
+                                }
+                            }
+                        }
+                    }
                     main {
                         class: "flex-1 overflow-auto {theme::spacing::PAGE_PADDING}",
                         if should_show_admin_denied(&current_route, &auth_context) {

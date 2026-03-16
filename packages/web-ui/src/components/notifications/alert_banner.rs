@@ -39,13 +39,13 @@ pub fn AlertBanner(
         icon_glyph,
     ) = match severity {
         AlertSeverity::Warning => (
-            "border-amber-500/40",
-            "bg-amber-900/20",
-            "text-amber-400",
-            "text-amber-200",
+            "border-amber-400/50 shadow-[0_0_0_1px_rgba(251,191,36,0.05)]",
+            "bg-gradient-to-r from-amber-950/80 via-amber-900/45 to-amber-950/30",
             "text-amber-300",
-            "hover:bg-amber-500/10",
-            "bg-amber-400/15",
+            "text-amber-100",
+            "text-amber-200",
+            "hover:bg-amber-400/10",
+            "bg-amber-300/15 border border-amber-300/10",
             "!",
         ),
         AlertSeverity::Info => (
@@ -62,14 +62,14 @@ pub fn AlertBanner(
 
     rsx! {
         div {
-            class: "flex items-start gap-3 rounded-lg border px-4 py-3 {border_class} {bg_class}",
+            class: "flex items-start gap-3 rounded-xl border px-4 py-3 {border_class} {bg_class}",
             role: "alert",
 
             // Severity icon
             div {
                 class: "shrink-0 rounded-full {icon_class} {icon_bg_class}",
                 style: "width: 1.5rem; min-width: 1.5rem; height: 1.5rem; margin-top: 0.125rem; display: flex; align-items: center; justify-content: center; font-size: 0.875rem; line-height: 1; font-weight: 700;",
-                "{icon_glyph}"
+            "{icon_glyph}"
             }
 
             // Message and action
