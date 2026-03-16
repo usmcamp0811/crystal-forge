@@ -14,8 +14,8 @@ use crate::showcase::fixtures::{
     stat_card_fixtures, system_summary_fixtures, timeline_fixtures,
 };
 use crate::showcase::shell::{
-    DESKTOP_WIDTH, MOBILE_WIDTH, ResponsiveGrid, ResponsivePreview, ShowcaseSection, StateMatrix,
-    StateTile, TABLET_WIDTH, VariantGroup, WIDE_WIDTH,
+    ResponsiveGrid, ResponsivePreview, ShowcaseSection, StateMatrix, StateTile, VariantGroup,
+    DESKTOP_WIDTH, MOBILE_WIDTH, TABLET_WIDTH, WIDE_WIDTH,
 };
 use crate::theme::{self, presets};
 
@@ -334,6 +334,59 @@ pub fn StyleGuideView() -> Element {
                                     label: "Total Deployments".to_string(),
                                     value: "1,247".to_string(),
                                     color_class: "".to_string()
+                                }
+                            }
+                        }
+                    }
+                }
+
+                ResponsiveGrid {
+                    ResponsivePreview {
+                        label: "mobile (375px)",
+                        width_class: MOBILE_WIDTH,
+                        {
+                            rsx! {
+                                div { class: "grid grid-cols-2 gap-2",
+                                    StatCard {
+                                        label: "Systems".to_string(),
+                                        value: "24".to_string(),
+                                        color_class: "".to_string()
+                                    }
+                                    StatCard {
+                                        label: "Healthy".to_string(),
+                                        value: "18".to_string(),
+                                        color_class: "text-green-400".to_string()
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    ResponsivePreview {
+                        label: "desktop (1024px)",
+                        width_class: DESKTOP_WIDTH,
+                        {
+                            rsx! {
+                                div { class: "grid grid-cols-4 gap-3",
+                                    StatCard {
+                                        label: "Total Systems".to_string(),
+                                        value: "24".to_string(),
+                                        color_class: "".to_string()
+                                    }
+                                    StatCard {
+                                        label: "Healthy".to_string(),
+                                        value: "18".to_string(),
+                                        color_class: "text-green-400".to_string()
+                                    }
+                                    StatCard {
+                                        label: "Policy Failures".to_string(),
+                                        value: "3".to_string(),
+                                        color_class: "text-amber-400".to_string()
+                                    }
+                                    StatCard {
+                                        label: "CVE Alerts".to_string(),
+                                        value: "12".to_string(),
+                                        color_class: "text-red-400".to_string()
+                                    }
                                 }
                             }
                         }
