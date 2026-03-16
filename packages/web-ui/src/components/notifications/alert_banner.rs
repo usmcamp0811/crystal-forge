@@ -28,54 +28,62 @@ pub fn AlertBanner(
     #[props(default)] action_url: Option<String>,
     #[props(default)] on_dismiss: Option<EventHandler<()>>,
 ) -> Element {
-    let (border_class, bg_class, icon_class, text_class, icon_path) = match severity {
+    let (
+        border_class,
+        bg_class,
+        icon_class,
+        text_class,
+        action_class,
+        dismiss_hover_class,
+        icon_bg_class,
+        icon_glyph,
+    ) = match severity {
         AlertSeverity::Warning => (
             "border-amber-500/40",
             "bg-amber-900/20",
             "text-amber-400",
             "text-amber-200",
-            // Warning triangle
-            "M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z",
+            "text-amber-300",
+            "hover:bg-amber-500/10",
+            "bg-amber-400/15",
+            "!",
         ),
         AlertSeverity::Info => (
             "border-blue-500/40",
             "bg-blue-900/20",
             "text-blue-400",
             "text-blue-200",
-            // Info circle
-            "M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z",
+            "text-blue-300",
+            "hover:bg-blue-500/10",
+            "bg-blue-400/15",
+            "i",
         ),
     };
 
     rsx! {
         div {
-            class: "flex items-start gap-3 px-4 py-3 rounded-lg border {border_class} {bg_class}",
+            class: "flex items-start gap-3 rounded-lg border px-4 py-3 {border_class} {bg_class}",
+            role: "alert",
 
             // Severity icon
-            svg {
-                class: "w-5 h-5 mt-0.5 shrink-0 {icon_class}",
-                fill: "none",
-                stroke: "currentColor",
-                view_box: "0 0 24 24",
-                path {
-                    stroke_linecap: "round",
-                    stroke_linejoin: "round",
-                    stroke_width: "2",
-                    d: "{icon_path}",
-                }
+            div {
+                class: "shrink-0 rounded-full {icon_class} {icon_bg_class}",
+                style: "width: 1.5rem; min-width: 1.5rem; height: 1.5rem; margin-top: 0.125rem; display: flex; align-items: center; justify-content: center; font-size: 0.875rem; line-height: 1; font-weight: 700;",
+                "{icon_glyph}"
             }
 
             // Message and action
             div {
-                class: "flex-1 min-w-0",
-                span {
-                    class: "text-sm {text_class}",
+                class: "min-w-0 flex-1",
+                style: "display: flex; flex-direction: column; gap: 0.35rem;",
+                p {
+                    class: "text-sm leading-6 {text_class}",
+                    style: "margin: 0;",
                     "{message}"
                 }
                 if let (Some(label), Some(url)) = (action_label, action_url) {
-                    span { class: "text-sm {text_class}", " " }
                     a {
-                        class: "text-sm font-medium underline {icon_class} hover:opacity-80 transition-opacity",
+                        class: "text-sm font-medium underline underline-offset-2 transition-opacity hover:opacity-80 {action_class}",
                         href: "{url}",
                         "{label}"
                     }
@@ -85,10 +93,13 @@ pub fn AlertBanner(
             // Optional dismiss button
             if let Some(handler) = on_dismiss {
                 button {
-                    class: "shrink-0 p-1 rounded hover:bg-white/10 transition-colors",
+                    class: "shrink-0 rounded p-1 transition-colors {dismiss_hover_class}",
                     onclick: move |_| handler.call(()),
+                    aria_label: "Dismiss alert",
                     svg {
-                        class: "w-4 h-4 text-gray-400",
+                        class: "block h-4 w-4 text-gray-400",
+                        width: "16",
+                        height: "16",
                         fill: "none",
                         stroke: "currentColor",
                         view_box: "0 0 24 24",
