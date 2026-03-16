@@ -7,8 +7,8 @@ use crate::components::filters::{ViewMode, ViewToggle};
 use crate::components::status_badge::{DeploymentBadge, HealthBadge};
 use crate::showcase::fixtures::{stat_card_fixtures, timeline_fixtures};
 use crate::showcase::shell::{
-    ResponsiveGrid, ResponsivePreview, ShowcaseSection, StateMatrix, StateTile, VariantGroup,
-    DESKTOP_WIDTH, MOBILE_WIDTH, TABLET_WIDTH,
+    DESKTOP_WIDTH, MOBILE_WIDTH, ResponsiveGrid, ResponsivePreview, ShowcaseSection, StateMatrix,
+    StateTile, TABLET_WIDTH, VariantGroup,
 };
 use crate::theme::{self, presets};
 
