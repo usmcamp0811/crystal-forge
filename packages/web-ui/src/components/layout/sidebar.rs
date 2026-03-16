@@ -318,7 +318,7 @@ pub fn SidebarNav() -> Element {
                     NavLink {
                         collapsed: is_collapsed,
                         to: Route::StyleGuideView {},
-                        label: "Style Guide",
+                        label: "Component Showcase",
                         icon: rsx!(
                             svg {
                                 class: "w-4 h-4",
@@ -618,7 +618,7 @@ pub fn MobileDrawer() -> Element {
                     NavLink {
                         collapsed: false,
                         to: Route::StyleGuideView {},
-                        label: "Style Guide",
+                        label: "Component Showcase",
                         icon: rsx!(
                             svg {
                                 class: "w-4 h-4",

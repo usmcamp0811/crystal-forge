@@ -4,7 +4,7 @@ title: Admin Configuration Health Warnings — Pipeline Readiness Alerts
 status: In Progress
 assignee: []
 created_date: '2026-03-13 01:16'
-updated_date: '2026-03-16 23:16'
+updated_date: '2026-03-16 00:29'
 labels:
   - frontend
   - backend
@@ -192,8 +192,4 @@ Current MR state is still `has_conflicts=true` because the rebased local branch 
 Reviewed the generated TASK-186 screenshots directly and found the warning banner icon styling was broken (oversized icon collapsing banner text/layout). Fixed `packages/web-ui/src/components/notifications/alert_banner.rs` by replacing the fragile SVG warning icon with a fixed-size badge layout, then regenerated screenshots and confirmed the banners render correctly across dashboard, global bar, systems, flakes, and environments surfaces.
 
 Pushed follow-up commit `2af5b5e7` (`fix(web-ui): stabilize admin warning banner layout`). Refreshed the screenshot uploads in MR 163 and updated the MR description to reference the corrected images. MR 163 is now mergeable and its pipeline is running on `2af5b5e7`.
-
-Follow-up review fix: centralized admin `config-health` into shared `AppState` and removed repeated per-view fetches from `AppShell`, `DashboardView`, `EnvironmentsListView`, and `FlakesListView`. The shell now guards the fetch so admin config health is loaded once and reused across views instead of each component issuing its own request.
-
-Verification for the refactor: `cargo check --target wasm32-unknown-unknown` passes for `packages/web-ui`. GitLab MR `!163` now has a successful head pipeline instead of `Pipelines 0` (`https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2387920433`). Pushed follow-up commit `bc5b675d` (`fix(web-ui): share admin config health state`).
 <!-- SECTION:NOTES:END -->

@@ -53,6 +53,20 @@ services.crystal-forge.server.auth_mode = "dev";  # Use local, not dev!
 
 ![Login with OIDC](./docs/screenshots/04-post-register-login.png)
 
+### Guided Onboarding Coach
+
+First-time admins are greeted with a **non-blocking guided setup coach** that walks through the 6 essential configuration steps:
+
+![Onboarding Coach](./docs/screenshots/06a-onboarding-coach-dashboard.png)
+
+- **6-Step Guided Tour**: Environment → Flake → Builder → Cache → System → Agent
+- **Progressive Field Callouts**: In-context guidance as you fill in each form
+- **Progress Tracking**: Live completion status with checkmarks
+- **Non-Blocking**: Navigate freely while the coach remains available
+- **Minimize/Dismiss**: Collapsible panel with relaunch from Server Management
+
+See the **[Onboarding Guide](./docs/onboarding-guide.md)** for a complete walkthrough.
+
 ### Role-Based Access Control
 
 - **Admin**: Full access to all features and settings
@@ -159,6 +173,8 @@ flowchart LR
 ---
 
 ## Quick Start
+
+**New to Crystal Forge?** See the **[Onboarding Guide](./docs/onboarding-guide.md)** for a complete step-by-step walkthrough using the built-in guided setup coach.
 
 ### NixOS Module Configuration
 

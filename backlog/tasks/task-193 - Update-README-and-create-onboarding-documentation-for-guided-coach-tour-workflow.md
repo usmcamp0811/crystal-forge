@@ -3,10 +3,10 @@ id: TASK-193
 title: >-
   Update README and create onboarding documentation for guided coach tour
   workflow
-status: Done
+status: In Progress
 assignee: []
 created_date: '2026-03-16 01:02'
-updated_date: '2026-03-16 02:49'
+updated_date: '2026-03-16 01:03'
 labels:
   - documentation
   - onboarding
@@ -214,109 +214,4 @@ No Tier 2 verification needed (documentation only, no code changes).
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: Claude (OpenCode) on gray in ~/code/crystal-forge/TASK-193-onboarding-docs
-
-Created comprehensive onboarding guide (docs/onboarding-guide.md) with 6-step walkthrough mirroring coach panel flow
-
-Added 19 onboarding screenshots (06a-06h series) from web-ui integration tests to docs/screenshots/
-
-Updated README.md to include Guided Onboarding Coach section in What's New
-
-Added reference to onboarding guide in README Quick Start section
-
-All screenshots sourced from automated web-ui check (nix build .#checks.x86_64-linux.web-ui)
-
-Onboarding guide includes: Prerequisites, Before You Begin, 6-step guided tour, After Onboarding, Troubleshooting
-
-Guide written for sysadmins with average NixOS skills (no assumed expert knowledge)
-
-Commit: 9a0fb56d
-
-Branch pushed: TASK-193-onboarding-docs (commit 9a0fb56d)
-
-MR created: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/166
-
-All 15 acceptance criteria verified and satisfied
-
-Documentation: 905 lines in onboarding-guide.md, 12 major sections, 20 screenshot references
-
-Screenshots: 19 onboarding screenshots (06a-06h) sourced from web-ui check
-
-README.md updated with Guided Onboarding Coach section and reference in Quick Start
-
-Target audience: sysadmins with average NixOS skills
-
-Verification complete: all screenshots exist, links valid, markdown formatting correct
-
-Updated cache section based on feedback: Attic is now recommended for production over S3
-
-Added detailed explanation of S3 caching issues (Nix client caching, no auto-reinterrogation of S3 cache)
-
-Repositioned Attic as the primary production cache backend with rationale
-
-Clarified S3 use case is better for archival/backup rather than active caching
-
-Commit: 0a6ddaa6
-
-MR !166 merged into dev
-
-Task complete and ready for worktree cleanup
 <!-- SECTION:NOTES:END -->
-
-## Final Summary
-
-<!-- SECTION:FINAL_SUMMARY:BEGIN -->
-## Summary
-
-Successfully created comprehensive onboarding documentation that mirrors the 6-step guided coach tour implemented in TASK-191.
-
-## Deliverables
-
-### 1. docs/onboarding-guide.md (905 lines)
-
-Complete step-by-step walkthrough covering:
-- Introduction and prerequisites
-- Before You Begin (server requirements, database, initial config)
-- The Guided Setup Coach (how it works, states)
-- Step 1: Create Environment (deployment policies, required STIG controls)
-- Step 2: Add Flake (repository formats, branch tracking)
-- Step 3: Register Builder (resource allocation, activation instructions)
-- Step 4: Configure Cache (S3, Attic, Nix, HTTP backends)
-- Step 5: Register System (key generation, deployment policies)
-- Step 6: Deploy Agent (NixOS module enablement, verification)
-- After Onboarding (next steps, common tasks)
-- Troubleshooting (coach issues, agent connectivity, common mistakes)
-
-### 2. README.md Updates
-
-- Added "Guided Onboarding Coach" section in What's New with screenshot
-- Added reference to onboarding guide in Quick Start section
-- All existing sections preserved
-
-### 3. Screenshots (19 images)
-
-- 06a-06h series showing complete onboarding flow
-- Coach panel states (dashboard, minimized, all-configured)
-- Page-level callouts for all 6 steps
-- Progressive form field callouts for all 5 entity types
-- Key generation and agent reminder modals
-
-All screenshots sourced from automated web-ui integration test for reproducibility.
-
-## Acceptance Criteria: 15/15 Satisfied
-
-✅ All criteria met (README updates, guide structure, screenshots, code examples, target audience, troubleshooting)
-
-## Verification
-
-- All screenshots exist in docs/screenshots/
-- All markdown links valid
-- Standard markdown formatting
-- Guide reviewed for clarity and target audience appropriateness
-- Total documentation added: ~900 lines
-
-## MR
-
-https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/166
-
-Ready for review and merge.
-<!-- SECTION:FINAL_SUMMARY:END -->

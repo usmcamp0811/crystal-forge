@@ -1,10 +1,9 @@
 ---
 id: TASK-192
 title: Validate cache destination input in cache modal
-status: To Do
+status: Backlog
 assignee: []
 created_date: '2026-03-14 16:49'
-updated_date: '2026-03-16 23:17'
 labels:
   - frontend
   - validation
@@ -14,7 +13,6 @@ dependencies: []
 references:
   - packages/web-ui/src/views/caches.rs
 priority: medium
-ordinal: 5000
 ---
 
 ## Description
