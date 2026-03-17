@@ -96,7 +96,7 @@ Low-Medium - Configuration change with clear rollback path (revert commit), but 
 <!-- AC:BEGIN -->
 - [ ] #1 `server-stack up` starts with empty environments, systems, and flakes tables
 - [ ] #2 `server-stack-mock up` continues to have pre-populated mock data
-- [ ] #3 `full-stack up` behavior is explicitly decided (clean or with test.gray)
+- [x] #3 `full-stack up` behavior is explicitly decided (clean or with test.gray)
 - [ ] #4 No regressions in existing functionality
 - [ ] #5 All process-compose stacks continue to work
 <!-- AC:END -->
