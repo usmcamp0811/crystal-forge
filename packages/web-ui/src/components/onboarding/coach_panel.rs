@@ -288,5 +288,3 @@ pub fn OnboardingCoachPanel() -> Element {
         }
     }
 }
-
-
