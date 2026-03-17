@@ -1,10 +1,10 @@
 ---
 id: TASK-192
 title: Validate cache destination input in cache modal
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-03-14 16:49'
-updated_date: '2026-03-17 00:12'
+updated_date: '2026-03-17 00:55'
 labels:
   - frontend
   - validation
@@ -76,4 +76,8 @@ Low-Medium — focused frontend validation change with minimal backend risk.
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: OpenCode on reckless in ~/code/crystal-forge/TASK-192-validate-cache-destination-input
+
+Opened MR `!169`: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/169
+
+Verification executed for review: `cargo check --target wasm32-unknown-unknown` passed; `cargo test --manifest-path packages/web-ui/Cargo.toml caches::tests -- --nocapture` passed (5 tests); `nix develop -c rustfmt --edition 2021 packages/web-ui/src/views/caches.rs` passed. Repo-wide `cargo fmt -- --check` for the web-ui crate still reports unrelated pre-existing formatting drift outside this task’s file; manual in-browser verification has not yet been run in this session.
 <!-- SECTION:NOTES:END -->
