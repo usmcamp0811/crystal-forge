@@ -131,4 +131,10 @@ Updated mock-execution-module:
 ### Verification Status
 - Tier 0: Nix evaluation successful, devScripts package builds
 - Tier 1: Pending manual stack testing
+
+### Criterion 3 Decision
+
+full-stack uses server-module which uses runServer -> generateConfig -> configTemplateClean.
+Therefore full-stack will start with a CLEAN database (no pre-populated data).
+This allows the agent to self-register using the API key workflow, which is the intended production-like behavior.
 <!-- SECTION:NOTES:END -->
