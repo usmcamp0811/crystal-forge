@@ -1,10 +1,10 @@
 ---
 id: TASK-188.3
 title: Document Frontend Isolation Standards and Contribution Workflow
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-03-13 01:52'
-updated_date: '2026-03-17 00:50'
+updated_date: '2026-03-17 00:54'
 labels:
   - frontend
   - docs
@@ -110,4 +110,16 @@ Low-Medium — docs-first change, but risk of drift if not aligned with implemen
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: Claude (OpenCode) on gray in ~/code/crystal-forge/TASK-188.3-document-frontend-standards
+
+MR created: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/168
+
+Documentation: docs/frontend-component-standards.md (767 lines)
+
+Covers: taxonomy, state coverage, fixtures, responsive, a11y, workflow, review checklist, merge requirements, exceptions
+
+Cross-links: architecture.md, web-ui-coding-standards.md, specs/01-frontend-views.md, CONTRIBUTING.md
+
+All paths/commands verified against repository
+
+Ready for review
 <!-- SECTION:NOTES:END -->
