@@ -1,7 +1,7 @@
 ---
 id: TASK-192
 title: Validate cache destination input in cache modal
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-03-14 16:49'
 updated_date: '2026-03-17 00:12'
@@ -71,3 +71,9 @@ Low-Medium — focused frontend validation change with minimal backend risk.
 - [ ] #4 Existing cache destination create flow remains functional for valid inputs.
 - [ ] #5 Validation behavior covers malformed and valid examples for each supported cache destination type handled by the modal.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: OpenCode on reckless in ~/code/crystal-forge/TASK-192-validate-cache-destination-input
+<!-- SECTION:NOTES:END -->
