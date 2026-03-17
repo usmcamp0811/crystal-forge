@@ -311,7 +311,11 @@ fn TimelineRow(title: &'static str, meta: &'static str, status: &'static str) ->
                     p { class: "text-sm font-medium {theme::text::PRIMARY}", "{title}" }
                     p { class: "text-xs {theme::text::MUTED} mt-1", "{meta}" }
                 }
-                span { class: "rounded-full px-2 py-0.5 text-xs whitespace-nowrap shrink-0 {status_text} {status_bg}", "{status}" }
+                span {
+                    class: "inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium whitespace-nowrap shrink-0 {status_text} {status_bg}",
+                    style: "{timeline_status_border(status)}",
+                    "{status}"
+                }
             }
         }
     }
@@ -332,6 +336,18 @@ fn timeline_status_style(status: &str) -> (&'static str, &'static str) {
             theme::deployment::UNKNOWN_BG,
         ),
     }
+}
+
+fn timeline_status_border(status: &str) -> String {
+    let border_color = match status {
+        "evaluating" => "rgba(251, 191, 36, 0.3)", // amber-400 with 30% opacity
+        "ready for build" => "rgba(96, 165, 250, 0.3)", // blue-400 with 30% opacity
+        "building" => "rgba(96, 165, 250, 0.3)",   // blue-400 with 30% opacity
+        "build complete" => "rgba(52, 211, 153, 0.3)", // emerald-400 with 30% opacity
+        "policy failed" => "rgba(248, 113, 113, 0.3)", // red-400 with 30% opacity
+        _ => "rgba(156, 163, 175, 0.3)",           // gray-400 with 30% opacity
+    };
+    format!("border-color: {}", border_color)
 }
 
 #[component]
