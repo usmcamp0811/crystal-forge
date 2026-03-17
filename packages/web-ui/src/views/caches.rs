@@ -51,6 +51,8 @@ struct CacheFormValidationInput {
     s3_access_key_id: String,
     s3_secret_access_key: String,
     s3_endpoint_url: String,
+    require_attic_token: bool,
+    require_s3_secret_access_key: bool,
 }
 
 fn validate_cache_destination_form(input: &CacheFormValidationInput) -> HashMap<String, String> {
@@ -93,7 +95,7 @@ fn validate_cache_destination_form(input: &CacheFormValidationInput) -> HashMap<
                 );
             }
 
-            if input.attic_token.trim().is_empty() {
+            if input.require_attic_token && input.attic_token.trim().is_empty() {
                 errors.insert(
                     "attic_token".to_string(),
                     "Attic token is required".to_string(),
@@ -124,7 +126,7 @@ fn validate_cache_destination_form(input: &CacheFormValidationInput) -> HashMap<
                 );
             }
 
-            if input.s3_secret_access_key.trim().is_empty() {
+            if input.require_s3_secret_access_key && input.s3_secret_access_key.trim().is_empty() {
                 errors.insert(
                     "s3_secret_access_key".to_string(),
                     "AWS secret access key is required".to_string(),
@@ -938,6 +940,8 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
                                         s3_access_key_id: add_s3_access_key_id(),
                                         s3_secret_access_key: add_s3_secret_access_key(),
                                         s3_endpoint_url: add_s3_endpoint_url(),
+                                        require_attic_token: cache_type == "Attic",
+                                        require_s3_secret_access_key: cache_type == "S3",
                                     });
 
                                     // If there are validation errors, display them and stop
@@ -1074,7 +1078,7 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
         use_signal(|| destination.attic_cache_name.clone().unwrap_or_default());
     let mut edit_attic_public_key =
         use_signal(|| destination.attic_public_key.clone().unwrap_or_default());
-    let mut edit_attic_token = use_signal(|| destination.attic_token.clone().unwrap_or_default());
+    let mut edit_attic_token = use_signal(String::new);
     let mut edit_signing_key_path =
         use_signal(|| destination.signing_key_path.clone().unwrap_or_default());
     let mut edit_compression = use_signal(|| destination.compression.clone().unwrap_or_default());
@@ -1082,8 +1086,7 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
     let mut edit_s3_profile = use_signal(|| destination.s3_profile.clone().unwrap_or_default());
     let mut edit_s3_access_key_id =
         use_signal(|| destination.s3_access_key_id.clone().unwrap_or_default());
-    let mut edit_s3_secret_access_key =
-        use_signal(|| destination.s3_secret_access_key.clone().unwrap_or_default());
+    let mut edit_s3_secret_access_key = use_signal(String::new);
     let mut edit_s3_session_token =
         use_signal(|| destination.s3_session_token.clone().unwrap_or_default());
     let mut edit_s3_endpoint_url =
@@ -1335,7 +1338,7 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                     div {
                                         class: "flex items-baseline justify-between gap-2",
                                         label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Attic Token *" }
-                                        span { class: "text-[11px] {theme::text::MUTED}", "Token is required for Attic cache destinations" }
+                                        span { class: "text-[11px] {theme::text::MUTED}", "Leave blank to keep the existing token" }
                                     }
                                     input {
                                         r#type: "password",
@@ -1446,7 +1449,11 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                         }
                                     }
                                     div {
-                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "AWS Secret Access Key *" }
+                                        div {
+                                            class: "flex items-baseline justify-between gap-2",
+                                            label { class: "block text-sm {theme::text::SECONDARY} mb-1", "AWS Secret Access Key *" }
+                                            span { class: "text-[11px] {theme::text::MUTED}", "Leave blank to keep the existing secret" }
+                                        }
                                         input {
                                             r#type: "password",
                                             class: if edit_field_errors().contains_key("s3_secret_access_key") {
@@ -1618,6 +1625,10 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                         s3_access_key_id: edit_s3_access_key_id(),
                                         s3_secret_access_key: edit_s3_secret_access_key(),
                                         s3_endpoint_url: edit_s3_endpoint_url(),
+                                        require_attic_token: cache_type == "Attic"
+                                            && destination.attic_token.is_none(),
+                                        require_s3_secret_access_key: cache_type == "S3"
+                                            && destination.s3_secret_access_key.is_none(),
                                     });
 
                                     // If there are validation errors, display them and stop
@@ -1776,6 +1787,8 @@ mod tests {
             s3_access_key_id: "AKIA1234567890".to_string(),
             s3_secret_access_key: "secret-access-key".to_string(),
             s3_endpoint_url: "https://s3.us-east-1.amazonaws.com".to_string(),
+            require_attic_token: cache_type == "Attic",
+            require_s3_secret_access_key: cache_type == "S3",
         }
     }
 
@@ -1820,6 +1833,24 @@ mod tests {
         let errors =
             validate_cache_destination_form(&base_input("S3", "s3://my-cache-bucket/releases"));
         assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn allows_blank_attic_token_on_edit_when_existing_secret_is_preserved() {
+        let mut input = base_input("Attic", "https://attic.example.com");
+        input.attic_token.clear();
+        input.require_attic_token = false;
+        let errors = validate_cache_destination_form(&input);
+        assert!(!errors.contains_key("attic_token"));
+    }
+
+    #[test]
+    fn allows_blank_s3_secret_on_edit_when_existing_secret_is_preserved() {
+        let mut input = base_input("S3", "s3://my-cache-bucket/releases");
+        input.s3_secret_access_key.clear();
+        input.require_s3_secret_access_key = false;
+        let errors = validate_cache_destination_form(&input);
+        assert!(!errors.contains_key("s3_secret_access_key"));
     }
 }
 
