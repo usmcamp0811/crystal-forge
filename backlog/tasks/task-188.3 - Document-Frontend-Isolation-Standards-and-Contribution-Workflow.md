@@ -1,10 +1,10 @@
 ---
 id: TASK-188.3
 title: Document Frontend Isolation Standards and Contribution Workflow
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-03-13 01:52'
-updated_date: '2026-03-13 12:15'
+updated_date: '2026-03-17 00:50'
 labels:
   - frontend
   - docs
@@ -105,3 +105,9 @@ Low-Medium — docs-first change, but risk of drift if not aligned with implemen
 - [ ] #11 Relevant existing docs are updated with links to the new standards page so contributors can discover it easily.
 - [ ] #12 All documented paths, component names, and commands are verified against the repository and are not stale placeholders.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: Claude (OpenCode) on gray in ~/code/crystal-forge/TASK-188.3-document-frontend-standards
+<!-- SECTION:NOTES:END -->
