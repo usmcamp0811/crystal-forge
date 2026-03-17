@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-03-17 03:13'
-updated_date: '2026-03-17 03:16'
+updated_date: '2026-03-17 03:25'
 labels:
   - devops
   - configuration
@@ -105,4 +105,30 @@ Low-Medium - Configuration change with clear rollback path (revert commit), but 
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: Claude (OpenCode) on gray in ~/code/crystal-forge/TASK-194-clean-server-stack
+
+## Progress Update (2026-03-17)
+
+### Implementation Complete
+
+Created config template split:
+1. configTemplateClean - No pre-populated data (lines 97-139)
+2. configTemplateMock - Includes mockenv, test.gray, dotfiles (lines 142-203)
+3. configTemplate - Aliased to clean template for backward compat (line 206)
+
+Created helper function approach:
+- makeGenerateConfig - Accepts template parameter (lines 31-78)
+- generateConfig - Uses clean template (line 84)
+- generateConfigMock - Uses mock template (line 87)
+
+Created mock runtime variants:
+- runServerMock - Uses generateConfigMock (lines 364-378)
+- runBuilderMock - Uses generateConfigMock (lines 381-400)
+
+Updated mock-execution-module:
+- Uses runServerMock instead of runServer (line 666)
+- Uses runBuilderMock instead of runBuilder (line 676)
+
+### Verification Status
+- Tier 0: Nix evaluation successful, devScripts package builds
+- Tier 1: Pending manual stack testing
 <!-- SECTION:NOTES:END -->
