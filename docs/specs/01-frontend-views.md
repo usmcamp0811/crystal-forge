@@ -4,6 +4,11 @@ This document describes each UI view in Crystal Forge. It's written for develope
 
 **Assumption:** You have basic knowledge of React/Dioxus concepts (components, state, routing).
 
+> **Related Documentation:**
+> - **[Frontend Component Isolation Standards](../frontend-component-standards.md)** - Component development workflow, state coverage, and isolation requirements
+> - **[Web UI Coding Standards](../web-ui-coding-standards.md)** - Styling and theme policies
+> - **[UI/UX Design System](../ui-ux-design-system.md)** - Design philosophy and patterns
+
 ---
 
 ## Navigation Structure
