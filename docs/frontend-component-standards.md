@@ -623,7 +623,7 @@ In rare cases, a component may need to merge without full isolation coverage.
 Exceptions are ONLY allowed for:
 
 1. **Page Containers (Layer 3)** - Never require isolation demos
-2. **Temporary scaffolding** - Component will be replaced soon (must have GitHub issue)
+2. **Temporary scaffolding** - Component will be replaced soon (must have tracking issue/task)
 3. **Third-party integration** - Component wraps external library that can't be mocked
 4. **Experimental feature** - Component is behind feature flag for testing
 
@@ -645,10 +645,10 @@ To request an exception:
 
 3. **Add TODO comment** in code:
    ```rust
-   // TODO(ISSUE-123): Add isolation demo when mock API is available
+   // TODO(TASK-XXX): Add isolation demo when mock API is available
    ```
 
-4. **Create follow-up task** to add proper isolation coverage
+4. **Create follow-up backlog task** to add proper isolation coverage
 
 ### Exception Denial Criteria
 
@@ -671,8 +671,7 @@ Use these commands to verify your work before creating a PR.
 
 ```bash
 cd /path/to/crystal-forge
-nix develop
-dx serve
+nix develop -c dx serve
 ```
 
 Navigate to: http://localhost:8080/style-guide
