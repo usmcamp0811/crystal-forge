@@ -3,10 +3,10 @@ id: TASK-194
 title: >-
   Remove pre-populated data from server-stack up (keep clean for
   server-stack-mock only)
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-03-17 03:13'
-updated_date: '2026-03-17 03:27'
+updated_date: '2026-03-17 03:28'
 labels:
   - devops
   - configuration
@@ -153,4 +153,13 @@ All architectural constraints satisfied:
 - Process-compose health checks unchanged ✅
 
 Static verification complete. Runtime testing required for final acceptance.
+
+### Merge Request Created
+
+MR !170: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/170
+
+Branch: TASK-194-clean-server-stack
+Target: dev
+
+The implementation is complete and ready for review. Runtime verification is recommended during review to confirm the database behavior matches expectations.
 <!-- SECTION:NOTES:END -->
