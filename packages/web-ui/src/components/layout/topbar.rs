@@ -1,12 +1,12 @@
 //! Top bar layout component.
 
-use dioxus::prelude::*;
 use crate::api::client;
 use crate::components::layout::sidebar::SidebarContext;
 use crate::state::app_state::AppState;
 use crate::state::auth;
 use crate::state::theme::UiTheme;
 use crate::theme;
+use dioxus::prelude::*;
 
 /// Header bar displaying the current page title and optional actions.
 #[component]
@@ -46,7 +46,7 @@ pub fn TopBar(title: String) -> Element {
                     const b = h.getBoundingClientRect().bottom; \
                     if (b > 0) document.documentElement.style.setProperty('--coach-top', b + 'px'); \
                 } \
-            })()"
+            })()",
         );
     });
 
