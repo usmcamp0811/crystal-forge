@@ -6,7 +6,7 @@ title: >-
 status: Review
 assignee: []
 created_date: '2026-03-17 03:13'
-updated_date: '2026-03-17 03:28'
+updated_date: '2026-03-17 13:56'
 labels:
   - devops
   - configuration
@@ -162,4 +162,18 @@ Branch: TASK-194-clean-server-stack
 Target: dev
 
 The implementation is complete and ready for review. Runtime verification is recommended during review to confirm the database behavior matches expectations.
+
+### Database Schema Issue Discovered
+
+During testing, discovered critical bug: `column 'is_active' does not exist` error in environments table.
+
+**Root Cause**: Database schema out of sync. The is_active column IS defined in migration 0006_add_environment_lookup_tables.sql (line 124), but the running database doesn't have it applied.
+
+**Fix**: Run sqlx-refresh to reset database and apply all migrations:
+
+```bash
+nix develop -c sqlx-refresh
+```
+
+**Impact**: This blocks ALL stacks (clean and mock) from functioning. Must be fixed before runtime verification can proceed.
 <!-- SECTION:NOTES:END -->
