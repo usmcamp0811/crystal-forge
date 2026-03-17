@@ -7,8 +7,8 @@ use crate::components::filters::{ViewMode, ViewToggle};
 use crate::components::status_badge::{DeploymentBadge, HealthBadge};
 use crate::showcase::fixtures::{stat_card_fixtures, timeline_fixtures};
 use crate::showcase::shell::{
-    DESKTOP_WIDTH, MOBILE_WIDTH, ResponsiveGrid, ResponsivePreview, ShowcaseSection, StateMatrix,
-    StateTile, TABLET_WIDTH, VariantGroup,
+    ResponsiveGrid, ResponsivePreview, ShowcaseSection, StateMatrix, StateTile, VariantGroup,
+    DESKTOP_WIDTH, MOBILE_WIDTH, TABLET_WIDTH,
 };
 use crate::theme::{self, presets};
 
@@ -307,11 +307,11 @@ fn TimelineRow(title: &'static str, meta: &'static str, status: &'static str) ->
     rsx! {
         div { class: "rounded-lg border {theme::surface::CARD_BORDER} p-3 bg-gray-900/30",
             div { class: "flex items-start justify-between gap-3",
-                div {
+                div { class: "flex-1 min-w-0",
                     p { class: "text-sm font-medium {theme::text::PRIMARY}", "{title}" }
                     p { class: "text-xs {theme::text::MUTED} mt-1", "{meta}" }
                 }
-                span { class: "rounded-full px-2 py-0.5 text-xs {status_text} {status_bg}", "{status}" }
+                span { class: "rounded-full px-2 py-0.5 text-xs whitespace-nowrap shrink-0 {status_text} {status_bg}", "{status}" }
             }
         }
     }
