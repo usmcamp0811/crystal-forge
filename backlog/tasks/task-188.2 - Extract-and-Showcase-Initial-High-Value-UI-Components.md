@@ -1,10 +1,10 @@
 ---
 id: TASK-188.2
 title: Extract and Showcase Initial High-Value UI Components
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-03-13 01:52'
-updated_date: '2026-03-16 23:35'
+updated_date: '2026-03-16 23:59'
 labels:
   - frontend
   - ux
@@ -104,4 +104,30 @@ Medium — extraction can introduce regressions if boundaries are unclear; mitig
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: Claude (OpenCode) on gray in ~/code/crystal-forge/TASK-188.2-extract-showcase-components
+
+MR created: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/167
+
+Implementation complete:
+
+- 8 components showcased with comprehensive state matrices
+
+- 3 components with responsive demos (mobile/tablet/desktop)
+
+- 4 new fixture functions added
+
+- All components prop-driven with deterministic fixtures
+
+- Zero business logic changes (purely additive)
+
+- All tests pass (40/40)
+
+Verification:
+
+- cargo fmt: ✅
+
+- cargo check: ✅ (compiles cleanly)
+
+- cargo test: ✅ (40 tests pass)
+
+Ready for review and merge to dev.
 <!-- SECTION:NOTES:END -->

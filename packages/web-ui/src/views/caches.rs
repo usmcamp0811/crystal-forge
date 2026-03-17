@@ -1,6 +1,7 @@
 //! Cache management view - configure cache destinations and monitor push jobs.
 
 use dioxus::prelude::*;
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::api::client;
@@ -8,6 +9,160 @@ use crate::api::models::{
     CacheDestination, CachePushJob, CreateCacheDestination, UpdateCacheDestination,
 };
 use crate::theme;
+
+fn is_http_url(value: &str) -> bool {
+    let trimmed = value.trim();
+    (trimmed.starts_with("https://") || trimmed.starts_with("http://")) && trimmed.len() > 8
+}
+
+fn is_s3_url(value: &str) -> bool {
+    let trimmed = value.trim();
+    let Some(rest) = trimmed.strip_prefix("s3://") else {
+        return false;
+    };
+
+    let bucket = rest.split('/').next().unwrap_or_default().trim();
+    !bucket.is_empty()
+}
+
+fn is_attic_public_key(value: &str) -> bool {
+    let trimmed = value.trim();
+    let Some((name, key)) = trimmed.split_once(':') else {
+        return false;
+    };
+
+    !name.trim().is_empty()
+        && !key.trim().is_empty()
+        && key
+            .trim()
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '/' | '=' | '-' | '_'))
+}
+
+#[derive(Clone)]
+struct CacheFormValidationInput {
+    name: String,
+    cache_type: String,
+    push_to: String,
+    attic_cache_name: String,
+    attic_public_key: String,
+    attic_token: String,
+    s3_region: String,
+    s3_access_key_id: String,
+    s3_secret_access_key: String,
+    s3_endpoint_url: String,
+    require_attic_token: bool,
+    require_s3_secret_access_key: bool,
+}
+
+fn validate_cache_destination_form(input: &CacheFormValidationInput) -> HashMap<String, String> {
+    let mut errors = HashMap::new();
+
+    if input.name.trim().is_empty() {
+        errors.insert("name".to_string(), "Cache name is required".to_string());
+    }
+
+    match input.cache_type.as_str() {
+        "Attic" => {
+            if input.attic_cache_name.trim().is_empty() {
+                errors.insert(
+                    "attic_cache_name".to_string(),
+                    "Attic cache name is required".to_string(),
+                );
+            }
+
+            if input.push_to.trim().is_empty() {
+                errors.insert(
+                    "push_to".to_string(),
+                    "Attic server URL is required".to_string(),
+                );
+            } else if !is_http_url(&input.push_to) {
+                errors.insert(
+                    "push_to".to_string(),
+                    "Attic server URL must start with http:// or https://".to_string(),
+                );
+            }
+
+            if input.attic_public_key.trim().is_empty() {
+                errors.insert(
+                    "attic_public_key".to_string(),
+                    "Attic public key is required".to_string(),
+                );
+            } else if !is_attic_public_key(&input.attic_public_key) {
+                errors.insert(
+                    "attic_public_key".to_string(),
+                    "Attic public key must look like cache-name:BASE64KEY".to_string(),
+                );
+            }
+
+            if input.require_attic_token && input.attic_token.trim().is_empty() {
+                errors.insert(
+                    "attic_token".to_string(),
+                    "Attic token is required".to_string(),
+                );
+            }
+        }
+        "S3" => {
+            if input.push_to.trim().is_empty() {
+                errors.insert(
+                    "push_to".to_string(),
+                    "Destination URL is required".to_string(),
+                );
+            } else if !is_s3_url(&input.push_to) {
+                errors.insert(
+                    "push_to".to_string(),
+                    "S3 destination must look like s3://bucket or s3://bucket/prefix".to_string(),
+                );
+            }
+
+            if input.s3_region.trim().is_empty() {
+                errors.insert("s3_region".to_string(), "S3 region is required".to_string());
+            }
+
+            if input.s3_access_key_id.trim().is_empty() {
+                errors.insert(
+                    "s3_access_key_id".to_string(),
+                    "AWS access key ID is required".to_string(),
+                );
+            }
+
+            if input.require_s3_secret_access_key && input.s3_secret_access_key.trim().is_empty() {
+                errors.insert(
+                    "s3_secret_access_key".to_string(),
+                    "AWS secret access key is required".to_string(),
+                );
+            }
+
+            if input.s3_endpoint_url.trim().is_empty() {
+                errors.insert(
+                    "s3_endpoint_url".to_string(),
+                    "S3 endpoint URL is required".to_string(),
+                );
+            } else if !is_http_url(&input.s3_endpoint_url) {
+                errors.insert(
+                    "s3_endpoint_url".to_string(),
+                    "S3 endpoint URL must start with http:// or https://".to_string(),
+                );
+            }
+        }
+        "Nix" | "Http" => {
+            if input.push_to.trim().is_empty() {
+                errors.insert(
+                    "push_to".to_string(),
+                    "Destination URL is required".to_string(),
+                );
+            } else if !is_http_url(&input.push_to) {
+                errors.insert(
+                    "push_to".to_string(),
+                    "Destination URL must start with http:// or https://".to_string(),
+                );
+            }
+        }
+        _ => {}
+    }
+
+    errors
+}
 
 fn came_from_setup() -> bool {
     if let Some(storage) = web_sys::window()
@@ -774,49 +929,20 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
                                     let attic_cache_name = add_attic_cache_name().trim().to_string();
                                     let attic_public_key = add_attic_public_key().trim().to_string();
 
-                                    // Validate and collect field errors
-                                    let mut errors = std::collections::HashMap::new();
-
-                                    if name.is_empty() {
-                                        errors.insert("name".to_string(), "Cache name is required".to_string());
-                                    }
-
-                                    if cache_type == "Attic" && attic_cache_name.is_empty() {
-                                        errors.insert("attic_cache_name".to_string(), "Attic cache name is required".to_string());
-                                    }
-
-                                    if cache_type == "Attic" && attic_public_key.is_empty() {
-                                        errors.insert("attic_public_key".to_string(), "Attic public key is required".to_string());
-                                    }
-
-                                    if cache_type == "Attic" && add_attic_token().trim().is_empty() {
-                                        errors.insert("attic_token".to_string(), "Attic token is required".to_string());
-                                    }
-
-                                    if cache_type == "S3" && add_s3_region().trim().is_empty() {
-                                        errors.insert("s3_region".to_string(), "S3 region is required".to_string());
-                                    }
-
-                                    if cache_type == "S3" && add_s3_access_key_id().trim().is_empty() {
-                                        errors.insert("s3_access_key_id".to_string(), "AWS access key ID is required".to_string());
-                                    }
-
-                                    if cache_type == "S3" && add_s3_secret_access_key().trim().is_empty() {
-                                        errors.insert("s3_secret_access_key".to_string(), "AWS secret access key is required".to_string());
-                                    }
-
-                                    if cache_type == "S3" && add_s3_endpoint_url().trim().is_empty() {
-                                        errors.insert("s3_endpoint_url".to_string(), "S3 endpoint URL is required".to_string());
-                                    }
-
-                                    if push_to.is_empty() {
-                                        let message = if cache_type == "Attic" {
-                                            "Attic server URL is required"
-                                        } else {
-                                            "Destination URL is required"
-                                        };
-                                        errors.insert("push_to".to_string(), message.to_string());
-                                    }
+                                    let errors = validate_cache_destination_form(&CacheFormValidationInput {
+                                        name: name.clone(),
+                                        cache_type: cache_type.clone(),
+                                        push_to: push_to.clone(),
+                                        attic_cache_name: attic_cache_name.clone(),
+                                        attic_public_key: attic_public_key.clone(),
+                                        attic_token: add_attic_token(),
+                                        s3_region: add_s3_region(),
+                                        s3_access_key_id: add_s3_access_key_id(),
+                                        s3_secret_access_key: add_s3_secret_access_key(),
+                                        s3_endpoint_url: add_s3_endpoint_url(),
+                                        require_attic_token: cache_type == "Attic",
+                                        require_s3_secret_access_key: cache_type == "S3",
+                                    });
 
                                     // If there are validation errors, display them and stop
                                     if !errors.is_empty() {
@@ -952,7 +1078,7 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
         use_signal(|| destination.attic_cache_name.clone().unwrap_or_default());
     let mut edit_attic_public_key =
         use_signal(|| destination.attic_public_key.clone().unwrap_or_default());
-    let mut edit_attic_token = use_signal(|| destination.attic_token.clone().unwrap_or_default());
+    let mut edit_attic_token = use_signal(String::new);
     let mut edit_signing_key_path =
         use_signal(|| destination.signing_key_path.clone().unwrap_or_default());
     let mut edit_compression = use_signal(|| destination.compression.clone().unwrap_or_default());
@@ -960,8 +1086,7 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
     let mut edit_s3_profile = use_signal(|| destination.s3_profile.clone().unwrap_or_default());
     let mut edit_s3_access_key_id =
         use_signal(|| destination.s3_access_key_id.clone().unwrap_or_default());
-    let mut edit_s3_secret_access_key =
-        use_signal(|| destination.s3_secret_access_key.clone().unwrap_or_default());
+    let mut edit_s3_secret_access_key = use_signal(String::new);
     let mut edit_s3_session_token =
         use_signal(|| destination.s3_session_token.clone().unwrap_or_default());
     let mut edit_s3_endpoint_url =
@@ -1213,7 +1338,7 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                     div {
                                         class: "flex items-baseline justify-between gap-2",
                                         label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Attic Token *" }
-                                        span { class: "text-[11px] {theme::text::MUTED}", "Token is required for Attic cache destinations" }
+                                        span { class: "text-[11px] {theme::text::MUTED}", "Leave blank to keep the existing token" }
                                     }
                                     input {
                                         r#type: "password",
@@ -1324,7 +1449,11 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                         }
                                     }
                                     div {
-                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "AWS Secret Access Key *" }
+                                        div {
+                                            class: "flex items-baseline justify-between gap-2",
+                                            label { class: "block text-sm {theme::text::SECONDARY} mb-1", "AWS Secret Access Key *" }
+                                            span { class: "text-[11px] {theme::text::MUTED}", "Leave blank to keep the existing secret" }
+                                        }
                                         input {
                                             r#type: "password",
                                             class: if edit_field_errors().contains_key("s3_secret_access_key") {
@@ -1485,49 +1614,22 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                     let attic_cache_name = edit_attic_cache_name().trim().to_string();
                                     let attic_public_key = edit_attic_public_key().trim().to_string();
 
-                                    // Validate and collect field errors
-                                    let mut errors = std::collections::HashMap::new();
-
-                                    if name.is_empty() {
-                                        errors.insert("name".to_string(), "Cache name is required".to_string());
-                                    }
-
-                                    if cache_type == "Attic" && attic_cache_name.is_empty() {
-                                        errors.insert("attic_cache_name".to_string(), "Attic cache name is required".to_string());
-                                    }
-
-                                    if cache_type == "Attic" && attic_public_key.is_empty() {
-                                        errors.insert("attic_public_key".to_string(), "Attic public key is required".to_string());
-                                    }
-
-                                    if cache_type == "Attic" && edit_attic_token().trim().is_empty() {
-                                        errors.insert("attic_token".to_string(), "Attic token is required".to_string());
-                                    }
-
-                                    if cache_type == "S3" && edit_s3_region().trim().is_empty() {
-                                        errors.insert("s3_region".to_string(), "S3 region is required".to_string());
-                                    }
-
-                                    if cache_type == "S3" && edit_s3_access_key_id().trim().is_empty() {
-                                        errors.insert("s3_access_key_id".to_string(), "AWS access key ID is required".to_string());
-                                    }
-
-                                    if cache_type == "S3" && edit_s3_secret_access_key().trim().is_empty() {
-                                        errors.insert("s3_secret_access_key".to_string(), "AWS secret access key is required".to_string());
-                                    }
-
-                                    if cache_type == "S3" && edit_s3_endpoint_url().trim().is_empty() {
-                                        errors.insert("s3_endpoint_url".to_string(), "S3 endpoint URL is required".to_string());
-                                    }
-
-                                    if push_to.is_empty() {
-                                        let message = if cache_type == "Attic" {
-                                            "Attic server URL is required"
-                                        } else {
-                                            "Destination URL is required"
-                                        };
-                                        errors.insert("push_to".to_string(), message.to_string());
-                                    }
+                                    let errors = validate_cache_destination_form(&CacheFormValidationInput {
+                                        name: name.clone(),
+                                        cache_type: cache_type.clone(),
+                                        push_to: push_to.clone(),
+                                        attic_cache_name: attic_cache_name.clone(),
+                                        attic_public_key: attic_public_key.clone(),
+                                        attic_token: edit_attic_token(),
+                                        s3_region: edit_s3_region(),
+                                        s3_access_key_id: edit_s3_access_key_id(),
+                                        s3_secret_access_key: edit_s3_secret_access_key(),
+                                        s3_endpoint_url: edit_s3_endpoint_url(),
+                                        require_attic_token: cache_type == "Attic"
+                                            && destination.attic_token.is_none(),
+                                        require_s3_secret_access_key: cache_type == "S3"
+                                            && destination.s3_secret_access_key.is_none(),
+                                    });
 
                                     // If there are validation errors, display them and stop
                                     if !errors.is_empty() {
@@ -1666,6 +1768,89 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{validate_cache_destination_form, CacheFormValidationInput};
+
+    fn base_input(cache_type: &str, push_to: &str) -> CacheFormValidationInput {
+        CacheFormValidationInput {
+            name: "main-cache".to_string(),
+            cache_type: cache_type.to_string(),
+            push_to: push_to.to_string(),
+            attic_cache_name: "binary-cache".to_string(),
+            attic_public_key: "cache.example.org-1:AbCdEf0123+/=".to_string(),
+            attic_token: "secret-token".to_string(),
+            s3_region: "us-east-1".to_string(),
+            s3_access_key_id: "AKIA1234567890".to_string(),
+            s3_secret_access_key: "secret-access-key".to_string(),
+            s3_endpoint_url: "https://s3.us-east-1.amazonaws.com".to_string(),
+            require_attic_token: cache_type == "Attic",
+            require_s3_secret_access_key: cache_type == "S3",
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_http_destination_for_nix_cache() {
+        let errors = validate_cache_destination_form(&base_input("Nix", "cache.example.com"));
+        assert_eq!(
+            errors.get("push_to").map(String::as_str),
+            Some("Destination URL must start with http:// or https://")
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_s3_destination() {
+        let errors = validate_cache_destination_form(&base_input("S3", "https://bucket"));
+        assert_eq!(
+            errors.get("push_to").map(String::as_str),
+            Some("S3 destination must look like s3://bucket or s3://bucket/prefix")
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_attic_public_key() {
+        let mut input = base_input("Attic", "https://attic.example.com");
+        input.attic_public_key = "not-a-valid-key".to_string();
+        let errors = validate_cache_destination_form(&input);
+        assert_eq!(
+            errors.get("attic_public_key").map(String::as_str),
+            Some("Attic public key must look like cache-name:BASE64KEY")
+        );
+    }
+
+    #[test]
+    fn accepts_valid_attic_input() {
+        let errors =
+            validate_cache_destination_form(&base_input("Attic", "https://attic.example.com"));
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn accepts_valid_s3_input() {
+        let errors =
+            validate_cache_destination_form(&base_input("S3", "s3://my-cache-bucket/releases"));
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn allows_blank_attic_token_on_edit_when_existing_secret_is_preserved() {
+        let mut input = base_input("Attic", "https://attic.example.com");
+        input.attic_token.clear();
+        input.require_attic_token = false;
+        let errors = validate_cache_destination_form(&input);
+        assert!(!errors.contains_key("attic_token"));
+    }
+
+    #[test]
+    fn allows_blank_s3_secret_on_edit_when_existing_secret_is_preserved() {
+        let mut input = base_input("S3", "s3://my-cache-bucket/releases");
+        input.s3_secret_access_key.clear();
+        input.require_s3_secret_access_key = false;
+        let errors = validate_cache_destination_form(&input);
+        assert!(!errors.contains_key("s3_secret_access_key"));
     }
 }
 

@@ -4,6 +4,7 @@ title: Add completed builds view to build queue UI
 status: To Do
 assignee: []
 created_date: '2026-03-02 04:41'
+updated_date: '2026-03-17 00:12'
 labels:
   - ui
   - build-queue
@@ -16,91 +17,58 @@ priority: medium
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-The current build queue UI only shows active/queued builds. We need a way to view historical completed builds.
+## Problem
+The current build queue UI only shows queued and actively building jobs. Operators have no way to inspect recently completed builds, failed builds, or historical execution details from the existing builds page.
 
-## Current Limitation
+## Goal
+Add a completed-builds view to the builds UI so users can inspect historical build results alongside the active queue without losing the current queue workflow.
 
-- Build queue view only shows `status IN ('queued', 'building')`
-- No way to see:
-  - Successfully completed builds
-  - Failed builds (after max retries)
-  - Build history over time
-  - Build duration/performance metrics
+## Non-Goals
+- This task does NOT redesign the entire builds page information architecture.
+- This task does NOT introduce analytics dashboards, charts, or timeline visualizations beyond the initial completed-builds view.
+- This task does NOT add export/reporting features.
+- This task does NOT change build execution behavior or queue semantics.
 
-## Proposed Solution
+## Scope
+1. Add a view switcher or tabs on the builds page for Active Queue vs Completed Builds.
+2. Render completed builds in a dense historical view appropriate for inspection.
+3. Support practical filtering/sorting for completed results.
+4. Preserve existing active queue behavior.
 
-Add a tab/view switcher on the builds page to toggle between:
+## Architectural Constraints
+- Prefer a table-based completed-builds view for the first iteration.
+- Keep queue behavior and completed-history rendering separate at the UI state level.
+- Reuse existing build status models and styling patterns where possible.
+- Avoid introducing business logic into presentational components.
+- Follow existing Dioxus view/component patterns in `packages/web-ui/src/views/builds.rs` and related components.
 
-1. **Active Queue** (current view)
-   - Shows queued + building jobs
-   - Real-time updates
-   - Drag-and-drop reordering (from TASK-155)
+## Impact Areas
+- `packages/web-ui/src/views/builds.rs`
+- `packages/web-ui/src/components/builds/`
+- API client/model files if a completed-builds fetch path or params need extension
 
-2. **Completed Builds** (new view)
-   - Shows completed builds (success + failed)
-   - Filterable by:
-     - Status (success/failed)
-     - Environment
-     - System/hostname
-     - Date range
-   - Sortable by:
-     - Completion time
-     - Duration
-     - Status
+## Risk Level
+Medium — user-facing view expansion in a complex page, but expected to be additive if queue behavior remains isolated.
 
-## UI Considerations
-
-### View Options to Explore
-
-**Option A: Tabs**
-```
-[ Active Queue ] [ Completed Builds ]
-```
-
-**Option B: Table View for Completed**
-- More information dense
-- Better for historical data
-- Sortable columns: System, Environment, Status, Duration, Completed At
-- Row click to expand details (logs, error messages)
-
-**Option C: Timeline View**
-- Visual timeline of build activity
-- Color-coded by status
-- Good for identifying patterns/issues
-
-### Recommended Approach
-
-Start with tabs + table view for completed builds:
-- Familiar UX pattern
-- Table format works well for historical data
-- Can add timeline/chart views later
-
-## API Requirements
-
-- Endpoint to fetch completed builds: `GET /api/v1/build-jobs?status=completed&limit=100`
-- Support pagination (100-500 results at a time)
-- Filter parameters: status, environment_id, system, date_range
-
-## Data to Display
-
-Each completed build should show:
-- System/hostname
-- Environment
-- Status (success/failed with visual indicator)
-- Started at / Completed at
-- Duration
-- Logs (link or expandable)
-- Error message (if failed)
-- Retry count (if applicable)
-
-## Future Enhancements
-
-- Export build history as CSV/JSON
-- Build analytics dashboard (success rate, avg duration)
-- Build log viewer with syntax highlighting
-- Rebuild button for failed builds
-
-## Notes
-
-This requires professional UI/UX design input (see TASK-156) to determine the best visualization approach for completed builds. The table view is a safe starting point but may not be optimal.
+## Verification Plan
+- Tier 0:
+  - `nix develop -c cargo fmt -- --check`
+  - `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml`
+  - targeted frontend tests if present
+- Tier 1:
+  - Run the web UI and verify switching between Active Queue and Completed Builds
+  - Confirm completed builds can be filtered/sorted as defined
+  - Confirm active queue behavior is unchanged
+- Tier 2:
+  - `nix flake check` not required unless API/model or wider package integration forces it
 <!-- SECTION:DESCRIPTION:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 The builds page includes a clear switcher between Active Queue and Completed Builds.
+- [ ] #2 The Completed Builds view shows successful and failed completed builds without removing the existing active queue view.
+- [ ] #3 Completed builds can be filtered by status and sorted by completion time at minimum.
+- [ ] #4 Completed build rows show system/hostname, environment where available, status, completion time, and duration.
+- [ ] #5 Existing active queue behavior continues to function unchanged after the new view is added.
+- [ ] #6 Local verification instructions cover both queue and completed-builds behavior.
+<!-- AC:END -->
