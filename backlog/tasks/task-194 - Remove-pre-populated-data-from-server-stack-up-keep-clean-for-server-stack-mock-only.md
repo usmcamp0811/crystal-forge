@@ -3,7 +3,7 @@ id: TASK-194
 title: >-
   Remove pre-populated data from server-stack up (keep clean for
   server-stack-mock only)
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-03-17 03:13'
 updated_date: '2026-03-17 03:16'
@@ -100,3 +100,9 @@ Low-Medium - Configuration change with clear rollback path (revert commit), but 
 - [ ] #4 No regressions in existing functionality
 - [ ] #5 All process-compose stacks continue to work
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: Claude (OpenCode) on gray in ~/code/crystal-forge/TASK-194-clean-server-stack
+<!-- SECTION:NOTES:END -->
