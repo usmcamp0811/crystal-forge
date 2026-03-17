@@ -1,6 +1,8 @@
 # Web UI Coding Standards
 
-> **See Also:** For comprehensive UI/UX guidance including design philosophy, component patterns, accessibility, and anti-patterns, see **[UI/UX Design System](./ui-ux-design-system.md)**.
+> **See Also:**
+> - **[Frontend Component Isolation Standards](./frontend-component-standards.md)** - Component taxonomy, isolation workflow, and state coverage requirements
+> - **[UI/UX Design System](./ui-ux-design-system.md)** - Design philosophy, component patterns, accessibility, and anti-patterns
 
 ## Scope
 

@@ -200,6 +200,16 @@ Eval Complete → create_build_jobs() → notify_build_queue() → Build Workers
 - Rust learning curve for contributors
 - Initial dependency on Grafana for user interface
 
+## Frontend Development
+
+Crystal Forge uses Dioxus for the web UI with isolation-driven component development practices.
+
+**Key Documentation:**
+- **[Frontend Component Isolation Standards](./frontend-component-standards.md)** - Component taxonomy, isolation workflow, state coverage, and contribution guidelines
+- **[Frontend Views Specification](./specs/01-frontend-views.md)** - View-level architecture and data flows
+- **[Web UI Coding Standards](./web-ui-coding-standards.md)** - Styling and theme token policies
+- **[UI/UX Design System](./ui-ux-design-system.md)** - Design philosophy and patterns
+
 ## Future Evolution
 
 - Custom web frontend to replace Grafana dashboards

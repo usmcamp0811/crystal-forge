@@ -87,6 +87,8 @@ When contributing, please:
 - Update the changelog if your change is user-facing
 - Include examples where appropriate
 
+**Frontend Contributors:** See [Frontend Component Isolation Standards](docs/frontend-component-standards.md) for component development workflow, state coverage requirements, and isolation-driven development practices.
+
 ## Code Style
 
 - Follow existing patterns in the codebase

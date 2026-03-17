@@ -1,10 +1,10 @@
 ---
 id: TASK-188.2
 title: Extract and Showcase Initial High-Value UI Components
-status: Review
+status: Done
 assignee: []
 created_date: '2026-03-13 01:52'
-updated_date: '2026-03-16 23:59'
+updated_date: '2026-03-17 00:28'
 labels:
   - frontend
   - ux
@@ -130,4 +130,8 @@ Verification:
 - cargo test: ✅ (40 tests pass)
 
 Ready for review and merge to dev.
+
+MR #167 merged to dev on 2026-03-16
+
+Task complete - all acceptance criteria satisfied.
 <!-- SECTION:NOTES:END -->
