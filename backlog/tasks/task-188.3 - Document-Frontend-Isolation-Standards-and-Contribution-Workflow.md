@@ -1,10 +1,10 @@
 ---
 id: TASK-188.3
 title: Document Frontend Isolation Standards and Contribution Workflow
-status: Review
+status: Done
 assignee: []
 created_date: '2026-03-13 01:52'
-updated_date: '2026-03-17 00:54'
+updated_date: '2026-03-17 03:08'
 labels:
   - frontend
   - docs
@@ -122,4 +122,8 @@ Cross-links: architecture.md, web-ui-coding-standards.md, specs/01-frontend-view
 All paths/commands verified against repository
 
 Ready for review
+
+MR #168 merged to dev on 2026-03-17
+
+Task complete - all 12 acceptance criteria satisfied.
 <!-- SECTION:NOTES:END -->
