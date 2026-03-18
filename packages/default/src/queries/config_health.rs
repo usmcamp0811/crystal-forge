@@ -25,7 +25,7 @@ pub async fn count_environments(pool: &PgPool) -> Result<i64> {
 
 /// Count of registered builders (not deactivated).
 pub async fn count_builders(pool: &PgPool) -> Result<i64> {
-    let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM builders WHERE is_active = true")
+    let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM builders WHERE status = 'active'")
         .fetch_one(pool)
         .await?;
     Ok(count)
