@@ -6,7 +6,7 @@ title: >-
 status: Review
 assignee: []
 created_date: '2026-03-17 03:13'
-updated_date: '2026-03-17 13:56'
+updated_date: '2026-03-18 23:53'
 labels:
   - devops
   - configuration
@@ -176,4 +176,22 @@ nix develop -c sqlx-refresh
 ```
 
 **Impact**: This blocks ALL stacks (clean and mock) from functioning. Must be fixed before runtime verification can proceed.
+
+### Critical Bug Fixed: Incorrect Column Name in config_health Query
+
+**Root Cause Identified**: The error was NOT about environments.is_active (which exists), but about builders.is_active (which doesn't exist).
+
+**Issue**: packages/default/src/queries/config_health.rs line 28 was querying:
+```sql
+SELECT COUNT(*) FROM builders WHERE is_active = true
+```
+
+But the builders table uses a 'status' column with enum values ('active', 'inactive', 'offline'), not a boolean 'is_active' column.
+
+**Fix**: Changed query to:
+```sql
+SELECT COUNT(*) FROM builders WHERE status = 'active'
+```
+
+Commit: cddf5edc - "fix: use correct column name for builders status query"
 <!-- SECTION:NOTES:END -->
