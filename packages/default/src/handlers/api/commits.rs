@@ -452,12 +452,14 @@ mod tests {
         assert!(msg1.contains("hello"));
 
         cleanup_eval_channel(&state, commit_id).await;
+        
+        // Cleanup is now delayed (spawned task), so channel should still exist immediately after
         let channels = state.eval_log_channels.lock().await;
-        assert!(!channels.contains_key(&commit_id));
+        assert!(channels.contains_key(&commit_id), "channel should still exist immediately after cleanup (delayed)");
 
         drop(channels);
         let history = state.eval_log_history.lock().await;
-        assert!(!history.contains_key(&commit_id));
+        assert!(history.contains_key(&commit_id), "history should still exist immediately after cleanup (delayed)");
     }
 
     #[tokio::test]
