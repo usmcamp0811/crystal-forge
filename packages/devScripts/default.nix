@@ -27,56 +27,64 @@ let
     '';
   };
 
-  generateConfig = pkgs.writeShellApplication {
-    name = "generate-config";
-    runtimeInputs = with pkgs; [
-      hostname
-      coreutils
-      pkgs.crystal-forge.default.cf-keygen
-    ];
-    text = ''
-      set -euo pipefail
+  # Helper function to create config generators with different templates
+  makeGenerateConfig = template:
+    pkgs.writeShellApplication {
+      name = "generate-config";
+      runtimeInputs = with pkgs; [
+        hostname
+        coreutils
+        pkgs.crystal-forge.default.cf-keygen
+      ];
+      text = ''
+        set -euo pipefail
 
-      CF_KEY_DIR="''${XDG_DATA_HOME:-$HOME/.local/share}/crystal-forge/devkeys"
-      mkdir -p "$CF_KEY_DIR"
+        CF_KEY_DIR="''${XDG_DATA_HOME:-$HOME/.local/share}/crystal-forge/devkeys"
+        mkdir -p "$CF_KEY_DIR"
 
-      # Generate agent keys if they don't exist
-      if [[ ! -f "$CF_KEY_DIR/agent.key" ]]; then
-        echo "Generating agent keys..."
-        cf-keygen -f "$CF_KEY_DIR/agent.key"
-      fi
+        # Generate agent keys if they don't exist
+        if [[ ! -f "$CF_KEY_DIR/agent.key" ]]; then
+          echo "Generating agent keys..."
+          cf-keygen -f "$CF_KEY_DIR/agent.key"
+        fi
 
-      # Generate builder keys if they don't exist
-      if [[ ! -f "$CF_KEY_DIR/builder.key" ]]; then
-        echo "Generating builder keys..."
-        cf-keygen -f "$CF_KEY_DIR/builder.key"
-      fi
+        # Generate builder keys if they don't exist
+        if [[ ! -f "$CF_KEY_DIR/builder.key" ]]; then
+          echo "Generating builder keys..."
+          cf-keygen -f "$CF_KEY_DIR/builder.key"
+        fi
 
-      # Generate a local cache encryption key if it doesn't exist
-      if [[ ! -f "$CF_KEY_DIR/cache-encryption.key" ]]; then
-        echo "Generating cache encryption key..."
-        head -c 48 /dev/urandom | base64 > "$CF_KEY_DIR/cache-encryption.key"
-        chmod 600 "$CF_KEY_DIR/cache-encryption.key"
-      fi
+        # Generate a local cache encryption key if it doesn't exist
+        if [[ ! -f "$CF_KEY_DIR/cache-encryption.key" ]]; then
+          echo "Generating cache encryption key..."
+          head -c 48 /dev/urandom | base64 > "$CF_KEY_DIR/cache-encryption.key"
+          chmod 600 "$CF_KEY_DIR/cache-encryption.key"
+        fi
 
-      # Prefer an address other machines can resolve (FQDN), fall back to short host.
-      # If your LAN DNS doesn't resolve either, set CF_PUBLIC_HOST yourself before running.
-      ACTUAL_HOST="''${CF_PUBLIC_HOST:-$(hostname -f 2>/dev/null || hostname -s)}"
-      ACTUAL_PUBKEY="$(cat "$CF_KEY_DIR/agent.pub")"
+        # Prefer an address other machines can resolve (FQDN), fall back to short host.
+        # If your LAN DNS doesn't resolve either, set CF_PUBLIC_HOST yourself before running.
+        ACTUAL_HOST="''${CF_PUBLIC_HOST:-$(hostname -f 2>/dev/null || hostname -s)}"
+        ACTUAL_PUBKEY="$(cat "$CF_KEY_DIR/agent.pub")"
 
-      CONFIG_DIR="''${XDG_RUNTIME_DIR:-/tmp}/crystal-forge"
-      mkdir -p "$CONFIG_DIR"
-      CONFIG_FILE="$CONFIG_DIR/crystal-forge-config.toml"
+        CONFIG_DIR="''${XDG_RUNTIME_DIR:-/tmp}/crystal-forge"
+        mkdir -p "$CONFIG_DIR"
+        CONFIG_FILE="$CONFIG_DIR/crystal-forge-config.toml"
 
-      sed \
-        -e "s/HOSTNAME_PLACEHOLDER/$ACTUAL_HOST/g" \
-        -e "s|PUBLIC_KEY_PLACEHOLDER|$ACTUAL_PUBKEY|g" \
-        -e "s|BUILDER_KEY_PATH_PLACEHOLDER|$CF_KEY_DIR/builder.key|g" \
-        ${configTemplate} > "$CONFIG_FILE"
+        sed \
+          -e "s/HOSTNAME_PLACEHOLDER/$ACTUAL_HOST/g" \
+          -e "s|PUBLIC_KEY_PLACEHOLDER|$ACTUAL_PUBKEY|g" \
+          -e "s|BUILDER_KEY_PATH_PLACEHOLDER|$CF_KEY_DIR/builder.key|g" \
+          ${template} > "$CONFIG_FILE"
 
-      echo "$CONFIG_FILE"
-    '';
-  };
+        echo "$CONFIG_FILE"
+      '';
+    };
+
+  # Clean config generator (no pre-populated data)
+  generateConfig = makeGenerateConfig configTemplate;
+
+  # Mock config generator (includes pre-populated mock data)
+  generateConfigMock = makeGenerateConfig configTemplateMock;
 
   envExports = ''
     export CRYSTAL_FORGE_CONFIG="$(${generateConfig}/bin/generate-config)"
@@ -85,7 +93,8 @@ let
     export CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY="$CACHE_ENCRYPTION_KEY"
   '';
 
-  configTemplate = tomlFormat.generate "crystal-forge-config-template.toml" {
+  # Clean config template for production-like deployments (no pre-populated data)
+  configTemplateClean = tomlFormat.generate "crystal-forge-config-clean.toml" {
     database = {
       host = "127.0.0.1";
       port = db_port;
@@ -120,6 +129,52 @@ let
       server_port = cf_port;
       private_key = "$CF_KEY_DIR/agent.key";
     };
+    # NO pre-populated environments, systems, or flakes
+    flakes = {
+      flake_polling_interval = "10m";
+      commit_evaluation_interval = "10m";
+      build_processing_interval = "10m";
+      watched = [ ];
+    };
+  };
+
+  # Mock config template for development/demo (pre-populated with test data)
+  configTemplateMock = tomlFormat.generate "crystal-forge-config-mock.toml" {
+    database = {
+      host = "127.0.0.1";
+      port = db_port;
+      user = "crystal_forge";
+      password = db_password;
+      name = "crystal_forge";
+    };
+    server = {
+      host = "0.0.0.0";
+      port = cf_port;
+    };
+    build = {
+      cores = 7;
+      max_jobs = 1;
+      poll_interval = "1m";
+    };
+    builder = {
+      enable_api_mode = true;
+      builder_id = "00000000-0000-0000-0000-000000000001";
+      private_key_path = "BUILDER_KEY_PATH_PLACEHOLDER";
+
+      # 👇 external-friendly (not localhost)
+      server_url = "http://HOSTNAME_PLACEHOLDER:${toString cf_port}";
+
+      poll_interval = 5;
+      heartbeat_interval = 30;
+      max_concurrent_jobs = 1;
+    };
+    client = {
+      # 👇 external-friendly (not localhost)
+      server_host = "HOSTNAME_PLACEHOLDER";
+      server_port = cf_port;
+      private_key = "$CF_KEY_DIR/agent.key";
+    };
+    # Pre-populated mock data for development/demo
     environments = [{
       name = "mockenv";
       description =
@@ -146,6 +201,9 @@ let
       }];
     };
   };
+
+  # Default to clean template (backward compatibility alias)
+  configTemplate = configTemplateClean;
 
   simulatePush = pkgs.writeShellApplication {
     name = "simulate-push";
@@ -286,6 +344,45 @@ let
     runtimeInputs = [ pkgs.nix pkgs.coreutils ];
     text = ''
       CRYSTAL_FORGE_CONFIG="$(${generateConfig}/bin/generate-config)"
+      export CRYSTAL_FORGE_CONFIG
+      CF_KEY_DIR="''${XDG_DATA_HOME:-$HOME/.local/share}/crystal-forge/devkeys"
+      CACHE_ENCRYPTION_KEY="$(cat "$CF_KEY_DIR/cache-encryption.key")"
+      export CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY="$CACHE_ENCRYPTION_KEY"
+
+      # Bootstrap the dev builder in the database before starting
+      ${bootstrapDevBuilder}/bin/bootstrap-dev-builder
+
+      if [[ "''${1:-}" == "--dev" ]]; then
+        exec nix run .#builder
+      else
+        exec ${pkgs.crystal-forge.default.builder}/bin/builder
+      fi
+    '';
+  };
+
+  # Mock variants that use pre-populated config template
+  runServerMock = pkgs.writeShellApplication {
+    name = "run-server-mock";
+    runtimeInputs = [ pkgs.nix pkgs.git pkgs.vulnix pkgs.coreutils ];
+    text = ''
+      CRYSTAL_FORGE_CONFIG="$(${generateConfigMock}/bin/generate-config)"
+      export CRYSTAL_FORGE_CONFIG
+      CF_KEY_DIR="''${XDG_DATA_HOME:-$HOME/.local/share}/crystal-forge/devkeys"
+      CACHE_ENCRYPTION_KEY="$(cat "$CF_KEY_DIR/cache-encryption.key")"
+      export CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY="$CACHE_ENCRYPTION_KEY"
+      if [[ "''${1:-}" == "--dev" ]]; then
+        exec nix run .#server
+      else
+        exec ${pkgs.crystal-forge.default.server}/bin/server
+      fi
+    '';
+  };
+
+  runBuilderMock = pkgs.writeShellApplication {
+    name = "run-builder-mock";
+    runtimeInputs = [ pkgs.nix pkgs.coreutils ];
+    text = ''
+      CRYSTAL_FORGE_CONFIG="$(${generateConfigMock}/bin/generate-config)"
       export CRYSTAL_FORGE_CONFIG
       CF_KEY_DIR="''${XDG_DATA_HOME:-$HOME/.local/share}/crystal-forge/devkeys"
       CACHE_ENCRYPTION_KEY="$(cat "$CF_KEY_DIR/cache-encryption.key")"
@@ -566,7 +663,7 @@ let
 
   mock-execution-module = {
     settings.processes.server.command =
-      mkForce "${runServer}/bin/run-server --dev";
+      mkForce "${runServerMock}/bin/run-server-mock --dev";
     settings.processes.server.environment = {
       AUTH_MODE = mkForce "local";
       CRYSTAL_FORGE__SERVER__EXECUTION_MODE = "mock";
@@ -576,7 +673,7 @@ let
     };
 
     settings.processes.builder.command =
-      mkForce "${runBuilder}/bin/run-builder --dev";
+      mkForce "${runBuilderMock}/bin/run-builder-mock --dev";
     settings.processes.builder.environment = {
       AUTH_MODE = mkForce "local";
       CRYSTAL_FORGE__SERVER__EXECUTION_MODE = "mock";

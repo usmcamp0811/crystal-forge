@@ -25,7 +25,7 @@ pub async fn count_environments(pool: &PgPool) -> Result<i64> {
 
 /// Count of registered builders (not deactivated).
 pub async fn count_builders(pool: &PgPool) -> Result<i64> {
-    let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM builders WHERE is_active = true")
+    let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM builders WHERE status = 'active'")
         .fetch_one(pool)
         .await?;
     Ok(count)
@@ -52,8 +52,8 @@ pub async fn count_flakes_with_eval_errors(pool: &PgPool) -> Result<i64> {
             FROM commits c
             WHERE c.flake_id = f.id
               AND c.evaluation_error_message IS NOT NULL
-              AND c.created_at = (
-                  SELECT MAX(c2.created_at) FROM commits c2 WHERE c2.flake_id = f.id
+              AND c.commit_timestamp = (
+                  SELECT MAX(c2.commit_timestamp) FROM commits c2 WHERE c2.flake_id = f.id
               )
         )
         "#,
