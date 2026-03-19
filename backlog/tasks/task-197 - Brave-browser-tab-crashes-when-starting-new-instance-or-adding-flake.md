@@ -4,6 +4,7 @@ title: Brave browser tab crashes when starting new instance or adding flake
 status: Backlog
 assignee: []
 created_date: '2026-03-19 12:38'
+updated_date: '2026-03-19 12:38'
 labels:
   - bug
   - ui
@@ -68,3 +69,21 @@ The exact trigger is unclear and needs investigation.
 
 **High** - Users on Brave browser (popular privacy-focused browser) cannot use the application at all if tabs crash.
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+## Browser Testing Notes (2026-03-19)
+
+**Firefox**: Does NOT crash - works correctly
+**Brave**: Crashes (either on load or when adding flake)
+
+This suggests the issue is **Chromium-specific** or **Brave-specific** (Brave is Chromium-based with additional privacy/security features).
+
+Next steps for investigation:
+1. Test in vanilla Chrome to see if it's Chromium-wide or Brave-specific
+2. Test in Edge (also Chromium-based)
+3. Check if Brave's Shield settings (ad blocking, script blocking) are interfering
+4. Look for Chromium-specific rendering issues in Dioxus
+5. Check if WASM memory limits differ between browsers
+<!-- SECTION:NOTES:END -->
