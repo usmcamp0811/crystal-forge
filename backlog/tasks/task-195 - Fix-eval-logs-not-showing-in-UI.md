@@ -1,9 +1,10 @@
 ---
 id: TASK-195
 title: Fix eval logs not showing in UI
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-03-19 00:46'
+updated_date: '2026-03-19 00:46'
 labels:
   - bug
   - ui
@@ -52,3 +53,9 @@ Fix the log streaming from backend to frontend so users can see evaluation progr
 - Log streaming/buffering logic
 - Error message propagation
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: Claude (OpenCode) on gray in ~/code/crystal-forge/TASK-195-fix-eval-logs-ui
+<!-- SECTION:NOTES:END -->
