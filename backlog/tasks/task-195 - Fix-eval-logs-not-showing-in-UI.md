@@ -4,7 +4,7 @@ title: Fix eval logs not showing in UI
 status: Review
 assignee: []
 created_date: '2026-03-19 00:46'
-updated_date: '2026-03-19 01:08'
+updated_date: '2026-03-19 02:09'
 labels:
   - bug
   - ui
@@ -77,4 +77,14 @@ Added automated WebSocket test to web-ui check:
 MR !171: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/171
 
 Ready for review and testing!
+
+### Test Fix Applied
+
+CI tests failed because eval_channel_fanout_and_cleanup test expected immediate cleanup.
+
+Fixed by updating test to verify channels/history remain available after cleanup is called (correct behavior for delayed cleanup).
+
+Commit: 806f1080 - Pushed to MR !171
+
+CI should now pass!
 <!-- SECTION:NOTES:END -->
