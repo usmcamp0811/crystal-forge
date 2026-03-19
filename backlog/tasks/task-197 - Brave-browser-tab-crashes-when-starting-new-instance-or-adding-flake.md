@@ -4,7 +4,7 @@ title: Brave browser tab crashes when starting new instance or adding flake
 status: Backlog
 assignee: []
 created_date: '2026-03-19 12:38'
-updated_date: '2026-03-19 12:38'
+updated_date: '2026-03-19 12:39'
 labels:
   - bug
   - ui
@@ -75,15 +75,24 @@ The exact trigger is unclear and needs investigation.
 <!-- SECTION:NOTES:BEGIN -->
 ## Browser Testing Notes (2026-03-19)
 
-**Firefox**: Does NOT crash - works correctly
+**Initial report**: Firefox seemed fine, but crash MAY also occur in Firefox
 **Brave**: Crashes (either on load or when adding flake)
+**Firefox**: Uncertain - may also crash, needs more testing
 
-This suggests the issue is **Chromium-specific** or **Brave-specific** (Brave is Chromium-based with additional privacy/security features).
+**Status**: Issue is NOT browser-specific - appears to be a general UI/rendering problem that can affect multiple browsers.
+
+This suggests the root cause is likely:
+- Memory leak or excessive memory usage
+- Infinite render loop in Dioxus components
+- Large data payload causing browser OOM
+- WASM memory issue
+- Cascading state updates causing excessive re-renders
 
 Next steps for investigation:
-1. Test in vanilla Chrome to see if it's Chromium-wide or Brave-specific
-2. Test in Edge (also Chromium-based)
-3. Check if Brave's Shield settings (ad blocking, script blocking) are interfering
-4. Look for Chromium-specific rendering issues in Dioxus
-5. Check if WASM memory limits differ between browsers
+1. Try to reproduce crash consistently in both browsers
+2. Monitor browser memory usage when loading UI
+3. Check browser console for errors/warnings before crash
+4. Look for infinite loops or excessive re-renders in Dioxus components
+5. Profile memory usage and component render cycles
+6. Check if adding flake triggers large data fetch or render loop
 <!-- SECTION:NOTES:END -->
