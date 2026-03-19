@@ -6,7 +6,7 @@ title: >-
 status: Review
 assignee: []
 created_date: '2026-03-17 03:13'
-updated_date: '2026-03-18 23:53'
+updated_date: '2026-03-19 00:03'
 labels:
   - devops
   - configuration
@@ -194,4 +194,19 @@ SELECT COUNT(*) FROM builders WHERE status = 'active'
 ```
 
 Commit: cddf5edc - "fix: use correct column name for builders status query"
+
+### Second Bug Fixed: Incorrect Column Name for Commits Timestamp
+
+**Issue**: config_health.rs was using c.created_at when querying the commits table, but the column is actually named 'commit_timestamp'.
+
+**Fix**: Changed query from:
+```sql
+AND c.created_at = (SELECT MAX(c2.created_at) ...)
+```
+To:
+```sql
+AND c.commit_timestamp = (SELECT MAX(c2.commit_timestamp) ...)
+```
+
+Commit: 44e0cff5 - "fix: use commit_timestamp instead of created_at in commits table query"
 <!-- SECTION:NOTES:END -->
