@@ -150,6 +150,55 @@ in pkgs.testers.runNixOSTest {
     if ok_count == 0:
         raise Exception("All screenshots failed")
 
+    # WebSocket Eval Log Streaming Test
+    print("\n=== WebSocket Eval Log Test ===")
+    print("Testing that eval logs stream correctly via WebSocket...")
+    print("This validates the fix for late-connecting WebSocket clients")
+
+    # Extract auth token from the integration test (it logged in as admin)
+    # For simplicity, we'll register a new admin user for this test
+    machine.succeed("""
+        curl -sf -X POST http://127.0.0.1:${
+          toString CF_TEST_SERVER_PORT
+        }/api/auth/local/register \
+          -H 'Content-Type: application/json' \
+          -d '{"username":"wstest","email":"wstest@example.com","password":"test123","firstName":"WS","lastName":"Test"}' \
+          > /tmp/wstest-user.json
+    """)
+
+    # Login to get token
+    machine.succeed("""
+        curl -sf -X POST http://127.0.0.1:${
+          toString CF_TEST_SERVER_PORT
+        }/api/auth/local/login \
+          -H 'Content-Type: application/json' \
+          -d '{"username":"wstest","password":"test123"}' \
+          > /tmp/wstest-login.json
+    """)
+
+    token_json = machine.succeed("cat /tmp/wstest-login.json")
+    token_data = json.loads(token_json)
+    auth_token = token_data.get("token", "")
+
+    if not auth_token:
+        print("Warning: Could not get auth token, skipping WebSocket test")
+    else:
+        # Run WebSocket test
+        ws_exit_code, ws_output = machine.execute(
+            f"${pkgs.nodejs}/bin/node /tmp/web-ui-tests/eval-websocket-test.js http://127.0.0.1:${
+              toString CF_TEST_SERVER_PORT
+            } {auth_token} 2>&1"
+        )
+        print(ws_output)
+        
+        if ws_exit_code != 0:
+            print("❌ WebSocket eval log test FAILED")
+            print("This means late-connecting WebSocket clients don't receive log history")
+            raise Exception("WebSocket eval log streaming test failed")
+        else:
+            print("✅ WebSocket eval log test PASSED")
+            print("Late-connecting clients successfully receive log history")
+
     expected_onboarding = [
       "06a-onboarding-coach-dashboard",
       "06b-onboarding-environments-callout",
