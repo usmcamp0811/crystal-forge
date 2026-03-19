@@ -6,7 +6,7 @@ title: >-
 status: Review
 assignee: []
 created_date: '2026-03-17 03:13'
-updated_date: '2026-03-19 00:03'
+updated_date: '2026-03-19 00:31'
 labels:
   - devops
   - configuration
@@ -209,4 +209,14 @@ AND c.commit_timestamp = (SELECT MAX(c2.commit_timestamp) ...)
 ```
 
 Commit: 44e0cff5 - "fix: use commit_timestamp instead of created_at in commits table query"
+
+### Ready for Merge
+
+MR !170 is ready for review and merge:
+- Config template split complete (clean vs mock)
+- Two critical config_health bugs fixed
+- Server starts without errors
+- All commits pushed
+
+Comment added to MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/170#note_3172531318
 <!-- SECTION:NOTES:END -->
