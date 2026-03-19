@@ -1,10 +1,10 @@
 ---
 id: TASK-195
 title: Fix eval logs not showing in UI
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-03-19 00:46'
-updated_date: '2026-03-19 00:46'
+updated_date: '2026-03-19 01:08'
 labels:
   - bug
   - ui
@@ -58,4 +58,23 @@ Fix the log streaming from backend to frontend so users can see evaluation progr
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: Claude (OpenCode) on gray in ~/code/crystal-forge/TASK-195-fix-eval-logs-ui
+
+## Implementation Complete
+
+### Root Cause Found
+WebSocket channels and log history were cleaned up immediately after evaluation completed. Late-connecting clients (which is always the case - users open UI after eval) had no history to replay.
+
+### Solution
+Delayed cleanup by 10 minutes using tokio::spawn. Keeps both broadcast channel and history available for late connections.
+
+### Testing
+Added automated WebSocket test to web-ui check:
+- Creates flake/commit, triggers eval, waits for completion
+- THEN connects WebSocket (late connection scenario)  
+- Verifies logs are received (validates history replay)
+
+### MR Created
+MR !171: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/171
+
+Ready for review and testing!
 <!-- SECTION:NOTES:END -->
