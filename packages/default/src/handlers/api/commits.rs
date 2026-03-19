@@ -362,15 +362,26 @@ async fn get_or_create_eval_channel(
     Some(tx)
 }
 
-/// Cleanup broadcast channel when evaluation completes
+/// Cleanup broadcast channel when evaluation completes (with delay)
+/// This allows late-connecting WebSocket clients to still receive log history
 pub async fn cleanup_eval_channel(state: &CFState, commit_id: i32) {
-    let mut channels = state.eval_log_channels.lock().await;
-    channels.remove(&commit_id);
-    drop(channels);
+    // Clone state for the delayed cleanup task
+    let state = state.clone();
+    
+    // Spawn a background task to cleanup after 10 minutes
+    tokio::spawn(async move {
+        tokio::time::sleep(tokio::time::Duration::from_secs(600)).await;
+        
+        let mut channels = state.eval_log_channels.lock().await;
+        channels.remove(&commit_id);
+        drop(channels);
 
-    let mut history = state.eval_log_history.lock().await;
-    history.remove(&commit_id);
-    tracing::debug!("Cleaned up broadcast channel for commit {}", commit_id);
+        let mut history = state.eval_log_history.lock().await;
+        history.remove(&commit_id);
+        tracing::debug!("Cleaned up broadcast channel for commit {} (after 10min delay)", commit_id);
+    });
+    
+    tracing::debug!("Scheduled cleanup for commit {} in 10 minutes", commit_id);
 }
 
 /// Trigger manual re-evaluation for a commit
@@ -441,12 +452,14 @@ mod tests {
         assert!(msg1.contains("hello"));
 
         cleanup_eval_channel(&state, commit_id).await;
+        
+        // Cleanup is now delayed (spawned task), so channel should still exist immediately after
         let channels = state.eval_log_channels.lock().await;
-        assert!(!channels.contains_key(&commit_id));
+        assert!(channels.contains_key(&commit_id), "channel should still exist immediately after cleanup (delayed)");
 
         drop(channels);
         let history = state.eval_log_history.lock().await;
-        assert!(!history.contains_key(&commit_id));
+        assert!(history.contains_key(&commit_id), "history should still exist immediately after cleanup (delayed)");
     }
 
     #[tokio::test]
