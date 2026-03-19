@@ -155,24 +155,13 @@ in pkgs.testers.runNixOSTest {
     print("Testing that eval logs stream correctly via WebSocket...")
     print("This validates the fix for late-connecting WebSocket clients")
 
-    # Extract auth token from the integration test (it logged in as admin)
-    # For simplicity, we'll register a new admin user for this test
-    machine.succeed("""
-        curl -sf -X POST http://127.0.0.1:${
-          toString CF_TEST_SERVER_PORT
-        }/api/auth/local/register \
-          -H 'Content-Type: application/json' \
-          -d '{"username":"wstest","email":"wstest@example.com","password":"test123","firstName":"WS","lastName":"Test"}' \
-          > /tmp/wstest-user.json
-    """)
-
-    # Login to get token
+    # Login as the admin user that was created by the integration test
     machine.succeed("""
         curl -sf -X POST http://127.0.0.1:${
           toString CF_TEST_SERVER_PORT
         }/api/auth/local/login \
           -H 'Content-Type: application/json' \
-          -d '{"username":"wstest","password":"test123"}' \
+          -d '{"username":"admin","password":"testpassword123"}' \
           > /tmp/wstest-login.json
     """)
 
