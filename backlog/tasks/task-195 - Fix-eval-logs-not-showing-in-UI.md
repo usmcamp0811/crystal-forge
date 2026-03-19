@@ -4,7 +4,7 @@ title: Fix eval logs not showing in UI
 status: Review
 assignee: []
 created_date: '2026-03-19 00:46'
-updated_date: '2026-03-19 02:33'
+updated_date: '2026-03-19 03:14'
 labels:
   - bug
   - ui
@@ -95,4 +95,16 @@ Pushed commit f35ad618 to fix WebSocket test authentication issue.
 The web-ui check was failing because the test tried to register a new user, but the integration test already created an admin user. Fixed by reusing existing credentials (admin@example.com / adminpass).
 
 Waiting for CI to pass. All other checks (nix-build, server-stack, integration-test) passed on previous commits.
+
+## MR Description Updated (2026-03-18)
+
+Updated MR !171 with proper description including:
+- Summary of the problem and root cause
+- Solution explanation (delayed cleanup)
+- Changes made with line numbers
+- Testing details (unit + integration tests)
+- Tradeoffs and mitigation
+- CI status: ✅ All checks passed
+
+Ready for review and merge!
 <!-- SECTION:NOTES:END -->
