@@ -114,12 +114,31 @@ pub async fn ensure_bootstrap_oidc_admin_mapping(pool: &PgPool) -> Result<()> {
     use crate::config::OidcConfig;
     use crate::queries::auth_identity::{count_oidc_group_mappings, create_oidc_group_mapping};
 
-    let Some(admin_group) = OidcConfig::bootstrap_admin_group() else {
+    let Some(admin_group_raw) = OidcConfig::bootstrap_admin_group() else {
         // No bootstrap group configured, skip
+        tracing::debug!(
+            "CRYSTAL_FORGE_OIDC_BOOTSTRAP_ADMIN_GROUP not set; skipping bootstrap admin mapping"
+        );
         return Ok(());
     };
 
-    tracing::info!("Checking for OIDC bootstrap admin mapping: {}", admin_group);
+    // IMPORTANT: Normalize group name to match OIDC login flow
+    // Groups from OIDC tokens are normalized (trimmed + lowercased) before mapping,
+    // so the bootstrap mapping must use the same normalized form
+    let admin_group = admin_group_raw.trim().to_ascii_lowercase();
+    
+    if admin_group.is_empty() {
+        tracing::warn!(
+            "CRYSTAL_FORGE_OIDC_BOOTSTRAP_ADMIN_GROUP is set but empty after normalization; skipping"
+        );
+        return Ok(());
+    }
+
+    tracing::info!(
+        raw_group = %admin_group_raw,
+        normalized_group = %admin_group,
+        "Checking for OIDC bootstrap admin mapping"
+    );
 
     // Check if mapping already exists
     let existing = count_oidc_group_mappings(pool, &admin_group)
@@ -127,9 +146,9 @@ pub async fn ensure_bootstrap_oidc_admin_mapping(pool: &PgPool) -> Result<()> {
         .context("Failed to check existing OIDC group mapping")?;
 
     if existing > 0 {
-        tracing::debug!(
-            "Bootstrap admin mapping already exists for: {}",
-            admin_group
+        tracing::info!(
+            group = %admin_group,
+            "Bootstrap admin mapping already exists; skipping creation"
         );
         return Ok(());
     }
@@ -143,11 +162,14 @@ pub async fn ensure_bootstrap_oidc_admin_mapping(pool: &PgPool) -> Result<()> {
         ))?;
 
     tracing::info!(
-        "✅ Created bootstrap OIDC admin mapping: {} → Admin",
-        admin_group
+        raw_group = %admin_group_raw,
+        normalized_group = %admin_group,
+        role = "Admin",
+        "✅ Created bootstrap OIDC admin mapping"
     );
     tracing::info!(
-        "   Users in the '{}' OIDC group will now have Admin access",
+        group = %admin_group,
+        "   Users in OIDC groups matching '{}' (case-insensitive) will receive Admin role",
         admin_group
     );
 
