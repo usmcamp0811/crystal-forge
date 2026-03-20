@@ -1,10 +1,11 @@
 ---
 id: TASK-198
 title: Fix web-ui wasm-bindgen-cli version mismatch breaking crystal-forge builds
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - OpenCode
 created_date: '2026-03-20 02:58'
-updated_date: '2026-03-20 02:58'
+updated_date: '2026-03-20 02:59'
 labels: []
 dependencies: []
 references:
@@ -50,8 +51,19 @@ Source issue: GitLab issue #115
 - [ ] #4 Changes are limited to files required for this build break fix
 <!-- AC:END -->
 
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Locate the web-ui Nix derivation logic that injects a wasm-bindgen path into Dioxus build tooling.
+2. Remove or adjust the forced wasm-bindgen symlink so the build uses a compatible wasm-bindgen-cli version.
+3. Run targeted Nix builds to verify crystal-forge-web-ui and affected crystal-forge build paths succeed without version mismatch error.
+4. Update task notes and acceptance criteria checkboxes with verification evidence.
+<!-- SECTION:PLAN:END -->
+
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
 Moved to To Do per explicit user request to address production-breaking issue ASAP (GitLab #115).
+
+LOCK: OpenCode on reckless in /home/mcamp/code/crystal-forge/TASK-198-fix-wasm-bindgen-mismatch
 <!-- SECTION:NOTES:END -->
