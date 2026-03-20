@@ -1,10 +1,10 @@
 ---
 id: TASK-156
 title: Add completed builds view to build queue UI
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-03-02 04:41'
-updated_date: '2026-03-17 00:12'
+updated_date: '2026-03-20 00:24'
 labels:
   - ui
   - build-queue
@@ -72,3 +72,9 @@ Medium — user-facing view expansion in a complex page, but expected to be addi
 - [ ] #5 Existing active queue behavior continues to function unchanged after the new view is added.
 - [ ] #6 Local verification instructions cover both queue and completed-builds behavior.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: OpenCode-gpt5 on reckless in ~/code/crystal-forge/TASK-156-add-completed-builds-view
+<!-- SECTION:NOTES:END -->
