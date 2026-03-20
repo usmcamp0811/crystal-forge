@@ -5,7 +5,7 @@ status: Review
 assignee:
   - OpenCode
 created_date: '2026-03-20 02:58'
-updated_date: '2026-03-20 03:16'
+updated_date: '2026-03-20 03:26'
 labels: []
 dependencies: []
 references:
@@ -74,4 +74,10 @@ Verification run in task worktree `/home/mcamp/code/crystal-forge/TASK-198-fix-w
 MR (dev): https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/173
 
 MR (main): https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/174
+
+Created main-based cherry-pick branch `TASK-198-main-cherry-pick` from `main` and cherry-picked commit `f911d6e7` to keep main MR diff scoped to the hotfix only.
+
+Opened replacement main MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/175
+
+Closed superseded main MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/174
 <!-- SECTION:NOTES:END -->
