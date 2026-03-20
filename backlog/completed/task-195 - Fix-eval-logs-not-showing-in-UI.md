@@ -1,10 +1,10 @@
 ---
 id: TASK-195
 title: Fix eval logs not showing in UI
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-03-19 00:46'
-updated_date: '2026-03-19 00:46'
+updated_date: '2026-03-20 00:16'
 labels:
   - bug
   - ui
@@ -58,4 +58,57 @@ Fix the log streaming from backend to frontend so users can see evaluation progr
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: Claude (OpenCode) on gray in ~/code/crystal-forge/TASK-195-fix-eval-logs-ui
+
+## Implementation Complete
+
+### Root Cause Found
+WebSocket channels and log history were cleaned up immediately after evaluation completed. Late-connecting clients (which is always the case - users open UI after eval) had no history to replay.
+
+### Solution
+Delayed cleanup by 10 minutes using tokio::spawn. Keeps both broadcast channel and history available for late connections.
+
+### Testing
+Added automated WebSocket test to web-ui check:
+- Creates flake/commit, triggers eval, waits for completion
+- THEN connects WebSocket (late connection scenario)  
+- Verifies logs are received (validates history replay)
+
+### MR Created
+MR !171: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/171
+
+Ready for review and testing!
+
+### Test Fix Applied
+
+CI tests failed because eval_channel_fanout_and_cleanup test expected immediate cleanup.
+
+Fixed by updating test to verify channels/history remain available after cleanup is called (correct behavior for delayed cleanup).
+
+Commit: 806f1080 - Pushed to MR !171
+
+CI should now pass!
+
+## Latest Update (2026-03-18)
+
+Pushed commit f35ad618 to fix WebSocket test authentication issue.
+
+The web-ui check was failing because the test tried to register a new user, but the integration test already created an admin user. Fixed by reusing existing credentials (admin@example.com / adminpass).
+
+Waiting for CI to pass. All other checks (nix-build, server-stack, integration-test) passed on previous commits.
+
+## MR Description Updated (2026-03-18)
+
+Updated MR !171 with proper description including:
+- Summary of the problem and root cause
+- Solution explanation (delayed cleanup)
+- Changes made with line numbers
+- Testing details (unit + integration tests)
+- Tradeoffs and mitigation
+- CI status: ✅ All checks passed
+
+Ready for review and merge!
+
+Merged to dev via MR !171 at 2026-03-19T12:40:57Z.
+
+Post-merge cleanup complete: removed worktree ~/code/crystal-forge/TASK-195-fix-eval-logs-ui and pruned worktrees.
 <!-- SECTION:NOTES:END -->

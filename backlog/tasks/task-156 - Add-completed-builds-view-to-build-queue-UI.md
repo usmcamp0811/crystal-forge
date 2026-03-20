@@ -1,10 +1,10 @@
 ---
 id: TASK-156
 title: Add completed builds view to build queue UI
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-03-02 04:41'
-updated_date: '2026-03-17 00:12'
+updated_date: '2026-03-20 02:24'
 labels:
   - ui
   - build-queue
@@ -72,3 +72,25 @@ Medium — user-facing view expansion in a complex page, but expected to be addi
 - [ ] #5 Existing active queue behavior continues to function unchanged after the new view is added.
 - [ ] #6 Local verification instructions cover both queue and completed-builds behavior.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: OpenCode-gpt5 on reckless in ~/code/crystal-forge/TASK-156-add-completed-builds-view
+
+Implemented initial completed-builds view in `packages/web-ui/src/views/builds.rs` with:
+- Active Queue / Completed Builds tab switcher
+- Completed table with columns: system, environment, status, completion time, duration, commit
+- Status filter (All / Complete / Failed)
+- Completion time sort (newest/oldest)
+- Active queue pane behavior kept unchanged under Active Queue tab
+
+Extended build UI model in `packages/web-ui/src/components/builds/helpers.rs`:
+- Added `environment`, `duration_secs`, and `completed_at` fields to `BuildItem`
+
+Verification run:
+- `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml` ✅
+- `nix develop -c rustfmt --edition 2021 --check packages/web-ui/src/views/builds.rs packages/web-ui/src/components/builds/helpers.rs` ✅
+
+Note: repository-wide `cargo fmt -- --check` in this worktree reports unrelated pre-existing formatting drift in other files not touched by this task.
+<!-- SECTION:NOTES:END -->
