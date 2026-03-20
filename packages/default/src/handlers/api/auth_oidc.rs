@@ -405,7 +405,31 @@ pub async fn oidc_callback(
 
     let ip_address = Some(addr.ip().to_string());
 
+    // Extract and normalize OIDC groups from user claims
     let groups = normalize_oidc_groups(&user_info.roles);
+    
+    tracing::info!(
+        user_id = %user.id,
+        email = %user.email,
+        groups_raw_count = user_info.roles.len(),
+        groups_normalized_count = groups.len(),
+        "OIDC groups extracted from ID token"
+    );
+    
+    if groups.is_empty() {
+        tracing::warn!(
+            user_id = %user.id,
+            email = %user.email,
+            "No groups found in OIDC token claims - user may not receive appropriate role"
+        );
+    } else {
+        tracing::debug!(
+            user_id = %user.id,
+            email = %user.email,
+            groups = ?groups,
+            "Normalized OIDC groups for mapping"
+        );
+    }
 
     let mapping_rows = get_oidc_mapping_matches(&pool, &groups)
         .await
@@ -414,8 +438,32 @@ pub async fn oidc_callback(
             OidcError::DatabaseError
         })?;
 
+    tracing::info!(
+        user_id = %user.id,
+        email = %user.email,
+        matched_mappings = mapping_rows.len(),
+        "OIDC group mappings queried from database"
+    );
+
+    if !groups.is_empty() && mapping_rows.is_empty() {
+        tracing::warn!(
+            user_id = %user.id,
+            email = %user.email,
+            groups = ?groups,
+            "User has OIDC groups but no matching group-to-role mappings found in database"
+        );
+    }
+
     let mapped_role = derive_highest_role(mapping_rows.iter().filter_map(|row| row.role));
     let mapped_environments = collect_mapped_environments(&mapping_rows);
+    
+    tracing::info!(
+        user_id = %user.id,
+        email = %user.email,
+        mapped_role = ?mapped_role,
+        mapped_environments_count = mapped_environments.len(),
+        "OIDC group-to-role mapping derived"
+    );
 
     let existing_roles = get_user_roles(&pool, user.id).await.map_err(|e| {
         tracing::error!("Failed to check user roles: {}", e);
@@ -423,6 +471,13 @@ pub async fn oidc_callback(
     })?;
 
     if let Some(role) = mapped_role {
+        tracing::info!(
+            user_id = %user.id,
+            email = %user.email,
+            role = ?role,
+            "Assigning OIDC-mapped role to user"
+        );
+        
         clear_user_role_assignments(&pool, user.id)
             .await
             .map_err(|e| {
@@ -433,16 +488,53 @@ pub async fn oidc_callback(
         assign_role_to_user(&pool, user.id, role, None)
             .await
             .map_err(|e| {
-                tracing::error!("Failed to assign mapped role: {}", e);
+                tracing::error!(
+                    user_id = %user.id,
+                    email = %user.email,
+                    role = ?role,
+                    error = %e,
+                    "Failed to assign mapped role"
+                );
                 OidcError::DatabaseError
             })?;
+        
+        tracing::info!(
+            user_id = %user.id,
+            email = %user.email,
+            role = ?role,
+            "✅ Successfully assigned OIDC-mapped role"
+        );
     } else if existing_roles.is_empty() {
+        tracing::info!(
+            user_id = %user.id,
+            email = %user.email,
+            "No OIDC role mapping found and user has no existing roles; assigning default Viewer role"
+        );
+        
         assign_role_to_user(&pool, user.id, AuthRole::Viewer, None)
             .await
             .map_err(|e| {
-                tracing::error!("Failed to assign default role: {}", e);
+                tracing::error!(
+                    user_id = %user.id,
+                    email = %user.email,
+                    error = %e,
+                    "Failed to assign default Viewer role"
+                );
                 OidcError::DatabaseError
             })?;
+        
+        tracing::info!(
+            user_id = %user.id,
+            email = %user.email,
+            "✅ Assigned default Viewer role"
+        );
+    } else {
+        tracing::info!(
+            user_id = %user.id,
+            email = %user.email,
+            existing_roles = ?existing_roles,
+            "No OIDC role mapping found; preserving existing roles"
+        );
     }
 
     let mut apply_environment_mappings = false;

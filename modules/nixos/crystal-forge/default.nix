@@ -1245,6 +1245,26 @@ in {
           default = null;
           description = "Optional claim name for preferred username.";
         };
+
+        bootstrapAdminGroup = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          example = "crystal-forge-admins";
+          description = lib.mdDoc ''
+            OIDC group name that should automatically receive Admin role.
+
+            This creates a bootstrap mapping on server startup, allowing initial
+            admin access without manual database configuration. The group name
+            will be normalized (trimmed and lowercased) to match the OIDC login
+            flow.
+
+            Idempotent: if the mapping already exists, it won't be recreated.
+
+            After the first admin logs in, additional group-to-role mappings can
+            be configured via the admin UI (when available) or by manually
+            inserting into the `oidc_group_mappings` table.
+          '';
+        };
       };
       eval_workers = lib.mkOption {
         type = lib.types.int;
@@ -1287,7 +1307,10 @@ in {
       role_mapping = lib.mkOption {
         type = lib.types.attrsOf lib.types.str;
         default = { };
-        example = { "Admins" = "admin"; "Developers" = "user"; };
+        example = {
+          "Admins" = "admin";
+          "Developers" = "user";
+        };
         description = lib.mdDoc ''
           Mapping from OIDC group/role claim values to Crystal Forge roles.
 
@@ -1870,6 +1893,9 @@ in {
       } // lib.optionalAttrs (cfg.server.oidc.preferredUsernameClaim != null) {
         CRYSTAL_FORGE_OIDC_PREFERRED_USERNAME_CLAIM =
           cfg.server.oidc.preferredUsernameClaim;
+      } // lib.optionalAttrs (cfg.server.oidc.bootstrapAdminGroup != null) {
+        CRYSTAL_FORGE_OIDC_BOOTSTRAP_ADMIN_GROUP =
+          cfg.server.oidc.bootstrapAdminGroup;
       });
 
       preStart = ''
