@@ -1,11 +1,11 @@
 ---
 id: TASK-198
 title: Fix web-ui wasm-bindgen-cli version mismatch breaking crystal-forge builds
-status: In Progress
+status: Review
 assignee:
   - OpenCode
 created_date: '2026-03-20 02:58'
-updated_date: '2026-03-20 02:59'
+updated_date: '2026-03-20 03:16'
 labels: []
 dependencies: []
 references:
@@ -45,10 +45,10 @@ Source issue: GitLab issue #115
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Building crystal-forge-web-ui no longer fails with wasm-bindgen-cli version mismatch error
-- [ ] #2 The web-ui derivation no longer forces a mismatched wasm-bindgen binary path for Dioxus
-- [ ] #3 A targeted build path that previously failed now completes successfully in local verification
-- [ ] #4 Changes are limited to files required for this build break fix
+- [x] #1 Building crystal-forge-web-ui no longer fails with wasm-bindgen-cli version mismatch error
+- [x] #2 The web-ui derivation no longer forces a mismatched wasm-bindgen binary path for Dioxus
+- [x] #3 A targeted build path that previously failed now completes successfully in local verification
+- [x] #4 Changes are limited to files required for this build break fix
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -66,4 +66,12 @@ Source issue: GitLab issue #115
 Moved to To Do per explicit user request to address production-breaking issue ASAP (GitLab #115).
 
 LOCK: OpenCode on reckless in /home/mcamp/code/crystal-forge/TASK-198-fix-wasm-bindgen-mismatch
+
+Implemented hotfix in `packages/web-ui/default.nix`: replaced `pkgs.wasm-bindgen-cli` with `pkgs.wasm-bindgen-cli_0_2_108` for web build, desktop build, and dx-serve runtime wiring.
+
+Verification run in task worktree `/home/mcamp/code/crystal-forge/TASK-198-fix-wasm-bindgen-mismatch`: `nix develop -c nix build .#web-ui`, `nix develop -c nix build .#default`, and `nix develop -c nix flake check` all completed successfully.
+
+MR (dev): https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/173
+
+MR (main): https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/174
 <!-- SECTION:NOTES:END -->
