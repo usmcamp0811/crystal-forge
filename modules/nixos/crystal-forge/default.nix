@@ -32,6 +32,8 @@ let
       eval_workers = cfg.server.eval_workers;
       eval_max_memory_mb = cfg.server.eval_max_memory_mb;
       eval_check_cache = cfg.server.eval_check_cache;
+    } // lib.optionalAttrs (cfg.server.role_mapping != { }) {
+      role_mapping = cfg.server.role_mapping;
     };
   } // lib.optionalAttrs cfg.client.enable {
     client = {
@@ -1279,6 +1281,20 @@ in {
           already built (in local store or binary cache) vs need building.
 
           Disable if cache checking is slow or causing issues.
+        '';
+      };
+
+      role_mapping = lib.mkOption {
+        type = lib.types.attrsOf lib.types.str;
+        default = { };
+        example = { "Admins" = "admin"; "Developers" = "user"; };
+        description = lib.mdDoc ''
+          Mapping from OIDC group/role claim values to Crystal Forge roles.
+
+          Keys are the group names from the identity provider (e.g., Authentik),
+          values are the Crystal Forge role names (e.g., "admin", "user").
+
+          Example: `{ "Admins" = "admin"; "Developers" = "user"; }`
         '';
       };
     };
