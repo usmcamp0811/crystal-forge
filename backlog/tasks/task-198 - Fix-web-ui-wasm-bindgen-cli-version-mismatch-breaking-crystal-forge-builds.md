@@ -1,9 +1,10 @@
 ---
 id: TASK-198
 title: Fix web-ui wasm-bindgen-cli version mismatch breaking crystal-forge builds
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-03-20 02:58'
+updated_date: '2026-03-20 02:58'
 labels: []
 dependencies: []
 references:
@@ -48,3 +49,9 @@ Source issue: GitLab issue #115
 - [ ] #3 A targeted build path that previously failed now completes successfully in local verification
 - [ ] #4 Changes are limited to files required for this build break fix
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Moved to To Do per explicit user request to address production-breaking issue ASAP (GitLab #115).
+<!-- SECTION:NOTES:END -->
