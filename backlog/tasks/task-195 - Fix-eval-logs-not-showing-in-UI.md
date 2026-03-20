@@ -1,10 +1,10 @@
 ---
 id: TASK-195
 title: Fix eval logs not showing in UI
-status: Review
+status: Done
 assignee: []
 created_date: '2026-03-19 00:46'
-updated_date: '2026-03-19 03:14'
+updated_date: '2026-03-20 00:16'
 labels:
   - bug
   - ui
@@ -107,4 +107,8 @@ Updated MR !171 with proper description including:
 - CI status: ✅ All checks passed
 
 Ready for review and merge!
+
+Merged to dev via MR !171 at 2026-03-19T12:40:57Z.
+
+Post-merge cleanup complete: removed worktree ~/code/crystal-forge/TASK-195-fix-eval-logs-ui and pruned worktrees.
 <!-- SECTION:NOTES:END -->
