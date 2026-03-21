@@ -192,12 +192,11 @@ pub async fn delete_flake_by_id(pool: &PgPool, flake_id: i32) -> Result<u64> {
 /// Soft delete a flake by setting deleted_at timestamp.
 /// The flake will be excluded from normal queries but retained for audit.
 pub async fn soft_delete_flake(pool: &PgPool, flake_id: i32) -> Result<u64> {
-    let result = sqlx::query(
-        "UPDATE flakes SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL"
-    )
-    .bind(flake_id)
-    .execute(pool)
-    .await?;
+    let result =
+        sqlx::query("UPDATE flakes SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL")
+            .bind(flake_id)
+            .execute(pool)
+            .await?;
 
     Ok(result.rows_affected())
 }
@@ -250,7 +249,7 @@ pub async fn cascade_delete_flake(pool: &PgPool, flake_id: i32) -> Result<u64> {
         .bind(flake_id)
         .execute(pool)
         .await?;
-    
+
     // Delete the flake (commits, evaluations, builds cascade automatically)
     let result = sqlx::query("DELETE FROM flakes WHERE id = $1")
         .bind(flake_id)

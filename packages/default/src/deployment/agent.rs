@@ -91,7 +91,9 @@ impl AgentDeploymentManager {
         }
     }
 
-    fn effective_runtime_cache(&self) -> Option<(String, CacheType, Option<String>, Option<String>)> {
+    fn effective_runtime_cache(
+        &self,
+    ) -> Option<(String, CacheType, Option<String>, Option<String>)> {
         if let Some(cache) = self.runtime_caches.first() {
             let cache_type = match cache.cache_type.as_str() {
                 "Attic" => CacheType::Attic,
@@ -195,7 +197,8 @@ impl AgentDeploymentManager {
 
         let result = if is_store_path {
             // Store paths: deploy from cache
-            let Some((cache_url, cache_type, cache_public_key, attic_cache_name)) = effective_cache else {
+            let Some((cache_url, cache_type, cache_public_key, attic_cache_name)) = effective_cache
+            else {
                 anyhow::bail!("Store path deployment requested without effective cache config");
             };
             self.deploy_store_path_from_cache(
@@ -249,8 +252,13 @@ impl AgentDeploymentManager {
 
         // Step 1: Copy from cache with retry logic
         info!("Starting cache copy with retry logic...");
-        self.copy_from_cache_with_retry(&binary_cache_url, store_path, cache_type, cache_public_key)
-            .await?;
+        self.copy_from_cache_with_retry(
+            &binary_cache_url,
+            store_path,
+            cache_type,
+            cache_public_key,
+        )
+        .await?;
 
         // Step 2: Activate the configuration using systemd-run
         info!("Activating configuration via systemd-run...");
@@ -278,7 +286,13 @@ impl AgentDeploymentManager {
             let use_refresh = attempt == 2;
 
             match self
-                .copy_from_cache(cache_url, store_path, use_refresh, cache_type, cache_public_key)
+                .copy_from_cache(
+                    cache_url,
+                    store_path,
+                    use_refresh,
+                    cache_type,
+                    cache_public_key,
+                )
                 .await
             {
                 Ok(()) => {

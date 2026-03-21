@@ -43,7 +43,10 @@ fn destination_to_runtime_cache(destination: CacheDestination) -> Option<Runtime
     })
 }
 
-async fn load_runtime_caches_for_agent(pool: &PgPool, environment_id: Option<uuid::Uuid>) -> Vec<RuntimeCacheConfig> {
+async fn load_runtime_caches_for_agent(
+    pool: &PgPool,
+    environment_id: Option<uuid::Uuid>,
+) -> Vec<RuntimeCacheConfig> {
     let destinations = match environment_id {
         Some(env_id) => get_caches_for_environment(pool, env_id).await,
         None => get_global_caches(pool).await,
@@ -120,7 +123,8 @@ pub async fn log(
             }
         };
 
-    let runtime_caches = load_runtime_caches_for_agent(&pool, agent_request.system.environment_id).await;
+    let runtime_caches =
+        load_runtime_caches_for_agent(&pool, agent_request.system.environment_id).await;
     let response = LogResponse {
         desired_target,
         runtime_caches,

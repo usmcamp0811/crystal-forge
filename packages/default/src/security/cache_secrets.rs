@@ -1,7 +1,7 @@
-use anyhow::{anyhow, Context, Result};
-use base64::{engine::general_purpose, Engine as _};
+use anyhow::{Context, Result, anyhow};
+use base64::{Engine as _, engine::general_purpose};
 use rand::RngCore;
-use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, NONCE_LEN};
+use ring::aead::{AES_256_GCM, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey};
 use sha2::{Digest, Sha256};
 
 const ENC_PREFIX: &str = "enc:v1:";

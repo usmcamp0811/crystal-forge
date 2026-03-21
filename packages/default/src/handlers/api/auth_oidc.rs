@@ -407,7 +407,7 @@ pub async fn oidc_callback(
 
     // Extract and normalize OIDC groups from user claims
     let groups = normalize_oidc_groups(&user_info.roles);
-    
+
     tracing::info!(
         user_id = %user.id,
         email = %user.email,
@@ -415,7 +415,7 @@ pub async fn oidc_callback(
         groups_normalized_count = groups.len(),
         "OIDC groups extracted from ID token"
     );
-    
+
     if groups.is_empty() {
         tracing::warn!(
             user_id = %user.id,
@@ -456,7 +456,7 @@ pub async fn oidc_callback(
 
     let mapped_role = derive_highest_role(mapping_rows.iter().filter_map(|row| row.role));
     let mapped_environments = collect_mapped_environments(&mapping_rows);
-    
+
     tracing::info!(
         user_id = %user.id,
         email = %user.email,
@@ -477,7 +477,7 @@ pub async fn oidc_callback(
             role = ?role,
             "Assigning OIDC-mapped role to user"
         );
-        
+
         clear_user_role_assignments(&pool, user.id)
             .await
             .map_err(|e| {
@@ -497,7 +497,7 @@ pub async fn oidc_callback(
                 );
                 OidcError::DatabaseError
             })?;
-        
+
         tracing::info!(
             user_id = %user.id,
             email = %user.email,
@@ -510,7 +510,7 @@ pub async fn oidc_callback(
             email = %user.email,
             "No OIDC role mapping found and user has no existing roles; assigning default Viewer role"
         );
-        
+
         assign_role_to_user(&pool, user.id, AuthRole::Viewer, None)
             .await
             .map_err(|e| {
@@ -522,7 +522,7 @@ pub async fn oidc_callback(
                 );
                 OidcError::DatabaseError
             })?;
-        
+
         tracing::info!(
             user_id = %user.id,
             email = %user.email,

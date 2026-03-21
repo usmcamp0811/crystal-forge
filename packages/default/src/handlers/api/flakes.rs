@@ -23,6 +23,7 @@ use crate::flake::commits::{
 };
 use crate::handlers::agent_request::CFState;
 use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_above};
+use crate::queries::admin::insert_admin_audit_event;
 use crate::queries::commits::insert_commit_with_metadata;
 use crate::queries::flakes::{
     cascade_delete_flake, check_flake_dependencies, count_systems_for_flake, delete_flake_by_id,
@@ -30,7 +31,6 @@ use crate::queries::flakes::{
     insert_flake, list_flake_registry, soft_delete_flake, update_flake,
 };
 use crate::queries::users::get_by_email;
-use crate::queries::admin::insert_admin_audit_event;
 
 const MAX_HYDRATION_COMMITS_PER_REQUEST: usize = 20;
 
@@ -651,14 +651,23 @@ pub async fn delete_flake(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let hard_delete = params.get("hard").and_then(|v| v.parse::<bool>().ok()).unwrap_or(false);
-    let cascade = params.get("cascade").and_then(|v| v.parse::<bool>().ok()).unwrap_or(false);
+    let hard_delete = params
+        .get("hard")
+        .and_then(|v| v.parse::<bool>().ok())
+        .unwrap_or(false);
+    let cascade = params
+        .get("cascade")
+        .and_then(|v| v.parse::<bool>().ok())
+        .unwrap_or(false);
 
     // Get flake to check existence and environment
     let flake = match get_flake_by_id(&pool, flake_id).await {
         Ok(f) => f,
         Err(e) => {
-            if matches!(e.downcast_ref::<sqlx::Error>(), Some(sqlx::Error::RowNotFound)) {
+            if matches!(
+                e.downcast_ref::<sqlx::Error>(),
+                Some(sqlx::Error::RowNotFound)
+            ) {
                 return (
                     StatusCode::NOT_FOUND,
                     Json(ApiError {
@@ -700,7 +709,7 @@ pub async fn delete_flake(
         .await;
 
         match has_access_query {
-            Ok(true) => {}, // Operator has access
+            Ok(true) => {} // Operator has access
             Ok(false) => {
                 return (
                     StatusCode::FORBIDDEN,
@@ -747,7 +756,7 @@ pub async fn delete_flake(
                 )
                     .into_response();
             }
-            Ok(_) => {}, // No dependencies, safe to delete
+            Ok(_) => {} // No dependencies, safe to delete
             Err(e) => {
                 error!("Failed to check dependencies: {e:#}");
                 return (
@@ -784,7 +793,7 @@ pub async fn delete_flake(
         };
 
         let result = cascade_delete_flake(&pool, flake_id).await;
-        
+
         if result.is_ok() {
             if let Err(e) = tx.commit().await {
                 error!("Failed to commit cascade delete: {e:#}");
@@ -801,7 +810,7 @@ pub async fn delete_flake(
         } else {
             let _ = tx.rollback().await;
         }
-        
+
         result
     } else if hard_delete {
         delete_flake_by_id(&pool, flake_id).await
@@ -843,7 +852,11 @@ pub async fn delete_flake(
                 warn!("Failed to log audit event for flake deletion: {e:#}");
             }
 
-            (StatusCode::OK, Json(serde_json::json!({"message": "Flake deleted successfully"}))).into_response()
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"message": "Flake deleted successfully"})),
+            )
+                .into_response()
         }
         Ok(_) => {
             // No rows affected - flake might already be soft-deleted

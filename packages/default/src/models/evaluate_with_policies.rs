@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::collections::HashMap;
@@ -14,7 +14,7 @@ use tracing::{debug, error, info, warn};
 use crate::config::{BuildConfig, ServerConfig};
 use crate::models::commits::Commit;
 use crate::models::deployment_policies::{
-    build_nix_eval_expression, DeploymentPolicy, PolicyCheckResult,
+    DeploymentPolicy, PolicyCheckResult, build_nix_eval_expression,
 };
 use crate::models::flakes::Flake;
 use crate::queries::derivations::{
@@ -612,13 +612,8 @@ pub async fn evaluate_with_mock_eval_jobs(
     let systems = resolve_mock_systems(&flake.name, target_system, configured_systems)?;
     let stage_delay = mock_eval_stage_delay(systems.len());
 
-    crate::queries::commits_artifacts::upsert_commit_artifact_cache(
-        pool,
-        commit.id,
-        &systems,
-        &[],
-    )
-    .await?;
+    crate::queries::commits_artifacts::upsert_commit_artifact_cache(pool, commit.id, &systems, &[])
+        .await?;
 
     if let Some(state) = cf_state {
         crate::handlers::api::commits::broadcast_eval_log(
@@ -863,9 +858,10 @@ mod tests {
         let systems = vec!["alpha".to_string(), "beta".to_string()];
         let err = resolve_mock_systems("demo", "gamma", &systems)
             .expect_err("missing target should return error");
-        assert!(err
-            .to_string()
-            .contains("mock evaluation has no matching systems to evaluate"));
+        assert!(
+            err.to_string()
+                .contains("mock evaluation has no matching systems to evaluate")
+        );
     }
 
     #[test]

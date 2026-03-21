@@ -111,8 +111,8 @@ async fn load_counts(pool: &PgPool) -> anyhow::Result<SetupWizardCounts> {
 
     let cache_destination_count =
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::bigint FROM cache_destinations")
-    .fetch_one(pool)
-    .await?;
+            .fetch_one(pool)
+            .await?;
 
     let system_with_links = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*)::bigint FROM systems WHERE environment_id IS NOT NULL AND flake_id IS NOT NULL",

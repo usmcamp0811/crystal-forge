@@ -256,10 +256,7 @@ async fn run_mock_legacy_build(derivation: &Derivation) -> Result<String> {
     }
 
     if should_mock_build_fail(&derivation.derivation_name) {
-        anyhow::bail!(
-            "MOCK build failure for {}",
-            derivation.derivation_name
-        );
+        anyhow::bail!("MOCK build failure for {}", derivation.derivation_name);
     }
 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();

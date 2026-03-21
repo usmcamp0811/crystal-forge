@@ -124,7 +124,7 @@ impl CreateCacheDestination {
                 return Err(format!(
                     "Invalid cache_type: {}. Must be one of: S3, Attic, Http, Nix",
                     self.cache_type
-                ))
+                ));
             }
         }
 

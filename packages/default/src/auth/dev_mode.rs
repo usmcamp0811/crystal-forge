@@ -9,7 +9,8 @@ use crate::models::auth_identity::{AuthRole, UserRoleAssignment};
 use crate::models::users::User;
 use crate::queries::auth_identity::{assign_role_to_user, find_user_roles};
 use crate::queries::users::{
-    get_by_email, get_by_username, get_user_by_email, insert_user, update_username_and_password_hash,
+    get_by_email, get_by_username, get_user_by_email, insert_user,
+    update_username_and_password_hash,
 };
 use anyhow::{Context, Result};
 use sqlx::PgPool;
@@ -126,7 +127,7 @@ pub async fn ensure_bootstrap_oidc_admin_mapping(pool: &PgPool) -> Result<()> {
     // Groups from OIDC tokens are normalized (trimmed + lowercased) before mapping,
     // so the bootstrap mapping must use the same normalized form
     let admin_group = admin_group_raw.trim().to_ascii_lowercase();
-    
+
     if admin_group.is_empty() {
         tracing::warn!(
             "CRYSTAL_FORGE_OIDC_BOOTSTRAP_ADMIN_GROUP is set but empty after normalization; skipping"
@@ -200,7 +201,8 @@ pub async fn ensure_local_bootstrap_admin(
             .context("Failed to insert local bootstrap admin user")?
     };
 
-    let password_hash = hash_password(password).context("Failed to hash local bootstrap password")?;
+    let password_hash =
+        hash_password(password).context("Failed to hash local bootstrap password")?;
     update_username_and_password_hash(pool, user.id, username, &password_hash)
         .await
         .context("Failed to set local bootstrap admin credentials")?;

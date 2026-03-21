@@ -9,14 +9,19 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
-use tokio_tungstenite::{connect_async, tungstenite::{Message, client::IntoClientRequest}};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{Message, client::IntoClientRequest},
+};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BuildStreamMessage {
-    Log { message: String },
+    Log {
+        message: String,
+    },
     Metrics {
         cpu_percent: f32,
         ram_used_mb: u64,
@@ -352,13 +357,23 @@ impl BuilderApiClient {
 
     /// Create WebSocket URL for log streaming
     fn ws_url(&self, job_id: &Uuid) -> String {
-        let base = self.server_url.replace("http://", "ws://").replace("https://", "wss://");
+        let base = self
+            .server_url
+            .replace("http://", "ws://")
+            .replace("https://", "wss://");
         format!("{}/api/v1/build-jobs/{}/logs/stream", base, job_id)
     }
 
     /// Stream a log line via WebSocket
     /// Returns a WebSocket stream that can be used to send log lines and metrics
-    pub async fn create_log_stream(&self, job_id: &Uuid) -> Result<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>> {
+    pub async fn create_log_stream(
+        &self,
+        job_id: &Uuid,
+    ) -> Result<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    > {
         let ws_url = self.ws_url(job_id);
         info!("🔌 Connecting WebSocket to {}", ws_url);
 
@@ -392,7 +407,9 @@ impl BuilderApiClient {
 
     /// Send a log line via WebSocket stream
     pub async fn send_log_line(
-        ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
         line: &str,
     ) -> Result<()> {
         let payload = BuildStreamMessage::Log {
@@ -406,7 +423,9 @@ impl BuilderApiClient {
 
     /// Send system metrics via WebSocket stream
     pub async fn send_metrics(
-        ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
         cpu_percent: f32,
         ram_used_mb: u64,
         ram_total_mb: u64,
@@ -436,7 +455,7 @@ mod tests {
     fn test_load_valid_private_key() {
         let key = SigningKey::generate(&mut rand::thread_rng());
         let key_bytes = key.to_bytes();
-        
+
         // Encode key as base64 (matching cf-keygen format)
         let key_base64 = base64::engine::general_purpose::STANDARD.encode(&key_bytes);
 
@@ -452,7 +471,7 @@ mod tests {
     fn test_load_invalid_key_length() {
         // Write base64-encoded invalid key (16 bytes instead of 32)
         let invalid_key = base64::engine::general_purpose::STANDARD.encode(&[0u8; 16]);
-        
+
         let mut temp_file = NamedTempFile::new().unwrap();
         temp_file.write_all(invalid_key.as_bytes()).unwrap();
         temp_file.flush().unwrap();

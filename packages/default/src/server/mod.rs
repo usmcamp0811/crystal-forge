@@ -15,9 +15,9 @@ use anyhow::Result;
 use sqlx::PgPool;
 use std::sync::Arc;
 use tokio::time;
-use tokio::time::interval;
 use tokio::time::Duration;
 use tokio::time::Instant;
+use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 
 // ⬇️ bring in the commit-eval helpers you said you added in queries/commits.rs
@@ -27,8 +27,8 @@ use crate::queries::commits::{
     get_commits_pending_evaluation, mark_commit_evaluation_complete, mark_commit_evaluation_failed,
     mark_commit_evaluation_started, reset_stuck_commit_evaluations,
 };
-use crate::queries::derivations::{cleanup_partial_derivations, reset_stuck_builds};
 use crate::queries::deployment_policies::list_enabled_deployment_policies;
+use crate::queries::derivations::{cleanup_partial_derivations, reset_stuck_builds};
 
 fn custom_field_name(name: &str, id: uuid::Uuid) -> String {
     let mut slug = name
@@ -135,7 +135,9 @@ async fn load_deployment_policies_for_eval(pool: &PgPool) -> Vec<DeploymentPolic
                 .collect::<Vec<_>>();
 
             if policies.is_empty() {
-                warn!("No valid deployment policies found in DB, falling back to strict CF agent check");
+                warn!(
+                    "No valid deployment policies found in DB, falling back to strict CF agent check"
+                );
                 // Use strict mode in fallback to enforce core security policy even in error scenarios.
                 // This ensures systems without the agent package cannot pass evaluation when policy
                 // loading fails, maintaining the "always enforce core policy" safety model.
@@ -350,8 +352,7 @@ async fn process_pending_commits(
             if error_text.contains("another commit is already being evaluated") {
                 debug!(
                     "⏭️ Eval start race for commit {} ({}): another worker/loop iteration already claimed in_progress",
-                    commit.id,
-                    commit.git_commit_hash
+                    commit.id, commit.git_commit_hash
                 );
                 return Ok(());
             } else {
@@ -401,190 +402,188 @@ async fn process_pending_commits(
         // This ensures WebSocket clients can subscribe before messages are sent
         crate::handlers::api::commits::ensure_eval_channel(&cf_state, commit.id).await;
 
-                // Broadcast eval start status to WebSocket clients
+        // Broadcast eval start status to WebSocket clients
+        crate::handlers::api::commits::broadcast_eval_status(
+            &cf_state,
+            commit.id,
+            "started".to_string(),
+            Some(format!(
+                "Starting evaluation for commit {}",
+                &commit.git_commit_hash[..7.min(commit.git_commit_hash.len())]
+            )),
+        )
+        .await;
+        crate::handlers::api::commits::broadcast_eval_log(
+            &cf_state,
+            commit.id,
+            format!(
+                "🚀 Starting evaluation for commit {}",
+                commit.git_commit_hash
+            ),
+        )
+        .await;
+
+        // Use nix-eval-jobs to discover AND evaluate all nixosConfigurations
+        // This will:
+        // 1. Evaluate all systems in parallel
+        // 2. Check deployment policies (CF agent status) for each system
+        // 3. Store policy results in database (cf_agent_enabled column)
+        // 4. Insert/update derivation records
+        let eval_result = if server_config.execution_mode.is_mock() {
+            info!(
+                "🧪 Using MOCK evaluation mode for commit {}",
+                commit.git_commit_hash
+            );
+            evaluate_with_mock_eval_jobs(
+                pool,
+                &commit,
+                &flake,
+                &flake.repo_url,
+                &commit.git_commit_hash,
+                "all",
+                &build_config,
+                &server_config,
+                &policies,
+                &mock_systems,
+                Some(&cf_state),
+            )
+            .await
+        } else {
+            evaluate_with_nix_eval_jobs(
+                pool,
+                &commit,
+                &flake,
+                &flake.repo_url,
+                &commit.git_commit_hash,
+                "all", // Evaluate all systems
+                &build_config,
+                &server_config,
+                &policies,       // Check deployment policies
+                Some(&cf_state), // Pass CFState for WebSocket broadcasting
+            )
+            .await
+        };
+
+        match eval_result {
+            Ok((results, policy_checks)) => {
+                // Broadcast completion status
                 crate::handlers::api::commits::broadcast_eval_status(
                     &cf_state,
                     commit.id,
-                    "started".to_string(),
-                    Some(format!(
-                        "Starting evaluation for commit {}",
-                        &commit.git_commit_hash[..7.min(commit.git_commit_hash.len())]
-                    )),
+                    "complete".to_string(),
+                    Some(format!("Evaluated {} systems", results.len())),
                 )
                 .await;
                 crate::handlers::api::commits::broadcast_eval_log(
                     &cf_state,
                     commit.id,
                     format!(
-                        "🚀 Starting evaluation for commit {}",
+                        "✅ Evaluation complete for commit {}",
                         commit.git_commit_hash
                     ),
                 )
                 .await;
 
-                // Use nix-eval-jobs to discover AND evaluate all nixosConfigurations
-                // This will:
-                // 1. Evaluate all systems in parallel
-                // 2. Check deployment policies (CF agent status) for each system
-                // 3. Store policy results in database (cf_agent_enabled column)
-                // 4. Insert/update derivation records
-                let eval_result = if server_config.execution_mode.is_mock() {
-                    info!(
-                        "🧪 Using MOCK evaluation mode for commit {}",
-                        commit.git_commit_hash
+                // Cleanup WebSocket broadcast channel
+                crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id).await;
+
+                // ⬇️ mark COMPLETE
+                if let Err(e) = mark_commit_evaluation_complete(pool, commit.id).await {
+                    error!(
+                        "❌ Failed to mark commit {} evaluation complete: {}",
+                        commit.git_commit_hash, e
                     );
-                    evaluate_with_mock_eval_jobs(
-                        pool,
-                        &commit,
-                        &flake,
-                        &flake.repo_url,
-                        &commit.git_commit_hash,
-                        "all",
-                        &build_config,
-                        &server_config,
-                        &policies,
-                        &mock_systems,
-                        Some(&cf_state),
-                    )
-                    .await
-                } else {
-                    evaluate_with_nix_eval_jobs(
-                        pool,
-                        &commit,
-                        &flake,
-                        &flake.repo_url,
-                        &commit.git_commit_hash,
-                        "all", // Evaluate all systems
-                        &build_config,
-                        &server_config,
-                        &policies,       // Check deployment policies
-                        Some(&cf_state), // Pass CFState for WebSocket broadcasting
-                    )
-                    .await
-                };
+                }
 
-                match eval_result {
-                    Ok((results, policy_checks)) => {
-                        // Broadcast completion status
-                        crate::handlers::api::commits::broadcast_eval_status(
-                            &cf_state,
-                            commit.id,
-                            "complete".to_string(),
-                            Some(format!("Evaluated {} systems", results.len())),
-                        )
-                        .await;
-                        crate::handlers::api::commits::broadcast_eval_log(
-                            &cf_state,
-                            commit.id,
-                            format!(
-                                "✅ Evaluation complete for commit {}",
-                                commit.git_commit_hash
-                            ),
-                        )
-                        .await;
-
-                        // Cleanup WebSocket broadcast channel
-                        crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id)
-                            .await;
-
-                        // ⬇️ mark COMPLETE
-                        if let Err(e) = mark_commit_evaluation_complete(pool, commit.id).await {
-                            error!(
-                                "❌ Failed to mark commit {} evaluation complete: {}",
-                                commit.git_commit_hash, e
-                            );
-                        }
-
-                        // ⬇️ CREATE BUILD JOBS for evaluated derivations
-                        match create_build_jobs_for_commit(pool, commit.id).await {
-                            Ok(job_count) if job_count > 0 => {
-                                info!(
-                                    "📋 Queued {} build jobs for commit {}, notifying build workers",
-                                    job_count, commit.git_commit_hash
-                                );
-                                // Notify build queue that new work is available
-                                queue_notifier.notify_build_queue();
-                            }
-                            Ok(_) => {
-                                debug!(
-                                    "No new build jobs for commit {} (already queued or no ready derivations)",
-                                    commit.git_commit_hash
-                                );
-                            }
-                            Err(e) => {
-                                error!(
-                                    "❌ Failed to create build jobs for commit {}: {}",
-                                    commit.git_commit_hash, e
-                                );
-                                // Don't fail the whole evaluation if job creation fails
-                            }
-                        }
-
-                        let total = results.len();
-                        let with_agent = policy_checks
-                            .iter()
-                            .filter(|check| check.cf_agent_enabled == Some(true))
-                            .count();
-
+                // ⬇️ CREATE BUILD JOBS for evaluated derivations
+                match create_build_jobs_for_commit(pool, commit.id).await {
+                    Ok(job_count) if job_count > 0 => {
                         info!(
-                            "✅ Evaluated {} NixOS configurations for commit {}",
-                            total, commit.git_commit_hash
+                            "📋 Queued {} build jobs for commit {}, notifying build workers",
+                            job_count, commit.git_commit_hash
                         );
-                        info!(
-                            "   CF agent: {}/{} systems enabled ({:.1}%)",
-                            with_agent,
-                            policy_checks.len(),
-                            if policy_checks.len() > 0 {
-                                (with_agent as f64 / policy_checks.len() as f64) * 100.0
-                            } else {
-                                0.0
-                            }
+                        // Notify build queue that new work is available
+                        queue_notifier.notify_build_queue();
+                    }
+                    Ok(_) => {
+                        debug!(
+                            "No new build jobs for commit {} (already queued or no ready derivations)",
+                            commit.git_commit_hash
                         );
-
-                        // Log any policy warnings
-                        for check in policy_checks.iter().filter(|c| !c.meets_requirements) {
-                            for warning in &check.warnings {
-                                warn!("⚠️  {}: {}", check.system_name, warning);
-                            }
-                        }
                     }
                     Err(e) => {
                         error!(
-                            "❌ Failed to evaluate commit {}: {}",
+                            "❌ Failed to create build jobs for commit {}: {}",
                             commit.git_commit_hash, e
                         );
-
-                        // Broadcast failure status
-                        crate::handlers::api::commits::broadcast_eval_status(
-                            &cf_state,
-                            commit.id,
-                            "failed".to_string(),
-                            Some(format!("Evaluation failed: {}", e)),
-                        )
-                        .await;
-                        crate::handlers::api::commits::broadcast_eval_log(
-                            &cf_state,
-                            commit.id,
-                            format!("❌ Evaluation failed: {}", e),
-                        )
-                        .await;
-
-                        // Cleanup WebSocket broadcast channel
-                        crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id)
-                            .await;
-
-                        // ⬇️ mark FAILED (function will set 'pending' or terminal 'failed'
-                        // depending on attempt limit inside your SQL)
-                        if let Err(mark_err) =
-                            mark_commit_evaluation_failed(pool, commit.id, &e.to_string()).await
-                        {
-                            error!(
-                                "❌ Failed to mark commit {} evaluation failed: {}",
-                                commit.git_commit_hash, mark_err
-                            );
-                        }
-                        return Ok(());
+                        // Don't fail the whole evaluation if job creation fails
                     }
+                }
+
+                let total = results.len();
+                let with_agent = policy_checks
+                    .iter()
+                    .filter(|check| check.cf_agent_enabled == Some(true))
+                    .count();
+
+                info!(
+                    "✅ Evaluated {} NixOS configurations for commit {}",
+                    total, commit.git_commit_hash
+                );
+                info!(
+                    "   CF agent: {}/{} systems enabled ({:.1}%)",
+                    with_agent,
+                    policy_checks.len(),
+                    if policy_checks.len() > 0 {
+                        (with_agent as f64 / policy_checks.len() as f64) * 100.0
+                    } else {
+                        0.0
+                    }
+                );
+
+                // Log any policy warnings
+                for check in policy_checks.iter().filter(|c| !c.meets_requirements) {
+                    for warning in &check.warnings {
+                        warn!("⚠️  {}: {}", check.system_name, warning);
+                    }
+                }
+            }
+            Err(e) => {
+                error!(
+                    "❌ Failed to evaluate commit {}: {}",
+                    commit.git_commit_hash, e
+                );
+
+                // Broadcast failure status
+                crate::handlers::api::commits::broadcast_eval_status(
+                    &cf_state,
+                    commit.id,
+                    "failed".to_string(),
+                    Some(format!("Evaluation failed: {}", e)),
+                )
+                .await;
+                crate::handlers::api::commits::broadcast_eval_log(
+                    &cf_state,
+                    commit.id,
+                    format!("❌ Evaluation failed: {}", e),
+                )
+                .await;
+
+                // Cleanup WebSocket broadcast channel
+                crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id).await;
+
+                // ⬇️ mark FAILED (function will set 'pending' or terminal 'failed'
+                // depending on attempt limit inside your SQL)
+                if let Err(mark_err) =
+                    mark_commit_evaluation_failed(pool, commit.id, &e.to_string()).await
+                {
+                    error!(
+                        "❌ Failed to mark commit {} evaluation failed: {}",
+                        commit.git_commit_hash, mark_err
+                    );
+                }
+                return Ok(());
+            }
         }
     }
 }
