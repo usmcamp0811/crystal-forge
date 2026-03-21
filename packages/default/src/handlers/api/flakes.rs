@@ -792,7 +792,8 @@ pub async fn delete_flake(
             }
         };
 
-        let result = cascade_delete_flake(&pool, flake_id).await;
+        // Execute cascade delete within the transaction
+        let result = cascade_delete_flake(&mut tx, flake_id).await;
 
         if result.is_ok() {
             if let Err(e) = tx.commit().await {

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, name, repo_url, branch\n        FROM flakes \n        WHERE repo_url = ANY($1)\n        ORDER BY \n            CASE \n                WHEN repo_url = $2 THEN 1  -- Exact match first\n                ELSE 2\n            END\n        LIMIT 1\n        ",
+  "query": "\n        SELECT id, name, repo_url, branch\n        FROM flakes \n        WHERE repo_url = ANY($1) AND deleted_at IS NULL\n        ORDER BY \n            CASE \n                WHEN repo_url = $2 THEN 1  -- Exact match first\n                ELSE 2\n            END\n        LIMIT 1\n        ",
   "describe": {
     "columns": [
       {
@@ -37,5 +37,5 @@
       false
     ]
   },
-  "hash": "3038dff8f4256a16b30c7a2640af3bbf912151c5ac8ca79231be6247722d6200"
+  "hash": "b8123881da8bc6effd65f6e374b77c9ccb56a75b6ff13b3ab90904bde2699359"
 }

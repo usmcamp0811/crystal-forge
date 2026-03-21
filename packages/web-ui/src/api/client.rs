@@ -313,7 +313,7 @@ pub async fn delete_flake(id: i32, hard: bool, cascade: bool) -> Result<(), ApiC
         url.push_str(&params.join("&"));
     }
     
-    send_empty("DELETE", &url).await
+    send_empty_with_csrf::<()>("DELETE", &url, None).await
 }
 
 /// Fetch flake timelines with recent commits for dashboard.
