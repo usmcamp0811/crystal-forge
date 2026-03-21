@@ -693,13 +693,26 @@ pub async fn delete_flake(
 
     // RBAC: Admin can delete any flake, Operator can delete flakes in their environments
     if !user.is_admin() {
-        // For Operator: check if they have access to any system using this flake
+        // For Operator: check if they have access to any environment where this flake
+        // has been used (either currently via systems.flake_id, or historically via
+        // commits/derivations that targeted systems in their environments)
         let has_access_query = sqlx::query_scalar::<_, bool>(
             r#"
             SELECT EXISTS(
+                -- Check current system references
                 SELECT 1 FROM systems s
                 JOIN user_environment_memberships uem ON s.environment_id = uem.environment_id
                 WHERE s.flake_id = $1 AND uem.user_id = $2
+                
+                UNION
+                
+                -- Check historical evaluations: commits from this flake evaluated for
+                -- systems in operator's environments
+                SELECT 1 FROM commits c
+                JOIN derivations d ON d.commit_id = c.id
+                JOIN systems s ON s.id::text = d.target_id
+                JOIN user_environment_memberships uem ON s.environment_id = uem.environment_id
+                WHERE c.flake_id = $1 AND uem.user_id = $2
             )
             "#,
         )
@@ -715,7 +728,7 @@ pub async fn delete_flake(
                     StatusCode::FORBIDDEN,
                     Json(ApiError {
                         error: "forbidden".to_string(),
-                        message: "You do not have permission to delete this flake".to_string(),
+                        message: "You do not have permission to delete this flake. You can only delete flakes used in environments you have access to.".to_string(),
                         details: None,
                     }),
                 )
