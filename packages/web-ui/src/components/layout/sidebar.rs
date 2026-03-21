@@ -63,8 +63,10 @@ pub fn SidebarEdgeToggle() -> Element {
 #[component]
 pub fn SidebarNav() -> Element {
     let app_state = use_context::<Signal<AppState>>();
-    let auth_context = app_state.read().auth.clone();
-    let show_admin = auth::is_admin(&auth_context);
+    let state_read = app_state.read();
+    let auth_context = state_read.auth.clone();
+    let masquerade_role = state_read.masquerade_role;
+    let show_admin = auth::is_admin(&auth_context, &masquerade_role);
 
     // Get sidebar context
     let sidebar_ctx = use_context::<SidebarContext>();
@@ -350,8 +352,10 @@ pub fn SidebarNav() -> Element {
 #[component]
 pub fn MobileDrawer() -> Element {
     let app_state = use_context::<Signal<AppState>>();
-    let auth_context = app_state.read().auth.clone();
-    let show_admin = auth::is_admin(&auth_context);
+    let state_read = app_state.read();
+    let auth_context = state_read.auth.clone();
+    let masquerade_role = state_read.masquerade_role;
+    let show_admin = auth::is_admin(&auth_context, &masquerade_role);
 
     let sidebar_ctx = use_context::<SidebarContext>();
     let mut is_mobile_drawer_open = sidebar_ctx.is_mobile_drawer_open;

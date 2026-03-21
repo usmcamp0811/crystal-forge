@@ -2,7 +2,7 @@
 
 use dioxus::prelude::*;
 
-use crate::api::models::{AuthContext, ConfigHealthResponse};
+use crate::api::models::{AuthContext, ConfigHealthResponse, Role};
 
 /// State of authentication fetch operation.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -41,6 +41,9 @@ pub struct AppState {
     pub config_health: Option<ConfigHealthResponse>,
     /// State of the shared config-health fetch.
     pub config_health_fetch_state: ConfigHealthFetchState,
+    /// Admin role masquerade state (None = using real role, Some = viewing as this role).
+    /// Only applicable when real user role is Admin.
+    pub masquerade_role: Option<Role>,
 }
 
 impl Default for AppState {
@@ -52,6 +55,7 @@ impl Default for AppState {
             auth_fetch_state: AuthFetchState::Loading,
             config_health: None,
             config_health_fetch_state: ConfigHealthFetchState::Idle,
+            masquerade_role: None,
         }
     }
 }

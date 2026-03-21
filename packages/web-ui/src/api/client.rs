@@ -6,6 +6,17 @@
 use super::models::*;
 use uuid::Uuid;
 
+/// Get the current masquerade role from global AppState if available.
+fn get_masquerade_role() -> Option<Role> {
+    use crate::state::app_state::AppState;
+    use dioxus::prelude::*;
+    
+    // Try to access AppState from context (only works within a Dioxus component tree)
+    // If not available, return None (no masquerade)
+    dioxus::prelude::try_consume_context::<Signal<AppState>>()
+        .and_then(|state| state.read().masquerade_role)
+}
+
 fn backend_origin_for_dev(window: &web_sys::Window, origin: &str) -> Option<String> {
     if !(origin.contains(":8080") || origin.contains(":8000") || origin.contains(":8081")) {
         return None;
@@ -789,6 +800,19 @@ async fn send_request_with_csrf(
         }
     }
 
+    // Add masquerade header if masquerading
+    if let Some(masq_role) = get_masquerade_role() {
+        let role_str = match masq_role {
+            Role::Admin => "Admin",
+            Role::Operator => "Operator",
+            Role::Viewer => "Viewer",
+        };
+        request
+            .headers()
+            .set("X-Masquerade-Role", role_str)
+            .map_err(|e| ApiClientError::Network(format!("{e:?}")))?;
+    }
+
     let resp_value = JsFuture::from(window.fetch_with_request(&request))
         .await
         .map_err(|e| ApiClientError::Network(format!("{e:?}")))?;
@@ -904,6 +928,19 @@ async fn send_request(
         request
             .headers()
             .set("Content-Type", "application/json")
+            .map_err(|e| ApiClientError::Network(format!("{e:?}")))?;
+    }
+
+    // Add masquerade header if masquerading
+    if let Some(masq_role) = get_masquerade_role() {
+        let role_str = match masq_role {
+            Role::Admin => "Admin",
+            Role::Operator => "Operator",
+            Role::Viewer => "Viewer",
+        };
+        request
+            .headers()
+            .set("X-Masquerade-Role", role_str)
             .map_err(|e| ApiClientError::Network(format!("{e:?}")))?;
     }
 

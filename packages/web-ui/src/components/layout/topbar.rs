@@ -1,6 +1,7 @@
 //! Top bar layout component.
 
 use crate::api::client;
+use crate::api::models::Role;
 use crate::components::layout::sidebar::SidebarContext;
 use crate::state::app_state::AppState;
 use crate::state::auth;
@@ -23,13 +24,24 @@ pub fn TopBar(title: String) -> Element {
     let handle_logout = move |_| {
         spawn(async move {
             if let Ok(()) = client::logout().await {
-                // Clear auth context
-                app_state.write().auth = None;
+                // Clear auth context and masquerade
+                let mut state = app_state.write();
+                state.auth = None;
+                state.masquerade_role = None;
                 // Redirect to login
                 nav.push("/login");
             }
         });
     };
+
+    let mut set_masquerade = move |role: Option<Role>| {
+        app_state.write().masquerade_role = role;
+        show_user_menu.set(false);
+    };
+
+    let is_real_admin = auth::is_admin(&auth_context, &None);
+    let masquerade_role = app_state.read().masquerade_role;
+    let effective_role = auth::get_effective_role(&auth_context, &masquerade_role);
 
     let toggle_drawer = move |_| {
         is_mobile_drawer_open.set(!is_mobile_drawer_open());
@@ -51,6 +63,34 @@ pub fn TopBar(title: String) -> Element {
     });
 
     rsx! {
+        // Masquerade banner (shown when masquerading)
+        if masquerade_role.is_some() {
+            div {
+                class: "flex items-center justify-center gap-2 px-4 py-2 bg-amber-600/20 border-b border-amber-600/30",
+                svg {
+                    class: "w-5 h-5 text-amber-400",
+                    fill: "none",
+                    stroke: "currentColor",
+                    view_box: "0 0 24 24",
+                    path {
+                        stroke_linecap: "round",
+                        stroke_linejoin: "round",
+                        stroke_width: "2",
+                        d: "M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
+                    }
+                }
+                span {
+                    class: "text-sm font-medium text-amber-200",
+                    "Viewing as {masquerade_role.unwrap():?}"
+                }
+                button {
+                    class: "ml-4 px-3 py-1 rounded text-xs font-medium bg-amber-500 text-amber-950 hover:bg-amber-400 transition-colors",
+                    onclick: move |_| set_masquerade(None),
+                    "Return to Admin"
+                }
+            }
+        }
+
         header {
             class: "flex items-center justify-between h-16 px-6 {theme::surface::SIDEBAR_BG}",
             style: "border-bottom: 1px solid var(--cf-card-border);",
@@ -145,15 +185,62 @@ pub fn TopBar(title: String) -> Element {
                                                 "{user.email}"
                                             }
                                         }
-                                        // Show roles
-                                        if !ctx.roles.is_empty() {
+                                        // Show effective role badge
+                                        if let Some(role) = effective_role {
                                             div {
-                                                class: "mt-2 flex flex-wrap gap-1 justify-end",
-                                                for role in &ctx.roles {
-                                                    span {
-                                                        class: "px-2 py-0.5 rounded text-xs bg-violet-500/20 text-violet-300",
-                                                        "{role:?}"
-                                                    }
+                                                class: "mt-2 flex justify-end",
+                                                span {
+                                                    class: "px-2 py-1 rounded text-xs font-medium",
+                                                    class: if masquerade_role.is_some() {
+                                                        "bg-amber-500/20 text-amber-300"
+                                                    } else {
+                                                        "bg-violet-500/20 text-violet-300"
+                                                    },
+                                                    "{role:?}"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Masquerade controls (Admin only)
+                                if is_real_admin {
+                                    div {
+                                        class: "px-4 py-3 border-b {theme::surface::CARD_BORDER}",
+                                        p {
+                                            class: "{theme::text::SECONDARY} text-xs font-semibold uppercase tracking-wide mb-2 text-right",
+                                            "View as Role"
+                                        }
+                                        div {
+                                            class: "flex flex-col gap-1",
+                                            
+                                            button {
+                                                class: "w-full text-right px-3 py-2 text-sm rounded transition-colors",
+                                                class: if masquerade_role == Some(Role::Operator) {
+                                                    "bg-amber-500/20 text-amber-300"
+                                                } else {
+                                                    "{theme::text::PRIMARY} {theme::interactive::HOVER_BG}"
+                                                },
+                                                onclick: move |_| set_masquerade(Some(Role::Operator)),
+                                                "Operator"
+                                            }
+                                            
+                                            button {
+                                                class: "w-full text-right px-3 py-2 text-sm rounded transition-colors",
+                                                class: if masquerade_role == Some(Role::Viewer) {
+                                                    "bg-amber-500/20 text-amber-300"
+                                                } else {
+                                                    "{theme::text::PRIMARY} {theme::interactive::HOVER_BG}"
+                                                },
+                                                onclick: move |_| set_masquerade(Some(Role::Viewer)),
+                                                "Viewer"
+                                            }
+
+                                            if masquerade_role.is_some() {
+                                                button {
+                                                    class: "w-full text-right px-3 py-2 text-sm rounded bg-violet-500/20 text-violet-300 transition-colors",
+                                                    onclick: move |_| set_masquerade(None),
+                                                    "✓ Admin (Real Role)"
                                                 }
                                             }
                                         }

@@ -141,8 +141,9 @@ pub fn DashboardView() -> Element {
 
     // Shared config health (admin only).
     let app_state = use_context::<Signal<AppState>>();
-    let is_admin_user = auth::is_admin(&app_state.read().auth);
-    let config_health = app_state.read().config_health.clone();
+    let state_read = app_state.read();
+    let is_admin_user = auth::is_admin(&state_read.auth, &state_read.masquerade_role);
+    let config_health = state_read.config_health.clone();
 
     // Flake timelines state
     let flake_timelines = use_signal(Vec::<FlakeTimeline>::new);

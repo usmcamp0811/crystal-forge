@@ -96,7 +96,8 @@ pub fn SetupView() -> Element {
         };
     }
 
-    if !auth::is_admin(&auth_context) {
+    let masquerade_role = app_state.read().masquerade_role;
+    if !auth::is_admin(&auth_context, &masquerade_role) {
         return rsx! {
             div {
                 class: "min-h-screen flex items-center justify-center p-6 {theme::surface::PAGE_BG}",

@@ -62,7 +62,8 @@ const VIEW_PREF_KEY: &str = "crystal_forge.systems.view";
 pub fn SystemsListView() -> Element {
     let nav = navigator();
     let app_state = use_context::<Signal<AppState>>();
-    let is_admin_user = auth::is_admin(&app_state.read().auth);
+    let state_read = app_state.read();
+    let is_admin_user = auth::is_admin(&state_read.auth, &state_read.masquerade_role);
 
     let stored_view = LocalStorage::get::<String>(VIEW_PREF_KEY).ok();
     let mut view_mode = use_signal(|| ViewMode::from_storage(stored_view));

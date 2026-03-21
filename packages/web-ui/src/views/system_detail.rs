@@ -177,8 +177,10 @@ pub fn SystemDetailView(id: String) -> Element {
     let vulnerabilities = mock_vulnerabilities();
     let deployment_logs = mock_deployment_logs();
 
-    let auth_context = app_state.read().auth.clone();
-    let can_mutate = auth::can_mutate_systems(&auth_context);
+    let state_read = app_state.read();
+    let auth_context = state_read.auth.clone();
+    let masquerade_role = state_read.masquerade_role;
+    let can_mutate = auth::can_mutate_systems(&auth_context, &masquerade_role);
 
     let environment = system
         .environment

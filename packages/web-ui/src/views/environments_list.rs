@@ -36,7 +36,8 @@ fn came_from_setup() -> bool {
 #[component]
 pub fn EnvironmentsListView() -> Element {
     let app_state = use_context::<Signal<AppState>>();
-    let is_admin_user = auth::is_admin(&app_state.read().auth);
+    let state_read = app_state.read();
+    let is_admin_user = auth::is_admin(&state_read.auth, &state_read.masquerade_role);
 
     let mut policy_library_state = use_signal(policy_library);
     let default_required_policy = required_agent_policy_id(&policy_library_state.read());

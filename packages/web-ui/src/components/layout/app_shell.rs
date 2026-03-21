@@ -45,8 +45,8 @@ fn ui_check_mock_auth_context() -> AuthContext {
     }
 }
 
-fn should_show_admin_denied(route: &Route, auth_context: &Option<AuthContext>) -> bool {
-    matches!(route, Route::AdminView { .. }) && !auth::is_admin(auth_context)
+fn should_show_admin_denied(route: &Route, auth_context: &Option<AuthContext>, masquerade_role: &Option<Role>) -> bool {
+    matches!(route, Route::AdminView { .. }) && !auth::is_admin(auth_context, masquerade_role)
 }
 
 /// Top-level application layout wrapping all views.
@@ -152,7 +152,8 @@ pub fn AppShell() -> Element {
     }
 
     // Shared config health state — fetched once for admin users and reused by views.
-    let is_admin_user = auth::is_admin(&auth_context);
+    let masquerade_role = app_state.read().masquerade_role;
+    let is_admin_user = auth::is_admin(&auth_context, &masquerade_role);
     let mut dismissed_key: Signal<Option<String>> = use_signal(|| None);
     let shared_health = app_state.read().config_health.clone();
 
@@ -263,7 +264,7 @@ pub fn AppShell() -> Element {
                     }
                     main {
                         class: "flex-1 overflow-auto {theme::spacing::PAGE_PADDING}",
-                        if should_show_admin_denied(&current_route, &auth_context) {
+                        if should_show_admin_denied(&current_route, &auth_context, &masquerade_role) {
                             section {
                                 class: "max-w-3xl mx-auto rounded-xl border border-amber-500/40 bg-amber-900/20 p-6 space-y-2",
                                 h2 { class: "text-xl font-semibold text-amber-100", "Access Denied" }
@@ -275,7 +276,7 @@ pub fn AppShell() -> Element {
                     }
                 }
 
-                if auth::is_admin(&auth_context) {
+                if auth::is_admin(&auth_context, &masquerade_role) {
                     OnboardingCoachPanel {}
                 }
             }
@@ -307,13 +308,15 @@ mod tests {
         let route = Route::AdminView {};
         assert!(should_show_admin_denied(
             &route,
-            &auth_context(true, vec![Role::Operator])
+            &auth_context(true, vec![Role::Operator]),
+            &None
         ));
         assert!(should_show_admin_denied(
             &route,
-            &auth_context(true, vec![Role::Viewer])
+            &auth_context(true, vec![Role::Viewer]),
+            &None
         ));
-        assert!(should_show_admin_denied(&route, &None));
+        assert!(should_show_admin_denied(&route, &None, &None));
     }
 
     #[test]
@@ -321,7 +324,8 @@ mod tests {
         let route = Route::AdminView {};
         assert!(!should_show_admin_denied(
             &route,
-            &auth_context(true, vec![Role::Admin])
+            &auth_context(true, vec![Role::Admin]),
+            &None
         ));
     }
 
@@ -330,8 +334,9 @@ mod tests {
         let route = Route::DashboardView {};
         assert!(!should_show_admin_denied(
             &route,
-            &auth_context(true, vec![Role::Viewer])
+            &auth_context(true, vec![Role::Viewer]),
+            &None
         ));
-        assert!(!should_show_admin_denied(&route, &None));
+        assert!(!should_show_admin_denied(&route, &None, &None));
     }
 }
