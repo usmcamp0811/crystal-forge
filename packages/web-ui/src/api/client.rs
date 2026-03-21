@@ -297,9 +297,23 @@ pub async fn update_flake(
 }
 
 /// Remove a flake by id.
-pub async fn delete_flake(id: i32) -> Result<(), ApiClientError> {
-    let url = format!("{}/flakes/{id}", base_url());
-    send_empty("DELETE", &url).await
+pub async fn delete_flake(id: i32, hard: bool, cascade: bool) -> Result<(), ApiClientError> {
+    let mut url = format!("{}/flakes/{id}", base_url());
+    
+    let mut params = Vec::new();
+    if hard {
+        params.push("hard=true");
+    }
+    if cascade {
+        params.push("cascade=true");
+    }
+    
+    if !params.is_empty() {
+        url.push('?');
+        url.push_str(&params.join("&"));
+    }
+    
+    send_empty_with_csrf::<()>("DELETE", &url, None).await
 }
 
 /// Fetch flake timelines with recent commits for dashboard.

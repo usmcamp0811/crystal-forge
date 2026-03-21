@@ -1056,8 +1056,8 @@ mod tests {
     use anyhow::anyhow;
     use axum::http::StatusCode;
 
-    use super::map_create_builder_error;
     use super::BuildStreamMessage;
+    use super::map_create_builder_error;
 
     #[test]
     fn build_stream_requires_explicit_type_discriminator() {

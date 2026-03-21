@@ -14,7 +14,7 @@ use crate::api::models::{
     ApiError, CommitDiffResponse, CreateFlakeRequest, FlakeRegistryItem, FlakeTimeline,
     UpdateFlakeRequest,
 };
-use crate::auth::extractors::{RequireAdmin, RequireOperator};
+use crate::auth::extractors::{AuthenticatedUser, RequireAdmin, RequireOperator};
 use crate::config::CrystalForgeConfig;
 use crate::flake::commits::{
     GitCommitMetadata, branch_exists, get_commit_changed_files, get_commit_diff,
@@ -23,11 +23,12 @@ use crate::flake::commits::{
 };
 use crate::handlers::agent_request::CFState;
 use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_above};
+use crate::queries::admin::insert_admin_audit_event;
 use crate::queries::commits::insert_commit_with_metadata;
 use crate::queries::flakes::{
-    count_systems_for_flake, delete_flake_by_id, fetch_dashboard_flake_timelines,
-    fetch_flake_timelines, get_flake_by_id, get_flake_by_name, insert_flake, list_flake_registry,
-    update_flake,
+    cascade_delete_flake, check_flake_dependencies, count_systems_for_flake, delete_flake_by_id,
+    fetch_dashboard_flake_timelines, fetch_flake_timelines, get_flake_by_id, get_flake_by_name,
+    insert_flake, list_flake_registry, soft_delete_flake, update_flake,
 };
 use crate::queries::users::get_by_email;
 
@@ -627,51 +628,272 @@ pub async fn update_flake_handler(
 /// Delete a flake from the registry.
 ///
 /// **Authorization**: Requires Admin role (destructive operation).
+/// Delete a flake from the registry.
+///
+/// **Authorization**:
+/// - Admin: Can delete any flake
+/// - Operator: Can delete flakes only in environments they have access to
+/// - Viewer: Denied (403)
+///
+/// **Query Parameters**:
+/// - `hard` (bool): If true, permanently delete from database. Default: soft delete
+/// - `cascade` (bool): If true, also delete all related evaluations, builds, deployments. Default: false
+///
+/// **Responses**:
+/// - 200 OK: Flake deleted successfully
+/// - 403 Forbidden: User doesn't have permission to delete this flake
+/// - 404 Not Found: Flake doesn't exist
+/// - 409 Conflict: Flake has active dependencies (use cascade=true to force delete)
 pub async fn delete_flake(
-    RequireAdmin(_user): RequireAdmin,
+    user: AuthenticatedUser,
     State(pool): State<PgPool>,
     Path(flake_id): Path<i32>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
-    match count_systems_for_flake(&pool, flake_id).await {
-        Ok(system_count) if system_count > 0 => {
-            return (
-                StatusCode::CONFLICT,
-                Json(ApiError {
-                    error: "flake_in_use".to_string(),
-                    message: format!(
-                        "Flake is linked to {system_count} systems and cannot be removed"
-                    ),
-                    details: None,
-                }),
-            )
-                .into_response();
-        }
-        Ok(_) => {}
+    let hard_delete = params
+        .get("hard")
+        .and_then(|v| v.parse::<bool>().ok())
+        .unwrap_or(false);
+    let cascade = params
+        .get("cascade")
+        .and_then(|v| v.parse::<bool>().ok())
+        .unwrap_or(false);
+
+    // Get flake to check existence and environment
+    let flake = match get_flake_by_id(&pool, flake_id).await {
+        Ok(f) => f,
         Err(e) => {
-            error!("Failed to check flake usage: {e:#}");
+            if matches!(
+                e.downcast_ref::<sqlx::Error>(),
+                Some(sqlx::Error::RowNotFound)
+            ) {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(ApiError {
+                        error: "not_found".to_string(),
+                        message: "Flake not found".to_string(),
+                        details: None,
+                    }),
+                )
+                    .into_response();
+            }
+            error!("Failed to get flake: {e:#}");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ApiError {
                     error: "internal_error".to_string(),
-                    message: "Failed to validate flake removal".to_string(),
+                    message: "Failed to get flake".to_string(),
                     details: None,
                 }),
             )
                 .into_response();
         }
+    };
+
+    // RBAC: Admin can delete any flake, Operator can delete flakes ONLY if they have
+    // access to ALL environments where this flake is used
+    if !user.is_admin() {
+        // For Operator: verify they have access to ALL environments using this flake.
+        // This prevents scope leak where an operator with access to one environment
+        // could delete a flake also used by other environments they don't control.
+        let rbac_check = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT NOT EXISTS(
+                -- Find systems using this flake in environments the operator does NOT have access to
+                SELECT 1 FROM systems s
+                WHERE s.flake_id = $1
+                  AND s.environment_id IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM user_environment_memberships uem
+                      WHERE uem.environment_id = s.environment_id
+                        AND uem.user_id = $2
+                  )
+                
+                UNION
+                
+                -- Also check historical derivations targeting systems in inaccessible environments
+                SELECT 1 FROM commits c
+                JOIN derivations d ON d.commit_id = c.id
+                JOIN systems s ON s.id::text = d.target_id
+                WHERE c.flake_id = $1
+                  AND s.environment_id IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM user_environment_memberships uem
+                      WHERE uem.environment_id = s.environment_id
+                        AND uem.user_id = $2
+                  )
+            )
+            "#,
+        )
+        .bind(flake_id)
+        .bind(user.user_id)
+        .fetch_one(&pool)
+        .await;
+
+        match rbac_check {
+            Ok(true) => {} // Operator has access to ALL environments using this flake
+            Ok(false) => {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(ApiError {
+                        error: "forbidden".to_string(),
+                        message: "You do not have permission to delete this flake. This flake is used in environments you do not have access to.".to_string(),
+                        details: None,
+                    }),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                error!("Failed to check flake access: {e:#}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiError {
+                        error: "internal_error".to_string(),
+                        message: "Failed to check permissions".to_string(),
+                        details: None,
+                    }),
+                )
+                    .into_response();
+            }
+        }
     }
 
-    match delete_flake_by_id(&pool, flake_id).await {
-        Ok(0) => (
-            StatusCode::NOT_FOUND,
-            Json(ApiError {
-                error: "not_found".to_string(),
-                message: "Flake not found".to_string(),
-                details: None,
-            }),
-        )
-            .into_response(),
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+    // Check for active dependencies unless cascade delete requested
+    if !cascade {
+        match check_flake_dependencies(&pool, flake_id).await {
+            Ok(count) if count > 0 => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(ApiError {
+                        error: "conflict".to_string(),
+                        message: format!(
+                            "Flake has {} active dependencies (evaluations, builds, or deployments). Use cascade=true to force delete.",
+                            count
+                        ),
+                        details: Some(serde_json::json!({
+                            "dependencies_count": count,
+                            "hint": "Add ?cascade=true to the request to delete all related data"
+                        })),
+                    }),
+                )
+                    .into_response();
+            }
+            Ok(_) => {} // No dependencies, safe to delete
+            Err(e) => {
+                error!("Failed to check dependencies: {e:#}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiError {
+                        error: "internal_error".to_string(),
+                        message: "Failed to check dependencies".to_string(),
+                        details: None,
+                    }),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    // Perform deletion (soft, hard, or cascade)
+    let delete_result = if cascade {
+        // Cascade delete (hard delete + all dependencies)
+        // Use transaction for safety
+        let mut tx = match pool.begin().await {
+            Ok(tx) => tx,
+            Err(e) => {
+                error!("Failed to begin transaction: {e:#}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiError {
+                        error: "internal_error".to_string(),
+                        message: "Failed to delete flake".to_string(),
+                        details: None,
+                    }),
+                )
+                    .into_response();
+            }
+        };
+
+        // Execute cascade delete within the transaction
+        let result = cascade_delete_flake(&mut tx, flake_id).await;
+
+        if result.is_ok() {
+            if let Err(e) = tx.commit().await {
+                error!("Failed to commit cascade delete: {e:#}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiError {
+                        error: "internal_error".to_string(),
+                        message: "Failed to delete flake".to_string(),
+                        details: None,
+                    }),
+                )
+                    .into_response();
+            }
+        } else {
+            let _ = tx.rollback().await;
+        }
+
+        result
+    } else if hard_delete {
+        delete_flake_by_id(&pool, flake_id).await
+    } else {
+        soft_delete_flake(&pool, flake_id).await
+    };
+
+    match delete_result {
+        Ok(rows) if rows > 0 => {
+            // Audit log
+            let deletion_type = if cascade {
+                "cascade"
+            } else if hard_delete {
+                "hard"
+            } else {
+                "soft"
+            };
+
+            let metadata = serde_json::json!({
+                "flake_id": flake_id,
+                "flake_name": flake.name,
+                "deletion_type": deletion_type,
+            });
+
+            if let Err(e) = insert_admin_audit_event(
+                &pool,
+                user.user_id,
+                &user.user_id.to_string(),
+                "delete_flake",
+                &format!("flake:{}", flake_id),
+                headers
+                    .get("x-forwarded-for")
+                    .and_then(|h| h.to_str().ok())
+                    .map(String::from),
+                metadata,
+            )
+            .await
+            {
+                warn!("Failed to log audit event for flake deletion: {e:#}");
+            }
+
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"message": "Flake deleted successfully"})),
+            )
+                .into_response()
+        }
+        Ok(_) => {
+            // No rows affected - flake might already be soft-deleted
+            (
+                StatusCode::NOT_FOUND,
+                Json(ApiError {
+                    error: "not_found".to_string(),
+                    message: "Flake not found or already deleted".to_string(),
+                    details: None,
+                }),
+            )
+                .into_response()
+        }
         Err(e) => {
             error!("Failed to delete flake: {e:#}");
             (
@@ -1075,4 +1297,249 @@ mod tests {
     // in auth/extractors.rs. These handlers now use RequireOperator and RequireAdmin extractors
     // which enforce authorization before the handler is called, so unit tests at this level
     // cannot test authorization behavior. Integration tests should test the full request path.
+
+    #[cfg(test)]
+    mod delete_tests {
+        use super::*;
+        use crate::models::flakes::Flake;
+        use crate::queries::flakes::{insert_flake, get_flake_by_id, soft_delete_flake, delete_flake_by_id, check_flake_dependencies, cascade_delete_flake};
+        use sqlx::PgPool;
+
+        async fn setup_test_flake(pool: &PgPool) -> Flake {
+            insert_flake(pool, "test-flake", "https://github.com/test/repo", "main")
+                .await
+                .expect("Failed to create test flake")
+        }
+
+        #[sqlx::test]
+        #[ignore = "requires live database connection"]
+        async fn test_soft_delete_sets_timestamp(pool: PgPool) {
+            let flake = setup_test_flake(&pool).await;
+
+            // Soft delete
+            let affected = soft_delete_flake(&pool, flake.id)
+                .await
+                .expect("Soft delete should succeed");
+            assert_eq!(affected, 1);
+
+            // Verify deleted_at is set
+            let result = sqlx::query_as::<_, Flake>("SELECT * FROM flakes WHERE id = $1")
+                .bind(flake.id)
+                .fetch_one(&pool)
+                .await
+                .expect("Should find flake in raw query");
+            
+            assert!(result.deleted_at.is_some(), "deleted_at should be set");
+        }
+
+        #[sqlx::test]
+        #[ignore = "requires live database connection"]
+        async fn test_soft_deleted_flake_excluded_from_get_by_id(pool: PgPool) {
+            let flake = setup_test_flake(&pool).await;
+
+            // Soft delete
+            soft_delete_flake(&pool, flake.id).await.unwrap();
+
+            // get_flake_by_id should now fail
+            let result = get_flake_by_id(&pool, flake.id).await;
+            assert!(result.is_err(), "get_flake_by_id should not find soft-deleted flake");
+        }
+
+        #[sqlx::test]
+        #[ignore = "requires live database connection"]
+        async fn test_soft_delete_idempotent(pool: PgPool) {
+            let flake = setup_test_flake(&pool).await;
+
+            // First soft delete
+            let affected = soft_delete_flake(&pool, flake.id).await.unwrap();
+            assert_eq!(affected, 1);
+
+            // Second soft delete should return 0 (already deleted)
+            let affected = soft_delete_flake(&pool, flake.id).await.unwrap();
+            assert_eq!(affected, 0);
+        }
+
+        #[sqlx::test]
+        #[ignore = "requires live database connection"]
+        async fn test_hard_delete_removes_permanently(pool: PgPool) {
+            let flake = setup_test_flake(&pool).await;
+
+            // Hard delete
+            let affected = delete_flake_by_id(&pool, flake.id)
+                .await
+                .expect("Hard delete should succeed");
+            assert_eq!(affected, 1);
+
+            // Verify flake is gone (even in raw query)
+            let result = sqlx::query_as::<_, Flake>("SELECT * FROM flakes WHERE id = $1")
+                .bind(flake.id)
+                .fetch_optional(&pool)
+                .await
+                .expect("Query should succeed");
+            
+            assert!(result.is_none(), "Flake should be permanently deleted");
+        }
+
+        #[sqlx::test]
+        #[ignore = "requires live database connection"]
+        async fn test_resurrection_clears_deleted_at(pool: PgPool) {
+            let flake = setup_test_flake(&pool).await;
+            let repo_url = flake.repo_url.clone();
+
+            // Soft delete
+            soft_delete_flake(&pool, flake.id).await.unwrap();
+
+            // Re-insert same repo_url
+            let resurrected = insert_flake(&pool, "test-flake-restored", &repo_url, "main")
+                .await
+                .expect("Re-insert should succeed");
+
+            // Verify deleted_at is cleared
+            assert!(resurrected.deleted_at.is_none(), "deleted_at should be cleared on resurrection");
+            
+            // Verify it's now visible via get_by_id
+            let fetched = get_flake_by_id(&pool, resurrected.id).await;
+            assert!(fetched.is_ok(), "Resurrected flake should be visible");
+        }
+
+        #[sqlx::test]
+        #[ignore = "requires live database connection"]
+        async fn test_check_dependencies_counts_systems(pool: PgPool) {
+            let flake = setup_test_flake(&pool).await;
+            
+            // Create a test environment
+            let env_id = sqlx::query_scalar::<_, uuid::Uuid>(
+                "INSERT INTO environments (name, description, color_hex) VALUES ($1, $2, $3) RETURNING id"
+            )
+            .bind("test-env")
+            .bind("Test environment")
+            .bind("#FF0000")
+            .fetch_one(&pool)
+            .await
+            .expect("Failed to create test environment");
+
+            // Create a system using this flake
+            sqlx::query(
+                "INSERT INTO systems (id, name, hostname, environment_id, flake_id, enabled) 
+                 VALUES ($1, $2, $3, $4, $5, $6)"
+            )
+            .bind(uuid::Uuid::new_v4())
+            .bind("test-system")
+            .bind("test-host")
+            .bind(env_id)
+            .bind(flake.id)
+            .bind(true)
+            .execute(&pool)
+            .await
+            .expect("Failed to create test system");
+
+            // Check dependencies
+            let count = check_flake_dependencies(&pool, flake.id)
+                .await
+                .expect("check_dependencies should succeed");
+            
+            assert_eq!(count, 1, "Should count the system as a dependency");
+        }
+
+        #[sqlx::test]
+        #[ignore = "requires live database connection"]
+        async fn test_cascade_delete_within_transaction(pool: PgPool) {
+            let flake = setup_test_flake(&pool).await;
+            
+            // Create test data
+            let env_id = sqlx::query_scalar::<_, uuid::Uuid>(
+                "INSERT INTO environments (name, description, color_hex) VALUES ($1, $2, $3) RETURNING id"
+            )
+            .bind("test-env")
+            .bind("Test environment")
+            .bind("#FF0000")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+            let system_id = uuid::Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO systems (id, name, hostname, environment_id, flake_id, enabled) 
+                 VALUES ($1, $2, $3, $4, $5, $6)"
+            )
+            .bind(system_id)
+            .bind("test-system")
+            .bind("test-host")
+            .bind(env_id)
+            .bind(flake.id)
+            .bind(true)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            // Begin transaction and cascade delete
+            let mut tx = pool.begin().await.expect("Failed to begin transaction");
+            let affected = cascade_delete_flake(&mut tx, flake.id)
+                .await
+                .expect("Cascade delete should succeed");
+            tx.commit().await.expect("Failed to commit transaction");
+
+            assert_eq!(affected, 1);
+
+            // Verify flake is gone
+            let flake_result = sqlx::query_as::<_, Flake>("SELECT * FROM flakes WHERE id = $1")
+                .bind(flake.id)
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+            assert!(flake_result.is_none());
+
+            // Verify system is gone
+            let system_result = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM systems WHERE id = $1"
+            )
+            .bind(system_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(system_result, 0);
+        }
+
+        #[sqlx::test]
+        #[ignore = "requires live database connection"]
+        async fn test_cascade_delete_rollback_on_error(pool: PgPool) {
+            let flake = setup_test_flake(&pool).await;
+            
+            // Create test system
+            let env_id = sqlx::query_scalar::<_, uuid::Uuid>(
+                "INSERT INTO environments (name, description, color_hex) VALUES ($1, $2, $3) RETURNING id"
+            )
+            .bind("test-env")
+            .bind("Test environment")
+            .bind("#FF0000")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+            sqlx::query(
+                "INSERT INTO systems (id, name, hostname, environment_id, flake_id, enabled) 
+                 VALUES ($1, $2, $3, $4, $5, $6)"
+            )
+            .bind(uuid::Uuid::new_v4())
+            .bind("test-system")
+            .bind("test-host")
+            .bind(env_id)
+            .bind(flake.id)
+            .bind(true)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            // Begin transaction
+            let mut tx = pool.begin().await.expect("Failed to begin transaction");
+            
+            // Do cascade delete but rollback
+            let _result = cascade_delete_flake(&mut tx, flake.id).await;
+            tx.rollback().await.expect("Failed to rollback");
+
+            // Verify flake still exists
+            let flake_result = get_flake_by_id(&pool, flake.id).await;
+            assert!(flake_result.is_ok(), "Flake should still exist after rollback");
+        }
+    }
 }

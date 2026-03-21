@@ -616,13 +616,7 @@ async fn run_mock_build(
     .await;
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-    send_log_with_fallback(
-        client,
-        job_id,
-        ws_shared,
-        "⚙️  [65%] Building outputs...\n",
-    )
-    .await;
+    send_log_with_fallback(client, job_id, ws_shared, "⚙️  [65%] Building outputs...\n").await;
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     send_log_with_fallback(
@@ -642,10 +636,7 @@ async fn run_mock_build(
             "❌ MOCK build failed intentionally for UI validation\n",
         )
         .await;
-        anyhow::bail!(
-            "MOCK build failure for {}",
-            derivation.derivation_name
-        );
+        anyhow::bail!("MOCK build failure for {}", derivation.derivation_name);
     }
 
     let store_path = mock_store_path(job_id, derivation.id, &derivation.derivation_name);

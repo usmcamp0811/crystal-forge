@@ -207,11 +207,7 @@ pub async fn sync_all_watched_flakes_commits(
                                 let count = new_commits.len();
                                 total_inserted += count;
                                 if count > 0 {
-                                    info!(
-                                        "✅ Found {} new commits for {}",
-                                        count,
-                                        flake.name
-                                    );
+                                    info!("✅ Found {} new commits for {}", count, flake.name);
                                 } else {
                                     debug!("📍 No new commits for {}", flake.name);
                                 }
@@ -242,8 +238,7 @@ pub async fn sync_all_watched_flakes_commits(
                         total_inserted += count;
                         info!(
                             "✅ Successfully initialized {} commits for {}",
-                            count,
-                            flake.name
+                            count, flake.name
                         );
                     }
                     Err(e) => {

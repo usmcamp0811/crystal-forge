@@ -6,7 +6,9 @@
 use crate::config::{BuildConfig, CacheConfig, CacheType, CrystalForgeConfig};
 use crate::log::{WorkerState, WorkerStatus, get_build_status};
 use crate::models::cache_destination::CacheDestination;
-use crate::queries::cache_destinations::{list_cache_destinations, update_cache_destination_last_used};
+use crate::queries::cache_destinations::{
+    list_cache_destinations, update_cache_destination_last_used,
+};
 use crate::queries::cache_push::{
     CachePushJob, cleanup_stale_cache_push_jobs, get_pending_cache_push_jobs,
     mark_cache_push_completed, mark_cache_push_failed, mark_cache_push_in_progress,
@@ -77,7 +79,7 @@ async fn load_cache_config(pool: &PgPool) -> Option<(CacheConfig, Option<String>
     // Fallback to server.toml
     let cfg = CrystalForgeConfig::load().unwrap_or_default();
     let cache_cfg = cfg.get_cache_config().clone();
-    
+
     if cache_cfg.push_to.is_some() {
         info!("📦 Using cache configuration from server.toml (fallback)");
         Some((cache_cfg, None))
@@ -290,8 +292,16 @@ async fn cache_worker(
             continue;
         }
 
-        if let Err(e) =
-            process_one_job(&pool, &cache_cfg, &build_cfg, job, worker_id, status_id, cache_dest_name.as_deref()).await
+        if let Err(e) = process_one_job(
+            &pool,
+            &cache_cfg,
+            &build_cfg,
+            job,
+            worker_id,
+            status_id,
+            cache_dest_name.as_deref(),
+        )
+        .await
         {
             error!("cache-worker {worker_id}: job failed: {e:#}");
         }
@@ -347,14 +357,17 @@ async fn process_one_job(
         Ok(()) => {
             let duration_ms = (started.elapsed().as_millis() as i32).max(0);
             mark_cache_push_completed(pool, job.id, None, Some(duration_ms)).await?;
-            
+
             // Update last_used_at for the cache destination if using database config
             if let Some(dest_name) = cache_dest_name {
                 if let Err(e) = update_cache_destination_last_used(pool, dest_name).await {
-                    warn!("Failed to update last_used_at for cache destination {}: {:#}", dest_name, e);
+                    warn!(
+                        "Failed to update last_used_at for cache destination {}: {:#}",
+                        dest_name, e
+                    );
                 }
             }
-            
+
             info!(
                 "✅ cache-worker {worker_id}: pushed {} (job {})",
                 derivation.derivation_name, job.id

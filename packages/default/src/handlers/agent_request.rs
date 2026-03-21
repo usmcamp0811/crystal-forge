@@ -8,10 +8,10 @@ use bytes::Bytes;
 use ed25519_dalek::Signature;
 use ed25519_dalek::Verifier;
 use sqlx::PgPool;
-use uuid::Uuid;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use uuid::Uuid;
 
 #[derive(Debug)]
 pub struct VerifiedAgentRequest {
@@ -135,14 +135,22 @@ pub struct CFState {
     pub pool: PgPool,
     pub server_config: ServerConfig,
     pub queue_notifier: Arc<QueueNotifier>,
-    pub eval_log_channels: Arc<tokio::sync::Mutex<std::collections::HashMap<i32, tokio::sync::broadcast::Sender<String>>>>,
+    pub eval_log_channels: Arc<
+        tokio::sync::Mutex<std::collections::HashMap<i32, tokio::sync::broadcast::Sender<String>>>,
+    >,
     pub eval_log_history: Arc<tokio::sync::Mutex<std::collections::HashMap<i32, Vec<String>>>>,
-    pub build_log_channels: Arc<tokio::sync::Mutex<std::collections::HashMap<Uuid, tokio::sync::broadcast::Sender<String>>>>,
+    pub build_log_channels: Arc<
+        tokio::sync::Mutex<std::collections::HashMap<Uuid, tokio::sync::broadcast::Sender<String>>>,
+    >,
     pub build_log_history: Arc<tokio::sync::Mutex<std::collections::HashMap<Uuid, Vec<String>>>>,
 }
 
 impl CFState {
-    pub fn new(pool: PgPool, server_config: ServerConfig, queue_notifier: Arc<QueueNotifier>) -> Self {
+    pub fn new(
+        pool: PgPool,
+        server_config: ServerConfig,
+        queue_notifier: Arc<QueueNotifier>,
+    ) -> Self {
         Self {
             pool,
             server_config,

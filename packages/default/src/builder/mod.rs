@@ -45,7 +45,7 @@ pub use cve_worker::run_cve_scan_loop;
 pub use worker::{create_gc_root, get_gc_root_path, remove_gc_root};
 
 use crate::config::CrystalForgeConfig;
-use crate::log::{get_build_status, WorkerState, WorkerStatus};
+use crate::log::{WorkerState, WorkerStatus, get_build_status};
 use sqlx::PgPool;
 use tracing::{info, warn};
 

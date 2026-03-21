@@ -130,7 +130,7 @@ pub async fn update_password_hash_by_user_id(
         .bind(password_hash)
         .bind(user_id)
         .execute(pool)
-    .await?;
+        .await?;
     Ok(())
 }
 
@@ -146,14 +146,16 @@ pub async fn get_setup_wizard_dismissed(pool: &PgPool, user_id: Uuid) -> Result<
     Ok(value)
 }
 
-pub async fn set_setup_wizard_dismissed(pool: &PgPool, user_id: Uuid, dismissed: bool) -> Result<()> {
-    sqlx::query(
-        "UPDATE users SET setup_wizard_dismissed = $1, updated_at = NOW() WHERE id = $2",
-    )
-    .bind(dismissed)
-    .bind(user_id)
-    .execute(pool)
-    .await?;
+pub async fn set_setup_wizard_dismissed(
+    pool: &PgPool,
+    user_id: Uuid,
+    dismissed: bool,
+) -> Result<()> {
+    sqlx::query("UPDATE users SET setup_wizard_dismissed = $1, updated_at = NOW() WHERE id = $2")
+        .bind(dismissed)
+        .bind(user_id)
+        .execute(pool)
+        .await?;
 
     Ok(())
 }

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id FROM flakes WHERE repo_url = $1",
+  "query": "SELECT id FROM flakes WHERE repo_url = $1 AND deleted_at IS NULL",
   "describe": {
     "columns": [
       {
@@ -18,5 +18,5 @@
       false
     ]
   },
-  "hash": "44ef786898f0ecc0c6682337d2f13c7809ea8b7422ea5ffd784412ba8202ea18"
+  "hash": "850933d179880da1a9d08df40a9f40471a82a81adbead3b2f31c5e797bc5c8a0"
 }

@@ -729,13 +729,13 @@ pub fn FlakesListView() -> Element {
                     flake_name: flake.name.clone(),
                     system_count: flake.system_count,
                     on_cancel: move |_| pending_remove.set(None),
-                    on_confirm: move |_| {
+                    on_confirm: move |(hard, cascade)| {
                         let mut flakes = flakes.clone();
                         let mut pending_remove = pending_remove.clone();
                         let mut server_notice = server_notice.clone();
                         let remove_id = flake.id;
                         spawn(async move {
-                            match delete_flake(remove_id).await {
+                            match delete_flake(remove_id, hard, cascade).await {
                                 Ok(()) => {
                                     let mut values = flakes.read().clone();
                                     values.retain(|item| item.id != remove_id);
@@ -952,20 +952,13 @@ fn FlakesTable(
                                                     },
                                                     "Edit"
                                                 }
-                                                if flake.system_count > 0 {
-                                                    span {
-                                                        class: "text-xs text-gray-500",
-                                                        "In Use"
-                                                    }
-                                                } else {
-                                                    button {
-                                                        class: "text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors",
-                                                        onclick: move |evt| {
-                                                            evt.stop_propagation();
-                                                            on_remove.call(flake.id)
-                                                        },
-                                                        "Remove"
-                                                    }
+                                                button {
+                                                    class: "text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors",
+                                                    onclick: move |evt| {
+                                                        evt.stop_propagation();
+                                                        on_remove.call(flake.id)
+                                                    },
+                                                    "Remove"
                                                 }
                                             }
                                         }
@@ -1819,43 +1812,183 @@ fn AddFlakeForm(
 fn RemoveFlakeDialog(
     flake_name: String,
     system_count: usize,
-    on_confirm: EventHandler<()>,
+    on_confirm: EventHandler<(bool, bool)>, // (hard_delete, cascade)
     on_cancel: EventHandler<()>,
 ) -> Element {
-    let warning = if system_count == 0 {
-        "This removes the flake from the registry. Related commits are deleted by cascade."
-            .to_string()
+    let mut hard_delete = use_signal(|| false);
+    let mut cascade = use_signal(|| false);
+    let mut confirm_text = use_signal(|| String::new());
+    let mut deleting = use_signal(|| false);
+
+    let has_dependencies = system_count > 0;
+    let needs_cascade = has_dependencies && !cascade();
+    let needs_hard_confirm = hard_delete();
+    let can_proceed = if needs_hard_confirm {
+        confirm_text() == "DELETE"
     } else {
-        format!("This flake is linked to {system_count} systems and cannot be removed.")
+        true
     };
 
     rsx! {
         div {
             class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
-            onclick: move |_| on_cancel.call(()),
+            onclick: move |_| {
+                if !deleting() {
+                    on_cancel.call(())
+                }
+            },
             div {
-                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6 cf-modal-panel-30",
+                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6 cf-modal-panel-34",
                 onclick: |evt| evt.stop_propagation(),
+                
+                // Header
                 h3 {
                     class: "text-lg font-semibold text-white mb-2",
-                    "Remove flake {flake_name}?"
+                    "Delete flake {flake_name}?"
                 }
-                p {
-                    class: "text-sm {theme::text::SECONDARY} mb-6",
-                    "{warning}"
+                
+                // Warning message
+                if has_dependencies {
+                    div {
+                        class: "mb-4 p-3 rounded-lg bg-amber-500/10 border border-amber-500/30",
+                        div {
+                            class: "flex items-start gap-2",
+                            svg {
+                                class: "w-5 h-5 text-amber-400 shrink-0 mt-0.5",
+                                fill: "none",
+                                stroke: "currentColor",
+                                view_box: "0 0 24 24",
+                                path {
+                                    stroke_linecap: "round",
+                                    stroke_linejoin: "round",
+                                    stroke_width: "2",
+                                    d: "M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
+                                }
+                            }
+                            div {
+                                p {
+                                    class: "text-sm font-medium text-amber-200",
+                                    "This flake is linked to {system_count} system(s)"
+                                }
+                                p {
+                                    class: "text-xs text-amber-300/80 mt-1",
+                                    "Enable cascade delete to remove all related evaluations, builds, and deployments"
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    p {
+                        class: "text-sm {theme::text::SECONDARY} mb-4",
+                        "This will soft-delete the flake (can be recovered). Related commits are retained."
+                    }
                 }
+
+                // Delete options
+                div {
+                    class: "space-y-3 mb-6",
+                    
+                    // Cascade checkbox (only if has dependencies)
+                    if has_dependencies {
+                        label {
+                            class: "flex items-start gap-3 cursor-pointer",
+                            input {
+                                r#type: "checkbox",
+                                class: "mt-1 w-4 h-4 rounded border-gray-600 bg-gray-800 text-violet-500 focus:ring-violet-500 focus:ring-offset-gray-900",
+                                checked: cascade(),
+                                onchange: move |evt| cascade.set(evt.checked())
+                            }
+                            div {
+                                span {
+                                    class: "text-sm font-medium text-gray-200",
+                                    "Also delete all evaluations, builds, and deployments (cascade)"
+                                }
+                                p {
+                                    class: "text-xs text-gray-400 mt-0.5",
+                                    "This will permanently remove all related data"
+                                }
+                            }
+                        }
+                    }
+
+                    // Hard delete checkbox
+                    label {
+                        class: "flex items-start gap-3 cursor-pointer",
+                        input {
+                            r#type: "checkbox",
+                            class: "mt-1 w-4 h-4 rounded border-gray-600 bg-gray-800 text-red-500 focus:ring-red-500 focus:ring-offset-gray-900",
+                            checked: hard_delete(),
+                            onchange: move |evt| {
+                                hard_delete.set(evt.checked());
+                                if !evt.checked() {
+                                    confirm_text.set(String::new());
+                                }
+                            }
+                        }
+                        div {
+                            span {
+                                class: "text-sm font-medium text-gray-200",
+                                "Permanently delete (hard delete)"
+                            }
+                            p {
+                                class: "text-xs text-gray-400 mt-0.5",
+                                "Cannot be undone. Default is soft delete (recoverable)"
+                            }
+                        }
+                    }
+                }
+
+                // Hard delete confirmation input
+                if hard_delete() {
+                    div {
+                        class: "mb-6 p-4 rounded-lg bg-red-500/10 border border-red-500/30",
+                        p {
+                            class: "text-sm font-medium text-red-200 mb-2",
+                            "⚠️ This will PERMANENTLY delete \"{flake_name}\" and cannot be undone."
+                        }
+                        p {
+                            class: "text-xs text-red-300/80 mb-3",
+                            "Type DELETE to confirm:"
+                        }
+                        input {
+                            class: "w-full rounded-lg px-3 py-2 text-sm font-mono bg-gray-800 border border-gray-600 focus:border-red-500 focus:ring-1 focus:ring-red-500 text-white",
+                            r#type: "text",
+                            placeholder: "DELETE",
+                            value: "{confirm_text()}",
+                            oninput: move |evt| confirm_text.set(evt.value())
+                        }
+                    }
+                }
+
+                // Buttons
                 div {
                     class: "flex gap-3",
                     button {
                         class: "flex-1 px-4 py-2 rounded-lg font-medium text-sm transition-colors bg-gray-700 hover:bg-gray-600 text-white",
+                        disabled: deleting(),
                         onclick: move |_| on_cancel.call(()),
                         "Cancel"
                     }
-                    if system_count == 0 {
-                        button {
-                            class: "flex-1 px-4 py-2 rounded-lg font-medium text-sm transition-colors bg-red-500 hover:bg-red-400 text-white",
-                            onclick: move |_| on_confirm.call(()),
-                            "Remove"
+                    button {
+                        class: "flex-1 px-4 py-2 rounded-lg font-medium text-sm transition-colors",
+                        class: if can_proceed && !needs_cascade && !deleting() {
+                            "bg-red-500 hover:bg-red-400 text-white"
+                        } else {
+                            "bg-gray-600 text-gray-400 cursor-not-allowed"
+                        },
+                        disabled: !can_proceed || needs_cascade || deleting(),
+                        onclick: move |_| {
+                            deleting.set(true);
+                            on_confirm.call((hard_delete(), cascade()));
+                        },
+                        if deleting() {
+                            "Deleting..."
+                        } else if needs_cascade {
+                            "Enable cascade to proceed"
+                        } else if needs_hard_confirm && !can_proceed {
+                            "Type DELETE to confirm"
+                        } else {
+                            "Delete Flake"
                         }
                     }
                 }

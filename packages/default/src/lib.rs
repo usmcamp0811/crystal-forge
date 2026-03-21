@@ -10,8 +10,8 @@ pub mod log;
 pub mod models;
 pub mod queries;
 pub mod queue;
-pub mod server;
 pub mod security;
+pub mod server;
 pub mod services;
 pub mod vulnix;
 

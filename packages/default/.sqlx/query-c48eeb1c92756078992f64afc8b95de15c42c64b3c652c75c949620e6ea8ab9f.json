@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT name, repo_url, branch FROM flakes",
+  "query": "SELECT name, repo_url, branch FROM flakes WHERE deleted_at IS NULL",
   "describe": {
     "columns": [
       {
@@ -28,5 +28,5 @@
       false
     ]
   },
-  "hash": "295e01286c8436cb90a463ac19844df08cb032a38e66c604bb58b205546636b3"
+  "hash": "c48eeb1c92756078992f64afc8b95de15c42c64b3c652c75c949620e6ea8ab9f"
 }
