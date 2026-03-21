@@ -124,7 +124,7 @@ pub async fn find_flake_by_repo_urls(
     sqlx::query_as!(
         crate::models::flakes::Flake,
         r#"
-        SELECT id, name, repo_url, branch
+        SELECT id, name, repo_url, branch, deleted_at
         FROM flakes 
         WHERE repo_url = ANY($1) AND deleted_at IS NULL
         ORDER BY 

@@ -1287,4 +1287,240 @@ mod tests {
     // in auth/extractors.rs. These handlers now use RequireOperator and RequireAdmin extractors
     // which enforce authorization before the handler is called, so unit tests at this level
     // cannot test authorization behavior. Integration tests should test the full request path.
+
+    #[cfg(test)]
+    mod delete_tests {
+        use super::*;
+        use crate::queries::flakes::{insert_flake, get_flake_by_id, soft_delete_flake, delete_flake_by_id};
+        use sqlx::PgPool;
+
+        async fn setup_test_flake(pool: &PgPool) -> Flake {
+            insert_flake(pool, "test-flake", "https://github.com/test/repo", "main")
+                .await
+                .expect("Failed to create test flake")
+        }
+
+        #[sqlx::test]
+        async fn test_soft_delete_sets_timestamp(pool: PgPool) {
+            let flake = setup_test_flake(&pool).await;
+
+            // Soft delete
+            let affected = soft_delete_flake(&pool, flake.id)
+                .await
+                .expect("Soft delete should succeed");
+            assert_eq!(affected, 1);
+
+            // Verify deleted_at is set
+            let result = sqlx::query_as::<_, Flake>("SELECT * FROM flakes WHERE id = $1")
+                .bind(flake.id)
+                .fetch_one(&pool)
+                .await
+                .expect("Should find flake in raw query");
+            
+            assert!(result.deleted_at.is_some(), "deleted_at should be set");
+        }
+
+        #[sqlx::test]
+        async fn test_soft_deleted_flake_excluded_from_get_by_id(pool: PgPool) {
+            let flake = setup_test_flake(&pool).await;
+
+            // Soft delete
+            soft_delete_flake(&pool, flake.id).await.unwrap();
+
+            // get_flake_by_id should now fail
+            let result = get_flake_by_id(&pool, flake.id).await;
+            assert!(result.is_err(), "get_flake_by_id should not find soft-deleted flake");
+        }
+
+        #[sqlx::test]
+        async fn test_soft_delete_idempotent(pool: PgPool) {
+            let flake = setup_test_flake(&pool).await;
+
+            // First soft delete
+            let affected = soft_delete_flake(&pool, flake.id).await.unwrap();
+            assert_eq!(affected, 1);
+
+            // Second soft delete should return 0 (already deleted)
+            let affected = soft_delete_flake(&pool, flake.id).await.unwrap();
+            assert_eq!(affected, 0);
+        }
+
+        #[sqlx::test]
+        async fn test_hard_delete_removes_permanently(pool: PgPool) {
+            let flake = setup_test_flake(&pool).await;
+
+            // Hard delete
+            let affected = delete_flake_by_id(&pool, flake.id)
+                .await
+                .expect("Hard delete should succeed");
+            assert_eq!(affected, 1);
+
+            // Verify flake is gone (even in raw query)
+            let result = sqlx::query_as::<_, Flake>("SELECT * FROM flakes WHERE id = $1")
+                .bind(flake.id)
+                .fetch_optional(&pool)
+                .await
+                .expect("Query should succeed");
+            
+            assert!(result.is_none(), "Flake should be permanently deleted");
+        }
+
+        #[sqlx::test]
+        async fn test_resurrection_clears_deleted_at(pool: PgPool) {
+            let flake = setup_test_flake(&pool).await;
+            let repo_url = flake.repo_url.clone();
+
+            // Soft delete
+            soft_delete_flake(&pool, flake.id).await.unwrap();
+
+            // Re-insert same repo_url
+            let resurrected = insert_flake(&pool, "test-flake-restored", &repo_url, "main")
+                .await
+                .expect("Re-insert should succeed");
+
+            // Verify deleted_at is cleared
+            assert!(resurrected.deleted_at.is_none(), "deleted_at should be cleared on resurrection");
+            
+            // Verify it's now visible via get_by_id
+            let fetched = get_flake_by_id(&pool, resurrected.id).await;
+            assert!(fetched.is_ok(), "Resurrected flake should be visible");
+        }
+
+        #[sqlx::test]
+        async fn test_check_dependencies_counts_systems(pool: PgPool) {
+            let flake = setup_test_flake(&pool).await;
+            
+            // Create a test environment
+            let env_id = sqlx::query_scalar::<_, uuid::Uuid>(
+                "INSERT INTO environments (name, description, color_hex) VALUES ($1, $2, $3) RETURNING id"
+            )
+            .bind("test-env")
+            .bind("Test environment")
+            .bind("#FF0000")
+            .fetch_one(&pool)
+            .await
+            .expect("Failed to create test environment");
+
+            // Create a system using this flake
+            sqlx::query(
+                "INSERT INTO systems (id, name, hostname, environment_id, flake_id, enabled) 
+                 VALUES ($1, $2, $3, $4, $5, $6)"
+            )
+            .bind(uuid::Uuid::new_v4())
+            .bind("test-system")
+            .bind("test-host")
+            .bind(env_id)
+            .bind(flake.id)
+            .bind(true)
+            .execute(&pool)
+            .await
+            .expect("Failed to create test system");
+
+            // Check dependencies
+            let count = check_flake_dependencies(&pool, flake.id)
+                .await
+                .expect("check_dependencies should succeed");
+            
+            assert_eq!(count, 1, "Should count the system as a dependency");
+        }
+
+        #[sqlx::test]
+        async fn test_cascade_delete_within_transaction(pool: PgPool) {
+            let flake = setup_test_flake(&pool).await;
+            
+            // Create test data
+            let env_id = sqlx::query_scalar::<_, uuid::Uuid>(
+                "INSERT INTO environments (name, description, color_hex) VALUES ($1, $2, $3) RETURNING id"
+            )
+            .bind("test-env")
+            .bind("Test environment")
+            .bind("#FF0000")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+            let system_id = uuid::Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO systems (id, name, hostname, environment_id, flake_id, enabled) 
+                 VALUES ($1, $2, $3, $4, $5, $6)"
+            )
+            .bind(system_id)
+            .bind("test-system")
+            .bind("test-host")
+            .bind(env_id)
+            .bind(flake.id)
+            .bind(true)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            // Begin transaction and cascade delete
+            let mut tx = pool.begin().await.expect("Failed to begin transaction");
+            let affected = cascade_delete_flake(&mut tx, flake.id)
+                .await
+                .expect("Cascade delete should succeed");
+            tx.commit().await.expect("Failed to commit transaction");
+
+            assert_eq!(affected, 1);
+
+            // Verify flake is gone
+            let flake_result = sqlx::query_as::<_, Flake>("SELECT * FROM flakes WHERE id = $1")
+                .bind(flake.id)
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+            assert!(flake_result.is_none());
+
+            // Verify system is gone
+            let system_result = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM systems WHERE id = $1"
+            )
+            .bind(system_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(system_result, 0);
+        }
+
+        #[sqlx::test]
+        async fn test_cascade_delete_rollback_on_error(pool: PgPool) {
+            let flake = setup_test_flake(&pool).await;
+            
+            // Create test system
+            let env_id = sqlx::query_scalar::<_, uuid::Uuid>(
+                "INSERT INTO environments (name, description, color_hex) VALUES ($1, $2, $3) RETURNING id"
+            )
+            .bind("test-env")
+            .bind("Test environment")
+            .bind("#FF0000")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+            sqlx::query(
+                "INSERT INTO systems (id, name, hostname, environment_id, flake_id, enabled) 
+                 VALUES ($1, $2, $3, $4, $5, $6)"
+            )
+            .bind(uuid::Uuid::new_v4())
+            .bind("test-system")
+            .bind("test-host")
+            .bind(env_id)
+            .bind(flake.id)
+            .bind(true)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            // Begin transaction
+            let mut tx = pool.begin().await.expect("Failed to begin transaction");
+            
+            // Do cascade delete but rollback
+            let _result = cascade_delete_flake(&mut tx, flake.id).await;
+            tx.rollback().await.expect("Failed to rollback");
+
+            // Verify flake still exists
+            let flake_result = get_flake_by_id(&pool, flake.id).await;
+            assert!(flake_result.is_ok(), "Flake should still exist after rollback");
+        }
+    }
 }

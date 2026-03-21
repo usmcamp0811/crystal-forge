@@ -285,6 +285,7 @@ impl FlakeBuilder {
             name: self.name.clone(),
             repo_url: self.repo_url.clone(),
             branch: self.branch.clone(),
+            deleted_at: None,
         }
     }
 }
