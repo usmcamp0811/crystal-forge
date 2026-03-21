@@ -66,7 +66,12 @@ pub fn SidebarNav() -> Element {
     let state_read = app_state.read();
     let auth_context = state_read.auth.clone();
     let masquerade_role = state_read.masquerade_role;
-    let show_admin = auth::is_admin(&auth_context, &masquerade_role);
+    // UI visibility uses display role (masquerade-aware)
+    let show_admin = auth::should_show_for_display_role(
+        &auth_context,
+        &masquerade_role,
+        &[crate::api::models::Role::Admin],
+    );
 
     // Get sidebar context
     let sidebar_ctx = use_context::<SidebarContext>();
@@ -355,7 +360,12 @@ pub fn MobileDrawer() -> Element {
     let state_read = app_state.read();
     let auth_context = state_read.auth.clone();
     let masquerade_role = state_read.masquerade_role;
-    let show_admin = auth::is_admin(&auth_context, &masquerade_role);
+    // UI visibility uses display role (masquerade-aware)
+    let show_admin = auth::should_show_for_display_role(
+        &auth_context,
+        &masquerade_role,
+        &[crate::api::models::Role::Admin],
+    );
 
     let sidebar_ctx = use_context::<SidebarContext>();
     let mut is_mobile_drawer_open = sidebar_ctx.is_mobile_drawer_open;

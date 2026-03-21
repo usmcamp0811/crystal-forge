@@ -37,7 +37,8 @@ fn came_from_setup() -> bool {
 pub fn EnvironmentsListView() -> Element {
     let app_state = use_context::<Signal<AppState>>();
     let state_read = app_state.read();
-    let is_admin_user = auth::is_admin(&state_read.auth, &state_read.masquerade_role);
+    // UI visibility uses display role (masquerade-aware)
+    let is_admin_user = auth::should_show_for_display_role(&state_read.auth, &state_read.masquerade_role, &[crate::api::models::Role::Admin]);
 
     let mut policy_library_state = use_signal(policy_library);
     let default_required_policy = required_agent_policy_id(&policy_library_state.read());

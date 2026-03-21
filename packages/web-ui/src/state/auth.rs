@@ -1,52 +1,19 @@
 //! Authentication state helpers and role checking utilities.
+//!
+//! This module separates three concerns:
+//! 1. Authorization (real role only - never affected by masquerade)
+//! 2. UI Display (masquerade-aware - for rendering preview)
+//! 3. User info (display names, etc.)
 
 use crate::api::models::{AuthContext, Role};
 
-/// Get the effective role for the current user, considering masquerade state.
-///
-/// If masquerade_role is Some and the real user is Admin, returns the masquerade role.
-/// Otherwise returns the real user's primary role.
-pub fn get_effective_role(
-    auth: &Option<AuthContext>,
-    masquerade_role: &Option<Role>,
-) -> Option<Role> {
-    // If masquerading and real user is Admin, use masquerade role
-    if let Some(masq_role) = masquerade_role {
-        if is_admin_real(auth) {
-            return Some(*masq_role);
-        }
-    }
+// ============================================================================
+// AUTHORIZATION FUNCTIONS (Real Role Only - Never Masquerade)
+// ============================================================================
 
-    // Otherwise use real role
-    auth.as_ref()
-        .filter(|ctx| ctx.is_authenticated)
-        .and_then(|ctx| ctx.roles.first().copied())
-}
-
-/// Check if the real (not masqueraded) user has Admin role.
-/// This is used for authorization checks that should never be affected by masquerade.
-fn is_admin_real(auth: &Option<AuthContext>) -> bool {
-    match auth {
-        Some(ctx) if ctx.is_authenticated => ctx.roles.contains(&Role::Admin),
-        _ => false,
-    }
-}
-
-/// Check if the current user has at least one of the specified roles (respects masquerade).
-pub fn has_any_role(
-    auth: &Option<AuthContext>,
-    masquerade_role: &Option<Role>,
-    required_roles: &[Role],
-) -> bool {
-    // When masquerading, check only the masquerade role
-    if masquerade_role.is_some() {
-        if let Some(effective_role) = get_effective_role(auth, masquerade_role) {
-            return required_roles.contains(&effective_role);
-        }
-        return false;
-    }
-
-    // When NOT masquerading, check all user roles (backward-compatible with multi-role users)
+/// Check if user has any of the required roles (multi-role safe).
+/// This is for AUTHORIZATION and ignores masquerade state.
+fn has_any_real_role(auth: &Option<AuthContext>, required_roles: &[Role]) -> bool {
     match auth {
         Some(ctx) if ctx.is_authenticated => {
             required_roles.iter().any(|role| ctx.roles.contains(role))
@@ -55,25 +22,91 @@ pub fn has_any_role(
     }
 }
 
-/// Check if the current user has the Admin role (respects masquerade).
-pub fn is_admin(auth: &Option<AuthContext>, masquerade_role: &Option<Role>) -> bool {
-    has_any_role(auth, masquerade_role, &[Role::Admin])
+/// Check if the current user has the Admin role.
+/// Used for AUTHORIZATION - never affected by masquerade.
+pub fn is_admin(auth: &Option<AuthContext>) -> bool {
+    has_any_real_role(auth, &[Role::Admin])
 }
 
-/// Check if the current user has the Operator role or higher (respects masquerade).
-pub fn is_operator_or_above(auth: &Option<AuthContext>, masquerade_role: &Option<Role>) -> bool {
-    has_any_role(auth, masquerade_role, &[Role::Admin, Role::Operator])
+/// Check if the current user has the Operator role or higher.
+/// Used for AUTHORIZATION - never affected by masquerade.
+pub fn is_operator_or_above(auth: &Option<AuthContext>) -> bool {
+    has_any_real_role(auth, &[Role::Admin, Role::Operator])
 }
 
-/// Check if the current user can perform mutating system actions (respects masquerade).
-pub fn can_mutate_systems(auth: &Option<AuthContext>, masquerade_role: &Option<Role>) -> bool {
-    has_any_role(auth, masquerade_role, &[Role::Admin, Role::Operator])
+/// Check if the current user can perform mutating system actions.
+/// Used for AUTHORIZATION - never affected by masquerade.
+pub fn can_mutate_systems(auth: &Option<AuthContext>) -> bool {
+    has_any_real_role(auth, &[Role::Admin, Role::Operator])
 }
 
-/// Check if the current user can manage environments (respects masquerade).
-pub fn can_manage_environments(auth: &Option<AuthContext>, masquerade_role: &Option<Role>) -> bool {
-    has_any_role(auth, masquerade_role, &[Role::Admin])
+/// Check if the current user can manage environments.
+/// Used for AUTHORIZATION - never affected by masquerade.
+pub fn can_manage_environments(auth: &Option<AuthContext>) -> bool {
+    has_any_real_role(auth, &[Role::Admin])
 }
+
+// ============================================================================
+// UI DISPLAY FUNCTIONS (Masquerade-Aware - For Rendering)
+// ============================================================================
+
+/// Get the highest privilege role from user's real roles.
+/// Used for badge display and determining real capabilities.
+/// Returns Admin > Operator > Viewer in priority order.
+pub fn get_highest_real_role(auth: &Option<AuthContext>) -> Option<Role> {
+    auth.as_ref()
+        .filter(|ctx| ctx.is_authenticated)
+        .and_then(|ctx| {
+            // Check in priority order: Admin > Operator > Viewer
+            if ctx.roles.contains(&Role::Admin) {
+                Some(Role::Admin)
+            } else if ctx.roles.contains(&Role::Operator) {
+                Some(Role::Operator)
+            } else if ctx.roles.contains(&Role::Viewer) {
+                Some(Role::Viewer)
+            } else {
+                None
+            }
+        })
+}
+
+/// Get the display role for UI rendering (respects masquerade).
+/// When masquerading, returns the masquerade role.
+/// When not masquerading, returns the highest privilege real role.
+/// This is used ONLY for UI display, never for authorization.
+pub fn get_display_role(
+    auth: &Option<AuthContext>,
+    masquerade_role: &Option<Role>,
+) -> Option<Role> {
+    // If masquerading and user is admin, use masquerade role
+    if let Some(masq_role) = masquerade_role {
+        if is_admin(auth) {
+            return Some(*masq_role);
+        }
+    }
+
+    // Otherwise use highest privilege real role
+    get_highest_real_role(auth)
+}
+
+/// Check if a UI element should be shown based on display role.
+/// This respects masquerade for UI preview purposes only.
+/// Use this for conditional rendering of buttons, sections, etc.
+pub fn should_show_for_display_role(
+    auth: &Option<AuthContext>,
+    masquerade_role: &Option<Role>,
+    required_roles: &[Role],
+) -> bool {
+    if let Some(display_role) = get_display_role(auth, masquerade_role) {
+        required_roles.contains(&display_role)
+    } else {
+        false
+    }
+}
+
+// ============================================================================
+// USER INFO FUNCTIONS
+// ============================================================================
 
 /// Check if the current user is authenticated.
 pub fn is_authenticated(auth: &Option<AuthContext>) -> bool {
@@ -125,109 +158,89 @@ mod tests {
         })
     }
 
+    // ========================================================================
+    // AUTHORIZATION TESTS (Real Role Only - Ignore Masquerade)
+    // ========================================================================
+
     #[test]
     fn is_admin_requires_authenticated_admin_role() {
-        assert!(is_admin(&auth_context(true, vec![Role::Admin]), &None));
-        assert!(!is_admin(&auth_context(true, vec![Role::Operator]), &None));
-        assert!(!is_admin(&auth_context(false, vec![Role::Admin]), &None));
-        assert!(!is_admin(&None, &None));
+        assert!(is_admin(&auth_context(true, vec![Role::Admin])));
+        assert!(!is_admin(&auth_context(true, vec![Role::Operator])));
+        assert!(!is_admin(&auth_context(false, vec![Role::Admin])));
+        assert!(!is_admin(&None));
     }
 
     #[test]
     fn is_operator_or_above_accepts_operator_and_admin() {
-        assert!(is_operator_or_above(
-            &auth_context(true, vec![Role::Operator]),
-            &None
-        ));
-        assert!(is_operator_or_above(
-            &auth_context(true, vec![Role::Admin]),
-            &None
-        ));
-        assert!(!is_operator_or_above(
-            &auth_context(true, vec![Role::Viewer]),
-            &None
-        ));
+        assert!(is_operator_or_above(&auth_context(
+            true,
+            vec![Role::Operator]
+        )));
+        assert!(is_operator_or_above(&auth_context(true, vec![Role::Admin])));
+        assert!(!is_operator_or_above(&auth_context(
+            true,
+            vec![Role::Viewer]
+        )));
     }
 
     #[test]
     fn can_mutate_systems_requires_operator_or_admin() {
-        assert!(can_mutate_systems(
-            &auth_context(true, vec![Role::Admin]),
-            &None
-        ));
-        assert!(can_mutate_systems(
-            &auth_context(true, vec![Role::Operator]),
-            &None
-        ));
-        assert!(!can_mutate_systems(
-            &auth_context(true, vec![Role::Viewer]),
-            &None
-        ));
-        assert!(!can_mutate_systems(
-            &auth_context(false, vec![Role::Operator]),
-            &None
-        ));
+        assert!(can_mutate_systems(&auth_context(true, vec![Role::Admin])));
+        assert!(can_mutate_systems(&auth_context(
+            true,
+            vec![Role::Operator]
+        )));
+        assert!(!can_mutate_systems(&auth_context(true, vec![Role::Viewer])));
+        assert!(!can_mutate_systems(&auth_context(
+            false,
+            vec![Role::Operator]
+        )));
     }
 
     #[test]
     fn can_manage_environments_requires_admin() {
-        assert!(can_manage_environments(
-            &auth_context(true, vec![Role::Admin]),
-            &None
-        ));
-        assert!(!can_manage_environments(
-            &auth_context(true, vec![Role::Operator]),
-            &None
-        ));
-        assert!(!can_manage_environments(
-            &auth_context(true, vec![Role::Viewer]),
-            &None
-        ));
+        assert!(can_manage_environments(&auth_context(
+            true,
+            vec![Role::Admin]
+        )));
+        assert!(!can_manage_environments(&auth_context(
+            true,
+            vec![Role::Operator]
+        )));
+        assert!(!can_manage_environments(&auth_context(
+            true,
+            vec![Role::Viewer]
+        )));
     }
 
     #[test]
-    fn masquerade_as_operator_hides_admin_privileges() {
+    fn authorization_ignores_masquerade() {
         let admin_ctx = auth_context(true, vec![Role::Admin]);
-        let masq = Some(Role::Operator);
 
-        // Real admin can manage environments
-        assert!(can_manage_environments(&admin_ctx, &None));
-        // But when masquerading as Operator, cannot
-        assert!(!can_manage_environments(&admin_ctx, &masq));
-        // Can still mutate systems as Operator
-        assert!(can_mutate_systems(&admin_ctx, &masq));
+        // Authorization functions don't take masquerade parameter
+        // Admin always has admin permissions regardless of UI state
+        assert!(is_admin(&admin_ctx));
+        assert!(can_mutate_systems(&admin_ctx));
+        assert!(can_manage_environments(&admin_ctx));
     }
 
     #[test]
-    fn masquerade_as_viewer_hides_all_mutate_privileges() {
-        let admin_ctx = auth_context(true, vec![Role::Admin]);
-        let masq = Some(Role::Viewer);
+    fn multi_role_authorization_checks_all_roles() {
+        let ctx = auth_context(true, vec![Role::Viewer, Role::Admin]);
 
-        // Real admin can mutate
-        assert!(can_mutate_systems(&admin_ctx, &None));
-        // But when masquerading as Viewer, cannot
-        assert!(!can_mutate_systems(&admin_ctx, &masq));
+        // Should have admin privileges regardless of role order
+        assert!(is_admin(&ctx));
+        assert!(can_manage_environments(&ctx));
     }
-
-    #[test]
-    fn non_admin_cannot_masquerade() {
-        let operator_ctx = auth_context(true, vec![Role::Operator]);
-        let masq = Some(Role::Admin);
-
-        // Operator trying to masquerade as Admin should not gain privileges
-        assert!(!can_manage_environments(&operator_ctx, &masq));
-    }
-
-    // Multi-role regression tests (TASK-205)
 
     #[test]
     fn multi_role_viewer_admin_grants_admin_privileges() {
         let ctx = auth_context(true, vec![Role::Viewer, Role::Admin]);
 
         // User with [Viewer, Admin] should have Admin privileges
-        assert!(is_admin(&ctx, &None));
-        assert!(can_manage_environments(&ctx, &None));
-        assert!(can_mutate_systems(&ctx, &None));
+        assert!(is_admin(&ctx));
+        assert!(can_manage_environments(&ctx));
+        assert!(can_mutate_systems(&ctx));
     }
 
     #[test]
@@ -235,9 +248,9 @@ mod tests {
         let ctx = auth_context(true, vec![Role::Operator, Role::Admin]);
 
         // User with [Operator, Admin] should have Admin privileges
-        assert!(is_admin(&ctx, &None));
-        assert!(can_manage_environments(&ctx, &None));
-        assert!(is_operator_or_above(&ctx, &None));
+        assert!(is_admin(&ctx));
+        assert!(can_manage_environments(&ctx));
+        assert!(is_operator_or_above(&ctx));
     }
 
     #[test]
@@ -245,9 +258,9 @@ mod tests {
         let ctx = auth_context(true, vec![Role::Admin, Role::Operator]);
 
         // User with [Admin, Operator] (reversed) should still have Admin privileges
-        assert!(is_admin(&ctx, &None));
-        assert!(can_manage_environments(&ctx, &None));
-        assert!(is_operator_or_above(&ctx, &None));
+        assert!(is_admin(&ctx));
+        assert!(can_manage_environments(&ctx));
+        assert!(is_operator_or_above(&ctx));
     }
 
     #[test]
@@ -255,33 +268,129 @@ mod tests {
         let ctx = auth_context(true, vec![Role::Admin, Role::Viewer]);
 
         // User with [Admin, Viewer] should have Admin privileges
-        assert!(is_admin(&ctx, &None));
-        assert!(can_manage_environments(&ctx, &None));
+        assert!(is_admin(&ctx));
+        assert!(can_manage_environments(&ctx));
+    }
+
+    // ========================================================================
+    // DISPLAY ROLE TESTS (UI Preview - Masquerade Aware)
+    // ========================================================================
+
+    #[test]
+    fn get_highest_real_role_returns_admin_for_multi_role() {
+        assert_eq!(
+            get_highest_real_role(&auth_context(true, vec![Role::Viewer, Role::Admin])),
+            Some(Role::Admin)
+        );
+
+        assert_eq!(
+            get_highest_real_role(&auth_context(true, vec![Role::Admin, Role::Viewer])),
+            Some(Role::Admin)
+        );
     }
 
     #[test]
-    fn multi_role_masquerade_still_restricts_to_masquerade_role() {
-        let ctx = auth_context(true, vec![Role::Viewer, Role::Admin]);
-        let masq = Some(Role::Operator);
+    fn get_highest_real_role_hierarchy() {
+        assert_eq!(
+            get_highest_real_role(&auth_context(
+                true,
+                vec![Role::Viewer, Role::Operator, Role::Admin]
+            )),
+            Some(Role::Admin)
+        );
 
-        // Real user has [Viewer, Admin] but masquerading as Operator
-        // Should have Operator privileges only (not Admin, not just Viewer)
-        assert!(!is_admin(&ctx, &masq));
-        assert!(!can_manage_environments(&ctx, &masq)); // Admin-only
-        assert!(can_mutate_systems(&ctx, &masq)); // Operator can mutate
-        assert!(is_operator_or_above(&ctx, &masq));
+        assert_eq!(
+            get_highest_real_role(&auth_context(true, vec![Role::Viewer, Role::Operator])),
+            Some(Role::Operator)
+        );
+
+        assert_eq!(
+            get_highest_real_role(&auth_context(true, vec![Role::Viewer])),
+            Some(Role::Viewer)
+        );
     }
 
     #[test]
-    fn multi_role_masquerade_as_viewer_most_restrictive() {
-        let ctx = auth_context(true, vec![Role::Admin, Role::Operator]);
+    fn display_role_respects_masquerade() {
+        let admin_ctx = auth_context(true, vec![Role::Admin]);
         let masq = Some(Role::Viewer);
 
-        // Real user has [Admin, Operator] but masquerading as Viewer
-        // Should have only Viewer privileges (most restrictive)
-        assert!(!is_admin(&ctx, &masq));
-        assert!(!is_operator_or_above(&ctx, &masq));
-        assert!(!can_mutate_systems(&ctx, &masq));
-        assert!(!can_manage_environments(&ctx, &masq));
+        // Display role should be Viewer when masquerading
+        assert_eq!(get_display_role(&admin_ctx, &masq), Some(Role::Viewer));
+
+        // Without masquerade, display role is real role
+        assert_eq!(get_display_role(&admin_ctx, &None), Some(Role::Admin));
+    }
+
+    #[test]
+    fn display_role_shows_highest_privilege_for_multi_role() {
+        let ctx = auth_context(true, vec![Role::Viewer, Role::Admin]);
+
+        // Should display Admin (highest privilege) not Viewer
+        assert_eq!(get_display_role(&ctx, &None), Some(Role::Admin));
+    }
+
+    #[test]
+    fn should_show_for_display_role_respects_masquerade() {
+        let admin_ctx = auth_context(true, vec![Role::Admin]);
+        let masq_viewer = Some(Role::Viewer);
+
+        // When masquerading as Viewer, admin UI elements should be hidden
+        assert!(!should_show_for_display_role(
+            &admin_ctx,
+            &masq_viewer,
+            &[Role::Admin]
+        ));
+
+        // But viewer UI elements should be shown
+        assert!(should_show_for_display_role(
+            &admin_ctx,
+            &masq_viewer,
+            &[Role::Viewer]
+        ));
+
+        // Without masquerade, admin UI elements should be shown
+        assert!(should_show_for_display_role(
+            &admin_ctx,
+            &None,
+            &[Role::Admin]
+        ));
+    }
+
+    #[test]
+    fn masquerade_as_operator_hides_admin_ui_but_not_operator_ui() {
+        let admin_ctx = auth_context(true, vec![Role::Admin]);
+        let masq = Some(Role::Operator);
+
+        // Admin UI elements hidden when masquerading as Operator
+        assert!(!should_show_for_display_role(
+            &admin_ctx,
+            &masq,
+            &[Role::Admin]
+        ));
+
+        // Operator UI elements shown
+        assert!(should_show_for_display_role(
+            &admin_ctx,
+            &masq,
+            &[Role::Operator]
+        ));
+
+        // Multi-role check: Admin or Operator
+        assert!(should_show_for_display_role(
+            &admin_ctx,
+            &masq,
+            &[Role::Admin, Role::Operator]
+        ));
+    }
+
+    #[test]
+    fn non_admin_cannot_masquerade() {
+        let operator_ctx = auth_context(true, vec![Role::Operator]);
+        let masq = Some(Role::Admin);
+
+        // Operator trying to masquerade as Admin should not affect display
+        // (masquerade only works for admins)
+        assert_eq!(get_display_role(&operator_ctx, &masq), Some(Role::Operator));
     }
 }

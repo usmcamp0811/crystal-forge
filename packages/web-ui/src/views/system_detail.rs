@@ -180,7 +180,8 @@ pub fn SystemDetailView(id: String) -> Element {
     let state_read = app_state.read();
     let auth_context = state_read.auth.clone();
     let masquerade_role = state_read.masquerade_role;
-    let can_mutate = auth::can_mutate_systems(&auth_context, &masquerade_role);
+    // UI visibility uses display role (masquerade-aware)
+    let can_mutate = auth::should_show_for_display_role(&auth_context, &masquerade_role, &[crate::api::models::Role::Admin, crate::api::models::Role::Operator]);
 
     let environment = system
         .environment

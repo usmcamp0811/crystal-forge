@@ -6,14 +6,14 @@
 use super::models::*;
 use uuid::Uuid;
 
-/// Get the current masquerade role from global AppState if available.
-fn get_masquerade_role() -> Option<Role> {
+/// Helper to get masquerade role from AppState in component context.
+/// This should be called once in the component and the result passed to API calls.
+pub fn get_masquerade_from_context() -> Option<Role> {
     use crate::state::app_state::AppState;
     use dioxus::prelude::*;
     
-    // Try to access AppState from context (only works within a Dioxus component tree)
-    // If not available, return None (no masquerade)
-    dioxus::prelude::try_consume_context::<Signal<AppState>>()
+    // Get masquerade role from AppState if available
+    try_consume_context::<Signal<AppState>>()
         .and_then(|state| state.read().masquerade_role)
 }
 
@@ -800,8 +800,9 @@ async fn send_request_with_csrf(
         }
     }
 
-    // Add masquerade header if masquerading
-    if let Some(masq_role) = get_masquerade_role() {
+    // Add X-Masquerade-Role header if masquerading (ADVISORY ONLY)
+    // Backend MUST authorize by real role, MAY use this for data filtering
+    if let Some(masq_role) = get_masquerade_from_context() {
         let role_str = match masq_role {
             Role::Admin => "Admin",
             Role::Operator => "Operator",
@@ -931,8 +932,9 @@ async fn send_request(
             .map_err(|e| ApiClientError::Network(format!("{e:?}")))?;
     }
 
-    // Add masquerade header if masquerading
-    if let Some(masq_role) = get_masquerade_role() {
+    // Add X-Masquerade-Role header if masquerading (ADVISORY ONLY)
+    // Backend MUST authorize by real role, MAY use this for data filtering
+    if let Some(masq_role) = get_masquerade_from_context() {
         let role_str = match masq_role {
             Role::Admin => "Admin",
             Role::Operator => "Operator",

@@ -45,8 +45,9 @@ fn ui_check_mock_auth_context() -> AuthContext {
     }
 }
 
-fn should_show_admin_denied(route: &Route, auth_context: &Option<AuthContext>, masquerade_role: &Option<Role>) -> bool {
-    matches!(route, Route::AdminView { .. }) && !auth::is_admin(auth_context, masquerade_role)
+fn should_show_admin_denied(route: &Route, auth_context: &Option<AuthContext>) -> bool {
+    // Route guards use REAL role only (never masquerade)
+    matches!(route, Route::AdminView { .. }) && !auth::is_admin(auth_context)
 }
 
 /// Top-level application layout wrapping all views.
@@ -153,7 +154,8 @@ pub fn AppShell() -> Element {
 
     // Shared config health state — fetched once for admin users and reused by views.
     let masquerade_role = app_state.read().masquerade_role;
-    let is_admin_user = auth::is_admin(&auth_context, &masquerade_role);
+    // Use display role for UI visibility (config health banner)
+    let is_admin_user = auth::should_show_for_display_role(&auth_context, &masquerade_role, &[crate::api::models::Role::Admin]);
     let mut dismissed_key: Signal<Option<String>> = use_signal(|| None);
     let shared_health = app_state.read().config_health.clone();
 
@@ -264,7 +266,8 @@ pub fn AppShell() -> Element {
                     }
                     main {
                         class: "flex-1 overflow-auto {theme::spacing::PAGE_PADDING}",
-                        if should_show_admin_denied(&current_route, &auth_context, &masquerade_role) {
+                        // Route guard uses REAL role (authorization)
+                        if should_show_admin_denied(&current_route, &auth_context) {
                             section {
                                 class: "max-w-3xl mx-auto rounded-xl border border-amber-500/40 bg-amber-900/20 p-6 space-y-2",
                                 h2 { class: "text-xl font-semibold text-amber-100", "Access Denied" }
@@ -276,7 +279,8 @@ pub fn AppShell() -> Element {
                     }
                 }
 
-                if auth::is_admin(&auth_context, &masquerade_role) {
+                // UI visibility uses display role (masquerade-aware)
+                if auth::should_show_for_display_role(&auth_context, &masquerade_role, &[crate::api::models::Role::Admin]) {
                     OnboardingCoachPanel {}
                 }
             }
@@ -308,15 +312,13 @@ mod tests {
         let route = Route::AdminView {};
         assert!(should_show_admin_denied(
             &route,
-            &auth_context(true, vec![Role::Operator]),
-            &None
+            &auth_context(true, vec![Role::Operator])
         ));
         assert!(should_show_admin_denied(
             &route,
-            &auth_context(true, vec![Role::Viewer]),
-            &None
+            &auth_context(true, vec![Role::Viewer])
         ));
-        assert!(should_show_admin_denied(&route, &None, &None));
+        assert!(should_show_admin_denied(&route, &None));
     }
 
     #[test]
@@ -324,8 +326,7 @@ mod tests {
         let route = Route::AdminView {};
         assert!(!should_show_admin_denied(
             &route,
-            &auth_context(true, vec![Role::Admin]),
-            &None
+            &auth_context(true, vec![Role::Admin])
         ));
     }
 
@@ -334,9 +335,8 @@ mod tests {
         let route = Route::DashboardView {};
         assert!(!should_show_admin_denied(
             &route,
-            &auth_context(true, vec![Role::Viewer]),
-            &None
+            &auth_context(true, vec![Role::Viewer])
         ));
-        assert!(!should_show_admin_denied(&route, &None, &None));
+        assert!(!should_show_admin_denied(&route, &None));
     }
 }

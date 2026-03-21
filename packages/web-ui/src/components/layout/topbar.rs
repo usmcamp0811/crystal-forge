@@ -39,9 +39,11 @@ pub fn TopBar(title: String) -> Element {
         show_user_menu.set(false);
     };
 
-    let is_real_admin = auth::is_admin(&auth_context, &None);
+    // Check real admin role for authorization (masquerade controls)
+    let is_real_admin = auth::is_admin(&auth_context);
     let masquerade_role = app_state.read().masquerade_role;
-    let effective_role = auth::get_effective_role(&auth_context, &masquerade_role);
+    // Get display role for badge (masquerade-aware)
+    let display_role = auth::get_display_role(&auth_context, &masquerade_role);
 
     let toggle_drawer = move |_| {
         is_mobile_drawer_open.set(!is_mobile_drawer_open());
@@ -185,8 +187,8 @@ pub fn TopBar(title: String) -> Element {
                                                 "{user.email}"
                                             }
                                         }
-                                        // Show effective role badge
-                                        if let Some(role) = effective_role {
+                                        // Show display role badge (masquerade-aware)
+                                        if let Some(role) = display_role {
                                             div {
                                                 class: "mt-2 flex justify-end",
                                                 span {

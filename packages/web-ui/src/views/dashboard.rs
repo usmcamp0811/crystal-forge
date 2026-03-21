@@ -142,7 +142,8 @@ pub fn DashboardView() -> Element {
     // Shared config health (admin only).
     let app_state = use_context::<Signal<AppState>>();
     let state_read = app_state.read();
-    let is_admin_user = auth::is_admin(&state_read.auth, &state_read.masquerade_role);
+    // UI visibility uses display role (masquerade-aware)
+    let is_admin_user = auth::should_show_for_display_role(&state_read.auth, &state_read.masquerade_role, &[crate::api::models::Role::Admin]);
     let config_health = state_read.config_health.clone();
 
     // Flake timelines state
