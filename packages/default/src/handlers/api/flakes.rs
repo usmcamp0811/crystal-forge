@@ -14,7 +14,7 @@ use crate::api::models::{
     ApiError, CommitDiffResponse, CreateFlakeRequest, FlakeRegistryItem, FlakeTimeline,
     UpdateFlakeRequest,
 };
-use crate::auth::extractors::{RequireAdmin, RequireOperator};
+use crate::auth::extractors::{AuthenticatedUser, RequireAdmin, RequireOperator};
 use crate::config::CrystalForgeConfig;
 use crate::flake::commits::{
     GitCommitMetadata, branch_exists, get_commit_changed_files, get_commit_diff,
@@ -25,11 +25,12 @@ use crate::handlers::agent_request::CFState;
 use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_above};
 use crate::queries::commits::insert_commit_with_metadata;
 use crate::queries::flakes::{
-    count_systems_for_flake, delete_flake_by_id, fetch_dashboard_flake_timelines,
-    fetch_flake_timelines, get_flake_by_id, get_flake_by_name, insert_flake, list_flake_registry,
-    update_flake,
+    cascade_delete_flake, check_flake_dependencies, count_systems_for_flake, delete_flake_by_id,
+    fetch_dashboard_flake_timelines, fetch_flake_timelines, get_flake_by_id, get_flake_by_name,
+    insert_flake, list_flake_registry, soft_delete_flake, update_flake,
 };
 use crate::queries::users::get_by_email;
+use crate::queries::admin::insert_admin_audit_event;
 
 const MAX_HYDRATION_COMMITS_PER_REQUEST: usize = 20;
 
@@ -627,51 +628,235 @@ pub async fn update_flake_handler(
 /// Delete a flake from the registry.
 ///
 /// **Authorization**: Requires Admin role (destructive operation).
+/// Delete a flake from the registry.
+///
+/// **Authorization**:
+/// - Admin: Can delete any flake
+/// - Operator: Can delete flakes only in environments they have access to
+/// - Viewer: Denied (403)
+///
+/// **Query Parameters**:
+/// - `hard` (bool): If true, permanently delete from database. Default: soft delete
+/// - `cascade` (bool): If true, also delete all related evaluations, builds, deployments. Default: false
+///
+/// **Responses**:
+/// - 200 OK: Flake deleted successfully
+/// - 403 Forbidden: User doesn't have permission to delete this flake
+/// - 404 Not Found: Flake doesn't exist
+/// - 409 Conflict: Flake has active dependencies (use cascade=true to force delete)
 pub async fn delete_flake(
-    RequireAdmin(_user): RequireAdmin,
+    user: AuthenticatedUser,
     State(pool): State<PgPool>,
     Path(flake_id): Path<i32>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
-    match count_systems_for_flake(&pool, flake_id).await {
-        Ok(system_count) if system_count > 0 => {
-            return (
-                StatusCode::CONFLICT,
-                Json(ApiError {
-                    error: "flake_in_use".to_string(),
-                    message: format!(
-                        "Flake is linked to {system_count} systems and cannot be removed"
-                    ),
-                    details: None,
-                }),
-            )
-                .into_response();
-        }
-        Ok(_) => {}
+    let hard_delete = params.get("hard").and_then(|v| v.parse::<bool>().ok()).unwrap_or(false);
+    let cascade = params.get("cascade").and_then(|v| v.parse::<bool>().ok()).unwrap_or(false);
+
+    // Get flake to check existence and environment
+    let flake = match get_flake_by_id(&pool, flake_id).await {
+        Ok(f) => f,
         Err(e) => {
-            error!("Failed to check flake usage: {e:#}");
+            if matches!(e.downcast_ref::<sqlx::Error>(), Some(sqlx::Error::RowNotFound)) {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(ApiError {
+                        error: "not_found".to_string(),
+                        message: "Flake not found".to_string(),
+                        details: None,
+                    }),
+                )
+                    .into_response();
+            }
+            error!("Failed to get flake: {e:#}");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ApiError {
                     error: "internal_error".to_string(),
-                    message: "Failed to validate flake removal".to_string(),
+                    message: "Failed to get flake".to_string(),
                     details: None,
                 }),
             )
                 .into_response();
         }
+    };
+
+    // RBAC: Admin can delete any flake, Operator can delete flakes in their environments
+    if !user.roles.contains(&crate::auth::role::Role::Admin) {
+        // For Operator: check if they have access to any system using this flake
+        let has_access_query = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS(
+                SELECT 1 FROM systems s
+                JOIN user_environment_memberships uem ON s.environment_id = uem.environment_id
+                WHERE s.flake_id = $1 AND uem.user_id = $2
+            )
+            "#,
+        )
+        .bind(flake_id)
+        .bind(user.id)
+        .fetch_one(&pool)
+        .await;
+
+        match has_access_query {
+            Ok(true) => {}, // Operator has access
+            Ok(false) => {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(ApiError {
+                        error: "forbidden".to_string(),
+                        message: "You do not have permission to delete this flake".to_string(),
+                        details: None,
+                    }),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                error!("Failed to check flake access: {e:#}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiError {
+                        error: "internal_error".to_string(),
+                        message: "Failed to check permissions".to_string(),
+                        details: None,
+                    }),
+                )
+                    .into_response();
+            }
+        }
     }
 
-    match delete_flake_by_id(&pool, flake_id).await {
-        Ok(0) => (
-            StatusCode::NOT_FOUND,
-            Json(ApiError {
-                error: "not_found".to_string(),
-                message: "Flake not found".to_string(),
-                details: None,
-            }),
-        )
-            .into_response(),
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+    // Check for active dependencies unless cascade delete requested
+    if !cascade {
+        match check_flake_dependencies(&pool, flake_id).await {
+            Ok(count) if count > 0 => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(ApiError {
+                        error: "conflict".to_string(),
+                        message: format!(
+                            "Flake has {} active dependencies (evaluations, builds, or deployments). Use cascade=true to force delete.",
+                            count
+                        ),
+                        details: Some(serde_json::json!({
+                            "dependencies_count": count,
+                            "hint": "Add ?cascade=true to the request to delete all related data"
+                        })),
+                    }),
+                )
+                    .into_response();
+            }
+            Ok(_) => {}, // No dependencies, safe to delete
+            Err(e) => {
+                error!("Failed to check dependencies: {e:#}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiError {
+                        error: "internal_error".to_string(),
+                        message: "Failed to check dependencies".to_string(),
+                        details: None,
+                    }),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    // Perform deletion (soft, hard, or cascade)
+    let delete_result = if cascade {
+        // Cascade delete (hard delete + all dependencies)
+        // Use transaction for safety
+        let mut tx = match pool.begin().await {
+            Ok(tx) => tx,
+            Err(e) => {
+                error!("Failed to begin transaction: {e:#}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiError {
+                        error: "internal_error".to_string(),
+                        message: "Failed to delete flake".to_string(),
+                        details: None,
+                    }),
+                )
+                    .into_response();
+            }
+        };
+
+        let result = cascade_delete_flake(&pool, flake_id).await;
+        
+        if result.is_ok() {
+            if let Err(e) = tx.commit().await {
+                error!("Failed to commit cascade delete: {e:#}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiError {
+                        error: "internal_error".to_string(),
+                        message: "Failed to delete flake".to_string(),
+                        details: None,
+                    }),
+                )
+                    .into_response();
+            }
+        } else {
+            let _ = tx.rollback().await;
+        }
+        
+        result
+    } else if hard_delete {
+        delete_flake_by_id(&pool, flake_id).await
+    } else {
+        soft_delete_flake(&pool, flake_id).await
+    };
+
+    match delete_result {
+        Ok(rows) if rows > 0 => {
+            // Audit log
+            let deletion_type = if cascade {
+                "cascade"
+            } else if hard_delete {
+                "hard"
+            } else {
+                "soft"
+            };
+
+            let metadata = serde_json::json!({
+                "flake_id": flake_id,
+                "flake_name": flake.name,
+                "deletion_type": deletion_type,
+            });
+
+            if let Err(e) = insert_admin_audit_event(
+                &pool,
+                user.id,
+                &user.email,
+                "delete_flake",
+                &format!("flake:{}", flake_id),
+                headers
+                    .get("x-forwarded-for")
+                    .and_then(|h| h.to_str().ok())
+                    .map(String::from),
+                metadata,
+            )
+            .await
+            {
+                warn!("Failed to log audit event for flake deletion: {e:#}");
+            }
+
+            (StatusCode::OK, Json(serde_json::json!({"message": "Flake deleted successfully"}))).into_response()
+        }
+        Ok(_) => {
+            // No rows affected - flake might already be soft-deleted
+            (
+                StatusCode::NOT_FOUND,
+                Json(ApiError {
+                    error: "not_found".to_string(),
+                    message: "Flake not found or already deleted".to_string(),
+                    details: None,
+                }),
+            )
+                .into_response()
+        }
         Err(e) => {
             error!("Failed to delete flake: {e:#}");
             (

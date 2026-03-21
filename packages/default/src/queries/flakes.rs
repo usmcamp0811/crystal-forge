@@ -85,7 +85,7 @@ pub async fn get_all_flakes_from_db(
     pool: &PgPool,
     config: &FlakeConfig,
 ) -> Result<Vec<WatchedFlake>> {
-    let rows = sqlx::query!("SELECT name, repo_url, branch FROM flakes")
+    let rows = sqlx::query!("SELECT name, repo_url, branch FROM flakes WHERE deleted_at IS NULL")
         .fetch_all(pool)
         .await?;
 
@@ -143,6 +143,7 @@ pub async fn list_flake_registry(pool: &PgPool) -> Result<Vec<FlakeRegistryItem>
             COUNT(s.id)::bigint AS system_count
         FROM flakes f
         LEFT JOIN systems s ON s.flake_id = f.id
+        WHERE f.deleted_at IS NULL
         GROUP BY f.id, f.name, f.repo_url, f.branch
         ORDER BY lower(f.name) ASC
         "#,
@@ -188,6 +189,77 @@ pub async fn delete_flake_by_id(pool: &PgPool, flake_id: i32) -> Result<u64> {
     Ok(result.rows_affected())
 }
 
+/// Soft delete a flake by setting deleted_at timestamp.
+/// The flake will be excluded from normal queries but retained for audit.
+pub async fn soft_delete_flake(pool: &PgPool, flake_id: i32) -> Result<u64> {
+    let result = sqlx::query(
+        "UPDATE flakes SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL"
+    )
+    .bind(flake_id)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected())
+}
+
+/// Check if flake has active dependencies (pending/in-progress evaluations, builds, or deployments).
+/// Returns count of blocking dependencies.
+pub async fn check_flake_dependencies(pool: &PgPool, flake_id: i32) -> Result<i64> {
+    let count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::bigint
+        FROM (
+            -- Active evaluations
+            SELECT 1 FROM commits c
+            JOIN evaluations e ON e.commit_id = c.id
+            WHERE c.flake_id = $1
+              AND e.status IN ('pending', 'in_progress')
+            
+            UNION ALL
+            
+            -- Active builds
+            SELECT 1 FROM commits c
+            JOIN derivations d ON d.commit_id = c.id
+            JOIN build_queue bq ON bq.derivation_id = d.id
+            WHERE c.flake_id = $1
+              AND bq.status IN ('pending', 'in_progress')
+            
+            UNION ALL
+            
+            -- Active deployments (systems using this flake)
+            SELECT 1 FROM systems s
+            WHERE s.flake_id = $1
+              AND s.enabled = true
+        ) AS dependencies
+        "#,
+    )
+    .bind(flake_id)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(count)
+}
+
+/// Cascade delete a flake and all related data (evaluations, builds, deployments).
+/// This is a hard delete that permanently removes all traces.
+/// MUST be run in a transaction for safety.
+pub async fn cascade_delete_flake(pool: &PgPool, flake_id: i32) -> Result<u64> {
+    // Note: ON DELETE CASCADE on commits FK will handle most cleanup
+    // But we explicitly delete systems first to be safe
+    sqlx::query("DELETE FROM systems WHERE flake_id = $1")
+        .bind(flake_id)
+        .execute(pool)
+        .await?;
+    
+    // Delete the flake (commits, evaluations, builds cascade automatically)
+    let result = sqlx::query("DELETE FROM flakes WHERE id = $1")
+        .bind(flake_id)
+        .execute(pool)
+        .await?;
+
+    Ok(result.rows_affected())
+}
+
 /// Fetch flake timelines for dashboard view (CF system deployment counts).
 ///
 /// Returns up to `max_commits_per_flake` most recent commits for each flake,
@@ -197,7 +269,7 @@ pub async fn fetch_dashboard_flake_timelines(
     max_commits_per_flake: i64,
 ) -> Result<Vec<FlakeTimeline>> {
     let flakes = sqlx::query_as::<_, (i32, String, String)>(
-        "SELECT id, name, repo_url FROM flakes ORDER BY name ASC",
+        "SELECT id, name, repo_url FROM flakes WHERE deleted_at IS NULL ORDER BY name ASC",
     )
     .fetch_all(pool)
     .await?;
@@ -339,7 +411,7 @@ pub async fn fetch_flake_timelines(
 ) -> Result<Vec<FlakeTimeline>> {
     // First, get all flakes
     let flakes = sqlx::query_as::<_, (i32, String, String)>(
-        "SELECT id, name, repo_url FROM flakes ORDER BY name ASC",
+        "SELECT id, name, repo_url FROM flakes WHERE deleted_at IS NULL ORDER BY name ASC",
     )
     .fetch_all(pool)
     .await?;
