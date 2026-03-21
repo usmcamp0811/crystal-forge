@@ -691,28 +691,38 @@ pub async fn delete_flake(
         }
     };
 
-    // RBAC: Admin can delete any flake, Operator can delete flakes in their environments
+    // RBAC: Admin can delete any flake, Operator can delete flakes ONLY if they have
+    // access to ALL environments where this flake is used
     if !user.is_admin() {
-        // For Operator: check if they have access to any environment where this flake
-        // has been used (either currently via systems.flake_id, or historically via
-        // commits/derivations that targeted systems in their environments)
-        let has_access_query = sqlx::query_scalar::<_, bool>(
+        // For Operator: verify they have access to ALL environments using this flake.
+        // This prevents scope leak where an operator with access to one environment
+        // could delete a flake also used by other environments they don't control.
+        let rbac_check = sqlx::query_scalar::<_, bool>(
             r#"
-            SELECT EXISTS(
-                -- Check current system references
+            SELECT NOT EXISTS(
+                -- Find systems using this flake in environments the operator does NOT have access to
                 SELECT 1 FROM systems s
-                JOIN user_environment_memberships uem ON s.environment_id = uem.environment_id
-                WHERE s.flake_id = $1 AND uem.user_id = $2
+                WHERE s.flake_id = $1
+                  AND s.environment_id IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM user_environment_memberships uem
+                      WHERE uem.environment_id = s.environment_id
+                        AND uem.user_id = $2
+                  )
                 
                 UNION
                 
-                -- Check historical evaluations: commits from this flake evaluated for
-                -- systems in operator's environments
+                -- Also check historical derivations targeting systems in inaccessible environments
                 SELECT 1 FROM commits c
                 JOIN derivations d ON d.commit_id = c.id
                 JOIN systems s ON s.id::text = d.target_id
-                JOIN user_environment_memberships uem ON s.environment_id = uem.environment_id
-                WHERE c.flake_id = $1 AND uem.user_id = $2
+                WHERE c.flake_id = $1
+                  AND s.environment_id IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM user_environment_memberships uem
+                      WHERE uem.environment_id = s.environment_id
+                        AND uem.user_id = $2
+                  )
             )
             "#,
         )
@@ -721,14 +731,14 @@ pub async fn delete_flake(
         .fetch_one(&pool)
         .await;
 
-        match has_access_query {
-            Ok(true) => {} // Operator has access
+        match rbac_check {
+            Ok(true) => {} // Operator has access to ALL environments using this flake
             Ok(false) => {
                 return (
                     StatusCode::FORBIDDEN,
                     Json(ApiError {
                         error: "forbidden".to_string(),
-                        message: "You do not have permission to delete this flake. You can only delete flakes used in environments you have access to.".to_string(),
+                        message: "You do not have permission to delete this flake. This flake is used in environments you do not have access to.".to_string(),
                         details: None,
                     }),
                 )

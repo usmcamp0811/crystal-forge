@@ -5,8 +5,10 @@
 ALTER TABLE flakes
 ADD COLUMN deleted_at TIMESTAMPTZ NULL;
 
--- Add index for filtering out deleted flakes in queries
-CREATE INDEX idx_flakes_deleted_at ON flakes(deleted_at);
+-- Add partial index for active flakes (the common query path)
+-- This index only covers rows where deleted_at IS NULL, which is much more
+-- efficient than indexing all rows including deleted ones
+CREATE INDEX idx_flakes_active ON flakes(id, name, repo_url) WHERE deleted_at IS NULL;
 
 -- Comment explaining the soft delete pattern
 COMMENT ON COLUMN flakes.deleted_at IS 'Timestamp when flake was soft-deleted. NULL means active, non-NULL means deleted.';
