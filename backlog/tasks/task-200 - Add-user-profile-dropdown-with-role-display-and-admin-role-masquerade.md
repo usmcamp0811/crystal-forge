@@ -163,3 +163,28 @@ None
 LOCK: Claude on reckless in /home/mcamp/code/crystal-forge/TASK-200-user-profile-dropdown
 
 Task moved to In Progress. Creating dedicated worktree.
+
+## Implementation Summary
+
+Implemented full admin role masquerade feature:
+
+1. **State Management**: Added `masquerade_role: Option<Role>` to AppState
+2. **Auth Helpers**: Created `get_effective_role()` and updated all auth helper functions to respect masquerade
+3. **TopBar UI**: Added role selector dropdown for Admins, visual banner when masquerading, and current role badge
+4. **API Integration**: Added `X-Masquerade-Role` HTTP header to all requests when masquerading
+5. **View Updates**: Updated all 12 usages of auth helpers across views and components to pass masquerade_role
+6. **Testing**: Added masquerade-specific unit tests to verify behavior
+
+Commit: facc3366
+
+## Manual Testing Required
+
+Need to verify:
+- Start server-stack and login as Admin
+- Profile dropdown appears with role selector
+- Selecting "View as Operator" shows banner and hides admin-only UI elements  
+- Selecting "View as Viewer" further restricts UI
+- "Return to Admin" restores full access
+- Page refresh clears masquerade state
+- API calls include X-Masquerade-Role header (check dev tools)
+- Non-admin users don't see masquerade controls
