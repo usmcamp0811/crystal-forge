@@ -1,7 +1,7 @@
 ---
 id: TASK-200
 title: Add user profile dropdown with role display and admin role masquerade
-status: In Progress
+status: Review
 assignee:
   - Claude
 created_date: '2026-03-20 13:40'
@@ -188,3 +188,5 @@ Need to verify:
 - Page refresh clears masquerade state
 - API calls include X-Masquerade-Role header (check dev tools)
 - Non-admin users don't see masquerade controls
+
+**MR**: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/177
