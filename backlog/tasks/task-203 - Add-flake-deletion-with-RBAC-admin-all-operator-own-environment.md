@@ -1,7 +1,7 @@
 ---
 id: TASK-203
 title: Add flake deletion with RBAC - admin all, operator own environment
-status: In Progress
+status: Review
 assignee:
   - Claude
 created_date: '2026-03-20 13:40'
@@ -211,3 +211,34 @@ None
 LOCK: Claude on reckless in /home/mcamp/code/crystal-forge/TASK-203-flake-deletion-rbac
 
 Task moved to In Progress. Creating dedicated worktree.
+
+## Implementation Complete
+
+**Backend** (Commit: 51d3de20)
+- Migration 0098: added deleted_at column with index
+- Query functions: soft_delete, check_dependencies, cascade_delete
+- Updated all flake queries to filter deleted_at IS NULL
+- DELETE handler with full RBAC enforcement
+- Audit logging for all deletions
+- Transaction safety for cascade deletes
+
+**Frontend** (Commit: 0072df0d)
+- Enhanced RemoveFlakeDialog with soft/hard/cascade options
+- Multi-step confirmation with DELETE text input for hard delete
+- Dependency warnings and visual indicators
+- Updated client to pass hard and cascade params
+
+**MR**: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/178
+
+## Manual Testing Needed
+
+- [ ] Soft delete flake (verify deleted_at set, excluded from list)
+- [ ] Hard delete flake (verify permanent removal)
+- [ ] Cascade delete with dependencies (verify all related data deleted)
+- [ ] RBAC: Admin can delete any flake
+- [ ] RBAC: Operator can delete flakes in their environments only
+- [ ] RBAC: Viewer gets 403 Forbidden
+- [ ] Audit log entries created correctly
+- [ ] UI: Delete button visibility based on role
+- [ ] UI: Hard delete requires typing DELETE
+- [ ] UI: Cascade checkbox appears when dependencies exist
