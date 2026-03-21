@@ -1291,7 +1291,8 @@ mod tests {
     #[cfg(test)]
     mod delete_tests {
         use super::*;
-        use crate::queries::flakes::{insert_flake, get_flake_by_id, soft_delete_flake, delete_flake_by_id};
+        use crate::models::flakes::Flake;
+        use crate::queries::flakes::{insert_flake, get_flake_by_id, soft_delete_flake, delete_flake_by_id, check_flake_dependencies, cascade_delete_flake};
         use sqlx::PgPool;
 
         async fn setup_test_flake(pool: &PgPool) -> Flake {
