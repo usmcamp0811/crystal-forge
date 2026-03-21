@@ -1,7 +1,7 @@
 ---
 id: TASK-198
 title: Fix web-ui wasm-bindgen-cli version mismatch breaking crystal-forge builds
-status: Review
+status: Done
 assignee:
   - OpenCode
 created_date: '2026-03-20 02:58'
@@ -80,4 +80,6 @@ Created main-based cherry-pick branch `TASK-198-main-cherry-pick` from `main` an
 Opened replacement main MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/175
 
 Closed superseded main MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/174
+
+**COMPLETED:** MR !173 merged to dev (commit 69b99878). Worktree cleaned up. Task moved to Done.
 <!-- SECTION:NOTES:END -->
