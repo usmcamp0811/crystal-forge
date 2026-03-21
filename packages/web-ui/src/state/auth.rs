@@ -1,9 +1,14 @@
 //! Authentication state helpers and role checking utilities.
 //!
 //! This module separates three concerns:
-//! 1. Authorization (real role only - never affected by masquerade)
-//! 2. UI Display (masquerade-aware - for rendering preview)
-//! 3. User info (display names, etc.)
+//! 1. **Authorization** (real role only - never affected by masquerade)
+//!    - Route guards, mutation permissions
+//!    - Admin masquerading as Viewer can still access ALL routes and perform ALL mutations
+//! 2. **UI Display** (masquerade-aware - for chrome/element visibility preview ONLY)
+//!    - Show/hide buttons, cards, info sections based on display role
+//!    - Does NOT affect route access or mutation capability
+//!    - Masquerade is a UI preview feature, not a full role simulation
+//! 3. **User info** (display names, etc.)
 
 use crate::api::models::{AuthContext, Role};
 
