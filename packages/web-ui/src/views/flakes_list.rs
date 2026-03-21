@@ -952,20 +952,13 @@ fn FlakesTable(
                                                     },
                                                     "Edit"
                                                 }
-                                                if flake.system_count > 0 {
-                                                    span {
-                                                        class: "text-xs text-gray-500",
-                                                        "In Use"
-                                                    }
-                                                } else {
-                                                    button {
-                                                        class: "text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors",
-                                                        onclick: move |evt| {
-                                                            evt.stop_propagation();
-                                                            on_remove.call(flake.id)
-                                                        },
-                                                        "Remove"
-                                                    }
+                                                button {
+                                                    class: "text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors",
+                                                    onclick: move |evt| {
+                                                        evt.stop_propagation();
+                                                        on_remove.call(flake.id)
+                                                    },
+                                                    "Remove"
                                                 }
                                             }
                                         }
