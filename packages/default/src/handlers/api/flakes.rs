@@ -683,7 +683,7 @@ pub async fn delete_flake(
     };
 
     // RBAC: Admin can delete any flake, Operator can delete flakes in their environments
-    if !user.roles.contains(&crate::auth::role::Role::Admin) {
+    if !user.is_admin() {
         // For Operator: check if they have access to any system using this flake
         let has_access_query = sqlx::query_scalar::<_, bool>(
             r#"
@@ -695,7 +695,7 @@ pub async fn delete_flake(
             "#,
         )
         .bind(flake_id)
-        .bind(user.id)
+        .bind(user.user_id)
         .fetch_one(&pool)
         .await;
 
@@ -828,8 +828,8 @@ pub async fn delete_flake(
 
             if let Err(e) = insert_admin_audit_event(
                 &pool,
-                user.id,
-                &user.email,
+                user.user_id,
+                &user.user_id.to_string(),
                 "delete_flake",
                 &format!("flake:{}", flake_id),
                 headers
