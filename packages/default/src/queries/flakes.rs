@@ -32,23 +32,21 @@ pub async fn insert_flake(
 }
 
 pub async fn get_flake_by_name(pool: &PgPool, name: &str) -> Result<Flake> {
-    let commit = sqlx::query_as::<_, Flake>(
-        "SELECT * FROM flakes WHERE name = $1 AND deleted_at IS NULL",
-    )
-    .bind(name)
-    .fetch_one(pool)
-    .await?;
+    let commit =
+        sqlx::query_as::<_, Flake>("SELECT * FROM flakes WHERE name = $1 AND deleted_at IS NULL")
+            .bind(name)
+            .fetch_one(pool)
+            .await?;
 
     Ok(commit)
 }
 
 pub async fn get_flake_by_id(pool: &PgPool, id: i32) -> Result<Flake> {
-    let commit = sqlx::query_as::<_, Flake>(
-        "SELECT * FROM flakes WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(id)
-    .fetch_one(pool)
-    .await?;
+    let commit =
+        sqlx::query_as::<_, Flake>("SELECT * FROM flakes WHERE id = $1 AND deleted_at IS NULL")
+            .bind(id)
+            .fetch_one(pool)
+            .await?;
 
     Ok(commit)
 }
@@ -215,7 +213,7 @@ pub async fn soft_delete_flake(pool: &PgPool, flake_id: i32) -> Result<u64> {
 /// Returns count of blocking dependencies.
 pub async fn check_flake_dependencies(pool: &PgPool, flake_id: i32) -> Result<i64> {
     // Check if any active systems are using this flake
-    // 
+    //
     // NOTE: The 'evaluations' and 'build_queue' tables are planned features
     // but not yet implemented. When they are added, expand this check to include:
     // - Active evaluations (evaluations.status IN ('pending', 'in_progress'))
