@@ -649,7 +649,7 @@ pub fn FlakesListView() -> Element {
                             },
                             on_remove: move |id| remove_flake_by_id(flakes, pending_remove, id),
                             on_edit: move |id| start_edit_flake(flakes, editing_flake, edit_error, id),
-                            on_refresh: move |id| refresh_flake_by_id(id, refreshing_flake),
+                            on_refresh: move |id| refresh_flake_by_id(id, refreshing_flake, sync_note),
                         }
                     }
                 }
@@ -663,7 +663,7 @@ pub fn FlakesListView() -> Element {
                     },
                     on_remove: move |id| remove_flake_by_id(flakes, pending_remove, id),
                     on_edit: move |id| start_edit_flake(flakes, editing_flake, edit_error, id),
-                    on_refresh: move |id| refresh_flake_by_id(id, refreshing_flake),
+                    on_refresh: move |id| refresh_flake_by_id(id, refreshing_flake, sync_note),
                 }
             }
 
@@ -2168,19 +2168,18 @@ fn start_edit_flake(
     }
 }
 
-fn refresh_flake_by_id(flake_id: i32, mut refreshing_flake: Signal<Option<i32>>) {
+fn refresh_flake_by_id(flake_id: i32, mut refreshing_flake: Signal<Option<i32>>, mut sync_note: Signal<Option<String>>) {
     use crate::api::client::refresh_flake;
-    use crate::components::notifications::toast;
 
     refreshing_flake.set(Some(flake_id));
     spawn(async move {
         match refresh_flake(flake_id).await {
             Ok(()) => {
-                toast::success("Flake cache refreshed successfully");
+                sync_note.set(Some("✅ Flake cache refreshed successfully".to_string()));
                 refreshing_flake.set(None);
             }
             Err(e) => {
-                toast::error(&format!("Failed to refresh flake: {}", e));
+                sync_note.set(Some(format!("❌ Failed to refresh flake: {}", e)));
                 refreshing_flake.set(None);
             }
         }

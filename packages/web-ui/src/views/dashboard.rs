@@ -648,7 +648,6 @@ pub fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                     build_status: Some(BuildStatus::Building),
                     evaluation_status: None,
                     evaluation_error_message: None,
-                    evaluation_error_message: None,
                 },
                 FlakeCommit {
                     id: 2,
