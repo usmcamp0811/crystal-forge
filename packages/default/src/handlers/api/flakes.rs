@@ -1302,7 +1302,10 @@ mod tests {
     mod delete_tests {
         use super::*;
         use crate::models::flakes::Flake;
-        use crate::queries::flakes::{insert_flake, get_flake_by_id, soft_delete_flake, delete_flake_by_id, check_flake_dependencies, cascade_delete_flake};
+        use crate::queries::flakes::{
+            cascade_delete_flake, check_flake_dependencies, delete_flake_by_id, get_flake_by_id,
+            insert_flake, soft_delete_flake,
+        };
         use sqlx::PgPool;
 
         async fn setup_test_flake(pool: &PgPool) -> Flake {
@@ -1328,7 +1331,7 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .expect("Should find flake in raw query");
-            
+
             assert!(result.deleted_at.is_some(), "deleted_at should be set");
         }
 
@@ -1342,7 +1345,10 @@ mod tests {
 
             // get_flake_by_id should now fail
             let result = get_flake_by_id(&pool, flake.id).await;
-            assert!(result.is_err(), "get_flake_by_id should not find soft-deleted flake");
+            assert!(
+                result.is_err(),
+                "get_flake_by_id should not find soft-deleted flake"
+            );
         }
 
         #[sqlx::test]
@@ -1376,7 +1382,7 @@ mod tests {
                 .fetch_optional(&pool)
                 .await
                 .expect("Query should succeed");
-            
+
             assert!(result.is_none(), "Flake should be permanently deleted");
         }
 
@@ -1395,8 +1401,11 @@ mod tests {
                 .expect("Re-insert should succeed");
 
             // Verify deleted_at is cleared
-            assert!(resurrected.deleted_at.is_none(), "deleted_at should be cleared on resurrection");
-            
+            assert!(
+                resurrected.deleted_at.is_none(),
+                "deleted_at should be cleared on resurrection"
+            );
+
             // Verify it's now visible via get_by_id
             let fetched = get_flake_by_id(&pool, resurrected.id).await;
             assert!(fetched.is_ok(), "Resurrected flake should be visible");
@@ -1406,7 +1415,7 @@ mod tests {
         #[ignore = "requires live database connection"]
         async fn test_check_dependencies_counts_systems(pool: PgPool) {
             let flake = setup_test_flake(&pool).await;
-            
+
             // Create a test environment
             let env_id = sqlx::query_scalar::<_, uuid::Uuid>(
                 "INSERT INTO environments (name, description, color_hex) VALUES ($1, $2, $3) RETURNING id"
@@ -1421,7 +1430,7 @@ mod tests {
             // Create a system using this flake
             sqlx::query(
                 "INSERT INTO systems (id, name, hostname, environment_id, flake_id, enabled) 
-                 VALUES ($1, $2, $3, $4, $5, $6)"
+                 VALUES ($1, $2, $3, $4, $5, $6)",
             )
             .bind(uuid::Uuid::new_v4())
             .bind("test-system")
@@ -1437,7 +1446,7 @@ mod tests {
             let count = check_flake_dependencies(&pool, flake.id)
                 .await
                 .expect("check_dependencies should succeed");
-            
+
             assert_eq!(count, 1, "Should count the system as a dependency");
         }
 
@@ -1445,7 +1454,7 @@ mod tests {
         #[ignore = "requires live database connection"]
         async fn test_cascade_delete_within_transaction(pool: PgPool) {
             let flake = setup_test_flake(&pool).await;
-            
+
             // Create test data
             let env_id = sqlx::query_scalar::<_, uuid::Uuid>(
                 "INSERT INTO environments (name, description, color_hex) VALUES ($1, $2, $3) RETURNING id"
@@ -1460,7 +1469,7 @@ mod tests {
             let system_id = uuid::Uuid::new_v4();
             sqlx::query(
                 "INSERT INTO systems (id, name, hostname, environment_id, flake_id, enabled) 
-                 VALUES ($1, $2, $3, $4, $5, $6)"
+                 VALUES ($1, $2, $3, $4, $5, $6)",
             )
             .bind(system_id)
             .bind("test-system")
@@ -1490,13 +1499,12 @@ mod tests {
             assert!(flake_result.is_none());
 
             // Verify system is gone
-            let system_result = sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM systems WHERE id = $1"
-            )
-            .bind(system_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+            let system_result =
+                sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM systems WHERE id = $1")
+                    .bind(system_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
             assert_eq!(system_result, 0);
         }
 
@@ -1504,7 +1512,7 @@ mod tests {
         #[ignore = "requires live database connection"]
         async fn test_cascade_delete_rollback_on_error(pool: PgPool) {
             let flake = setup_test_flake(&pool).await;
-            
+
             // Create test system
             let env_id = sqlx::query_scalar::<_, uuid::Uuid>(
                 "INSERT INTO environments (name, description, color_hex) VALUES ($1, $2, $3) RETURNING id"
@@ -1518,7 +1526,7 @@ mod tests {
 
             sqlx::query(
                 "INSERT INTO systems (id, name, hostname, environment_id, flake_id, enabled) 
-                 VALUES ($1, $2, $3, $4, $5, $6)"
+                 VALUES ($1, $2, $3, $4, $5, $6)",
             )
             .bind(uuid::Uuid::new_v4())
             .bind("test-system")
@@ -1532,14 +1540,17 @@ mod tests {
 
             // Begin transaction
             let mut tx = pool.begin().await.expect("Failed to begin transaction");
-            
+
             // Do cascade delete but rollback
             let _result = cascade_delete_flake(&mut tx, flake.id).await;
             tx.rollback().await.expect("Failed to rollback");
 
             // Verify flake still exists
             let flake_result = get_flake_by_id(&pool, flake.id).await;
-            assert!(flake_result.is_ok(), "Flake should still exist after rollback");
+            assert!(
+                flake_result.is_ok(),
+                "Flake should still exist after rollback"
+            );
         }
     }
 }
