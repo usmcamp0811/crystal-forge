@@ -1,11 +1,12 @@
 # TASK-210: Fix flake deletion fails due to missing evaluations table
 
-**Status:** Review  
+**Status:** Done  
 **Priority:** High  
 **Risk:** Low  
 **Effort:** Small (30 minutes - 1 hour)
 
-**MR:** https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/182
+**MR:** https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/182 (merged)
+**Resolution:** Fixed by simplifying check_flake_dependencies() to only check systems table. Removed references to non-existent evaluations and build_queue tables.
 
 ## Problem
 

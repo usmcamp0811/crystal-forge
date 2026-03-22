@@ -1,9 +1,12 @@
 # TASK-208: Fix builder UI generates private keys in hex instead of base64
 
-**Status:** Backlog  
+**Status:** Done  
 **Priority:** High  
 **Risk:** Medium  
 **Effort:** Small (2-4 hours)
+
+**MR:** https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/181 (merged)
+**Resolution:** Fixed keypair_generator.rs to encode private keys as base64 instead of hex. Also updated public keys to base64 to match server API format.
 
 ## Problem
 
