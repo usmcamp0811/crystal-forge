@@ -506,3 +506,35 @@ pub async fn get_flake_id_by_name(pool: &PgPool, name: &str) -> Result<Option<i3
         .await?;
     Ok(id)
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn hotfix_migration_updates_system_list_view_heartbeat_ordering() {
+        let migration = include_str!(
+            "../../migrations/0099_fix_system_health_views_latest_heartbeat_null_order.sql"
+        );
+
+        assert!(
+            migration.contains("CREATE OR REPLACE VIEW public.view_system_list AS")
+                && migration.contains("ORDER BY s.id, ah.timestamp DESC NULLS LAST"),
+            "hotfix migration must update system list view to prefer non-null heartbeat rows"
+        );
+    }
+
+    #[test]
+    fn hotfix_migration_updates_system_detail_view_heartbeat_ordering() {
+        let migration = include_str!(
+            "../../migrations/0099_fix_system_health_views_latest_heartbeat_null_order.sql"
+        );
+
+        assert!(
+            migration.contains("CREATE OR REPLACE VIEW public.view_system_detail AS")
+                && migration
+                    .matches("ORDER BY s.id, ah.timestamp DESC NULLS LAST")
+                    .count()
+                    >= 2,
+            "hotfix migration must update system detail view to prefer non-null heartbeat rows"
+        );
+    }
+}
