@@ -1,9 +1,11 @@
 # TASK-209: Fix cache creation failing with HTTP 500 error
 
-**Status:** To Do  
+**Status:** Done  
 **Priority:** High  
 **Risk:** High  
 **Effort:** Small (1-2 hours) - **Root cause confirmed, fix is straightforward**
+
+**Resolution:** Fixed in FMF flake commit c0179545e. Added Vault-backed cache encryption key support. Cache creation now works successfully.
 
 ---
 
