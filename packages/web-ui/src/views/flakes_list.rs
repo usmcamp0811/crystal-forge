@@ -183,6 +183,7 @@ struct FlakeHistoryCommit {
     systems: Vec<String>,
     build_status: Option<ApiBuildStatus>,
     evaluation_status: Option<String>,
+    evaluation_error_message: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -296,6 +297,7 @@ pub fn FlakesListView() -> Element {
     let mut pending_remove = use_signal(|| None::<FlakeListItem>);
     let mut editing_flake = use_signal(|| None::<EditFlakeDraft>);
     let mut edit_error = use_signal(|| None::<String>);
+    let mut refreshing_flake = use_signal(|| None::<i32>);
     let mut selected_history_flake = use_signal(|| None::<i32>);
     let mut selected_history_commit = use_signal(|| None::<String>);
     let mut sync_note = use_signal(|| None::<String>);
@@ -647,6 +649,7 @@ pub fn FlakesListView() -> Element {
                             },
                             on_remove: move |id| remove_flake_by_id(flakes, pending_remove, id),
                             on_edit: move |id| start_edit_flake(flakes, editing_flake, edit_error, id),
+                            on_refresh: move |id| refresh_flake_by_id(id, refreshing_flake, sync_note),
                         }
                     }
                 }
@@ -660,6 +663,7 @@ pub fn FlakesListView() -> Element {
                     },
                     on_remove: move |id| remove_flake_by_id(flakes, pending_remove, id),
                     on_edit: move |id| start_edit_flake(flakes, editing_flake, edit_error, id),
+                    on_refresh: move |id| refresh_flake_by_id(id, refreshing_flake, sync_note),
                 }
             }
 
@@ -821,6 +825,7 @@ fn FlakesTable(
     on_select_history_flake: EventHandler<i32>,
     on_remove: EventHandler<i32>,
     on_edit: EventHandler<i32>,
+    on_refresh: EventHandler<i32>,
 ) -> Element {
     let sort_column = use_signal(|| None::<SortColumn>);
     let sort_direction = use_signal(|| SortDirection::Asc);
@@ -953,6 +958,14 @@ fn FlakesTable(
                                                     "Edit"
                                                 }
                                                 button {
+                                                    class: "text-xs text-blue-400 hover:text-blue-300 px-2 py-1 rounded hover:bg-blue-500/10 transition-colors",
+                                                    onclick: move |evt| {
+                                                        evt.stop_propagation();
+                                                        on_refresh.call(flake.id)
+                                                    },
+                                                    "🔄"
+                                                }
+                                                button {
                                                     class: "text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors",
                                                     onclick: move |evt| {
                                                         evt.stop_propagation();
@@ -980,6 +993,7 @@ fn FlakeCard(
     on_select_history_flake: EventHandler<i32>,
     on_remove: EventHandler<i32>,
     on_edit: EventHandler<i32>,
+    on_refresh: EventHandler<i32>,
 ) -> Element {
     let latest_commit = latest_commit_label(&flake);
     let is_selected = selected_history_flake_id == Some(flake.id);
@@ -1065,6 +1079,14 @@ fn FlakeCard(
                                 on_edit.call(flake.id)
                             },
                             "Edit"
+                        }
+                        button {
+                            class: "text-xs text-blue-400 hover:text-blue-300 px-2 py-1 rounded hover:bg-blue-500/10 transition-colors",
+                            onclick: move |evt| {
+                                evt.stop_propagation();
+                                on_refresh.call(flake.id)
+                            },
+                            "🔄 Refresh"
                         }
                         button {
                             class: "text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors",
@@ -1366,6 +1388,13 @@ fn FlakeHistoryExplorer(
                                                                         class: "inline-flex items-center px-2.5 py-1 rounded border text-gray-100 leading-none cf-chip-slate",
                                                                         "{commit.author}"
                                                                     }
+                                                                    if commit.evaluation_error_message.is_some() {
+                                                                        span {
+                                                                            class: "px-1.5 py-0.5 rounded bg-red-500/30 text-red-300 text-[10px]",
+                                                                            title: "This commit has evaluation errors",
+                                                                            "❌ eval error"
+                                                                        }
+                                                                    }
                                                                     span {
                                                                         class: "text-[10px] text-gray-400",
                                                                         "{commit_time}"
@@ -1458,6 +1487,20 @@ fn FlakeHistoryExplorer(
                                                     }
                                                 }
                                                 span { class: "px-2 py-1 rounded bg-slate-700/70 text-slate-200", "{commit.systems.len()} configs" }
+                                            }
+                                            // Show evaluation error message if present
+                                            if let Some(error_msg) = commit.evaluation_error_message.as_ref() {
+                                                div {
+                                                    class: "mt-3 px-3 py-2 rounded border border-red-500/50 bg-red-900/20",
+                                                    p {
+                                                        class: "text-xs font-semibold text-red-300 mb-1",
+                                                        "❌ Evaluation Error"
+                                                    }
+                                                    pre {
+                                                        class: "text-xs text-red-200 font-mono whitespace-pre-wrap break-words max-h-48 overflow-y-auto",
+                                                        "{error_msg}"
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -2125,6 +2168,24 @@ fn start_edit_flake(
     }
 }
 
+fn refresh_flake_by_id(flake_id: i32, mut refreshing_flake: Signal<Option<i32>>, mut sync_note: Signal<Option<String>>) {
+    use crate::api::client::refresh_flake;
+
+    refreshing_flake.set(Some(flake_id));
+    spawn(async move {
+        match refresh_flake(flake_id).await {
+            Ok(()) => {
+                sync_note.set(Some("✅ Flake cache refreshed successfully".to_string()));
+                refreshing_flake.set(None);
+            }
+            Err(e) => {
+                sync_note.set(Some(format!("❌ Failed to refresh flake: {}", e)));
+                refreshing_flake.set(None);
+            }
+        }
+    });
+}
+
 fn validate_new_flake(draft: &NewFlakeDraft, existing: &[FlakeListItem]) -> Result<(), String> {
     let name = draft.name.trim();
     let repo_url = draft.repo_url.trim();
@@ -2733,6 +2794,7 @@ fn build_flake_history(timelines: &[FlakeTimeline]) -> HashMap<i32, Vec<FlakeHis
                     systems: commit.systems.clone(),
                     build_status: commit.build_status.clone(),
                     evaluation_status: commit.evaluation_status.clone(),
+                    evaluation_error_message: commit.evaluation_error_message.clone(),
                 }
             })
             .collect();

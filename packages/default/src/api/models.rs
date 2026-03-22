@@ -482,6 +482,9 @@ pub struct FlakeCommit {
     pub build_status: Option<BuildStatus>,
     #[serde(default)]
     pub evaluation_status: Option<String>,
+    /// Error message if evaluation failed.
+    #[serde(default)]
+    pub evaluation_error_message: Option<String>,
 }
 
 /// Response containing the git diff for a specific commit.

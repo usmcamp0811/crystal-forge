@@ -909,6 +909,77 @@ pub async fn delete_flake(
     }
 }
 
+/// Refresh a flake's cached git repository.
+///
+/// This forces Nix to re-fetch the flake from the remote repository, clearing any
+/// stale cached references. Useful when a flake repository has been force-pushed
+/// or its git history has been rewritten.
+///
+/// **Authorization**: Requires Operator or Admin role.
+pub async fn refresh_flake(
+    RequireOperator(_user): RequireOperator,
+    State(pool): State<PgPool>,
+    Path(flake_id): Path<i32>,
+) -> impl IntoResponse {
+    use crate::flake::eval::refresh_flake_cache;
+
+    // Get flake details
+    let flake = match get_flake_by_id(&pool, flake_id).await {
+        Ok(f) => f,
+        Err(e) => {
+            if matches!(
+                e.downcast_ref::<sqlx::Error>(),
+                Some(sqlx::Error::RowNotFound)
+            ) {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(ApiError {
+                        error: "not_found".to_string(),
+                        message: "Flake not found".to_string(),
+                        details: None,
+                    }),
+                )
+                    .into_response();
+            }
+            error!("Failed to get flake: {e:#}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    error: "internal_error".to_string(),
+                    message: "Failed to get flake".to_string(),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    // Refresh the flake cache
+    match refresh_flake_cache(&flake.repo_url, &flake.branch).await {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "message": "Flake cache refreshed successfully",
+                "flake_id": flake_id,
+                "flake_name": flake.name
+            })),
+        )
+            .into_response(),
+        Err(e) => {
+            error!("Failed to refresh flake cache for {}: {e:#}", flake.name);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    error: "refresh_failed".to_string(),
+                    message: format!("Failed to refresh flake cache: {}", e),
+                    details: None,
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
 /// Trigger a commit sync for all tracked flakes.
 ///
 /// **Authorization**: Requires Operator or Admin role.
