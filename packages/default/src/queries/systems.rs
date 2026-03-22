@@ -512,7 +512,7 @@ mod tests {
     #[test]
     fn hotfix_migration_updates_system_list_view_heartbeat_ordering() {
         let migration = include_str!(
-            "../../migrations/0095_fix_system_health_views_latest_heartbeat_null_order.sql"
+            "../../migrations/0099_fix_system_health_views_latest_heartbeat_null_order.sql"
         );
 
         assert!(
@@ -525,7 +525,7 @@ mod tests {
     #[test]
     fn hotfix_migration_updates_system_detail_view_heartbeat_ordering() {
         let migration = include_str!(
-            "../../migrations/0095_fix_system_health_views_latest_heartbeat_null_order.sql"
+            "../../migrations/0099_fix_system_health_views_latest_heartbeat_null_order.sql"
         );
 
         assert!(
