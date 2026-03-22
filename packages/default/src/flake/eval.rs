@@ -97,6 +97,41 @@ pub async fn list_nixos_configurations_from_commit(
     Ok(nixos_configs)
 }
 
+/// Build a Nix flake URI with a ref parameter from a repository URL and branch.
+///
+/// Handles various URL formats correctly:
+/// - Preserves existing `git+` prefix
+/// - Doesn't double-add `.git` suffix
+/// - Properly appends ref parameter to existing query strings
+/// - Handles both HTTP(S) URLs and shorthand formats
+fn build_flake_uri_with_ref(repo_url: &str, branch: &str) -> String {
+    // Check if repo_url already has git+ prefix
+    let has_git_prefix = repo_url.starts_with("git+");
+    let base_url = if has_git_prefix {
+        &repo_url[4..] // Strip git+ to process the URL
+    } else {
+        repo_url
+    };
+
+    // Check if URL already ends with .git
+    let needs_git_suffix = !base_url.ends_with(".git") 
+        && !base_url.contains('?') 
+        && (base_url.starts_with("http://") || base_url.starts_with("https://"));
+
+    // Build the normalized URL with .git suffix if needed
+    let normalized_url = if needs_git_suffix {
+        format!("{}.git", base_url)
+    } else {
+        base_url.to_string()
+    };
+
+    // Determine separator for ref parameter
+    let separator = if normalized_url.contains('?') { "&" } else { "?" };
+
+    // Build final URI with git+ prefix and ref parameter
+    format!("git+{}{separator}ref={}", normalized_url, branch)
+}
+
 /// Refresh a flake's cached git repository by forcing Nix to re-fetch from remote.
 ///
 /// This is useful when a flake repository has been force-pushed or its git history
@@ -112,14 +147,8 @@ pub async fn list_nixos_configurations_from_commit(
 /// # Errors
 /// Returns an error if `nix flake update --refresh` fails
 pub async fn refresh_flake_cache(repo_url: &str, branch: &str) -> Result<()> {
-    // Build the flake URI with branch reference
-    let flake_uri = if repo_url.starts_with("git+") {
-        format!("{}?ref={}", repo_url, branch)
-    } else {
-        let separator = if repo_url.contains('?') { "&" } else { "?" };
-        let git_suffix = if repo_url.contains('?') { "" } else { ".git" };
-        format!("git+{}{git_suffix}{separator}ref={}", repo_url, branch)
-    };
+    // Normalize repo_url to a proper Nix flake URI with ref parameter
+    let flake_uri = build_flake_uri_with_ref(repo_url, branch);
 
     debug!("🔄 Refreshing flake cache for: {}", flake_uri);
 
@@ -143,4 +172,66 @@ pub async fn refresh_flake_cache(repo_url: &str, branch: &str) -> Result<()> {
 
     debug!("✅ Successfully refreshed flake cache for: {}", flake_uri);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_flake_uri_with_ref() {
+        // HTTPS URL without .git suffix
+        assert_eq!(
+            build_flake_uri_with_ref("https://github.com/user/repo", "main"),
+            "git+https://github.com/user/repo.git?ref=main"
+        );
+
+        // HTTPS URL with .git suffix already present
+        assert_eq!(
+            build_flake_uri_with_ref("https://github.com/user/repo.git", "dev"),
+            "git+https://github.com/user/repo.git?ref=dev"
+        );
+
+        // git+ prefix already present
+        assert_eq!(
+            build_flake_uri_with_ref("git+https://github.com/user/repo", "main"),
+            "git+https://github.com/user/repo.git?ref=main"
+        );
+
+        // git+ prefix with .git suffix
+        assert_eq!(
+            build_flake_uri_with_ref("git+https://github.com/user/repo.git", "feature"),
+            "git+https://github.com/user/repo.git?ref=feature"
+        );
+
+        // URL with existing query parameters
+        assert_eq!(
+            build_flake_uri_with_ref("https://example.com/repo?shallow=1", "main"),
+            "git+https://example.com/repo?shallow=1&ref=main"
+        );
+
+        // git+ URL with existing query parameters
+        assert_eq!(
+            build_flake_uri_with_ref("git+https://example.com/repo.git?shallow=1", "dev"),
+            "git+https://example.com/repo.git?shallow=1&ref=dev"
+        );
+
+        // Non-HTTP URL (like github:owner/repo shorthand) - no .git suffix
+        assert_eq!(
+            build_flake_uri_with_ref("github:nixos/nixpkgs", "nixos-unstable"),
+            "git+github:nixos/nixpkgs?ref=nixos-unstable"
+        );
+
+        // SSH URL - no .git suffix
+        assert_eq!(
+            build_flake_uri_with_ref("git@github.com:user/repo", "main"),
+            "git+git@github.com:user/repo?ref=main"
+        );
+
+        // SSH URL with .git suffix
+        assert_eq!(
+            build_flake_uri_with_ref("git@github.com:user/repo.git", "main"),
+            "git+git@github.com:user/repo.git?ref=main"
+        );
+    }
 }
