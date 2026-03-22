@@ -2,12 +2,12 @@
 //!
 //! Uses web-sys crypto.getRandomValues for secure random bytes.
 
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use ed25519_dalek::SigningKey;
 
 /// Generate an Ed25519 keypair using browser crypto API.
 ///
-/// Returns (private_key_hex, public_key_base64)
+/// Returns (private_key_base64, public_key_base64) matching the format expected by builder runtime.
 pub fn generate_ed25519_keypair() -> Result<(String, String), String> {
     // Generate a 32-byte private key and derive its public key.
     let private_key_bytes = generate_random_bytes(32)?;
@@ -18,13 +18,11 @@ pub fn generate_ed25519_keypair() -> Result<(String, String), String> {
     let signing_key = SigningKey::from_bytes(&private_key_array);
     let public_key_bytes = signing_key.verifying_key().to_bytes();
 
-    // Encode private key as hex
-    let private_key_hex = hex::encode(&private_key_bytes);
-
-    // Encode public key as base64
+    // Encode both keys as base64 (required by builder runtime and server API)
+    let private_key_base64 = BASE64.encode(&private_key_bytes);
     let public_key_base64 = BASE64.encode(&public_key_bytes);
 
-    Ok((private_key_hex, public_key_base64))
+    Ok((private_key_base64, public_key_base64))
 }
 
 /// Generate cryptographically secure random bytes using browser's crypto API.
@@ -50,13 +48,16 @@ mod tests {
     #[test]
     #[ignore] // Requires browser environment
     fn test_keypair_format() {
-        let (private_hex, public_b64) = generate_ed25519_keypair().unwrap();
+        let (private_b64, public_b64) = generate_ed25519_keypair().unwrap();
 
-        // Private key should be 64 hex chars (32 bytes)
-        assert_eq!(private_hex.len(), 64);
-        assert!(private_hex.chars().all(|c| c.is_ascii_hexdigit()));
+        // Both keys should be valid base64 encoding of 32 bytes
+        // Base64 encoding of 32 bytes is 44 characters (with padding) or 43 without
+        assert!(private_b64.len() == 43 || private_b64.len() == 44);
+        let private_decoded = BASE64.decode(&private_b64).unwrap();
+        assert_eq!(private_decoded.len(), 32);
 
-        // Public key should be valid base64
-        assert!(BASE64.decode(&public_b64).is_ok());
+        assert!(public_b64.len() == 43 || public_b64.len() == 44);
+        let public_decoded = BASE64.decode(&public_b64).unwrap();
+        assert_eq!(public_decoded.len(), 32);
     }
 }

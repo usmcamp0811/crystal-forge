@@ -104,8 +104,8 @@ pub fn EditBuilderModal(
     };
 
     let handle_generate_keypair = move |_| match generate_ed25519_keypair() {
-        Ok((priv_hex, pub_b64)) => {
-            rotated_private_key.set(priv_hex);
+        Ok((priv_b64, pub_b64)) => {
+            rotated_private_key.set(priv_b64);
             rotated_public_key.set(pub_b64);
             show_rotated_private_key.set(false);
             error_message.set(None);
