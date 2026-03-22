@@ -33,9 +33,9 @@ pub fn AddBuilderModal(
     let environments = use_resource(|| async move { api::client::fetch_environments().await });
 
     let generate_keypair = move |_| match generate_ed25519_keypair() {
-        Ok((priv_hex, pub_b64)) => {
-            private_key.set(priv_hex);
-            public_key.set(pub_b64);
+        Ok((priv_b64, pub_hex)) => {
+            private_key.set(priv_b64);
+            public_key.set(pub_hex);
         }
         Err(e) => {
             error_message.set(Some(format!("Failed to generate keypair: {}", e)));
