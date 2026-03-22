@@ -647,6 +647,8 @@ pub fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                     ],
                     build_status: Some(BuildStatus::Building),
                     evaluation_status: None,
+                    evaluation_error_message: None,
+                    evaluation_error_message: None,
                 },
                 FlakeCommit {
                     id: 2,
@@ -659,6 +661,7 @@ pub fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                     systems: vec!["luna-01".to_string(), "luna-02".to_string()],
                     build_status: Some(BuildStatus::Queued),
                     evaluation_status: None,
+                    evaluation_error_message: None,
                 },
                 FlakeCommit {
                     id: 3,
@@ -671,6 +674,7 @@ pub fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                     systems: vec!["orion-01".to_string()],
                     build_status: Some(BuildStatus::Idle),
                     evaluation_status: None,
+                    evaluation_error_message: None,
                 },
             ],
         },
@@ -699,6 +703,7 @@ pub fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                     ],
                     build_status: Some(BuildStatus::Queued),
                     evaluation_status: None,
+                    evaluation_error_message: None,
                 },
                 FlakeCommit {
                     id: 5,
@@ -711,6 +716,7 @@ pub fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                     systems: vec!["ws-009".to_string(), "ws-010".to_string()],
                     build_status: Some(BuildStatus::Queued),
                     evaluation_status: None,
+                    evaluation_error_message: None,
                 },
             ],
         },
@@ -740,6 +746,7 @@ pub fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                 ],
                 build_status: Some(BuildStatus::Queued),
                 evaluation_status: None,
+                    evaluation_error_message: None,
             }],
         },
     ]

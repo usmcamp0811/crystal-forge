@@ -183,6 +183,7 @@ struct FlakeHistoryCommit {
     systems: Vec<String>,
     build_status: Option<ApiBuildStatus>,
     evaluation_status: Option<String>,
+    evaluation_error_message: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2169,7 +2170,7 @@ fn start_edit_flake(
 
 fn refresh_flake_by_id(flake_id: i32, mut refreshing_flake: Signal<Option<i32>>) {
     use crate::api::client::refresh_flake;
-    use crate::utils::toast;
+    use crate::components::notifications::toast;
 
     refreshing_flake.set(Some(flake_id));
     spawn(async move {
@@ -2794,6 +2795,7 @@ fn build_flake_history(timelines: &[FlakeTimeline]) -> HashMap<i32, Vec<FlakeHis
                     systems: commit.systems.clone(),
                     build_status: commit.build_status.clone(),
                     evaluation_status: commit.evaluation_status.clone(),
+                    evaluation_error_message: commit.evaluation_error_message.clone(),
                 }
             })
             .collect();
