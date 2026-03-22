@@ -1,9 +1,11 @@
 # TASK-210: Fix flake deletion fails due to missing evaluations table
 
-**Status:** To Do  
+**Status:** In Progress  
 **Priority:** High  
 **Risk:** Low  
 **Effort:** Small (30 minutes - 1 hour)
+
+**LOCK:** agent on reckless in /home/mcamp/code/crystal-forge/TASK-210-fix-flake-deletion-missing-evaluations
 
 ## Problem
 

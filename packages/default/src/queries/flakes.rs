@@ -214,32 +214,21 @@ pub async fn soft_delete_flake(pool: &PgPool, flake_id: i32) -> Result<u64> {
 /// Check if flake has active dependencies (pending/in-progress evaluations, builds, or deployments).
 /// Returns count of blocking dependencies.
 pub async fn check_flake_dependencies(pool: &PgPool, flake_id: i32) -> Result<i64> {
+    // Check if any active systems are using this flake
+    // 
+    // NOTE: The 'evaluations' and 'build_queue' tables are planned features
+    // but not yet implemented. When they are added, expand this check to include:
+    // - Active evaluations (evaluations.status IN ('pending', 'in_progress'))
+    // - Active builds (build_queue.status IN ('pending', 'in_progress'))
+    //
+    // For now, we only check for systems using the flake, which is the most
+    // critical dependency that would break if we deleted the flake.
     let count = sqlx::query_scalar::<_, i64>(
         r#"
         SELECT COUNT(*)::bigint
-        FROM (
-            -- Active evaluations
-            SELECT 1 FROM commits c
-            JOIN evaluations e ON e.commit_id = c.id
-            WHERE c.flake_id = $1
-              AND e.status IN ('pending', 'in_progress')
-            
-            UNION ALL
-            
-            -- Active builds
-            SELECT 1 FROM commits c
-            JOIN derivations d ON d.commit_id = c.id
-            JOIN build_queue bq ON bq.derivation_id = d.id
-            WHERE c.flake_id = $1
-              AND bq.status IN ('pending', 'in_progress')
-            
-            UNION ALL
-            
-            -- Active deployments (systems using this flake)
-            SELECT 1 FROM systems s
-            WHERE s.flake_id = $1
-              AND s.enabled = true
-        ) AS dependencies
+        FROM systems
+        WHERE flake_id = $1
+          AND is_active = true
         "#,
     )
     .bind(flake_id)
