@@ -224,6 +224,7 @@ async fn main() -> anyhow::Result<()> {
             patch(flakes::update_flake_handler).delete(flakes::delete_flake),
         )
         .route("/api/v1/flakes/:id/sync", post(flakes::sync_flake_handler))
+        .route("/api/v1/flakes/:id/refresh", post(flakes::refresh_flake))
         .route("/api/v1/flakes/timelines", get(flakes::get_flake_timelines))
         .route(
             "/api/v1/flakes/:id/commits/:hash/diff",

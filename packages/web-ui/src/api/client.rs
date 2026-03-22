@@ -316,6 +316,15 @@ pub async fn delete_flake(id: i32, hard: bool, cascade: bool) -> Result<(), ApiC
     send_empty_with_csrf::<()>("DELETE", &url, None).await
 }
 
+/// Refresh a flake's cached git repository.
+///
+/// Forces Nix to re-fetch the flake from remote, clearing stale cached references.
+/// Useful when a flake repository has been force-pushed or history rewritten.
+pub async fn refresh_flake(id: i32) -> Result<(), ApiClientError> {
+    let url = format!("{}/flakes/{}/refresh", base_url(), id);
+    send_empty_with_csrf::<()>("POST", &url, None).await
+}
+
 /// Fetch flake timelines with recent commits for dashboard.
 pub async fn fetch_flake_timelines() -> Result<Vec<FlakeTimeline>, ApiClientError> {
     let url = format!("{}/flakes/timelines", base_url());

@@ -397,6 +397,7 @@ pub async fn fetch_dashboard_flake_timelines(
                         systems,
                         build_status,
                         evaluation_status,
+                        evaluation_error_message: None,
                     }
                 },
             )
@@ -446,6 +447,7 @@ pub async fn fetch_flake_timelines(
                 i64,
                 Option<String>,
                 Option<String>,
+                Option<String>,
             ),
         >(
             r#"
@@ -476,7 +478,8 @@ pub async fn fetch_flake_timelines(
                     JOIN derivations d ON d.id = bj.derivation_id
                     WHERE d.commit_id = c.id
                 ) AS build_status,
-                c.evaluation_status
+                c.evaluation_status,
+                c.evaluation_error_message
             FROM commits c
             LEFT JOIN commit_artifacts_cache cac ON cac.commit_id = c.id
             WHERE c.flake_id = $1
@@ -503,6 +506,7 @@ pub async fn fetch_flake_timelines(
                     commits_behind,
                     build_status,
                     evaluation_status,
+                    evaluation_error_message,
                 )| {
                     let build_status = build_status.as_deref().map(|status| match status {
                         "queued" => BuildStatus::Queued,
@@ -523,6 +527,7 @@ pub async fn fetch_flake_timelines(
                         systems,
                         build_status,
                         evaluation_status,
+                        evaluation_error_message,
                     }
                 },
             )

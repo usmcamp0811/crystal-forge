@@ -589,6 +589,9 @@ pub struct FlakeCommit {
     /// Dry-run/evaluation status for this commit.
     #[serde(default)]
     pub evaluation_status: Option<String>,
+    /// Error message if evaluation failed.
+    #[serde(default)]
+    pub evaluation_error_message: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

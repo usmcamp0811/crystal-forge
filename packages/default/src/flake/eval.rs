@@ -96,3 +96,51 @@ pub async fn list_nixos_configurations_from_commit(
     debug!("✅ nixosConfigurations: {:?}", nixos_configs);
     Ok(nixos_configs)
 }
+
+/// Refresh a flake's cached git repository by forcing Nix to re-fetch from remote.
+///
+/// This is useful when a flake repository has been force-pushed or its git history
+/// has been rewritten, causing Nix's cached clone to have stale references.
+///
+/// # Arguments
+/// - `repo_url`: The flake repository URL (e.g., "git+https://github.com/user/repo")
+/// - `branch`: The branch to refresh (e.g., "main")
+///
+/// # Returns
+/// Ok(()) if the refresh succeeded
+///
+/// # Errors
+/// Returns an error if `nix flake update --refresh` fails
+pub async fn refresh_flake_cache(repo_url: &str, branch: &str) -> Result<()> {
+    // Build the flake URI with branch reference
+    let flake_uri = if repo_url.starts_with("git+") {
+        format!("{}?ref={}", repo_url, branch)
+    } else {
+        let separator = if repo_url.contains('?') { "&" } else { "?" };
+        let git_suffix = if repo_url.contains('?') { "" } else { ".git" };
+        format!("git+{}{git_suffix}{separator}ref={}", repo_url, branch)
+    };
+
+    debug!("🔄 Refreshing flake cache for: {}", flake_uri);
+
+    // Use `nix flake metadata --refresh` to force Nix to re-fetch from remote
+    // This is safer than `nix flake update` which might modify lock files
+    let output = timeout(
+        Duration::from_secs(60),
+        Command::new("nix")
+            .args(&["flake", "metadata", "--refresh", "--json", &flake_uri])
+            .output(),
+    )
+    .await
+    .context("Timeout refreshing flake cache")?
+    .context("Failed to spawn nix flake metadata command")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        error!("❌ nix flake metadata --refresh failed for {}: {}", flake_uri, stderr);
+        anyhow::bail!("Failed to refresh flake cache: {}", stderr.trim());
+    }
+
+    debug!("✅ Successfully refreshed flake cache for: {}", flake_uri);
+    Ok(())
+}
