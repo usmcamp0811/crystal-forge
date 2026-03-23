@@ -62,7 +62,7 @@ let
       # NOTE: systems’ items can include null fields by default (e.g., flake_name, desired_target, server_public_key)
       # We’ll strip them globally via stripNulls below.
       systems = cfg.systems;
-    } // lib.optionalAttrs (cfg.flakes.watched != [ ]) {
+    } // lib.optionalAttrs cfg.server.enable {
       flakes = {
         watched = cfg.flakes.watched;
         flake_polling_interval = cfg.flakes.flake_polling_interval;
