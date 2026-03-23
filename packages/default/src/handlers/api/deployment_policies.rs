@@ -50,7 +50,64 @@ fn default_limit() -> i64 {
     100
 }
 
-fn validate_policy_config(policy_type: &str, config: &Value) -> Result<(), (StatusCode, String)> {
+/// Validate and normalize a Nix expression for custom policy checks.
+///
+/// This function ensures expressions use the correct variable scope by:
+/// 1. Replacing standalone `config.` with `cfg.config.` (the correct scope in policy evaluation)
+/// 2. Preserving `cfg.config.` if already correct
+/// 3. Warning about potential issues
+///
+/// Returns the normalized expression or an error if validation fails.
+fn validate_and_normalize_nix_expression(expr: &str) -> Result<String, (StatusCode, String)> {
+    let trimmed = expr.trim();
+    
+    if trimmed.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Expression cannot be empty".to_string(),
+        ));
+    }
+
+    // Check for common mistakes and auto-fix them
+    let normalized = if trimmed.contains("config.") && !trimmed.contains("cfg.config.") {
+        // Replace `config.` with `cfg.config.` but be careful not to replace `cfg.config.`
+        // Use a simple regex-like replacement: replace `config.` with `cfg.config.` only when not preceded by `cfg.`
+        let mut result = String::new();
+        let mut chars = trimmed.chars().peekable();
+        let mut last_three = String::new();
+        
+        while let Some(c) = chars.next() {
+            result.push(c);
+            last_three.push(c);
+            if last_three.len() > 3 {
+                last_three.remove(0);
+            }
+            
+            // Check if we just wrote "config" and next char is "."
+            if result.ends_with("config") && chars.peek() == Some(&'.') {
+                // Check if it's preceded by "cfg."
+                if !result.ends_with("cfg.config") {
+                    // Insert "cfg." before "config"
+                    let len = result.len();
+                    result.insert_str(len - 6, "cfg.");
+                }
+            }
+        }
+        
+        tracing::warn!(
+            "Auto-corrected policy expression from 'config.' to 'cfg.config.': {} -> {}",
+            trimmed,
+            result
+        );
+        result
+    } else {
+        trimmed.to_string()
+    };
+
+    Ok(normalized)
+}
+
+fn validate_policy_config(policy_type: &str, config: &Value) -> Result<Value, (StatusCode, String)> {
     if config.is_null() {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -71,6 +128,8 @@ fn validate_policy_config(policy_type: &str, config: &Value) -> Result<(), (Stat
             ));
         }
     }
+
+    let mut validated_config = config.clone();
 
     match policy_type {
         "require_cf_agent" => {
@@ -108,7 +167,7 @@ fn validate_policy_config(policy_type: &str, config: &Value) -> Result<(), (Stat
             }
         }
         "custom_check" => {
-            obj.get("expression")
+            let expression = obj.get("expression")
                 .and_then(|v| v.as_str())
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
@@ -116,11 +175,19 @@ fn validate_policy_config(policy_type: &str, config: &Value) -> Result<(), (Stat
                     StatusCode::BAD_REQUEST,
                     "custom_check policy requires non-empty config.expression".to_string(),
                 ))?;
+
+            // Validate and normalize the expression
+            let normalized_expr = validate_and_normalize_nix_expression(expression)?;
+            
+            // Update the config with the normalized expression
+            if let Some(config_obj) = validated_config.as_object_mut() {
+                config_obj.insert("expression".to_string(), Value::String(normalized_expr));
+            }
         }
         _ => {}
     }
 
-    Ok(())
+    Ok(validated_config)
 }
 
 impl PaginationParams {
@@ -276,7 +343,8 @@ pub async fn create_deployment_policy(
         ));
     }
 
-    validate_policy_config(&request.policy_type, &request.config)?;
+    // Validate and normalize the config (may auto-fix expressions)
+    request.config = validate_policy_config(&request.policy_type, &request.config)?;
 
     // Check if policy name already exists
     let name_exists =
@@ -461,13 +529,16 @@ pub async fn update_deployment_policy(
         .policy_type
         .clone()
         .unwrap_or_else(|| existing.policy_type.clone());
-    let candidate_config = request
+    let mut candidate_config = request
         .config
         .clone()
         .unwrap_or_else(|| existing.config.clone());
 
     if request.policy_type.is_some() || request.config.is_some() {
-        validate_policy_config(&candidate_policy_type, &candidate_config)?;
+        // Validate and normalize the config (may auto-fix expressions)
+        candidate_config = validate_policy_config(&candidate_policy_type, &candidate_config)?;
+        // Update the request with the normalized config
+        request.config = Some(candidate_config.clone());
     }
 
     // Check for duplicate policy semantics (same type + same config)
@@ -619,11 +690,51 @@ mod tests {
 
     #[test]
     fn validate_policy_config_accepts_valid_custom_check() {
-        validate_policy_config(
+        let result = validate_policy_config(
+            "custom_check",
+            &serde_json::json!({"expression": "cfg.config.services.ssh.enable", "strict": true}),
+        )
+        .expect("valid custom_check config must pass");
+        
+        // Verify expression is preserved when already correct
+        assert_eq!(
+            result.get("expression").and_then(|v| v.as_str()),
+            Some("cfg.config.services.ssh.enable")
+        );
+    }
+
+    #[test]
+    fn validate_policy_config_auto_fixes_config_prefix() {
+        let result = validate_policy_config(
             "custom_check",
             &serde_json::json!({"expression": "config.services.ssh.enable", "strict": true}),
         )
-        .expect("valid custom_check config must pass");
+        .expect("should auto-fix config. to cfg.config.");
+        
+        // Verify expression was auto-corrected
+        assert_eq!(
+            result.get("expression").and_then(|v| v.as_str()),
+            Some("cfg.config.services.ssh.enable"),
+            "Expression should be auto-corrected from 'config.' to 'cfg.config.'"
+        );
+    }
+
+    #[test]
+    fn validate_policy_config_handles_complex_expression() {
+        let result = validate_policy_config(
+            "custom_check",
+            &serde_json::json!({
+                "expression": "!config.services.openssh.settings.PasswordAuthentication",
+                "strict": false
+            }),
+        )
+        .expect("should auto-fix complex expression");
+        
+        assert_eq!(
+            result.get("expression").and_then(|v| v.as_str()),
+            Some("!cfg.config.services.openssh.settings.PasswordAuthentication"),
+            "Complex expressions should be auto-corrected"
+        );
     }
 
     async fn create_test_policy(pool: &PgPool, name: &str) -> Uuid {
