@@ -167,6 +167,7 @@ pub async fn fetch_build_queue(pool: &PgPool, limit: i64) -> Result<BuildQueueSu
             Option<DateTime<Utc>>,
             Option<i64>,
             Option<String>,
+            Option<String>,
         ),
     >(
         r#"
@@ -185,12 +186,14 @@ pub async fn fetch_build_queue(pool: &PgPool, limit: i64) -> Result<BuildQueueSu
                 WHEN bj.started_at IS NULL THEN NULL
                 ELSE EXTRACT(EPOCH FROM (now() - bj.started_at))::BIGINT
             END AS elapsed_secs,
-            bj.logs
+            bj.logs,
+            e.name AS environment
         FROM build_jobs bj
         JOIN derivations d ON d.id = bj.derivation_id
         LEFT JOIN commits c ON c.id = d.commit_id
         LEFT JOIN flakes f ON f.id = c.flake_id
         LEFT JOIN systems s ON s.hostname = d.derivation_target
+        LEFT JOIN environments e ON e.id = s.environment_id
         LEFT JOIN builders b ON b.id = bj.builder_id
         WHERE bj.status IN ('queued', 'building')
         ORDER BY
@@ -220,6 +223,7 @@ pub async fn fetch_build_queue(pool: &PgPool, limit: i64) -> Result<BuildQueueSu
                 started_at,
                 elapsed_secs,
                 logs,
+                environment,
             )| {
                 let status = match status.as_str() {
                     "queued" => BuildStatus::Queued,
@@ -242,6 +246,7 @@ pub async fn fetch_build_queue(pool: &PgPool, limit: i64) -> Result<BuildQueueSu
                     started_at,
                     elapsed_secs,
                     logs,
+                    environment,
                 }
             },
         )
@@ -281,6 +286,7 @@ pub async fn fetch_recent_build_history(pool: &PgPool, limit: i64) -> Result<Vec
             Option<DateTime<Utc>>,
             Option<i64>,
             Option<String>,
+            Option<String>,
         ),
     >(
         r#"
@@ -299,12 +305,14 @@ pub async fn fetch_recent_build_history(pool: &PgPool, limit: i64) -> Result<Vec
                 WHEN bj.started_at IS NULL OR bj.completed_at IS NULL THEN NULL
                 ELSE EXTRACT(EPOCH FROM (bj.completed_at - bj.started_at))::BIGINT
             END AS elapsed_secs,
-            bj.logs
+            bj.logs,
+            e.name AS environment
         FROM build_jobs bj
         JOIN derivations d ON d.id = bj.derivation_id
         LEFT JOIN commits c ON c.id = d.commit_id
         LEFT JOIN flakes f ON f.id = c.flake_id
         LEFT JOIN systems s ON s.hostname = d.derivation_target
+        LEFT JOIN environments e ON e.id = s.environment_id
         LEFT JOIN builders b ON b.id = bj.builder_id
         WHERE bj.status IN ('success', 'failed')
         ORDER BY COALESCE(bj.completed_at, bj.updated_at, bj.created_at) DESC
@@ -331,6 +339,7 @@ pub async fn fetch_recent_build_history(pool: &PgPool, limit: i64) -> Result<Vec
                 started_at,
                 elapsed_secs,
                 logs,
+                environment,
             )| {
                 let status = match status.as_str() {
                     "failed" => BuildStatus::Failed,
@@ -353,6 +362,7 @@ pub async fn fetch_recent_build_history(pool: &PgPool, limit: i64) -> Result<Vec
                     started_at,
                     elapsed_secs,
                     logs,
+                    environment,
                 }
             },
         )

@@ -6,8 +6,8 @@ use crate::components::layout::Card;
 use crate::theme;
 
 use super::helpers::{
-    BuildAction, BuildItem, BuildStatus, build_status_badge_class, queue_row_style,
-    queue_sort_rank, short_commit,
+    build_status_badge_class, extract_system_name, queue_row_style, queue_sort_rank, short_commit,
+    BuildAction, BuildItem, BuildStatus,
 };
 
 /// Build queue pane showing all queued and active builds.
@@ -66,8 +66,8 @@ pub fn BuildQueuePane(
                                             class: "flex items-center gap-2 flex-wrap",
                                             p {
                                                 class: "text-sm {theme::text::PRIMARY} font-semibold truncate",
-                                                title: "{build.hostname}",
-                                                "{build.hostname}"
+                                                title: "{extract_system_name(&build.hostname)}",
+                                                "{extract_system_name(&build.hostname)}"
                                             }
                                             span {
                                                 class: "inline-flex px-2 py-0.5 text-[10px] rounded border cf-chip-blue shrink-0",
@@ -94,11 +94,11 @@ pub fn BuildQueuePane(
                                     class: "mt-2 rounded-md border {theme::surface::CARD_BORDER} cf-subtle-bg px-3 py-2",
                                     p {
                                         class: "text-[11px] {theme::text::SECONDARY} leading-5 truncate",
-                                        title: "Build target: {build.flake} · {build.hostname}",
+                                        title: "Build target: {build.flake} · {extract_system_name(&build.hostname)}",
                                         span { class: "{theme::text::MUTED}", "Build target: " }
                                         span { class: "font-mono text-cyan-300", "{build.flake}" }
                                         span { class: "{theme::text::DISABLED} mx-1", "·" }
-                                        span { class: "font-mono {theme::text::SECONDARY}", "{build.hostname}" }
+                                        span { class: "font-mono {theme::text::SECONDARY}", "{extract_system_name(&build.hostname)}" }
                                     }
                                     if !build.summary.is_empty() && build.summary != format!("job {}", build.job_id.map(|id| id.to_string()).unwrap_or_else(|| "unknown".to_string())) {
                                         p {

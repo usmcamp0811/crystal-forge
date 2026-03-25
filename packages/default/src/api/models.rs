@@ -224,6 +224,9 @@ pub struct BuildQueueItem {
     /// Build logs (if available).
     #[serde(default)]
     pub logs: Option<String>,
+    /// Environment name (if system has an environment).
+    #[serde(default)]
+    pub environment: Option<String>,
 }
 
 /// Summary of the evaluation queue for the evaluations view.
