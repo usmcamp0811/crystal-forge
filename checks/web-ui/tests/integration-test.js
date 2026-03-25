@@ -1559,6 +1559,54 @@ const steps = [
     },
   },
   {
+    name: "15b-builds-completed-tab",
+    description: "Builds page - Completed Builds tab",
+    action: async (page) => {
+      await routeBuildsData(page);
+      await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2000);
+
+      // Click the Completed Builds tab
+      const completedTab = page.locator("button:has-text('Completed Builds')");
+      await completedTab.click();
+      await page.waitForTimeout(800);
+
+      // Verify the completed builds table is visible
+      const completedTable = page.locator("table").first();
+      if (!(await completedTable.isVisible({ timeout: 2000 }).catch(() => false))) {
+        throw new Error("Expected completed builds table to be visible");
+      }
+
+      await unrouteBuildsData(page);
+    },
+  },
+  {
+    name: "15c-builds-completed-filters",
+    description: "Builds page - Completed Builds with filters",
+    action: async (page) => {
+      await routeBuildsData(page);
+      await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2000);
+
+      // Switch to Completed Builds tab
+      const completedTab = page.locator("button:has-text('Completed Builds')");
+      await completedTab.click();
+      await page.waitForTimeout(800);
+
+      // Select "Failed" filter
+      const statusFilter = page.locator("select").first();
+      await statusFilter.selectOption("failed");
+      await page.waitForTimeout(500);
+
+      // Change sort order
+      const sortSelect = page.locator("select").last();
+      await sortSelect.selectOption("oldest");
+      await page.waitForTimeout(500);
+
+      await unrouteBuildsData(page);
+    },
+  },
+  {
     name: "16-cves",
     description: "CVE dashboard",
     action: async (page) => {

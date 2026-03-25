@@ -422,9 +422,9 @@ pub fn BuildsView() -> Element {
                                         for item in completed_rows.iter() {
                                             {
                                                 let status_class = match item.status {
-                                                    BuildStatus::Complete => "inline-flex px-2 py-1 text-[10px] rounded border border-emerald-500/60 bg-emerald-900/30 text-emerald-100",
-                                                    BuildStatus::Failed => "inline-flex px-2 py-1 text-[10px] rounded border border-red-500/60 bg-red-900/30 text-red-100",
-                                                    _ => "inline-flex px-2 py-1 text-[10px] rounded border border-slate-600 bg-slate-800/30 text-slate-200",
+                                                    BuildStatus::Complete => "px-2 py-1 text-[10px] rounded border cf-build-status-complete",
+                                                    BuildStatus::Failed => "px-2 py-1 text-[10px] rounded border cf-build-status-failed",
+                                                    _ => "px-2 py-1 text-[10px] rounded border cf-chip-slate",
                                                 };
                                                 rsx! {
                                                     tr { key: "completed-{item.id}", class: "border-b border-slate-800/70",
