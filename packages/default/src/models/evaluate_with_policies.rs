@@ -411,23 +411,82 @@ pub async fn evaluate_with_nix_eval_jobs(
         );
     }
 
-    // Check for strict policy failures
-    let strict_failures: Vec<_> = policy_checks
-        .iter()
-        .filter(|c| !c.meets_requirements && policies.iter().any(|p| p.is_strict()))
-        .collect();
+    // Log policy failures per-system but DON'T fail entire evaluation
+    // Separate systems by whether they failed any strict policy
+    let mut systems_with_strict_failures = Vec::new();
+    let mut systems_with_only_non_strict_failures = Vec::new();
+    let mut passed_systems = Vec::new();
 
-    if !strict_failures.is_empty() {
-        error!("{}", strict_failures.len());
-        for failure in &strict_failures {
-            error!("  - {}", failure.system_name);
-            for warning in &failure.warnings {
-                error!("    • {}", warning);
+    for check in &policy_checks {
+        if check.meets_requirements {
+            passed_systems.push(check);
+        } else {
+            // Check if this system failed any strict policy
+            let has_strict_failure = check
+                .failed_policies
+                .iter()
+                .any(|(_, is_strict)| *is_strict);
+
+            if has_strict_failure {
+                systems_with_strict_failures.push(check);
+            } else {
+                systems_with_only_non_strict_failures.push(check);
             }
         }
-        bail!(
-            "{} systems failed strict deployment policies",
-            strict_failures.len()
+    }
+
+    // Log systems that failed strict policies
+    if !systems_with_strict_failures.is_empty() {
+        error!(
+            "⚠️  {} systems failed strict deployment policies (will not be queued for build):",
+            systems_with_strict_failures.len()
+        );
+        for failure in &systems_with_strict_failures {
+            error!("  - {}", failure.system_name);
+            // Log only the strict policy failures for clarity
+            for (policy_desc, is_strict) in &failure.failed_policies {
+                if *is_strict {
+                    error!("    • [STRICT] {}", policy_desc);
+                }
+            }
+        }
+        // DO NOT bail!() - let evaluation continue for systems that passed
+    }
+
+    // Log systems that failed only non-strict policies
+    if !systems_with_only_non_strict_failures.is_empty() {
+        warn!(
+            "⚠️  {} systems failed non-strict deployment policies:",
+            systems_with_only_non_strict_failures.len()
+        );
+        for failure in &systems_with_only_non_strict_failures {
+            warn!("  - {}", failure.system_name);
+            for (policy_desc, _) in &failure.failed_policies {
+                warn!("    • {}", policy_desc);
+            }
+        }
+    }
+
+    // Log systems that passed all policies
+    if !passed_systems.is_empty() {
+        info!(
+            "✅ {} systems passed all deployment policies",
+            passed_systems.len()
+        );
+    }
+
+    // Log overall summary
+    let total_systems = policy_checks.len();
+    let failed_count =
+        systems_with_strict_failures.len() + systems_with_only_non_strict_failures.len();
+    if total_systems > 0 {
+        info!(
+            "📊 Policy evaluation summary: {}/{} systems passed, {} failed ({} strict, {} non-strict)",
+            passed_systems.len(),
+            total_systems,
+            failed_count,
+            systems_with_strict_failures.len(),
+            systems_with_only_non_strict_failures.len()
         );
     }
 
@@ -713,6 +772,11 @@ pub async fn evaluate_with_mock_eval_jobs(
             } else {
                 vec![]
             },
+            failed_policies: if policy_failed {
+                vec![("Crystal Forge agent must be enabled".to_string(), true)]
+            } else {
+                vec![]
+            },
         };
         checks.push(check);
 
@@ -877,5 +941,86 @@ mod tests {
         assert!(!should_mock_policy_fail(3, 0));
         assert!(should_mock_policy_fail(3, 1));
         assert!(!should_mock_policy_fail(3, 2));
+    }
+
+    #[test]
+    fn test_policy_check_result_tracks_failed_policies_with_strictness() {
+        use crate::models::deployment_policies::{DeploymentPolicy, PolicyCheckResult};
+        use serde_json::json;
+
+        let policies = vec![
+            DeploymentPolicy::RequireCrystalForgeAgent { strict: true },
+            DeploymentPolicy::RequirePackages {
+                packages: vec!["git".to_string()],
+                strict: false,
+            },
+        ];
+
+        // System failing strict policy only
+        let policies_json = json!({
+            "cfAgentEnabled": false,
+            "hasRequiredPackages": true
+        });
+
+        let result = PolicyCheckResult::from_json(
+            "test-system".to_string(),
+            &policies_json,
+            &policies,
+        );
+
+        assert!(!result.meets_requirements);
+        assert_eq!(result.failed_policies.len(), 1);
+        assert_eq!(
+            result.failed_policies[0].0,
+            "Crystal Forge agent must be enabled"
+        );
+        assert!(result.failed_policies[0].1); // is_strict = true
+
+        // System failing non-strict policy only
+        let policies_json_2 = json!({
+            "cfAgentEnabled": true,
+            "hasRequiredPackages": false
+        });
+
+        let result_2 = PolicyCheckResult::from_json(
+            "test-system-2".to_string(),
+            &policies_json_2,
+            &policies,
+        );
+
+        assert!(!result_2.meets_requirements);
+        assert_eq!(result_2.failed_policies.len(), 1);
+        assert_eq!(result_2.failed_policies[0].0, "Required packages: git");
+        assert!(!result_2.failed_policies[0].1); // is_strict = false
+
+        // System failing both
+        let policies_json_3 = json!({
+            "cfAgentEnabled": false,
+            "hasRequiredPackages": false
+        });
+
+        let result_3 = PolicyCheckResult::from_json(
+            "test-system-3".to_string(),
+            &policies_json_3,
+            &policies,
+        );
+
+        assert!(!result_3.meets_requirements);
+        assert_eq!(result_3.failed_policies.len(), 2);
+
+        // Should have one strict and one non-strict failure
+        let strict_count = result_3
+            .failed_policies
+            .iter()
+            .filter(|(_, is_strict)| *is_strict)
+            .count();
+        let non_strict_count = result_3
+            .failed_policies
+            .iter()
+            .filter(|(_, is_strict)| !*is_strict)
+            .count();
+
+        assert_eq!(strict_count, 1);
+        assert_eq!(non_strict_count, 1);
     }
 }
