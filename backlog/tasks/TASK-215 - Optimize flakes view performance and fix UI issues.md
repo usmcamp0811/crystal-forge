@@ -1,11 +1,23 @@
 ---
 id: TASK-215
 title: Optimize flakes view performance and fix UI issues
-status: To Do
+status: In Progress
 created: 2026-03-25
 priority: high
 tags: [performance, ui, ux, database, caching]
 risk: medium
+notes: |
+  LOCK: claude-agent on gray in ~/code/crystal-forge/TASK-215-optimize-flakes-view
+  Started: 2026-03-25
+  
+  Implementation phases:
+  1. Database schema migration
+  2. Backend cache population
+  3. API endpoint updates
+  4. Garbage collection task
+  5. Frontend evaluation status chip fixes
+  6. Frontend system chip theming
+  7. Frontend timezone display
 ---
 
 ## Problem
