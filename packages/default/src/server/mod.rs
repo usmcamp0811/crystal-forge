@@ -5,7 +5,7 @@ use crate::log::log_builder_worker_status;
 use crate::models::commits::Commit;
 use crate::models::deployment_policies::DeploymentPolicy;
 use crate::models::evaluate_with_policies::{
-    evaluate_with_mock_eval_jobs, evaluate_with_nix_eval_jobs,
+    evaluate_with_mock_eval_jobs, evaluate_with_nix_eval_jobs, update_commit_metadata_cache,
 };
 use crate::models::flakes::Flake;
 use crate::queue::QueueNotifier;
@@ -495,6 +495,16 @@ async fn process_pending_commits(
                     );
                 }
 
+                // ⬇️ UPDATE CACHE with evaluation summary
+                if let Err(e) =
+                    update_commit_metadata_cache(pool, commit.id, &policy_checks, false).await
+                {
+                    error!(
+                        "❌ Failed to update commit metadata cache for {}: {}",
+                        commit.git_commit_hash, e
+                    );
+                }
+
                 // ⬇️ CREATE BUILD JOBS for evaluated derivations
                 match create_build_jobs_for_commit(pool, commit.id).await {
                     Ok(job_count) if job_count > 0 => {
@@ -582,6 +592,17 @@ async fn process_pending_commits(
                         commit.git_commit_hash, mark_err
                     );
                 }
+
+                // ⬇️ UPDATE CACHE to record eval error (no policy checks available)
+                if let Err(cache_err) =
+                    update_commit_metadata_cache(pool, commit.id, &[], true).await
+                {
+                    error!(
+                        "❌ Failed to update commit metadata cache for {}: {}",
+                        commit.git_commit_hash, cache_err
+                    );
+                }
+
                 return Ok(());
             }
         }

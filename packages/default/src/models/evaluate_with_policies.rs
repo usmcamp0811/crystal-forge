@@ -895,6 +895,104 @@ fn should_mock_policy_fail(system_count: usize, idx: usize) -> bool {
     system_count > 1 && idx == 1
 }
 
+/// Update commit metadata cache with evaluation summary statistics
+///
+/// This function should be called after evaluation completes (success or failure)
+/// to cache the results for fast flakes view loading.
+///
+/// # Arguments
+/// * `pool` - Database connection pool
+/// * `commit_id` - ID of the evaluated commit
+/// * `policy_checks` - Policy check results for all systems
+/// * `has_nix_eval_error` - Whether the evaluation had a Nix error (vs policy failure)
+pub async fn update_commit_metadata_cache(
+    pool: &PgPool,
+    commit_id: i32,
+    policy_checks: &[PolicyCheckResult],
+    has_nix_eval_error: bool,
+) -> Result<()> {
+    let total_systems = policy_checks.len() as i32;
+    
+    let systems_passed = policy_checks
+        .iter()
+        .filter(|c| c.meets_requirements)
+        .count() as i32;
+    
+    // Count systems that failed strict policies
+    let systems_failed_strict = policy_checks
+        .iter()
+        .filter(|c| {
+            !c.meets_requirements
+                && c.failed_policies
+                    .iter()
+                    .any(|(_, is_strict)| *is_strict)
+        })
+        .count() as i32;
+    
+    // Count systems that failed only non-strict policies
+    let systems_failed_non_strict = policy_checks
+        .iter()
+        .filter(|c| {
+            !c.meets_requirements
+                && !c.failed_policies
+                    .iter()
+                    .any(|(_, is_strict)| *is_strict)
+        })
+        .count() as i32;
+    
+    let all_systems_passed = systems_passed == total_systems;
+    let has_policy_failures = systems_failed_strict > 0 || systems_failed_non_strict > 0;
+    
+    // TODO: Track systems_with_eval_error separately
+    // For now, we don't have per-system eval error tracking
+    let systems_with_eval_error = 0i32;
+    
+    sqlx::query!(
+        r#"
+        INSERT INTO commit_metadata_cache (
+            commit_id,
+            total_systems,
+            systems_passed_policy,
+            systems_failed_policy_strict,
+            systems_failed_policy_non_strict,
+            systems_with_eval_error,
+            has_nix_eval_error,
+            has_policy_failures,
+            all_systems_passed
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        ON CONFLICT (commit_id) DO UPDATE SET
+            total_systems = EXCLUDED.total_systems,
+            systems_passed_policy = EXCLUDED.systems_passed_policy,
+            systems_failed_policy_strict = EXCLUDED.systems_failed_policy_strict,
+            systems_failed_policy_non_strict = EXCLUDED.systems_failed_policy_non_strict,
+            systems_with_eval_error = EXCLUDED.systems_with_eval_error,
+            has_nix_eval_error = EXCLUDED.has_nix_eval_error,
+            has_policy_failures = EXCLUDED.has_policy_failures,
+            all_systems_passed = EXCLUDED.all_systems_passed,
+            cached_at = CURRENT_TIMESTAMP
+        "#,
+        commit_id,
+        total_systems,
+        systems_passed,
+        systems_failed_strict,
+        systems_failed_non_strict,
+        systems_with_eval_error,
+        has_nix_eval_error,
+        has_policy_failures,
+        all_systems_passed
+    )
+    .execute(pool)
+    .await?;
+    
+    debug!(
+        "💾 Updated commit metadata cache for commit {}: {}/{} systems passed",
+        commit_id, systems_passed, total_systems
+    );
+    
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{mock_eval_stage_delay, resolve_mock_systems, should_mock_policy_fail};
