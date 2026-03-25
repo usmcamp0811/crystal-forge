@@ -1,7 +1,7 @@
 ---
 id: TASK-213
 title: CRITICAL - Policy failures should not fail entire flake evaluation
-status: In Progress
+status: Review
 created: 2026-03-22
 priority: critical
 tags: [bug, critical, policies, evaluation, blocking]
@@ -9,7 +9,16 @@ risk: medium
 notes: |
   LOCK: claude-agent on gray in ~/code/crystal-forge/TASK-213-policy-failures-per-system
   Started: 2026-03-24
-  Verified issue exists: Recent logs show "2 systems failed strict deployment policies" blocking evaluations
+  Completed: 2026-03-24
+  MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/184
+  
+  Implementation:
+  - Removed bail!() that was blocking entire evaluation on policy failures
+  - Added per-system logging (ERROR for strict, WARN for non-strict, INFO for passed)
+  - Added summary statistics showing X/Y systems passed
+  - Build verified: nix build .#default passes
+  
+  Awaiting merge to dev for production verification.
 ---
 
 ## Problem
