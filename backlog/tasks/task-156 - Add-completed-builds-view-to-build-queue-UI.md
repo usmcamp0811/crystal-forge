@@ -1,10 +1,10 @@
 ---
 id: TASK-156
 title: Add completed builds view to build queue UI
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-03-02 04:41'
-updated_date: '2026-03-20 02:24'
+updated_date: '2026-03-24 00:00'
 labels:
   - ui
   - build-queue
@@ -93,4 +93,12 @@ Verification run:
 - `nix develop -c rustfmt --edition 2021 --check packages/web-ui/src/views/builds.rs packages/web-ui/src/components/builds/helpers.rs` ✅
 
 Note: repository-wide `cargo fmt -- --check` in this worktree reports unrelated pre-existing formatting drift in other files not touched by this task.
+
+---
+
+**MR Created**: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/183
+
+Commit: c2fe201c "feat(ui): add completed builds view to build queue UI"
+
+Task moved to Review status. Awaiting merge to dev.
 <!-- SECTION:NOTES:END -->
