@@ -21,7 +21,7 @@ pub async fn garbage_collect_commit_cache(
     let result = sqlx::query!(
         r#"
         DELETE FROM commit_metadata_cache
-        WHERE cached_at < NOW() - INTERVAL '1 day' * $1
+        WHERE cached_at < NOW() - make_interval(days => $1)
         "#,
         retention_days
     )

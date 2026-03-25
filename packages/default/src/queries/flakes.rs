@@ -422,29 +422,30 @@ pub async fn fetch_flake_timelines(
     for (flake_id, flake_name, repo_url) in flakes {
         // Fetch recent commits for this flake, including systems at commit,
         // build queue status, dry-run/eval status, and git metadata (message/author).
-        let commits_rows = sqlx::query_as::<
-            _,
-            (
-                i32,
-                String,
-                chrono::DateTime<chrono::Utc>,
-                Option<String>,
-                Option<String>,
-                i64,
-                Vec<String>,
-                i64,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-                Option<i32>,
-                Option<i32>,
-                Option<i32>,
-                Option<i32>,
-                Option<bool>,
-                Option<bool>,
-                Option<bool>,
-            ),
-        >(
+        // Dedicated struct to avoid sqlx's 16-element tuple limit
+        #[derive(sqlx::FromRow)]
+        struct FlakeCommitRow {
+            id: i32,
+            git_commit_hash: String,
+            commit_timestamp: chrono::DateTime<chrono::Utc>,
+            message: Option<String>,
+            author: Option<String>,
+            system_count: i64,
+            systems: Vec<String>,
+            commits_behind: i64,
+            build_status: Option<String>,
+            evaluation_status: Option<String>,
+            evaluation_error_message: Option<String>,
+            total_systems: Option<i32>,
+            systems_passed_policy: Option<i32>,
+            systems_failed_policy_strict: Option<i32>,
+            systems_failed_policy_non_strict: Option<i32>,
+            has_nix_eval_error: Option<bool>,
+            has_policy_failures: Option<bool>,
+            all_systems_passed: Option<bool>,
+        }
+
+        let commits_rows = sqlx::query_as::<_, FlakeCommitRow>(
             r#"
             SELECT
                 c.id,
@@ -497,28 +498,8 @@ pub async fn fetch_flake_timelines(
 
         let commits: Vec<FlakeCommit> = commits_rows
             .into_iter()
-            .map(
-                |(
-                    id,
-                    hash,
-                    committed_at,
-                    message,
-                    author,
-                    system_count,
-                    systems,
-                    commits_behind,
-                    build_status,
-                    evaluation_status,
-                    evaluation_error_message,
-                    total_systems,
-                    systems_passed_policy,
-                    systems_failed_policy_strict,
-                    systems_failed_policy_non_strict,
-                    has_nix_eval_error,
-                    has_policy_failures,
-                    all_systems_passed,
-                )| {
-                    let build_status = build_status.as_deref().map(|status| match status {
+            .map(|row| {
+                    let build_status = row.build_status.as_deref().map(|status| match status {
                         "queued" => BuildStatus::Queued,
                         "building" => BuildStatus::Building,
                         "failed" => BuildStatus::Failed,
@@ -535,13 +516,13 @@ pub async fn fetch_flake_timelines(
                         Some(has_policy_failures),
                         Some(all_systems_passed),
                     ) = (
-                        total_systems,
-                        systems_passed_policy,
-                        systems_failed_policy_strict,
-                        systems_failed_policy_non_strict,
-                        has_nix_eval_error,
-                        has_policy_failures,
-                        all_systems_passed,
+                        row.total_systems,
+                        row.systems_passed_policy,
+                        row.systems_failed_policy_strict,
+                        row.systems_failed_policy_non_strict,
+                        row.has_nix_eval_error,
+                        row.has_policy_failures,
+                        row.all_systems_passed,
                     ) {
                         Some(CommitMetadata {
                             total_systems,
@@ -557,21 +538,20 @@ pub async fn fetch_flake_timelines(
                     };
 
                     FlakeCommit {
-                        id,
-                        hash,
-                        message: message.unwrap_or_default(),
-                        author: author.unwrap_or_default(),
-                        committed_at,
-                        system_count,
-                        commits_behind,
-                        systems,
+                        id: row.id,
+                        hash: row.git_commit_hash,
+                        message: row.message.unwrap_or_default(),
+                        author: row.author.unwrap_or_default(),
+                        committed_at: row.commit_timestamp,
+                        system_count: row.system_count,
+                        commits_behind: row.commits_behind,
+                        systems: row.systems,
                         build_status,
-                        evaluation_status,
-                        evaluation_error_message,
+                        evaluation_status: row.evaluation_status,
+                        evaluation_error_message: row.evaluation_error_message,
                         metadata,
                     }
-                },
-            )
+                })
             .collect();
 
         timelines.push(FlakeTimeline {

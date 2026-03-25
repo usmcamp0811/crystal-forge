@@ -494,7 +494,7 @@ pub struct FlakeCommit {
 }
 
 /// Cached evaluation metadata for fast UI rendering
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommitMetadata {
     pub total_systems: i32,
     pub systems_passed_policy: i32,

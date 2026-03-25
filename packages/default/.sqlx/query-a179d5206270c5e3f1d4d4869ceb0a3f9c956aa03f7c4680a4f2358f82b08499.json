@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO commit_metadata_cache (\n            commit_id,\n            total_systems,\n            systems_passed_policy,\n            systems_failed_policy_strict,\n            systems_failed_policy_non_strict,\n            systems_with_eval_error,\n            has_nix_eval_error,\n            has_policy_failures,\n            all_systems_passed\n        )\n        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)\n        ON CONFLICT (commit_id) DO UPDATE SET\n            total_systems = EXCLUDED.total_systems,\n            systems_passed_policy = EXCLUDED.systems_passed_policy,\n            systems_failed_policy_strict = EXCLUDED.systems_failed_policy_strict,\n            systems_failed_policy_non_strict = EXCLUDED.systems_failed_policy_non_strict,\n            systems_with_eval_error = EXCLUDED.systems_with_eval_error,\n            has_nix_eval_error = EXCLUDED.has_nix_eval_error,\n            has_policy_failures = EXCLUDED.has_policy_failures,\n            all_systems_passed = EXCLUDED.all_systems_passed,\n            cached_at = CURRENT_TIMESTAMP\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Bool",
+        "Bool",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a179d5206270c5e3f1d4d4869ceb0a3f9c956aa03f7c4680a4f2358f82b08499"
+}
