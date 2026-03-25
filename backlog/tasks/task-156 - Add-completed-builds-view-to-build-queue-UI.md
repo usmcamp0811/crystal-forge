@@ -1,10 +1,10 @@
 ---
 id: TASK-156
 title: Add completed builds view to build queue UI
-status: Review
+status: Done
 assignee: []
 created_date: '2026-03-02 04:41'
-updated_date: '2026-03-24 00:00'
+updated_date: '2026-03-24 20:45'
 labels:
   - ui
   - build-queue
@@ -65,12 +65,12 @@ Medium — user-facing view expansion in a complex page, but expected to be addi
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The builds page includes a clear switcher between Active Queue and Completed Builds.
-- [ ] #2 The Completed Builds view shows successful and failed completed builds without removing the existing active queue view.
-- [ ] #3 Completed builds can be filtered by status and sorted by completion time at minimum.
-- [ ] #4 Completed build rows show system/hostname, environment where available, status, completion time, and duration.
-- [ ] #5 Existing active queue behavior continues to function unchanged after the new view is added.
-- [ ] #6 Local verification instructions cover both queue and completed-builds behavior.
+- [x] #1 The builds page includes a clear switcher between Active Queue and Completed Builds.
+- [x] #2 The Completed Builds view shows successful and failed completed builds without removing the existing active queue view.
+- [x] #3 Completed builds can be filtered by status and sorted by completion time at minimum.
+- [x] #4 Completed build rows show system/hostname, environment where available, status, completion time, and duration.
+- [x] #5 Existing active queue behavior continues to function unchanged after the new view is added.
+- [x] #6 Local verification instructions cover both queue and completed-builds behavior.
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -98,7 +98,21 @@ Note: repository-wide `cargo fmt -- --check` in this worktree reports unrelated 
 
 **MR Created**: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/183
 
-Commit: c2fe201c "feat(ui): add completed builds view to build queue UI"
+Final commits:
+1. c2fe201c - Initial completed builds feature
+2. 3269df10 - Status badge CSS fix + web-ui check updates
+3. 18e397bc - System name extraction from flake paths
+4. 2dae4392 - Environment field addition (backend + frontend)
+5. 4483d4a5 - Mock data fixes for CI
 
-Task moved to Review status. Awaiting merge to dev.
+**MR Merged**: 2026-03-24
+
+Additional features delivered beyond initial scope:
+- Environment column properly wired from backend through to UI
+- System name extraction helper for clean display (strips flake URI paths)
+- Shared CSS classes for status badges (theme-ready)
+- Web-UI check test coverage for new feature
+- Screenshots captured and documented in MR
+
+Task completed successfully. All acceptance criteria met.
 <!-- SECTION:NOTES:END -->
