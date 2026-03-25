@@ -1,10 +1,11 @@
 //! Shared types and helper functions for build components.
 
+use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
 use std::rc::Rc;
-use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
-use web_sys::{Node, window};
+use wasm_bindgen::JsCast;
+use web_sys::{window, Node};
 
 /// Worker status enum.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,12 +119,15 @@ pub struct BuildItem {
     pub job_id: Option<uuid::Uuid>,
     pub system_id: Option<uuid::Uuid>,
     pub hostname: String,
+    pub environment: Option<String>,
     pub flake: String,
     pub commit: String,
     pub branch: String,
     pub worker_id: String,
     pub queued_for: String,
     pub runtime: Option<String>,
+    pub duration_secs: Option<i64>,
+    pub completed_at: Option<DateTime<Utc>>,
     pub started_by: String,
     pub status: BuildStatus,
     pub summary: String,
@@ -342,12 +346,15 @@ pub fn mock_builds() -> Vec<BuildItem> {
             job_id: None,
             system_id: None,
             hostname: "atlas-01".to_string(),
+            environment: Some("production".to_string()),
             flake: "campground".to_string(),
             commit: "a38f45fba91d4b0a5d80840c09b0910c70fa013e".to_string(),
             branch: "main".to_string(),
             worker_id: "worker-a".to_string(),
             queued_for: "queued 00:58 ago".to_string(),
             runtime: Some("02:13".to_string()),
+            duration_secs: Some(133),
+            completed_at: None,
             started_by: "mcamp".to_string(),
             status: BuildStatus::Building,
             summary: "nix build .#nixosConfigurations.atlas-01.config.system.build.toplevel"
@@ -358,12 +365,15 @@ pub fn mock_builds() -> Vec<BuildItem> {
             job_id: None,
             system_id: None,
             hostname: "luna-02".to_string(),
+            environment: Some("staging".to_string()),
             flake: "campground".to_string(),
             commit: "75c2fbf719ac2654af9f1dc4b773f502f9db515e".to_string(),
             branch: "main".to_string(),
             worker_id: "worker-b".to_string(),
             queued_for: "queued 01:32 ago".to_string(),
             runtime: None,
+            duration_secs: None,
+            completed_at: None,
             started_by: "scheduler".to_string(),
             status: BuildStatus::Queued,
             summary: "waiting for free worker slot".to_string(),
@@ -373,12 +383,15 @@ pub fn mock_builds() -> Vec<BuildItem> {
             job_id: None,
             system_id: None,
             hostname: "gray".to_string(),
+            environment: Some("dev".to_string()),
             flake: "campground".to_string(),
             commit: "4144fdc0312734c62bc5f4f9f48f5a87e4b3a85f".to_string(),
             branch: "main".to_string(),
             worker_id: "worker-a".to_string(),
             queued_for: "queued 00:29 ago".to_string(),
             runtime: None,
+            duration_secs: None,
+            completed_at: None,
             started_by: "scheduler".to_string(),
             status: BuildStatus::Queued,
             summary: "waiting for free worker slot".to_string(),
@@ -388,12 +401,15 @@ pub fn mock_builds() -> Vec<BuildItem> {
             job_id: None,
             system_id: None,
             hostname: "reckless".to_string(),
+            environment: Some("production".to_string()),
             flake: "campground".to_string(),
             commit: "9cc53a8f1792043b1f7868ecf5ff312ad67553de".to_string(),
             branch: "release/2026-02".to_string(),
             worker_id: "worker-b".to_string(),
             queued_for: "queued 06:11 ago".to_string(),
             runtime: Some("04:22".to_string()),
+            duration_secs: Some(262),
+            completed_at: None,
             started_by: "mcamp".to_string(),
             status: BuildStatus::Failed,
             summary: "dependency graph diverged on nixpkgs input".to_string(),

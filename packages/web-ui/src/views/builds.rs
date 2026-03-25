@@ -1,6 +1,6 @@
 //! Builds control center view.
 
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use dioxus::prelude::*;
 
 use crate::api::{
@@ -9,12 +9,48 @@ use crate::api::{
     models::{BuildStatus as ApiBuildStatus, BuilderStatus},
 };
 use crate::components::builds::{
-    BuildAction, BuildDetailPane, BuildItem, BuildQueuePane, BuildStatus, ConfirmActionModal,
-    DetailTab, MetricsRow, PendingAction, QueueAction, QueueActionButton, WorkerAction, WorkerItem,
-    WorkerStatus, WorkerStrip, selected_build_data,
+    selected_build_data, BuildAction, BuildDetailPane, BuildItem, BuildQueuePane, BuildStatus,
+    ConfirmActionModal, DetailTab, MetricsRow, PendingAction, QueueAction, QueueActionButton,
+    WorkerAction, WorkerItem, WorkerStatus, WorkerStrip,
 };
 use crate::components::layout::Card;
 use crate::theme;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BuildsTab {
+    ActiveQueue,
+    Completed,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CompletedStatusFilter {
+    All,
+    Complete,
+    Failed,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CompletedSortOrder {
+    NewestFirst,
+    OldestFirst,
+}
+
+fn format_completed_at(item: &BuildItem) -> String {
+    item.completed_at
+        .map(|ts| ts.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn format_duration(item: &BuildItem) -> String {
+    item.duration_secs
+        .map(|secs| format!("{}s", secs.max(0)))
+        .or_else(|| item.runtime.clone())
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn format_environment(item: &BuildItem) -> String {
+    item.environment.clone().unwrap_or_else(|| "-".to_string())
+}
 
 /// Builds control center page.
 #[component]
@@ -78,6 +114,7 @@ pub fn BuildsView() -> Element {
                             job_id: item.job_id,
                             system_id: item.system_id,
                             hostname: item.hostname.clone(),
+                            environment: None,
                             flake: item.flake_name.clone(),
                             commit: item.commit_hash.clone(),
                             branch: "main".to_string(),
@@ -87,6 +124,8 @@ pub fn BuildsView() -> Element {
                                 .unwrap_or_else(|| "unassigned".to_string()),
                             queued_for,
                             runtime: item.elapsed_secs.map(|secs| format!("{}s", secs)),
+                            duration_secs: item.elapsed_secs,
+                            completed_at: None,
                             started_by: "scheduler".to_string(),
                             status: match item.status {
                                 ApiBuildStatus::Queued => BuildStatus::Queued,
@@ -121,12 +160,19 @@ pub fn BuildsView() -> Element {
                         .elapsed_secs
                         .map(|secs| format!("completed in {}s", secs))
                         .unwrap_or_else(|| "completed".to_string());
+                    let completed_at = match (item.started_at, item.elapsed_secs) {
+                        (Some(started_at), Some(elapsed_secs)) => {
+                            Some(started_at + Duration::seconds(elapsed_secs.max(0)))
+                        }
+                        _ => Some(item.queued_at),
+                    };
 
                     BuildItem {
                         id: -((idx as i32) + 1),
                         job_id: item.job_id,
                         system_id: item.system_id,
                         hostname: item.hostname.clone(),
+                        environment: None,
                         flake: item.flake_name.clone(),
                         commit: item.commit_hash.clone(),
                         branch: "main".to_string(),
@@ -136,6 +182,8 @@ pub fn BuildsView() -> Element {
                             .unwrap_or_else(|| "unassigned".to_string()),
                         queued_for: finished_for,
                         runtime: item.elapsed_secs.map(|secs| format!("{}s", secs)),
+                        duration_secs: item.elapsed_secs,
+                        completed_at,
                         started_by: "scheduler".to_string(),
                         status: match item.status {
                             ApiBuildStatus::Failed => BuildStatus::Failed,
@@ -160,7 +208,10 @@ pub fn BuildsView() -> Element {
     });
 
     let mut selected_build = use_signal(|| Some(1_i32));
+    let mut active_view = use_signal(|| BuildsTab::ActiveQueue);
     let mut active_tab = use_signal(|| DetailTab::Logs);
+    let mut completed_status_filter = use_signal(|| CompletedStatusFilter::All);
+    let mut completed_sort_order = use_signal(|| CompletedSortOrder::NewestFirst);
 
     let follow_logs = use_signal(|| true);
     let pause_logs = use_signal(|| false);
@@ -174,6 +225,24 @@ pub fn BuildsView() -> Element {
     let queue_data = builds.read().clone();
     let worker_data = workers.read().clone();
     let selected = selected_build_data(selected_build.read().to_owned(), &queue_data);
+
+    let mut completed_rows = build_history.read().clone();
+    completed_rows.retain(|item| {
+        matches!(item.status, BuildStatus::Complete | BuildStatus::Failed)
+            && match completed_status_filter() {
+                CompletedStatusFilter::All => true,
+                CompletedStatusFilter::Complete => item.status == BuildStatus::Complete,
+                CompletedStatusFilter::Failed => item.status == BuildStatus::Failed,
+            }
+    });
+    completed_rows.sort_by(|left, right| {
+        let left_key = left.completed_at.unwrap_or_else(Utc::now);
+        let right_key = right.completed_at.unwrap_or_else(Utc::now);
+        match completed_sort_order() {
+            CompletedSortOrder::NewestFirst => right_key.cmp(&left_key),
+            CompletedSortOrder::OldestFirst => left_key.cmp(&right_key),
+        }
+    });
 
     rsx! {
         div {
@@ -222,6 +291,28 @@ pub fn BuildsView() -> Element {
                 },
             }
 
+            div {
+                class: "flex border-b border-slate-700",
+                button {
+                    class: if active_view() == BuildsTab::ActiveQueue {
+                        "px-4 py-2 border-b-2 border-blue-500 text-blue-400 font-medium"
+                    } else {
+                        "px-4 py-2 border-b-2 border-transparent text-slate-400 hover:text-white transition-colors"
+                    },
+                    onclick: move |_| active_view.set(BuildsTab::ActiveQueue),
+                    "Active Queue"
+                }
+                button {
+                    class: if active_view() == BuildsTab::Completed {
+                        "px-4 py-2 border-b-2 border-blue-500 text-blue-400 font-medium"
+                    } else {
+                        "px-4 py-2 border-b-2 border-transparent text-slate-400 hover:text-white transition-colors"
+                    },
+                    onclick: move |_| active_view.set(BuildsTab::Completed),
+                    "Completed Builds"
+                }
+            }
+
             if let Some(note) = last_action_note.read().clone() {
                 p {
                     class: "text-xs px-3 py-2 rounded-lg border text-blue-100 cf-chip-info",
@@ -237,65 +328,117 @@ pub fn BuildsView() -> Element {
                 }
             }
 
-            div {
-                class: "cf-builds-split",
+            if active_view() == BuildsTab::ActiveQueue {
                 div {
-                    BuildQueuePane {
-                        builds: queue_data.clone(),
-                        selected_id: selected_build,
-                        on_build_action: move |(build_id, action)| {
-                            pending_action.set(Some(PendingAction::Build { build_id, action }))
-                        },
+                    class: "cf-builds-split",
+                    div {
+                        BuildQueuePane {
+                            builds: queue_data.clone(),
+                            selected_id: selected_build,
+                            on_build_action: move |(build_id, action)| {
+                                pending_action.set(Some(PendingAction::Build { build_id, action }))
+                            },
+                        }
+                    }
+
+                    div {
+                        BuildDetailPane {
+                            selected: selected,
+                            tab: active_tab,
+                            on_tab_change: move |tab| active_tab.set(tab),
+                            follow_logs: follow_logs,
+                            pause_logs: pause_logs,
+                            wrap_logs: wrap_logs,
+                            log_query: log_query,
+                        }
                     }
                 }
-
-                div {
-                    BuildDetailPane {
-                        selected: selected,
-                        tab: active_tab,
-                        on_tab_change: move |tab| active_tab.set(tab),
-                        follow_logs: follow_logs,
-                        pause_logs: pause_logs,
-                        wrap_logs: wrap_logs,
-                        log_query: log_query,
-                    }
-                }
-            }
-
-            Card {
-                title: Some("Recent Builds".to_string()),
-                children: rsx! {
-                    if build_history.read().is_empty() {
-                        p { class: "text-sm {theme::text::SECONDARY}", "No completed builds yet." }
-                    } else {
-                        div { class: "space-y-2",
-                            for item in build_history.read().iter().take(25) {
-                                {
-                                    let status_class = match item.status {
-                                        BuildStatus::Complete => "px-2 py-1 text-[10px] rounded border border-emerald-500/60 bg-emerald-900/30 text-emerald-100",
-                                        BuildStatus::Failed => "px-2 py-1 text-[10px] rounded border border-red-500/60 bg-red-900/30 text-red-100",
-                                        _ => "px-2 py-1 text-[10px] rounded border border-slate-600 bg-slate-800/30 text-slate-200",
+            } else {
+                Card {
+                    title: Some("Completed Builds".to_string()),
+                    children: rsx! {
+                        div {
+                            class: "flex flex-wrap items-center gap-3 pb-3",
+                            label { class: "text-xs {theme::text::SECONDARY}", "Status" }
+                            select {
+                                class: "px-2 py-1 rounded border border-slate-600 bg-slate-900 text-xs text-slate-200",
+                                value: match completed_status_filter() {
+                                    CompletedStatusFilter::All => "all",
+                                    CompletedStatusFilter::Complete => "complete",
+                                    CompletedStatusFilter::Failed => "failed",
+                                },
+                                onchange: move |event| {
+                                    let value = event.value();
+                                    let next = match value.as_str() {
+                                        "complete" => CompletedStatusFilter::Complete,
+                                        "failed" => CompletedStatusFilter::Failed,
+                                        _ => CompletedStatusFilter::All,
                                     };
-                                    let status_label = match item.status {
-                                        BuildStatus::Complete => "complete",
-                                        BuildStatus::Failed => "failed",
-                                        BuildStatus::Building => "building",
-                                        BuildStatus::Queued => "queued",
-                                        BuildStatus::Stopping => "stopping",
-                                        BuildStatus::Restarting => "restarting",
-                                        BuildStatus::Canceled => "canceled",
+                                    completed_status_filter.set(next);
+                                },
+                                option { value: "all", "All" }
+                                option { value: "complete", "Complete" }
+                                option { value: "failed", "Failed" }
+                            }
+
+                            label { class: "text-xs {theme::text::SECONDARY}", "Sort" }
+                            select {
+                                class: "px-2 py-1 rounded border border-slate-600 bg-slate-900 text-xs text-slate-200",
+                                value: match completed_sort_order() {
+                                    CompletedSortOrder::NewestFirst => "newest",
+                                    CompletedSortOrder::OldestFirst => "oldest",
+                                },
+                                onchange: move |event| {
+                                    let next = if event.value() == "oldest" {
+                                        CompletedSortOrder::OldestFirst
+                                    } else {
+                                        CompletedSortOrder::NewestFirst
                                     };
-                                    rsx! {
-                                        div {
-                                            key: "recent-{item.id}",
-                                            class: "flex flex-wrap items-center justify-between gap-2 rounded border {theme::surface::CARD_BORDER} bg-gray-900/40 px-3 py-2",
-                                            div { class: "flex flex-wrap items-center gap-2 min-w-0",
-                                                span { class: "font-mono text-xs text-gray-300", "{item.hostname}" }
-                                                span { class: "text-xs text-gray-500", "{item.flake}" }
-                                                span { class: "text-xs text-gray-500", "{item.commit.chars().take(8).collect::<String>()}" }
-                                                span { class: "text-xs text-gray-400", "{item.queued_for}" }
+                                    completed_sort_order.set(next);
+                                },
+                                option { value: "newest", "Newest completion first" }
+                                option { value: "oldest", "Oldest completion first" }
+                            }
+                        }
+
+                        if completed_rows.is_empty() {
+                            p { class: "text-sm {theme::text::SECONDARY}", "No completed builds yet." }
+                        } else {
+                            div {
+                                class: "overflow-x-auto",
+                                table {
+                                    class: "w-full text-xs",
+                                    thead {
+                                        tr { class: "text-left border-b border-slate-700 text-slate-300",
+                                            th { class: "py-2 pr-3", "System" }
+                                            th { class: "py-2 pr-3", "Environment" }
+                                            th { class: "py-2 pr-3", "Status" }
+                                            th { class: "py-2 pr-3", "Completion Time" }
+                                            th { class: "py-2 pr-3", "Duration" }
+                                            th { class: "py-2 pr-3", "Commit" }
+                                        }
+                                    }
+                                    tbody {
+                                        for item in completed_rows.iter() {
+                                            {
+                                                let status_class = match item.status {
+                                                    BuildStatus::Complete => "inline-flex px-2 py-1 text-[10px] rounded border border-emerald-500/60 bg-emerald-900/30 text-emerald-100",
+                                                    BuildStatus::Failed => "inline-flex px-2 py-1 text-[10px] rounded border border-red-500/60 bg-red-900/30 text-red-100",
+                                                    _ => "inline-flex px-2 py-1 text-[10px] rounded border border-slate-600 bg-slate-800/30 text-slate-200",
+                                                };
+                                                rsx! {
+                                                    tr { key: "completed-{item.id}", class: "border-b border-slate-800/70",
+                                                        td { class: "py-2 pr-3 font-mono text-slate-200", "{item.hostname}" }
+                                                        td { class: "py-2 pr-3 text-slate-300", "{format_environment(item)}" }
+                                                        td { class: "py-2 pr-3",
+                                                            span { class: "{status_class}", "{item.status_label()}" }
+                                                        }
+                                                        td { class: "py-2 pr-3 text-slate-300", "{format_completed_at(item)}" }
+                                                        td { class: "py-2 pr-3 text-slate-300", "{format_duration(item)}" }
+                                                        td { class: "py-2 pr-3 text-slate-400 font-mono", "{item.commit.chars().take(8).collect::<String>()}" }
+                                                    }
+                                                }
                                             }
-                                            span { class: "{status_class}", "{status_label}" }
                                         }
                                     }
                                 }
