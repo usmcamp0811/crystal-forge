@@ -49,6 +49,11 @@ fn came_from_setup() -> bool {
 const VIEW_PREF_KEY: &str = "crystal_forge.flakes.view";
 const FLAKE_TABLE_SCHEMA_NOTE: &str = "flakes(name, repo_url UNIQUE, branch)";
 
+fn preview_systems(systems: &[String]) -> &[String] {
+    let end = systems.len().min(60);
+    &systems[..end]
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FlakesViewMode {
     Table,
@@ -1513,7 +1518,7 @@ fn FlakeHistoryExplorer(
                                     } else {
                                         div {
                                             class: "flex flex-wrap gap-2",
-                                            for hostname in commit.systems.iter() {
+                                            for hostname in preview_systems(&commit.systems).iter() {
                                                 {
                                                     let status = system_status.read().get(hostname).cloned();
                                                     let chip_class = match status {
@@ -1532,6 +1537,12 @@ fn FlakeHistoryExplorer(
                                                         }
                                                     }
                                                 }
+                                            }
+                                        }
+                                        if commit.systems.len() > 60 {
+                                            p {
+                                                class: "text-xs text-amber-300",
+                                                "Showing first 60 of {commit.systems.len()} configurations to keep the UI responsive."
                                             }
                                         }
                                         p {
