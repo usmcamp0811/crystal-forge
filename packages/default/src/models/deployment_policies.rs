@@ -103,6 +103,8 @@ pub struct PolicyCheckResult {
     pub custom_checks: HashMap<String, bool>,
     pub meets_requirements: bool,
     pub warnings: Vec<String>,
+    /// Tracks which policies failed (description, is_strict)
+    pub failed_policies: Vec<(String, bool)>,
 }
 
 impl PolicyCheckResult {
@@ -116,29 +118,35 @@ impl PolicyCheckResult {
         let mut cf_agent_enabled = None;
         let mut has_required_packages = None;
         let mut custom_checks = HashMap::new();
+        let mut failed_policies = Vec::new();
 
         for policy in policies {
             let field_name = policy.field_name();
             let value = policies_json.get(&field_name).and_then(|v| v.as_bool());
+            let is_strict = policy.is_strict();
 
             match policy {
                 DeploymentPolicy::RequireCrystalForgeAgent { .. } => {
                     cf_agent_enabled = value;
                     if value != Some(true) {
+                        let desc = policy.description();
                         warnings.push(format!(
                             "Crystal Forge agent not enabled for {}",
                             system_name
                         ));
+                        failed_policies.push((desc, is_strict));
                     }
                 }
                 DeploymentPolicy::RequirePackages { packages, .. } => {
                     has_required_packages = value;
                     if value != Some(true) {
+                        let desc = policy.description();
                         warnings.push(format!(
                             "Missing required packages for {}: {}",
                             system_name,
                             packages.join(", ")
                         ));
+                        failed_policies.push((desc, is_strict));
                     }
                 }
                 DeploymentPolicy::CustomCheck {
@@ -150,12 +158,14 @@ impl PolicyCheckResult {
                         custom_checks.insert(field_name.clone(), v);
                         if !v {
                             warnings.push(format!("{}: {}", system_name, description));
+                            failed_policies.push((description.clone(), is_strict));
                         }
                     } else {
                         warnings.push(format!(
                             "{}: Could not evaluate custom check '{}'",
                             system_name, description
                         ));
+                        failed_policies.push((description.clone(), is_strict));
                     }
                 }
             }
@@ -170,6 +180,7 @@ impl PolicyCheckResult {
             custom_checks,
             meets_requirements,
             warnings,
+            failed_policies,
         }
     }
 }
