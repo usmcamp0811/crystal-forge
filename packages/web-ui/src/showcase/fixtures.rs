@@ -210,6 +210,7 @@ pub fn build_queue_item_fixtures() -> Vec<BuildQueueItem> {
             started_at: Some(base_time - chrono::Duration::minutes(12)),
             elapsed_secs: Some(720), // 12 minutes
             logs: None,
+            environment: None,
         },
         // Queued state (next in queue)
         BuildQueueItem {
@@ -225,6 +226,7 @@ pub fn build_queue_item_fixtures() -> Vec<BuildQueueItem> {
             started_at: None,
             elapsed_secs: None,
             logs: None,
+            environment: None,
         },
         // Queued state (second in queue)
         BuildQueueItem {
@@ -240,6 +242,7 @@ pub fn build_queue_item_fixtures() -> Vec<BuildQueueItem> {
             started_at: None,
             elapsed_secs: None,
             logs: None,
+            environment: None,
         },
         // Building state with long commit message (overflow test)
         BuildQueueItem {
@@ -255,6 +258,7 @@ pub fn build_queue_item_fixtures() -> Vec<BuildQueueItem> {
             started_at: Some(base_time - chrono::Duration::minutes(6)),
             elapsed_secs: Some(360), // 6 minutes
             logs: None,
+            environment: None,
         },
         // Queued state with no commit message (empty content test)
         BuildQueueItem {
@@ -270,6 +274,7 @@ pub fn build_queue_item_fixtures() -> Vec<BuildQueueItem> {
             started_at: None,
             elapsed_secs: None,
             logs: None,
+            environment: None,
         },
     ]
 }
