@@ -488,6 +488,21 @@ pub struct FlakeCommit {
     /// Error message if evaluation failed.
     #[serde(default)]
     pub evaluation_error_message: Option<String>,
+    /// Cached evaluation metadata (if available)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<CommitMetadata>,
+}
+
+/// Cached evaluation metadata for fast UI rendering
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitMetadata {
+    pub total_systems: i32,
+    pub systems_passed_policy: i32,
+    pub systems_failed_policy_strict: i32,
+    pub systems_failed_policy_non_strict: i32,
+    pub has_nix_eval_error: bool,
+    pub has_policy_failures: bool,
+    pub all_systems_passed: bool,
 }
 
 /// Response containing the git diff for a specific commit.

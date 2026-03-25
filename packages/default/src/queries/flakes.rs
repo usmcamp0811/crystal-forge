@@ -1,4 +1,4 @@
-use crate::api::models::{BuildStatus, FlakeCommit, FlakeRegistryItem, FlakeTimeline};
+use crate::api::models::{BuildStatus, CommitMetadata, FlakeCommit, FlakeRegistryItem, FlakeTimeline};
 use crate::config::{FlakeConfig, WatchedFlake};
 use crate::models::flakes::Flake;
 use anyhow::Context;
@@ -385,6 +385,7 @@ pub async fn fetch_dashboard_flake_timelines(
                         build_status,
                         evaluation_status,
                         evaluation_error_message: None,
+                        metadata: None, // Dashboard view doesn't need metadata
                     }
                 },
             )
@@ -435,6 +436,13 @@ pub async fn fetch_flake_timelines(
                 Option<String>,
                 Option<String>,
                 Option<String>,
+                Option<i32>,
+                Option<i32>,
+                Option<i32>,
+                Option<i32>,
+                Option<bool>,
+                Option<bool>,
+                Option<bool>,
             ),
         >(
             r#"
@@ -466,9 +474,17 @@ pub async fn fetch_flake_timelines(
                     WHERE d.commit_id = c.id
                 ) AS build_status,
                 c.evaluation_status,
-                c.evaluation_error_message
+                c.evaluation_error_message,
+                cmc.total_systems,
+                cmc.systems_passed_policy,
+                cmc.systems_failed_policy_strict,
+                cmc.systems_failed_policy_non_strict,
+                cmc.has_nix_eval_error,
+                cmc.has_policy_failures,
+                cmc.all_systems_passed
             FROM commits c
             LEFT JOIN commit_artifacts_cache cac ON cac.commit_id = c.id
+            LEFT JOIN commit_metadata_cache cmc ON cmc.commit_id = c.id
             WHERE c.flake_id = $1
             ORDER BY c.commit_timestamp DESC
             LIMIT $2
@@ -494,6 +510,13 @@ pub async fn fetch_flake_timelines(
                     build_status,
                     evaluation_status,
                     evaluation_error_message,
+                    total_systems,
+                    systems_passed_policy,
+                    systems_failed_policy_strict,
+                    systems_failed_policy_non_strict,
+                    has_nix_eval_error,
+                    has_policy_failures,
+                    all_systems_passed,
                 )| {
                     let build_status = build_status.as_deref().map(|status| match status {
                         "queued" => BuildStatus::Queued,
@@ -502,6 +525,36 @@ pub async fn fetch_flake_timelines(
                         "complete" => BuildStatus::Complete,
                         _ => BuildStatus::Idle,
                     });
+
+                    let metadata = if let (
+                        Some(total_systems),
+                        Some(systems_passed_policy),
+                        Some(systems_failed_policy_strict),
+                        Some(systems_failed_policy_non_strict),
+                        Some(has_nix_eval_error),
+                        Some(has_policy_failures),
+                        Some(all_systems_passed),
+                    ) = (
+                        total_systems,
+                        systems_passed_policy,
+                        systems_failed_policy_strict,
+                        systems_failed_policy_non_strict,
+                        has_nix_eval_error,
+                        has_policy_failures,
+                        all_systems_passed,
+                    ) {
+                        Some(CommitMetadata {
+                            total_systems,
+                            systems_passed_policy,
+                            systems_failed_policy_strict,
+                            systems_failed_policy_non_strict,
+                            has_nix_eval_error,
+                            has_policy_failures,
+                            all_systems_passed,
+                        })
+                    } else {
+                        None
+                    };
 
                     FlakeCommit {
                         id,
@@ -515,6 +568,7 @@ pub async fn fetch_flake_timelines(
                         build_status,
                         evaluation_status,
                         evaluation_error_message,
+                        metadata,
                     }
                 },
             )
