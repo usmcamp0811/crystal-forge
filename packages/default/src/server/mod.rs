@@ -193,6 +193,12 @@ pub fn spawn_background_tasks(
         cfg.server.failed_build_log_retention_days,
     ));
 
+    let commit_cache_pool = pool.clone();
+    tokio::spawn(run_commit_cache_gc_loop(
+        commit_cache_pool,
+        cfg.server.commit_cache_retention_days,
+    ));
+
     tokio::spawn(spawn_deployment_policy_manager(cfg, deployment_pool));
 }
 
@@ -230,6 +236,35 @@ async fn run_build_log_retention_loop(
         }
 
         ticker.tick().await;
+    }
+}
+
+/// Runs daily commit metadata cache garbage collection.
+///
+/// Removes cache entries older than retention period to prevent unbounded growth.
+async fn run_commit_cache_gc_loop(pool: PgPool, retention_days: i32) {
+    info!(
+        "🔁 Starting commit metadata cache GC loop (retention={}d)",
+        retention_days
+    );
+
+    let mut ticker = interval(Duration::from_secs(24 * 60 * 60));
+
+    loop {
+        ticker.tick().await;
+
+        match crate::tasks::gc_commit_cache::garbage_collect_commit_cache(&pool, retention_days)
+            .await
+        {
+            Ok(deleted) => {
+                if deleted > 0 {
+                    debug!("Commit cache GC completed: {} entries removed", deleted);
+                }
+            }
+            Err(err) => {
+                error!("❌ Commit cache GC failed: {:#}", err);
+            }
+        }
     }
 }
 
