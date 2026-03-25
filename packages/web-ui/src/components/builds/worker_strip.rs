@@ -4,7 +4,7 @@ use dioxus::prelude::*;
 
 use crate::theme;
 
-use super::helpers::{WorkerAction, WorkerItem, worker_status_class};
+use super::helpers::{worker_status_class, WorkerAction, WorkerItem};
 
 /// Worker strip showing all build workers and their status.
 #[component]

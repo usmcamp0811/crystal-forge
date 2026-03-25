@@ -7,6 +7,26 @@ use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::JsCast;
 use web_sys::{window, Node};
 
+/// Extract the system name from a full flake attribute path or hostname.
+///
+/// Examples:
+/// - `git+https://...#nixosConfigurations.test.gray` → `gray`
+/// - `git+https://...#nixosConfigurations.gray` → `gray`
+/// - `gray` → `gray`
+pub fn extract_system_name(hostname: &str) -> &str {
+    // If there's a # (flake attribute path), extract everything after it
+    if let Some(attr_path) = hostname.split('#').nth(1) {
+        // Split by dots and take the last segment (the actual system name)
+        // Examples:
+        //   nixosConfigurations.test.gray -> gray
+        //   nixosConfigurations.gray -> gray
+        attr_path.split('.').last().unwrap_or(attr_path)
+    } else {
+        // No flake path, just return the hostname as-is
+        hostname
+    }
+}
+
 /// Worker status enum.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkerStatus {

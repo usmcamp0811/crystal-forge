@@ -9,9 +9,9 @@ use crate::api::{
     models::{BuildStatus as ApiBuildStatus, BuilderStatus},
 };
 use crate::components::builds::{
-    selected_build_data, BuildAction, BuildDetailPane, BuildItem, BuildQueuePane, BuildStatus,
-    ConfirmActionModal, DetailTab, MetricsRow, PendingAction, QueueAction, QueueActionButton,
-    WorkerAction, WorkerItem, WorkerStatus, WorkerStrip,
+    extract_system_name, selected_build_data, BuildAction, BuildDetailPane, BuildItem,
+    BuildQueuePane, BuildStatus, ConfirmActionModal, DetailTab, MetricsRow, PendingAction,
+    QueueAction, QueueActionButton, WorkerAction, WorkerItem, WorkerStatus, WorkerStrip,
 };
 use crate::components::layout::Card;
 use crate::theme;
@@ -428,7 +428,7 @@ pub fn BuildsView() -> Element {
                                                 };
                                                 rsx! {
                                                     tr { key: "completed-{item.id}", class: "border-b border-slate-800/70",
-                                                        td { class: "py-2 pr-3 font-mono text-slate-200", "{item.hostname}" }
+                                                        td { class: "py-2 pr-3 font-mono text-slate-200", "{extract_system_name(&item.hostname)}" }
                                                         td { class: "py-2 pr-3 text-slate-300", "{format_environment(item)}" }
                                                         td { class: "py-2 pr-3",
                                                             span { class: "{status_class}", "{item.status_label()}" }
