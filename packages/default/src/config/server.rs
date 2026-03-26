@@ -89,6 +89,12 @@ pub struct ServerConfig {
     /// Default: 90 days.
     #[serde(default = "default_failed_build_log_retention_days")]
     pub failed_build_log_retention_days: i32,
+
+    /// Retention period for cached commit metadata in days.
+    /// Older cache entries are cleared by background garbage collection task.
+    /// Default: 30 days.
+    #[serde(default = "default_commit_cache_retention_days")]
+    pub commit_cache_retention_days: i32,
 }
 
 // Default value functions for serde
@@ -124,6 +130,10 @@ fn default_failed_build_log_retention_days() -> i32 {
     90
 }
 
+fn default_commit_cache_retention_days() -> i32 {
+    30
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -139,6 +149,7 @@ impl Default for ServerConfig {
             max_build_log_chunk_mb: default_max_build_log_chunk_mb(),
             build_log_retention_days: default_build_log_retention_days(),
             failed_build_log_retention_days: default_failed_build_log_retention_days(),
+            commit_cache_retention_days: default_commit_cache_retention_days(),
         }
     }
 }
