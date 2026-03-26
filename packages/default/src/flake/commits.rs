@@ -504,13 +504,27 @@ pub async fn fetch_and_insert_commits_since(
     branch: &str,
     since_commit: &Commit,
 ) -> Result<Vec<String>> {
-    let commits = get_commits_with_full_metadata(
+    let commits = match get_commits_with_full_metadata(
         repo_url,
         branch,
         Some(50),
         Some(&since_commit.git_commit_hash),
     )
-    .await?;
+    .await
+    {
+        Ok(commits) => commits,
+        Err(err) if is_invalid_revision_range_error(&err) => {
+            warn!(
+                "⚠️ Incremental sync range is invalid for {} on {} (since={}): {}; falling back to recent HEAD sync",
+                repo_url,
+                branch,
+                since_commit.git_commit_hash,
+                err
+            );
+            get_commits_with_full_metadata(repo_url, branch, Some(50), None).await?
+        }
+        Err(err) => return Err(err),
+    };
 
     if commits.is_empty() {
         debug!(
@@ -546,6 +560,10 @@ pub async fn fetch_and_insert_commits_since(
         repo_url
     );
     Ok(inserted)
+}
+
+fn is_invalid_revision_range_error(err: &anyhow::Error) -> bool {
+    err.to_string().contains("Invalid revision range")
 }
 
 /// Resolve commit subject/author metadata for specific hashes.
@@ -950,4 +968,21 @@ async fn try_get_diff_for_branch(
     }
 
     Ok(String::from_utf8_lossy(&show_output.stdout).to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_invalid_revision_range_error;
+
+    #[test]
+    fn detects_invalid_revision_range_error() {
+        let err = anyhow::anyhow!("git log failed: fatal: Invalid revision range deadbeef..HEAD");
+        assert!(is_invalid_revision_range_error(&err));
+    }
+
+    #[test]
+    fn ignores_non_revision_range_errors() {
+        let err = anyhow::anyhow!("git clone failed: authentication required");
+        assert!(!is_invalid_revision_range_error(&err));
+    }
 }
