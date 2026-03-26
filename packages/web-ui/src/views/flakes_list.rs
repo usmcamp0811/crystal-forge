@@ -1521,18 +1521,17 @@ fn FlakeHistoryExplorer(
                                             for hostname in preview_systems(&commit.systems).iter() {
                                                 {
                                                     let status = system_status.read().get(hostname).cloned();
-                                                    let chip_class = match status {
-                                                        Some(SystemEvalStatus::Success) => "px-2 py-1 rounded border border-green-500/50 bg-green-900/30 text-green-200 text-xs font-mono",
-                                                        Some(SystemEvalStatus::Failed) => "px-2 py-1 rounded border border-red-500/50 bg-red-900/30 text-red-200 text-xs font-mono",
-                                                        Some(SystemEvalStatus::PolicyFailed) => "px-2 py-1 rounded border border-orange-500/60 bg-orange-900/30 text-orange-200 text-xs font-mono",
-                                                        Some(SystemEvalStatus::QueuedForBuild) => "px-2 py-1 rounded border border-emerald-500/60 bg-emerald-900/30 text-emerald-100 text-xs font-mono",
-                                                        Some(SystemEvalStatus::Evaluating) => "px-2 py-1 rounded border border-yellow-500/50 bg-yellow-900/30 text-yellow-200 text-xs font-mono animate-pulse",
-                                                        Some(SystemEvalStatus::Pending) | None => "px-2 py-1 rounded border border-slate-600 bg-slate-800/30 text-slate-400 text-xs font-mono",
+                                                    let chip_style = system_chip_style(status.as_ref());
+                                                    let chip_class = if status == Some(SystemEvalStatus::Evaluating) {
+                                                        "px-2 py-1 rounded border text-xs font-mono animate-pulse"
+                                                    } else {
+                                                        "px-2 py-1 rounded border text-xs font-mono"
                                                     };
                                                     rsx! {
                                                         span {
                                                             key: "{hostname}",
                                                             class: "{chip_class}",
+                                                            style: "{chip_style}",
                                                             "{hostname}"
                                                         }
                                                     }
@@ -2861,6 +2860,29 @@ fn build_badge_style(status: &ApiBuildStatus) -> &'static str {
             "background-color: #1f3a2f; border-color: #22c55e; color: #dcfce7;"
         }
         ApiBuildStatus::Idle => "background-color: #2b303b; border-color: #495264; color: #cbd5e1;",
+    }
+}
+
+fn system_chip_style(status: Option<&crate::hooks::websocket::SystemEvalStatus>) -> &'static str {
+    match status {
+        Some(crate::hooks::websocket::SystemEvalStatus::Success) => {
+            "background-color: #163b2b; border-color: #22c55e; color: #dcfce7;"
+        }
+        Some(crate::hooks::websocket::SystemEvalStatus::Failed) => {
+            "background-color: #4a2324; border-color: #ef4444; color: #fee2e2;"
+        }
+        Some(crate::hooks::websocket::SystemEvalStatus::PolicyFailed) => {
+            "background-color: #4a2f18; border-color: #f59e0b; color: #ffedd5;"
+        }
+        Some(crate::hooks::websocket::SystemEvalStatus::QueuedForBuild) => {
+            "background-color: #1a3d3b; border-color: #10b981; color: #d1fae5;"
+        }
+        Some(crate::hooks::websocket::SystemEvalStatus::Evaluating) => {
+            "background-color: #4a3a16; border-color: #facc15; color: #fef9c3;"
+        }
+        Some(crate::hooks::websocket::SystemEvalStatus::Pending) | None => {
+            "background-color: #2b303b; border-color: #64748b; color: #cbd5e1;"
+        }
     }
 }
 
