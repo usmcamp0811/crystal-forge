@@ -26,6 +26,7 @@ Crystal Forge should recover from missing commit history by deepening/unshallowi
 - Environment: Manual clone of the repo (git clone --depth 50 --branch main --single-branch …) does not contain the DB's last commit hash, so git log <hash>..HEAD fails. This happens when the repo history is rewritten or the DB contains an older commit outside the shallow depth.
 - Workaround: Clear commits for the flake in the DB so Crystal Forge re‑initializes
 - 2026-03-26: In Progress fix adds fallback from invalid revision-range incremental sync to bounded recent HEAD sync, with targeted unit tests for regression guard.
+- 2026-03-26: Updated approach to operator-gated rewrite handling: sync now returns conflict on history divergence and requires explicit acceptance via new API action before lineage reset + re-sync.
 
 ---
 

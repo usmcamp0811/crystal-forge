@@ -14,6 +14,7 @@ const GIT_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const NIX_CONFIG_EVAL_TIMEOUT: Duration = Duration::from_secs(60);
 const INIT_COMMIT_RETRY_ATTEMPTS: usize = 5;
 const INIT_COMMIT_RETRY_DELAY: Duration = Duration::from_secs(1);
+const HISTORY_REWRITE_ERROR_MARKER: &str = "history_rewrite_detected";
 
 async fn fetch_and_insert_recent_commits_with_retry(
     pool: &PgPool,
@@ -514,14 +515,14 @@ pub async fn fetch_and_insert_commits_since(
     {
         Ok(commits) => commits,
         Err(err) if is_invalid_revision_range_error(&err) => {
-            warn!(
-                "⚠️ Incremental sync range is invalid for {} on {} (since={}): {}; falling back to recent HEAD sync",
+            return Err(anyhow::anyhow!(
+                "{}: remote history diverged for {} on {}. Last known commit {} is no longer in branch history. Accept rewrite via POST /api/v1/flakes/:id/accept-rewrite before syncing again. Root cause: {}",
+                HISTORY_REWRITE_ERROR_MARKER,
                 repo_url,
                 branch,
                 since_commit.git_commit_hash,
                 err
-            );
-            get_commits_with_full_metadata(repo_url, branch, Some(50), None).await?
+            ));
         }
         Err(err) => return Err(err),
     };
@@ -564,6 +565,10 @@ pub async fn fetch_and_insert_commits_since(
 
 fn is_invalid_revision_range_error(err: &anyhow::Error) -> bool {
     err.to_string().contains("Invalid revision range")
+}
+
+pub fn is_history_rewrite_error(err: &anyhow::Error) -> bool {
+    err.to_string().contains(HISTORY_REWRITE_ERROR_MARKER)
 }
 
 /// Resolve commit subject/author metadata for specific hashes.
@@ -972,7 +977,7 @@ async fn try_get_diff_for_branch(
 
 #[cfg(test)]
 mod tests {
-    use super::is_invalid_revision_range_error;
+    use super::{is_history_rewrite_error, is_invalid_revision_range_error};
 
     #[test]
     fn detects_invalid_revision_range_error() {
@@ -984,5 +989,11 @@ mod tests {
     fn ignores_non_revision_range_errors() {
         let err = anyhow::anyhow!("git clone failed: authentication required");
         assert!(!is_invalid_revision_range_error(&err));
+    }
+
+    #[test]
+    fn detects_history_rewrite_error_marker() {
+        let err = anyhow::anyhow!("history_rewrite_detected: remote history diverged");
+        assert!(is_history_rewrite_error(&err));
     }
 }

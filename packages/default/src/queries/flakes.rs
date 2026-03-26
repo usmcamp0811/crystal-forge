@@ -197,6 +197,62 @@ pub async fn delete_flake_by_id(pool: &PgPool, flake_id: i32) -> Result<u64> {
     Ok(result.rows_affected())
 }
 
+pub async fn purge_flake_commit_history(pool: &PgPool, flake_id: i32) -> Result<u64> {
+    let mut tx = pool.begin().await?;
+
+    // Clear commit-scoped caches first for deterministic cleanup.
+    sqlx::query(
+        r#"
+        DELETE FROM commit_artifacts_cache cac
+        USING commits c
+        WHERE cac.commit_id = c.id
+          AND c.flake_id = $1
+        "#,
+    )
+    .bind(flake_id)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        DELETE FROM commit_metadata_cache cmc
+        USING commits c
+        WHERE cmc.commit_id = c.id
+          AND c.flake_id = $1
+        "#,
+    )
+    .bind(flake_id)
+    .execute(&mut *tx)
+    .await?;
+
+    // Remove derivations linked to this flake's commits.
+    sqlx::query(
+        r#"
+        DELETE FROM derivations d
+        USING commits c
+        WHERE d.commit_id = c.id
+          AND c.flake_id = $1
+        "#,
+    )
+    .bind(flake_id)
+    .execute(&mut *tx)
+    .await?;
+
+    let deleted_commits = sqlx::query(
+        r#"
+        DELETE FROM commits
+        WHERE flake_id = $1
+        "#,
+    )
+    .bind(flake_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+
+    tx.commit().await?;
+    Ok(deleted_commits)
+}
+
 /// Soft delete a flake by setting deleted_at timestamp.
 /// The flake will be excluded from normal queries but retained for audit.
 pub async fn soft_delete_flake(pool: &PgPool, flake_id: i32) -> Result<u64> {
