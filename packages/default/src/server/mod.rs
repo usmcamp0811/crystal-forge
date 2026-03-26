@@ -54,6 +54,35 @@ fn custom_field_name(name: &str, id: uuid::Uuid) -> String {
     }
 }
 
+fn normalize_custom_policy_expression(expression: &str) -> (String, bool) {
+    let mut cursor = 0usize;
+    let mut changed = false;
+    let mut normalized = String::with_capacity(expression.len() + 16);
+
+    while let Some(rel_idx) = expression[cursor..].find("config.") {
+        let idx = cursor + rel_idx;
+        let prev_char = expression[..idx].chars().next_back();
+        let has_safe_boundary = prev_char
+            .map(|c| !(c.is_ascii_alphanumeric() || c == '_' || c == '.'))
+            .unwrap_or(true);
+        let already_cfg_prefixed = idx >= 4 && expression.get(idx - 4..idx) == Some("cfg.");
+
+        normalized.push_str(&expression[cursor..idx]);
+
+        if has_safe_boundary && !already_cfg_prefixed {
+            normalized.push_str("cfg.config.");
+            changed = true;
+        } else {
+            normalized.push_str("config.");
+        }
+
+        cursor = idx + "config.".len();
+    }
+
+    normalized.push_str(&expression[cursor..]);
+    (normalized, changed)
+}
+
 fn parse_deployment_policy_record(
     record: &crate::models::deployment_policies::DeploymentPolicyRecord,
 ) -> Option<DeploymentPolicy> {
@@ -93,6 +122,14 @@ fn parse_deployment_policy_record(
                 );
                 return None;
             };
+            let (expression, normalized_legacy_ref) =
+                normalize_custom_policy_expression(&expression);
+            if normalized_legacy_ref {
+                warn!(
+                    "Auto-normalized legacy custom_check expression for policy '{}' ({}): replaced `config.` with `cfg.config.`",
+                    record.name, record.id
+                );
+            }
 
             let description = cfg
                 .get("description")
@@ -652,7 +689,10 @@ fn select_next_pending_commit_id_for_cycle(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_deployment_policy_record, select_next_pending_commit_id_for_cycle};
+    use super::{
+        normalize_custom_policy_expression, parse_deployment_policy_record,
+        select_next_pending_commit_id_for_cycle,
+    };
     use crate::models::deployment_policies::{DeploymentPolicy, DeploymentPolicyRecord};
     use chrono::Utc;
     use serde_json::json;
@@ -701,6 +741,47 @@ mod tests {
         match parsed {
             DeploymentPolicy::RequireCrystalForgeAgent { strict } => assert!(strict),
             _ => panic!("expected RequireCrystalForgeAgent variant"),
+        }
+    }
+
+    #[test]
+    fn normalize_custom_policy_expression_rewrites_legacy_config_prefix() {
+        let (normalized, changed) =
+            normalize_custom_policy_expression("config.services.auditd.enable or false");
+        assert!(changed);
+        assert_eq!(normalized, "cfg.config.services.auditd.enable or false");
+    }
+
+    #[test]
+    fn normalize_custom_policy_expression_keeps_cfg_config_prefix() {
+        let (normalized, changed) =
+            normalize_custom_policy_expression("cfg.config.networking.firewall.enable");
+        assert!(!changed);
+        assert_eq!(normalized, "cfg.config.networking.firewall.enable");
+    }
+
+    #[test]
+    fn parse_custom_check_normalizes_expression() {
+        let record = DeploymentPolicyRecord {
+            id: Uuid::new_v4(),
+            name: "auditd".to_string(),
+            description: Some("auditd enabled".to_string()),
+            policy_type: "custom_check".to_string(),
+            config: json!({
+                "expression": "config.services.auditd.enable or false",
+                "strict": false
+            }),
+            enabled: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let parsed = parse_deployment_policy_record(&record).expect("policy should parse");
+        match parsed {
+            DeploymentPolicy::CustomCheck { expression, .. } => {
+                assert_eq!(expression, "cfg.config.services.auditd.enable or false")
+            }
+            _ => panic!("expected CustomCheck variant"),
         }
     }
 }
