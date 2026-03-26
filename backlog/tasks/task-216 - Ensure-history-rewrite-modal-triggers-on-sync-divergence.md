@@ -1,7 +1,7 @@
 ---
 id: TASK-216
 title: Ensure history rewrite modal triggers on sync divergence
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-03-26 15:55'
 updated_date: '2026-03-26 15:55'
@@ -47,3 +47,7 @@ Medium: incorrect divergence detection could over-trigger conflicts. Keep detect
 ## Lock
 
 LOCK: opencode-gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-216-rewrite-warning-indicator
+
+## Review
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/187
