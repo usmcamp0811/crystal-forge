@@ -5,7 +5,7 @@ use crate::log::log_builder_worker_status;
 use crate::models::commits::Commit;
 use crate::models::deployment_policies::DeploymentPolicy;
 use crate::models::evaluate_with_policies::{
-    evaluate_with_mock_eval_jobs, evaluate_with_nix_eval_jobs,
+    evaluate_with_mock_eval_jobs, evaluate_with_nix_eval_jobs, update_commit_metadata_cache,
 };
 use crate::models::flakes::Flake;
 use crate::queue::QueueNotifier;
@@ -54,6 +54,35 @@ fn custom_field_name(name: &str, id: uuid::Uuid) -> String {
     }
 }
 
+fn normalize_custom_policy_expression(expression: &str) -> (String, bool) {
+    let mut cursor = 0usize;
+    let mut changed = false;
+    let mut normalized = String::with_capacity(expression.len() + 16);
+
+    while let Some(rel_idx) = expression[cursor..].find("config.") {
+        let idx = cursor + rel_idx;
+        let prev_char = expression[..idx].chars().next_back();
+        let has_safe_boundary = prev_char
+            .map(|c| !(c.is_ascii_alphanumeric() || c == '_' || c == '.'))
+            .unwrap_or(true);
+        let already_cfg_prefixed = idx >= 4 && expression.get(idx - 4..idx) == Some("cfg.");
+
+        normalized.push_str(&expression[cursor..idx]);
+
+        if has_safe_boundary && !already_cfg_prefixed {
+            normalized.push_str("cfg.config.");
+            changed = true;
+        } else {
+            normalized.push_str("config.");
+        }
+
+        cursor = idx + "config.".len();
+    }
+
+    normalized.push_str(&expression[cursor..]);
+    (normalized, changed)
+}
+
 fn parse_deployment_policy_record(
     record: &crate::models::deployment_policies::DeploymentPolicyRecord,
 ) -> Option<DeploymentPolicy> {
@@ -93,6 +122,14 @@ fn parse_deployment_policy_record(
                 );
                 return None;
             };
+            let (expression, normalized_legacy_ref) =
+                normalize_custom_policy_expression(&expression);
+            if normalized_legacy_ref {
+                warn!(
+                    "Auto-normalized legacy custom_check expression for policy '{}' ({}): replaced `config.` with `cfg.config.`",
+                    record.name, record.id
+                );
+            }
 
             let description = cfg
                 .get("description")
@@ -193,6 +230,12 @@ pub fn spawn_background_tasks(
         cfg.server.failed_build_log_retention_days,
     ));
 
+    let commit_cache_pool = pool.clone();
+    tokio::spawn(run_commit_cache_gc_loop(
+        commit_cache_pool,
+        cfg.server.commit_cache_retention_days,
+    ));
+
     tokio::spawn(spawn_deployment_policy_manager(cfg, deployment_pool));
 }
 
@@ -230,6 +273,45 @@ async fn run_build_log_retention_loop(
         }
 
         ticker.tick().await;
+    }
+}
+
+/// Runs daily commit metadata cache garbage collection.
+///
+/// Removes cache entries older than retention period to prevent unbounded growth.
+async fn run_commit_cache_gc_loop(pool: PgPool, retention_days: i32) {
+    let retention_days = if retention_days <= 0 {
+        warn!(
+            "Invalid commit cache retention_days={} (must be > 0); defaulting to 30 days",
+            retention_days
+        );
+        30
+    } else {
+        retention_days
+    };
+
+    info!(
+        "🔁 Starting commit metadata cache GC loop (retention={}d)",
+        retention_days
+    );
+
+    let mut ticker = interval(Duration::from_secs(24 * 60 * 60));
+
+    loop {
+        ticker.tick().await;
+
+        match crate::tasks::gc_commit_cache::garbage_collect_commit_cache(&pool, retention_days)
+            .await
+        {
+            Ok(deleted) => {
+                if deleted > 0 {
+                    debug!("Commit cache GC completed: {} entries removed", deleted);
+                }
+            }
+            Err(err) => {
+                error!("❌ Commit cache GC failed: {:#}", err);
+            }
+        }
     }
 }
 
@@ -495,6 +577,16 @@ async fn process_pending_commits(
                     );
                 }
 
+                // ⬇️ UPDATE CACHE with evaluation summary
+                if let Err(e) =
+                    update_commit_metadata_cache(pool, commit.id, &policy_checks, false).await
+                {
+                    error!(
+                        "❌ Failed to update commit metadata cache for {}: {}",
+                        commit.git_commit_hash, e
+                    );
+                }
+
                 // ⬇️ CREATE BUILD JOBS for evaluated derivations
                 match create_build_jobs_for_commit(pool, commit.id).await {
                     Ok(job_count) if job_count > 0 => {
@@ -582,6 +674,17 @@ async fn process_pending_commits(
                         commit.git_commit_hash, mark_err
                     );
                 }
+
+                // ⬇️ UPDATE CACHE to record eval error (no policy checks available)
+                if let Err(cache_err) =
+                    update_commit_metadata_cache(pool, commit.id, &[], true).await
+                {
+                    error!(
+                        "❌ Failed to update commit metadata cache for {}: {}",
+                        commit.git_commit_hash, cache_err
+                    );
+                }
+
                 return Ok(());
             }
         }
@@ -596,7 +699,10 @@ fn select_next_pending_commit_id_for_cycle(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_deployment_policy_record, select_next_pending_commit_id_for_cycle};
+    use super::{
+        normalize_custom_policy_expression, parse_deployment_policy_record,
+        select_next_pending_commit_id_for_cycle,
+    };
     use crate::models::deployment_policies::{DeploymentPolicy, DeploymentPolicyRecord};
     use chrono::Utc;
     use serde_json::json;
@@ -645,6 +751,47 @@ mod tests {
         match parsed {
             DeploymentPolicy::RequireCrystalForgeAgent { strict } => assert!(strict),
             _ => panic!("expected RequireCrystalForgeAgent variant"),
+        }
+    }
+
+    #[test]
+    fn normalize_custom_policy_expression_rewrites_legacy_config_prefix() {
+        let (normalized, changed) =
+            normalize_custom_policy_expression("config.services.auditd.enable or false");
+        assert!(changed);
+        assert_eq!(normalized, "cfg.config.services.auditd.enable or false");
+    }
+
+    #[test]
+    fn normalize_custom_policy_expression_keeps_cfg_config_prefix() {
+        let (normalized, changed) =
+            normalize_custom_policy_expression("cfg.config.networking.firewall.enable");
+        assert!(!changed);
+        assert_eq!(normalized, "cfg.config.networking.firewall.enable");
+    }
+
+    #[test]
+    fn parse_custom_check_normalizes_expression() {
+        let record = DeploymentPolicyRecord {
+            id: Uuid::new_v4(),
+            name: "auditd".to_string(),
+            description: Some("auditd enabled".to_string()),
+            policy_type: "custom_check".to_string(),
+            config: json!({
+                "expression": "config.services.auditd.enable or false",
+                "strict": false
+            }),
+            enabled: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let parsed = parse_deployment_policy_record(&record).expect("policy should parse");
+        match parsed {
+            DeploymentPolicy::CustomCheck { expression, .. } => {
+                assert_eq!(expression, "cfg.config.services.auditd.enable or false")
+            }
+            _ => panic!("expected CustomCheck variant"),
         }
     }
 }

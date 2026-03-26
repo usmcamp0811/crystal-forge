@@ -1,4 +1,4 @@
-use crate::api::models::{BuildStatus, FlakeCommit, FlakeRegistryItem, FlakeTimeline};
+use crate::api::models::{BuildStatus, CommitMetadata, FlakeCommit, FlakeRegistryItem, FlakeTimeline};
 use crate::config::{FlakeConfig, WatchedFlake};
 use crate::models::flakes::Flake;
 use anyhow::Context;
@@ -352,6 +352,20 @@ pub async fn fetch_dashboard_flake_timelines(
         .fetch_all(pool)
         .await?;
 
+        let commit_ids: Vec<i32> = commits_rows.iter().map(|row| row.0).collect();
+        if !commit_ids.is_empty() {
+            sqlx::query(
+                r#"
+                UPDATE commit_metadata_cache
+                SET last_accessed_at = CURRENT_TIMESTAMP
+                WHERE commit_id = ANY($1)
+                "#,
+            )
+            .bind(&commit_ids)
+            .execute(pool)
+            .await?;
+        }
+
         let commits: Vec<FlakeCommit> = commits_rows
             .into_iter()
             .map(
@@ -385,6 +399,7 @@ pub async fn fetch_dashboard_flake_timelines(
                         build_status,
                         evaluation_status,
                         evaluation_error_message: None,
+                        metadata: None, // Dashboard view doesn't need metadata
                     }
                 },
             )
@@ -421,22 +436,30 @@ pub async fn fetch_flake_timelines(
     for (flake_id, flake_name, repo_url) in flakes {
         // Fetch recent commits for this flake, including systems at commit,
         // build queue status, dry-run/eval status, and git metadata (message/author).
-        let commits_rows = sqlx::query_as::<
-            _,
-            (
-                i32,
-                String,
-                chrono::DateTime<chrono::Utc>,
-                Option<String>,
-                Option<String>,
-                i64,
-                Vec<String>,
-                i64,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-            ),
-        >(
+        // Dedicated struct to avoid sqlx's 16-element tuple limit
+        #[derive(sqlx::FromRow)]
+        struct FlakeCommitRow {
+            id: i32,
+            git_commit_hash: String,
+            commit_timestamp: chrono::DateTime<chrono::Utc>,
+            message: Option<String>,
+            author: Option<String>,
+            system_count: i64,
+            systems: Vec<String>,
+            commits_behind: i64,
+            build_status: Option<String>,
+            evaluation_status: Option<String>,
+            evaluation_error_message: Option<String>,
+            total_systems: Option<i32>,
+            systems_passed_policy: Option<i32>,
+            systems_failed_policy_strict: Option<i32>,
+            systems_failed_policy_non_strict: Option<i32>,
+            has_nix_eval_error: Option<bool>,
+            has_policy_failures: Option<bool>,
+            all_systems_passed: Option<bool>,
+        }
+
+        let commits_rows = sqlx::query_as::<_, FlakeCommitRow>(
             r#"
             SELECT
                 c.id,
@@ -445,7 +468,20 @@ pub async fn fetch_flake_timelines(
                 c.message,
                 c.author,
                 COALESCE(CARDINALITY(cac.nixos_configurations), 0)::bigint AS system_count,
-                COALESCE(cac.nixos_configurations, ARRAY[]::text[]) AS systems,
+                COALESCE(
+                    cac.nixos_configurations,
+                    (
+                        SELECT COALESCE(array_agg(dn.derivation_name), ARRAY[]::text[])
+                        FROM (
+                            SELECT DISTINCT d.derivation_name
+                            FROM derivations d
+                            WHERE d.commit_id = c.id
+                                AND d.derivation_type = 'nixos'
+                            ORDER BY d.derivation_name
+                        ) dn
+                    ),
+                    ARRAY[]::text[]
+                ) AS systems,
                 (
                     SELECT COUNT(*)::bigint
                     FROM commits c2
@@ -466,9 +502,17 @@ pub async fn fetch_flake_timelines(
                     WHERE d.commit_id = c.id
                 ) AS build_status,
                 c.evaluation_status,
-                c.evaluation_error_message
+                c.evaluation_error_message,
+                cmc.total_systems,
+                cmc.systems_passed_policy,
+                cmc.systems_failed_policy_strict,
+                cmc.systems_failed_policy_non_strict,
+                cmc.has_nix_eval_error,
+                cmc.has_policy_failures,
+                cmc.all_systems_passed
             FROM commits c
             LEFT JOIN commit_artifacts_cache cac ON cac.commit_id = c.id
+            LEFT JOIN commit_metadata_cache cmc ON cmc.commit_id = c.id
             WHERE c.flake_id = $1
             ORDER BY c.commit_timestamp DESC
             LIMIT $2
@@ -479,23 +523,24 @@ pub async fn fetch_flake_timelines(
         .fetch_all(pool)
         .await?;
 
+        let commit_ids: Vec<i32> = commits_rows.iter().map(|row| row.id).collect();
+        if !commit_ids.is_empty() {
+            sqlx::query(
+                r#"
+                UPDATE commit_metadata_cache
+                SET last_accessed_at = CURRENT_TIMESTAMP
+                WHERE commit_id = ANY($1)
+                "#,
+            )
+            .bind(&commit_ids)
+            .execute(pool)
+            .await?;
+        }
+
         let commits: Vec<FlakeCommit> = commits_rows
             .into_iter()
-            .map(
-                |(
-                    id,
-                    hash,
-                    committed_at,
-                    message,
-                    author,
-                    system_count,
-                    systems,
-                    commits_behind,
-                    build_status,
-                    evaluation_status,
-                    evaluation_error_message,
-                )| {
-                    let build_status = build_status.as_deref().map(|status| match status {
+            .map(|row| {
+                    let build_status = row.build_status.as_deref().map(|status| match status {
                         "queued" => BuildStatus::Queued,
                         "building" => BuildStatus::Building,
                         "failed" => BuildStatus::Failed,
@@ -503,21 +548,51 @@ pub async fn fetch_flake_timelines(
                         _ => BuildStatus::Idle,
                     });
 
+                    let metadata = if let (
+                        Some(total_systems),
+                        Some(systems_passed_policy),
+                        Some(systems_failed_policy_strict),
+                        Some(systems_failed_policy_non_strict),
+                        Some(has_nix_eval_error),
+                        Some(has_policy_failures),
+                        Some(all_systems_passed),
+                    ) = (
+                        row.total_systems,
+                        row.systems_passed_policy,
+                        row.systems_failed_policy_strict,
+                        row.systems_failed_policy_non_strict,
+                        row.has_nix_eval_error,
+                        row.has_policy_failures,
+                        row.all_systems_passed,
+                    ) {
+                        Some(CommitMetadata {
+                            total_systems,
+                            systems_passed_policy,
+                            systems_failed_policy_strict,
+                            systems_failed_policy_non_strict,
+                            has_nix_eval_error,
+                            has_policy_failures,
+                            all_systems_passed,
+                        })
+                    } else {
+                        None
+                    };
+
                     FlakeCommit {
-                        id,
-                        hash,
-                        message: message.unwrap_or_default(),
-                        author: author.unwrap_or_default(),
-                        committed_at,
-                        system_count,
-                        commits_behind,
-                        systems,
+                        id: row.id,
+                        hash: row.git_commit_hash,
+                        message: row.message.unwrap_or_default(),
+                        author: row.author.unwrap_or_default(),
+                        committed_at: row.commit_timestamp,
+                        system_count: row.system_count,
+                        commits_behind: row.commits_behind,
+                        systems: row.systems,
                         build_status,
-                        evaluation_status,
-                        evaluation_error_message,
+                        evaluation_status: row.evaluation_status,
+                        evaluation_error_message: row.evaluation_error_message,
+                        metadata,
                     }
-                },
-            )
+                })
             .collect();
 
         timelines.push(FlakeTimeline {
