@@ -1487,6 +1487,40 @@ const steps = [
     },
   },
   {
+    name: "13c-flakes-history-rewrite-modal",
+    description: "Flakes view history rewrite conflict modal after sync",
+    action: async (page) => {
+      await page.route(/\/api\/v1\/flakes\/\d+\/sync$/, async (route) => {
+        await route.fulfill({
+          status: 409,
+          contentType: "application/json",
+          body: JSON.stringify({
+            error: "history_rewrite_detected",
+            message:
+              "Git history rewrite detected for test flake. Review and accept rewrite before sync.",
+            details: {
+              accept_rewrite_endpoint: "/api/v1/flakes/1/accept-rewrite",
+            },
+          }),
+        });
+      });
+
+      await page.goto(`${baseUrl}/flakes`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2000);
+
+      const syncBtn = page.locator("button:has-text('Sync from Source')").first();
+      await syncBtn.waitFor({ timeout: 5000 });
+      await syncBtn.click();
+
+      await page
+        .locator("text=History Rewrite Detected")
+        .first()
+        .waitFor({ timeout: 5000 });
+
+      await page.unroute(/\/api\/v1\/flakes\/\d+\/sync$/);
+    },
+  },
+  {
     name: "14-environments",
     description: "Environments registry",
     action: async (page) => {

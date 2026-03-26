@@ -349,6 +349,14 @@ pub async fn request_sync_flake(id: i32) -> Result<SystemMutationResponse, ApiCl
     send_json_with_csrf("POST", &url, None::<&()>).await
 }
 
+/// Accept a detected history rewrite for a specific flake.
+pub async fn accept_flake_history_rewrite(
+    id: i32,
+) -> Result<SystemMutationResponse, ApiClientError> {
+    let url = format!("{}/flakes/{id}/accept-rewrite", base_url());
+    send_json_with_csrf("POST", &url, None::<&()>).await
+}
+
 /// Fetch the git diff for a specific commit in a flake.
 pub async fn fetch_commit_diff(
     flake_id: i32,

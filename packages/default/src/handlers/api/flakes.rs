@@ -8,7 +8,7 @@ use axum::response::IntoResponse;
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 use crate::api::models::{
     ApiError, CommitDiffResponse, CreateFlakeRequest, FlakeRegistryItem, FlakeTimeline,
@@ -1011,6 +1011,15 @@ pub async fn accept_flake_history_rewrite(
         }
     };
 
+    info!(
+        "history_rewrite_accept_requested flake_id={} flake_name={} repo_url={} branch={} actor={}",
+        flake.id,
+        flake.name,
+        flake.repo_url,
+        flake.branch,
+        user.user_id
+    );
+
     let previous_head = sqlx::query_scalar::<_, Option<String>>(
         r#"
         SELECT git_commit_hash
@@ -1066,6 +1075,15 @@ pub async fn accept_flake_history_rewrite(
                 .into_response();
         }
     };
+
+    info!(
+        "history_rewrite_accepted flake_id={} flake_name={} deleted_commits={} inserted_commits={} actor={}",
+        flake.id,
+        flake.name,
+        deleted_commits,
+        inserted,
+        user.user_id
+    );
 
     if inserted > 0 {
         state.queue_notifier.notify_eval_queue();
@@ -1284,6 +1302,14 @@ pub async fn sync_flake_handler(
             );
 
             if is_history_rewrite_error(&e) {
+                warn!(
+                    "history_rewrite_detected flake_id={} flake_name={} repo_url={} branch={} details={}",
+                    flake.id,
+                    flake.name,
+                    flake.repo_url,
+                    flake.branch,
+                    e
+                );
                 return (
                     StatusCode::CONFLICT,
                     Json(ApiError {

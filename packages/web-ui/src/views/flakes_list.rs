@@ -17,8 +17,9 @@ use web_sys::console;
 use web_sys::{window, Node};
 
 use crate::api::client::{
-    create_flake, delete_flake, fetch_commit_diff, fetch_flake_timelines, fetch_flakes,
-    request_sync_all_flakes, request_sync_flake, update_flake,
+    ApiClientError, accept_flake_history_rewrite, create_flake, delete_flake, fetch_commit_diff,
+    fetch_flake_timelines, fetch_flakes, request_sync_all_flakes, request_sync_flake,
+    update_flake,
 };
 use crate::api::models::{
     BuildStatus as ApiBuildStatus, CreateFlakeRequest, FlakeRegistryItem, FlakeTimeline,
@@ -302,6 +303,7 @@ pub fn FlakesListView() -> Element {
     let mut selected_history_commit = use_signal(|| None::<String>);
     let mut sync_note = use_signal(|| None::<String>);
     let mut last_manual_sync = use_signal(|| None::<DateTime<Utc>>);
+    let mut rewrite_prompt = use_signal(|| None::<(i32, String, String)>);
 
     let current_flakes = flakes.read().clone();
     let environments = unique_environments(&current_flakes);
@@ -411,6 +413,8 @@ pub fn FlakesListView() -> Element {
                             let mut timelines_signal = flake_timelines.clone();
                             let mut last_manual_sync = last_manual_sync.clone();
                             let mut sync_note = sync_note.clone();
+                            let mut rewrite_prompt = rewrite_prompt.clone();
+                            let flakes_snapshot = flakes.read().clone();
                             spawn(async move {
                                 let sync_result = if let Some(flake_id) = selected_flake_id {
                                     request_sync_flake(flake_id).await
@@ -453,7 +457,22 @@ pub fn FlakesListView() -> Element {
                                         };
                                         sync_note.set(Some(message));
                                     }
-                                    Err(_error) => {
+                                    Err(error) => {
+                                        if let Some((flake_id, detail)) =
+                                            extract_history_rewrite_conflict(&error, selected_flake_id)
+                                        {
+                                            let flake_name = flakes_snapshot
+                                                .iter()
+                                                .find(|f| f.id == flake_id)
+                                                .map(|f| f.name.clone())
+                                                .unwrap_or_else(|| format!("flake #{flake_id}"));
+                                            rewrite_prompt.set(Some((flake_id, flake_name, detail)));
+                                            sync_note.set(Some(
+                                                "Sync blocked: git history rewrite detected. Review and accept rewrite to continue.".to_string(),
+                                            ));
+                                            return;
+                                        }
+
                                         let mut next = flakes_signal.read().clone();
                                         let timelines = timelines_signal.read();
                                         let changed = if let Some(flake_id) = selected_flake_id {
@@ -753,6 +772,48 @@ pub fn FlakesListView() -> Element {
                             }
                         });
                     }
+                }
+            }
+
+            if let Some((flake_id, flake_name, detail)) = rewrite_prompt.read().clone() {
+                HistoryRewriteDialog {
+                    flake_name: flake_name.clone(),
+                    detail,
+                    on_cancel: move |_| rewrite_prompt.set(None),
+                    on_accept: move |_| {
+                        let flake_name_for_error = flake_name.clone();
+                        let mut rewrite_prompt = rewrite_prompt.clone();
+                        let mut sync_note = sync_note.clone();
+                        let mut last_manual_sync = last_manual_sync.clone();
+                        let mut flakes_signal = flakes.clone();
+                        let mut timelines_signal = flake_timelines.clone();
+                        spawn(async move {
+                            match accept_flake_history_rewrite(flake_id).await {
+                                Ok(response) => {
+                                    rewrite_prompt.set(None);
+                                    sync_note.set(Some(response.message));
+                                    last_manual_sync.set(Some(Utc::now()));
+
+                                    if let Ok(items) = fetch_flakes().await {
+                                        flakes_signal.set(
+                                            items
+                                                .into_iter()
+                                                .map(FlakeListItem::from_registry)
+                                                .collect(),
+                                        );
+                                    }
+                                    if let Ok(timelines) = fetch_flake_timelines().await {
+                                        timelines_signal.set(timelines);
+                                    }
+                                }
+                                Err(error) => {
+                                    sync_note.set(Some(format!(
+                                        "Failed to accept rewrite for {flake_name_for_error}: {error}"
+                                    )));
+                                }
+                            }
+                        });
+                    },
                 }
             }
         }
@@ -2041,6 +2102,52 @@ fn RemoveFlakeDialog(
 }
 
 #[component]
+fn HistoryRewriteDialog(
+    flake_name: String,
+    detail: String,
+    on_cancel: EventHandler<MouseEvent>,
+    on_accept: EventHandler<MouseEvent>,
+) -> Element {
+    rsx! {
+        div {
+            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
+            div {
+                class: "relative bg-gray-900 rounded-xl border border-amber-500/40 shadow-2xl p-6 cf-modal-panel-34 max-w-2xl w-full",
+                h3 {
+                    class: "text-lg font-semibold text-amber-200",
+                    "History Rewrite Detected"
+                }
+                p {
+                    class: "mt-2 text-sm text-slate-200",
+                    "{flake_name} has diverged from stored commit lineage."
+                }
+                p {
+                    class: "mt-2 text-sm text-slate-300",
+                    "Accepting rewrite will clear this flake's stored commit history and resync from current branch HEAD."
+                }
+                div {
+                    class: "mt-3 rounded-lg border border-amber-500/30 bg-amber-950/30 p-3 text-xs text-amber-100 font-mono break-words",
+                    "{detail}"
+                }
+                div {
+                    class: "mt-6 flex items-center justify-end gap-3",
+                    button {
+                        class: "px-3 py-2 rounded-lg text-sm font-medium text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-600",
+                        onclick: move |evt| on_cancel.call(evt),
+                        "Cancel"
+                    }
+                    button {
+                        class: "px-3 py-2 rounded-lg text-sm font-medium text-white bg-amber-600 hover:bg-amber-500 border border-amber-500",
+                        onclick: move |evt| on_accept.call(evt),
+                        "Accept rewrite and resync"
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
 fn EditFlakeDialog(
     draft: EditFlakeDraft,
     error: Signal<Option<String>>,
@@ -3280,6 +3387,25 @@ fn detect_language(path: &str) -> &'static str {
         "bash"
     } else {
         "plaintext"
+    }
+}
+
+fn extract_history_rewrite_conflict(
+    error: &ApiClientError,
+    selected_flake_id: Option<i32>,
+) -> Option<(i32, String)> {
+    let flake_id = selected_flake_id?;
+    match error {
+        ApiClientError::Status { code, body }
+            if *code == 409
+                && (body.to_ascii_lowercase().contains("history rewrite")
+                    || body
+                        .to_ascii_lowercase()
+                        .contains("history_rewrite_detected")) =>
+        {
+            Some((flake_id, body.clone()))
+        }
+        _ => None,
     }
 }
 
