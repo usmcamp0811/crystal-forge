@@ -468,7 +468,20 @@ pub async fn fetch_flake_timelines(
                 c.message,
                 c.author,
                 COALESCE(CARDINALITY(cac.nixos_configurations), 0)::bigint AS system_count,
-                COALESCE(cac.nixos_configurations, ARRAY[]::text[]) AS systems,
+                COALESCE(
+                    cac.nixos_configurations,
+                    (
+                        SELECT COALESCE(array_agg(dn.derivation_name), ARRAY[]::text[])
+                        FROM (
+                            SELECT DISTINCT d.derivation_name
+                            FROM derivations d
+                            WHERE d.commit_id = c.id
+                                AND d.derivation_type = 'nixos'
+                            ORDER BY d.derivation_name
+                        ) dn
+                    ),
+                    ARRAY[]::text[]
+                ) AS systems,
                 (
                     SELECT COUNT(*)::bigint
                     FROM commits c2
