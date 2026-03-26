@@ -2112,32 +2112,32 @@ fn HistoryRewriteDialog(
         div {
             class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
             div {
-                class: "relative bg-gray-900 rounded-xl border border-amber-500/40 shadow-2xl p-6 cf-modal-panel-34 max-w-2xl w-full",
+                class: "relative {theme::surface::CARD_BG} rounded-xl border {theme::surface::CARD_BORDER} shadow-2xl p-6 cf-modal-panel-34 max-w-2xl w-full",
                 h3 {
-                    class: "text-lg font-semibold text-amber-200",
+                    class: "text-lg font-semibold {theme::text::PRIMARY}",
                     "History Rewrite Detected"
                 }
                 p {
-                    class: "mt-2 text-sm text-slate-200",
+                    class: "mt-2 text-sm {theme::text::SECONDARY}",
                     "{flake_name} has diverged from stored commit lineage."
                 }
                 p {
-                    class: "mt-2 text-sm text-slate-300",
+                    class: "mt-2 text-sm {theme::text::SECONDARY}",
                     "Accepting rewrite will clear this flake's stored commit history and resync from current branch HEAD."
                 }
                 div {
-                    class: "mt-3 rounded-lg border border-amber-500/30 bg-amber-950/30 p-3 text-xs text-amber-100 font-mono break-words",
+                    class: "mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200 font-mono break-words",
                     "{detail}"
                 }
                 div {
                     class: "mt-6 flex items-center justify-end gap-3",
                     button {
-                        class: "px-3 py-2 rounded-lg text-sm font-medium text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-600",
+                        class: "px-3 py-2 rounded-lg text-sm font-medium {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
                         onclick: move |evt| on_cancel.call(evt),
                         "Cancel"
                     }
                     button {
-                        class: "px-3 py-2 rounded-lg text-sm font-medium text-white bg-amber-600 hover:bg-amber-500 border border-amber-500",
+                        class: "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING}",
                         onclick: move |evt| on_accept.call(evt),
                         "Accept rewrite and resync"
                     }
