@@ -352,6 +352,20 @@ pub async fn fetch_dashboard_flake_timelines(
         .fetch_all(pool)
         .await?;
 
+        let commit_ids: Vec<i32> = commits_rows.iter().map(|row| row.0).collect();
+        if !commit_ids.is_empty() {
+            sqlx::query(
+                r#"
+                UPDATE commit_metadata_cache
+                SET last_accessed_at = CURRENT_TIMESTAMP
+                WHERE commit_id = ANY($1)
+                "#,
+            )
+            .bind(&commit_ids)
+            .execute(pool)
+            .await?;
+        }
+
         let commits: Vec<FlakeCommit> = commits_rows
             .into_iter()
             .map(
@@ -495,6 +509,20 @@ pub async fn fetch_flake_timelines(
         .bind(max_commits_per_flake)
         .fetch_all(pool)
         .await?;
+
+        let commit_ids: Vec<i32> = commits_rows.iter().map(|row| row.id).collect();
+        if !commit_ids.is_empty() {
+            sqlx::query(
+                r#"
+                UPDATE commit_metadata_cache
+                SET last_accessed_at = CURRENT_TIMESTAMP
+                WHERE commit_id = ANY($1)
+                "#,
+            )
+            .bind(&commit_ids)
+            .execute(pool)
+            .await?;
+        }
 
         let commits: Vec<FlakeCommit> = commits_rows
             .into_iter()

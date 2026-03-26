@@ -280,6 +280,16 @@ async fn run_build_log_retention_loop(
 ///
 /// Removes cache entries older than retention period to prevent unbounded growth.
 async fn run_commit_cache_gc_loop(pool: PgPool, retention_days: i32) {
+    let retention_days = if retention_days <= 0 {
+        warn!(
+            "Invalid commit cache retention_days={} (must be > 0); defaulting to 30 days",
+            retention_days
+        );
+        30
+    } else {
+        retention_days
+    };
+
     info!(
         "🔁 Starting commit metadata cache GC loop (retention={}d)",
         retention_days

@@ -911,41 +911,15 @@ pub async fn update_commit_metadata_cache(
     policy_checks: &[PolicyCheckResult],
     has_nix_eval_error: bool,
 ) -> Result<()> {
-    let total_systems = policy_checks.len() as i32;
-    
-    let systems_passed = policy_checks
-        .iter()
-        .filter(|c| c.meets_requirements)
-        .count() as i32;
-    
-    // Count systems that failed strict policies
-    let systems_failed_strict = policy_checks
-        .iter()
-        .filter(|c| {
-            !c.meets_requirements
-                && c.failed_policies
-                    .iter()
-                    .any(|(_, is_strict)| *is_strict)
-        })
-        .count() as i32;
-    
-    // Count systems that failed only non-strict policies
-    let systems_failed_non_strict = policy_checks
-        .iter()
-        .filter(|c| {
-            !c.meets_requirements
-                && !c.failed_policies
-                    .iter()
-                    .any(|(_, is_strict)| *is_strict)
-        })
-        .count() as i32;
-    
-    let all_systems_passed = systems_passed == total_systems;
-    let has_policy_failures = systems_failed_strict > 0 || systems_failed_non_strict > 0;
-    
-    // TODO: Track systems_with_eval_error separately
-    // For now, we don't have per-system eval error tracking
-    let systems_with_eval_error = 0i32;
+    let (
+        total_systems,
+        systems_passed,
+        systems_failed_strict,
+        systems_failed_non_strict,
+        systems_with_eval_error,
+        has_policy_failures,
+        all_systems_passed,
+    ) = summarize_commit_metadata(policy_checks, has_nix_eval_error);
     
     sqlx::query!(
         r#"
@@ -993,9 +967,71 @@ pub async fn update_commit_metadata_cache(
     Ok(())
 }
 
+fn summarize_commit_metadata(
+    policy_checks: &[PolicyCheckResult],
+    has_nix_eval_error: bool,
+) -> (i32, i32, i32, i32, i32, bool, bool) {
+    let total_systems = policy_checks.len() as i32;
+
+    let systems_passed = policy_checks
+        .iter()
+        .filter(|c| c.meets_requirements)
+        .count() as i32;
+
+    let systems_failed_strict = policy_checks
+        .iter()
+        .filter(|c| {
+            !c.meets_requirements
+                && c.failed_policies
+                    .iter()
+                    .any(|(_, is_strict)| *is_strict)
+        })
+        .count() as i32;
+
+    // A failed check with no failed_policies indicates evaluation-level failure
+    // for that system (not a policy failure). We keep this distinct from
+    // non-strict policy failures to avoid misleading API counts.
+    let systems_with_eval_error_from_checks = policy_checks
+        .iter()
+        .filter(|c| !c.meets_requirements && c.failed_policies.is_empty())
+        .count() as i32;
+
+    let systems_failed_non_strict = policy_checks
+        .iter()
+        .filter(|c| {
+            !c.meets_requirements
+                && !c.failed_policies.is_empty()
+                && !c
+                    .failed_policies
+                    .iter()
+                    .any(|(_, is_strict)| *is_strict)
+        })
+        .count() as i32;
+
+    let systems_with_eval_error = systems_with_eval_error_from_checks;
+    let has_policy_failures = systems_failed_strict > 0 || systems_failed_non_strict > 0;
+
+    // If evaluation itself failed, this commit cannot be considered fully passing,
+    // even when per-system checks are unavailable.
+    let all_systems_passed = !has_nix_eval_error && total_systems > 0 && systems_passed == total_systems;
+
+    (
+        total_systems,
+        systems_passed,
+        systems_failed_strict,
+        systems_failed_non_strict,
+        systems_with_eval_error,
+        has_policy_failures,
+        all_systems_passed,
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{mock_eval_stage_delay, resolve_mock_systems, should_mock_policy_fail};
+    use super::{
+        mock_eval_stage_delay, resolve_mock_systems, should_mock_policy_fail,
+        summarize_commit_metadata,
+    };
 
     #[test]
     fn mock_systems_fallback_and_filtering() {
@@ -1120,5 +1156,42 @@ mod tests {
 
         assert_eq!(strict_count, 1);
         assert_eq!(non_strict_count, 1);
+    }
+
+    #[test]
+    fn metadata_summary_marks_eval_error_commit_as_not_all_passed() {
+        let (total, passed, strict_failed, non_strict_failed, eval_failed, has_policy_failures, all_passed) =
+            summarize_commit_metadata(&[], true);
+        assert_eq!(total, 0);
+        assert_eq!(passed, 0);
+        assert_eq!(strict_failed, 0);
+        assert_eq!(non_strict_failed, 0);
+        assert_eq!(eval_failed, 0);
+        assert!(!has_policy_failures);
+        assert!(!all_passed);
+    }
+
+    #[test]
+    fn metadata_summary_does_not_treat_empty_failed_policies_as_non_strict_failure() {
+        use crate::models::deployment_policies::PolicyCheckResult;
+
+        let checks = vec![PolicyCheckResult {
+            system_name: "alpha".to_string(),
+            cf_agent_enabled: None,
+            has_required_packages: None,
+            custom_checks: std::collections::HashMap::new(),
+            meets_requirements: false,
+            warnings: vec!["evaluation failed".to_string()],
+            failed_policies: vec![],
+        }];
+
+        let (_total, _passed, strict_failed, non_strict_failed, eval_failed, has_policy_failures, all_passed) =
+            summarize_commit_metadata(&checks, false);
+
+        assert_eq!(strict_failed, 0);
+        assert_eq!(non_strict_failed, 0);
+        assert_eq!(eval_failed, 1);
+        assert!(!has_policy_failures);
+        assert!(!all_passed);
     }
 }
