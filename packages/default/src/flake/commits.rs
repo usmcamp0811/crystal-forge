@@ -528,6 +528,19 @@ pub async fn fetch_and_insert_commits_since(
     };
 
     if commits.is_empty() {
+        if let Some(remote_head_hash) = remote_branch_head_hash(repo_url, branch).await? {
+            if is_remote_head_diverged(&since_commit.git_commit_hash, Some(&remote_head_hash)) {
+                return Err(anyhow::anyhow!(
+                    "{}: remote history diverged for {} on {}. Last known commit {} no longer matches remote HEAD {}. Accept rewrite via POST /api/v1/flakes/:id/accept-rewrite before syncing again.",
+                    HISTORY_REWRITE_ERROR_MARKER,
+                    repo_url,
+                    branch,
+                    since_commit.git_commit_hash,
+                    remote_head_hash,
+                ));
+            }
+        }
+
         debug!(
             "No new commits found since {} for {}",
             since_commit, repo_url
@@ -569,6 +582,54 @@ fn is_invalid_revision_range_error(err: &anyhow::Error) -> bool {
 
 pub fn is_history_rewrite_error(err: &anyhow::Error) -> bool {
     err.to_string().contains(HISTORY_REWRITE_ERROR_MARKER)
+}
+
+async fn remote_branch_head_hash(repo_url: &str, branch: &str) -> Result<Option<String>> {
+    let git_url = normalize_repo_url_for_git(repo_url);
+    let refspec = format!("refs/heads/{branch}");
+
+    let output = timeout(
+        GIT_PROBE_TIMEOUT,
+        tokio::process::Command::new("git")
+            .args(["ls-remote", &git_url, &refspec])
+            .output(),
+    )
+    .await
+    .with_context(|| format!("Timed out probing remote HEAD for {repo_url} on {branch}"))?
+    .with_context(|| format!("Failed to probe remote HEAD for {repo_url} on {branch}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "Git ls-remote failed for {repo_url} on {branch}: {}",
+            stderr.trim()
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .map(str::trim);
+
+    let Some(line) = line else {
+        return Ok(None);
+    };
+
+    let hash = line
+        .split_whitespace()
+        .next()
+        .map(str::to_string)
+        .filter(|value| !value.is_empty());
+
+    Ok(hash)
+}
+
+fn is_remote_head_diverged(since_hash: &str, remote_head_hash: Option<&str>) -> bool {
+    match remote_head_hash {
+        Some(head) => head != since_hash,
+        None => false,
+    }
 }
 
 /// Resolve commit subject/author metadata for specific hashes.
@@ -977,7 +1038,9 @@ async fn try_get_diff_for_branch(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_history_rewrite_error, is_invalid_revision_range_error};
+    use super::{
+        is_history_rewrite_error, is_invalid_revision_range_error, is_remote_head_diverged,
+    };
 
     #[test]
     fn detects_invalid_revision_range_error() {
@@ -995,5 +1058,20 @@ mod tests {
     fn detects_history_rewrite_error_marker() {
         let err = anyhow::anyhow!("history_rewrite_detected: remote history diverged");
         assert!(is_history_rewrite_error(&err));
+    }
+
+    #[test]
+    fn detects_remote_head_divergence_when_since_hash_differs() {
+        assert!(is_remote_head_diverged("ec80a2f", Some("79e33a9")));
+    }
+
+    #[test]
+    fn does_not_detect_divergence_when_hashes_match() {
+        assert!(!is_remote_head_diverged("79e33a9", Some("79e33a9")));
+    }
+
+    #[test]
+    fn does_not_detect_divergence_when_remote_head_missing() {
+        assert!(!is_remote_head_diverged("79e33a9", None));
     }
 }
