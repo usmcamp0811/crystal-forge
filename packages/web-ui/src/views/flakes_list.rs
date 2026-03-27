@@ -12,8 +12,6 @@ use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::JsCast;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsValue;
-#[cfg(target_arch = "wasm32")]
-use web_sys::console;
 use web_sys::{window, Node};
 
 use crate::api::client::{
@@ -3436,6 +3434,16 @@ fn extract_history_rewrite_conflict(
                         .to_ascii_lowercase()
                         .contains("history_rewrite_detected")) =>
         {
+            #[cfg(target_arch = "wasm32")]
+            {
+                web_sys::console::warn_1(
+                    &format!(
+                        "[CF] history rewrite conflict detected for flake_id={}: {}",
+                        flake_id, body
+                    )
+                    .into(),
+                );
+            }
             Some((flake_id, body.clone()))
         }
         _ => None,
