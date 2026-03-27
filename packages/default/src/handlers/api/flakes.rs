@@ -77,11 +77,39 @@ pub async fn get_flake_timelines(
         .map(|v| v == "dashboard")
         .unwrap_or(false);
 
+    let flake_ids = match params.get("ids") {
+        Some(raw) if !raw.trim().is_empty() => {
+            let mut parsed = Vec::new();
+            for part in raw.split(',') {
+                let value = part.trim();
+                if value.is_empty() {
+                    continue;
+                }
+                match value.parse::<i32>() {
+                    Ok(id) => parsed.push(id),
+                    Err(_) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(ApiError {
+                                error: "bad_request".to_string(),
+                                message: "Invalid ids query parameter".to_string(),
+                                details: Some(serde_json::json!({"ids": raw})),
+                            }),
+                        )
+                            .into_response();
+                    }
+                }
+            }
+            Some(parsed)
+        }
+        _ => None,
+    };
+
     // Fetch up to 10 most recent commits per flake
     let fetch_result = if use_dashboard_view {
-        fetch_dashboard_flake_timelines(&pool, 10).await
+        fetch_dashboard_flake_timelines(&pool, 10, flake_ids.as_deref()).await
     } else {
-        fetch_flake_timelines(&pool, 10).await
+        fetch_flake_timelines(&pool, 10, flake_ids.as_deref()).await
     };
 
     match fetch_result {
