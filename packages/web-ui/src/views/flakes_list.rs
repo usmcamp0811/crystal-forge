@@ -478,25 +478,23 @@ pub fn FlakesListView() -> Element {
                                             return;
                                         }
 
-                                        let mut next = flakes_signal.read().clone();
-                                        let timelines = timelines_signal.read();
-                                        let changed = if let Some(flake_id) = selected_flake_id {
-                                            sync_single_flake_registry(&mut next, &timelines, flake_id)
-                                        } else {
-                                            sync_flake_registry(&mut next, &timelines)
-                                        };
-                                        flakes_signal.set(next);
-                                        last_manual_sync.set(Some(Utc::now()));
-                                        let fallback_message = if selected_flake_id.is_some() {
-                                            format!("Polled selected flake from source ({changed} updated).")
-                                        } else {
-                                            format!(
-                                                "Polled {} flakes from source ({} updated).",
-                                                flakes_signal.read().len(),
-                                                changed
+                                        #[cfg(target_arch = "wasm32")]
+                                        web_sys::console::error_1(
+                                            &format!(
+                                                "[CF] sync request failed for selected_flake_id={:?}: {}",
+                                                selected_flake_id, error
                                             )
-                                        };
-                                        sync_note.set(Some(fallback_message));
+                                            .into(),
+                                        );
+
+                                        sync_note.set(Some(format!(
+                                            "Sync failed for {}: {}",
+                                            selected_flake_id
+                                                .map(|id| format!("flake #{id}"))
+                                                .unwrap_or_else(|| "all flakes".to_string()),
+                                            error
+                                        )));
+                                        return;
                                     }
                                 }
                             });
@@ -3436,6 +3434,14 @@ fn extract_history_rewrite_conflict(
                         .to_ascii_lowercase()
                         .contains("history_rewrite_detected")) =>
         {
+            #[cfg(target_arch = "wasm32")]
+            console::warn_1(
+                &format!(
+                    "[CF] history rewrite conflict detected for flake_id={}: {}",
+                    flake_id, body
+                )
+                .into(),
+            );
             Some((flake_id, body.clone()))
         }
         _ => None,
