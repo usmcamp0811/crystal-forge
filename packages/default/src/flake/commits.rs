@@ -515,6 +515,13 @@ pub async fn fetch_and_insert_commits_since(
     {
         Ok(commits) => commits,
         Err(err) if is_invalid_revision_range_error(&err) => {
+            warn!(
+                repo_url = %repo_url,
+                branch = %branch,
+                since_hash = %since_commit.git_commit_hash,
+                error = %err,
+                "history_rewrite_detected via invalid revision range"
+            );
             return Err(anyhow::anyhow!(
                 "{}: remote history diverged for {} on {}. Last known commit {} is no longer in branch history. Accept rewrite via POST /api/v1/flakes/:id/accept-rewrite before syncing again. Root cause: {}",
                 HISTORY_REWRITE_ERROR_MARKER,
@@ -528,8 +535,30 @@ pub async fn fetch_and_insert_commits_since(
     };
 
     if commits.is_empty() {
-        if let Some(remote_head_hash) = remote_branch_head_hash(repo_url, branch).await? {
-            if is_remote_head_diverged(&since_commit.git_commit_hash, Some(&remote_head_hash)) {
+        let remote_head_hash = remote_branch_head_hash(repo_url, branch).await?;
+        let diverged = is_remote_head_diverged(
+            &since_commit.git_commit_hash,
+            remote_head_hash.as_deref(),
+        );
+
+        info!(
+            repo_url = %repo_url,
+            branch = %branch,
+            since_hash = %since_commit.git_commit_hash,
+            remote_head_hash = ?remote_head_hash,
+            diverged,
+            "incremental sync produced zero commits; evaluated divergence"
+        );
+
+        if let Some(remote_head_hash) = remote_head_hash {
+            if diverged {
+                warn!(
+                    repo_url = %repo_url,
+                    branch = %branch,
+                    since_hash = %since_commit.git_commit_hash,
+                    remote_head_hash = %remote_head_hash,
+                    "history_rewrite_detected via zero-update divergence"
+                );
                 return Err(anyhow::anyhow!(
                     "{}: remote history diverged for {} on {}. Last known commit {} no longer matches remote HEAD {}. Accept rewrite via POST /api/v1/flakes/:id/accept-rewrite before syncing again.",
                     HISTORY_REWRITE_ERROR_MARKER,
@@ -541,10 +570,7 @@ pub async fn fetch_and_insert_commits_since(
             }
         }
 
-        debug!(
-            "No new commits found since {} for {}",
-            since_commit, repo_url
-        );
+        debug!(repo_url = %repo_url, branch = %branch, since_hash = %since_commit.git_commit_hash, "No new commits found and no divergence detected");
         return Ok(Vec::new());
     }
 
