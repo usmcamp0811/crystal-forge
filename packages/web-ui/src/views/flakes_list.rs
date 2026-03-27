@@ -312,6 +312,7 @@ pub fn FlakesListView() -> Element {
     let mut sync_note = use_signal(|| None::<String>);
     let mut last_manual_sync = use_signal(|| None::<DateTime<Utc>>);
     let mut rewrite_prompt = use_signal(|| None::<(i32, String, String)>);
+    let mut timeline_generation = use_signal(|| 0_u64);
 
     let current_flakes = flakes.read().clone();
     let environments = unique_environments(&current_flakes);
@@ -373,11 +374,16 @@ pub fn FlakesListView() -> Element {
     {
         let mut flake_timelines = flake_timelines.clone();
         let flakes = flakes.clone();
+        let mut timeline_generation = timeline_generation.clone();
         use_effect(move || {
             let flake_ids: Vec<i32> = flakes.read().iter().map(|flake| flake.id).collect();
+            let generation = *timeline_generation.read() + 1;
+            timeline_generation.set(generation);
             spawn(async move {
                 if flake_ids.is_empty() {
-                    flake_timelines.set(Vec::new());
+                    if *timeline_generation.read() == generation {
+                        flake_timelines.set(Vec::new());
+                    }
                     return;
                 }
 
@@ -397,16 +403,23 @@ pub fn FlakesListView() -> Element {
                                 timelines,
                                 &flake_ids,
                             );
+                            if *timeline_generation.read() != generation {
+                                return;
+                            }
                             flake_timelines.set(merged_timelines.clone());
                         }
                         Err(_error) => {
                             // Fallback to full fetch if subset request fails for any reason.
                             match fetch_flake_timelines().await {
                                 Ok(timelines) => {
-                                    flake_timelines.set(timelines);
+                                    if *timeline_generation.read() == generation {
+                                        flake_timelines.set(timelines);
+                                    }
                                 }
                                 Err(_) => {
-                                    flake_timelines.set(Vec::new());
+                                    if *timeline_generation.read() == generation {
+                                        flake_timelines.set(Vec::new());
+                                    }
                                 }
                             }
                             return;
@@ -428,6 +441,9 @@ pub fn FlakesListView() -> Element {
                                 timelines,
                                 &flake_ids,
                             );
+                            if *timeline_generation.read() != generation {
+                                return;
+                            }
                             flake_timelines.set(merged_timelines.clone());
                         }
                         Err(_) => {
@@ -474,6 +490,7 @@ pub fn FlakesListView() -> Element {
                             let mut last_manual_sync = last_manual_sync.clone();
                             let mut sync_note = sync_note.clone();
                             let mut rewrite_prompt = rewrite_prompt.clone();
+                            let mut timeline_generation = timeline_generation.clone();
                             let flakes_snapshot = flakes.read().clone();
                             spawn(async move {
                                 let sync_result = if let Some(flake_id) = selected_flake_id {
@@ -498,9 +515,15 @@ pub fn FlakesListView() -> Element {
                                                 refresh_warning = true;
                                             }
                                         }
+
+                                        let generation = *timeline_generation.read() + 1;
+                                        timeline_generation.set(generation);
+
                                         match fetch_flake_timelines().await {
                                             Ok(timelines) => {
-                                                timelines_signal.set(timelines);
+                                                if *timeline_generation.read() == generation {
+                                                    timelines_signal.set(timelines);
+                                                }
                                             }
                                             Err(_) => {
                                                 refresh_warning = true;
@@ -845,6 +868,7 @@ pub fn FlakesListView() -> Element {
                         let mut last_manual_sync = last_manual_sync.clone();
                         let mut flakes_signal = flakes.clone();
                         let mut timelines_signal = flake_timelines.clone();
+                        let mut timeline_generation = timeline_generation.clone();
                         spawn(async move {
                             match accept_flake_history_rewrite(flake_id).await {
                                 Ok(response) => {
@@ -860,8 +884,13 @@ pub fn FlakesListView() -> Element {
                                                 .collect(),
                                         );
                                     }
+
+                                    let generation = *timeline_generation.read() + 1;
+                                    timeline_generation.set(generation);
                                     if let Ok(timelines) = fetch_flake_timelines().await {
-                                        timelines_signal.set(timelines);
+                                        if *timeline_generation.read() == generation {
+                                            timelines_signal.set(timelines);
+                                        }
                                     }
                                 }
                                 Err(error) => {
