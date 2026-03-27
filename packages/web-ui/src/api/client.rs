@@ -331,6 +331,23 @@ pub async fn fetch_flake_timelines() -> Result<Vec<FlakeTimeline>, ApiClientErro
     fetch_json(&url).await
 }
 
+/// Fetch flake timelines for a subset of flake IDs.
+pub async fn fetch_flake_timelines_for_ids(
+    flake_ids: &[i32],
+) -> Result<Vec<FlakeTimeline>, ApiClientError> {
+    if flake_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let ids = flake_ids
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let url = format!("{}/flakes/timelines?ids={}", base_url(), ids);
+    fetch_json(&url).await
+}
+
 /// Fetch flake timelines for dashboard (CF system deployment counts).
 pub async fn fetch_dashboard_flake_timelines() -> Result<Vec<FlakeTimeline>, ApiClientError> {
     let url = format!("{}/flakes/timelines?view=dashboard", base_url());

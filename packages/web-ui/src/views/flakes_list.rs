@@ -18,7 +18,8 @@ use web_sys::{window, Node};
 
 use crate::api::client::{
     ApiClientError, accept_flake_history_rewrite, create_flake, delete_flake, fetch_commit_diff,
-    fetch_flake_timelines, fetch_flakes, request_sync_all_flakes, request_sync_flake,
+    fetch_flake_timelines, fetch_flake_timelines_for_ids, fetch_flakes, request_sync_all_flakes,
+    request_sync_flake,
     update_flake,
 };
 use crate::api::models::{
@@ -49,6 +50,8 @@ fn came_from_setup() -> bool {
 
 const VIEW_PREF_KEY: &str = "crystal_forge.flakes.view";
 const FLAKE_TABLE_SCHEMA_NOTE: &str = "flakes(name, repo_url UNIQUE, branch)";
+const INITIAL_TIMELINE_FLAKES: usize = 2;
+const TIMELINE_BATCH_SIZE: usize = 2;
 
 fn preview_systems(systems: &[String]) -> &[String] {
     let end = systems.len().min(60);
@@ -369,15 +372,67 @@ pub fn FlakesListView() -> Element {
     // Load flake timelines
     {
         let mut flake_timelines = flake_timelines.clone();
+        let flakes = flakes.clone();
         use_effect(move || {
+            let flake_ids: Vec<i32> = flakes.read().iter().map(|flake| flake.id).collect();
             spawn(async move {
-                match fetch_flake_timelines().await {
-                    Ok(timelines) => {
-                        flake_timelines.set(timelines);
+                if flake_ids.is_empty() {
+                    flake_timelines.set(Vec::new());
+                    return;
+                }
+
+                let initial_ids: Vec<i32> = flake_ids
+                    .iter()
+                    .take(INITIAL_TIMELINE_FLAKES)
+                    .copied()
+                    .collect();
+
+                let mut merged_timelines = Vec::new();
+
+                if !initial_ids.is_empty() {
+                    match fetch_flake_timelines_for_ids(&initial_ids).await {
+                        Ok(timelines) => {
+                            merged_timelines = merge_flake_timeline_batches(
+                                merged_timelines,
+                                timelines,
+                                &flake_ids,
+                            );
+                            flake_timelines.set(merged_timelines.clone());
+                        }
+                        Err(_error) => {
+                            // Fallback to full fetch if subset request fails for any reason.
+                            match fetch_flake_timelines().await {
+                                Ok(timelines) => {
+                                    flake_timelines.set(timelines);
+                                }
+                                Err(_) => {
+                                    flake_timelines.set(Vec::new());
+                                }
+                            }
+                            return;
+                        }
                     }
-                    Err(_error) => {
-                        // Keep empty instead of fallback to mock data
-                        flake_timelines.set(Vec::new());
+                }
+
+                let remaining_ids: Vec<i32> = flake_ids
+                    .iter()
+                    .skip(INITIAL_TIMELINE_FLAKES)
+                    .copied()
+                    .collect();
+
+                for chunk in remaining_ids.chunks(TIMELINE_BATCH_SIZE) {
+                    match fetch_flake_timelines_for_ids(chunk).await {
+                        Ok(timelines) => {
+                            merged_timelines = merge_flake_timeline_batches(
+                                merged_timelines,
+                                timelines,
+                                &flake_ids,
+                            );
+                            flake_timelines.set(merged_timelines.clone());
+                        }
+                        Err(_) => {
+                            // Keep already-loaded timelines if a later batch fails.
+                        }
                     }
                 }
             });
@@ -2829,6 +2884,26 @@ fn table_class(active: bool) -> &'static str {
     } else {
         "text-gray-400 hover:text-white"
     }
+}
+
+fn merge_flake_timeline_batches(
+    current: Vec<FlakeTimeline>,
+    incoming: Vec<FlakeTimeline>,
+    ordered_ids: &[i32],
+) -> Vec<FlakeTimeline> {
+    let mut by_flake: HashMap<i32, FlakeTimeline> = current
+        .into_iter()
+        .map(|timeline| (timeline.flake_id, timeline))
+        .collect();
+
+    for timeline in incoming {
+        by_flake.insert(timeline.flake_id, timeline);
+    }
+
+    ordered_ids
+        .iter()
+        .filter_map(|flake_id| by_flake.remove(flake_id))
+        .collect()
 }
 
 fn sync_flake_registry(flakes: &mut [FlakeListItem], timelines: &[FlakeTimeline]) -> usize {

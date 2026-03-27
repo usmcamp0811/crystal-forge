@@ -322,10 +322,13 @@ pub async fn cascade_delete_flake(
 pub async fn fetch_dashboard_flake_timelines(
     pool: &PgPool,
     max_commits_per_flake: i64,
+    flake_ids: Option<&[i32]>,
 ) -> Result<Vec<FlakeTimeline>> {
+    let flake_filter: Option<Vec<i32>> = flake_ids.map(|ids| ids.to_vec());
     let flakes = sqlx::query_as::<_, (i32, String, String)>(
-        "SELECT id, name, repo_url FROM flakes WHERE deleted_at IS NULL ORDER BY name ASC",
+        "SELECT id, name, repo_url FROM flakes WHERE deleted_at IS NULL AND ($1::int[] IS NULL OR id = ANY($1)) ORDER BY name ASC",
     )
+    .bind(&flake_filter)
     .fetch_all(pool)
     .await?;
 
@@ -479,11 +482,14 @@ pub async fn fetch_dashboard_flake_timelines(
 pub async fn fetch_flake_timelines(
     pool: &PgPool,
     max_commits_per_flake: i64,
+    flake_ids: Option<&[i32]>,
 ) -> Result<Vec<FlakeTimeline>> {
     // First, get all flakes
+    let flake_filter: Option<Vec<i32>> = flake_ids.map(|ids| ids.to_vec());
     let flakes = sqlx::query_as::<_, (i32, String, String)>(
-        "SELECT id, name, repo_url FROM flakes WHERE deleted_at IS NULL ORDER BY name ASC",
+        "SELECT id, name, repo_url FROM flakes WHERE deleted_at IS NULL AND ($1::int[] IS NULL OR id = ANY($1)) ORDER BY name ASC",
     )
+    .bind(&flake_filter)
     .fetch_all(pool)
     .await?;
 
