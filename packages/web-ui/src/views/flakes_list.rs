@@ -50,7 +50,7 @@ fn came_from_setup() -> bool {
 
 const VIEW_PREF_KEY: &str = "crystal_forge.flakes.view";
 const FLAKE_TABLE_SCHEMA_NOTE: &str = "flakes(name, repo_url UNIQUE, branch)";
-const INITIAL_TIMELINE_FLAKES: usize = 2;
+const INITIAL_TIMELINE_FLAKES: usize = 1;
 const TIMELINE_BATCH_SIZE: usize = 2;
 
 fn preview_systems(systems: &[String]) -> &[String] {
@@ -374,9 +374,11 @@ pub fn FlakesListView() -> Element {
     {
         let mut flake_timelines = flake_timelines.clone();
         let flakes = flakes.clone();
+        let selected_history_flake = selected_history_flake.clone();
         let mut timeline_generation = timeline_generation.clone();
         use_effect(move || {
             let flake_ids: Vec<i32> = flakes.read().iter().map(|flake| flake.id).collect();
+            let selected_flake_id = *selected_history_flake.read();
             let generation = *timeline_generation.read() + 1;
             timeline_generation.set(generation);
             spawn(async move {
@@ -387,7 +389,20 @@ pub fn FlakesListView() -> Element {
                     return;
                 }
 
-                let initial_ids: Vec<i32> = flake_ids
+                let prioritized_ids = if let Some(selected_id) = selected_flake_id {
+                    if flake_ids.iter().any(|id| *id == selected_id) {
+                        let mut ordered = Vec::with_capacity(flake_ids.len());
+                        ordered.push(selected_id);
+                        ordered.extend(flake_ids.iter().copied().filter(|id| *id != selected_id));
+                        ordered
+                    } else {
+                        flake_ids.clone()
+                    }
+                } else {
+                    flake_ids.clone()
+                };
+
+                let initial_ids: Vec<i32> = prioritized_ids
                     .iter()
                     .take(INITIAL_TIMELINE_FLAKES)
                     .copied()
@@ -427,7 +442,7 @@ pub fn FlakesListView() -> Element {
                     }
                 }
 
-                let remaining_ids: Vec<i32> = flake_ids
+                let remaining_ids: Vec<i32> = prioritized_ids
                     .iter()
                     .skip(INITIAL_TIMELINE_FLAKES)
                     .copied()
