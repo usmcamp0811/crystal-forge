@@ -528,7 +528,15 @@ pub async fn get_next_queued_job(
             SELECT *
             FROM build_jobs
             WHERE status = 'queued'
-            ORDER BY priority_weight DESC, created_at ASC
+            ORDER BY
+                priority_weight DESC,
+                (
+                    SELECT c.commit_timestamp
+                    FROM derivations d
+                    LEFT JOIN commits c ON c.id = d.commit_id
+                    WHERE d.id = build_jobs.derivation_id
+                ) DESC NULLS LAST,
+                created_at ASC
             LIMIT 1
             FOR UPDATE SKIP LOCKED
             "#,
@@ -544,7 +552,15 @@ pub async fn get_next_queued_job(
             FROM build_jobs
             WHERE status = 'queued'
               AND (environment_id = ANY($1) OR environment_id IS NULL)
-            ORDER BY priority_weight DESC, created_at ASC
+            ORDER BY
+                priority_weight DESC,
+                (
+                    SELECT c.commit_timestamp
+                    FROM derivations d
+                    LEFT JOIN commits c ON c.id = d.commit_id
+                    WHERE d.id = build_jobs.derivation_id
+                ) DESC NULLS LAST,
+                created_at ASC
             LIMIT 1
             FOR UPDATE SKIP LOCKED
             "#,
@@ -619,7 +635,15 @@ pub async fn claim_next_job_atomic(
                 SELECT id
                 FROM build_jobs
                 WHERE status = 'queued'
-                ORDER BY priority_weight DESC, created_at ASC
+                ORDER BY
+                    priority_weight DESC,
+                    (
+                        SELECT c.commit_timestamp
+                        FROM derivations d
+                        LEFT JOIN commits c ON c.id = d.commit_id
+                        WHERE d.id = build_jobs.derivation_id
+                    ) DESC NULLS LAST,
+                    created_at ASC
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
             )
@@ -644,7 +668,15 @@ pub async fn claim_next_job_atomic(
                 FROM build_jobs
                 WHERE status = 'queued'
                   AND (environment_id = ANY($2) OR environment_id IS NULL)
-                ORDER BY priority_weight DESC, created_at ASC
+                ORDER BY
+                    priority_weight DESC,
+                    (
+                        SELECT c.commit_timestamp
+                        FROM derivations d
+                        LEFT JOIN commits c ON c.id = d.commit_id
+                        WHERE d.id = build_jobs.derivation_id
+                    ) DESC NULLS LAST,
+                    created_at ASC
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
             )
