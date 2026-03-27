@@ -1,7 +1,7 @@
 ---
 id: TASK-219
 title: Guard progressive timeline fetches with generation token
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-03-26 23:20'
 updated_date: '2026-03-26 23:20'
@@ -37,3 +37,7 @@ Add request-generation guarding so only the latest timeline load sequence can up
 ## Lock
 
 LOCK: opencode-gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-219-harden-progressive-timeline-race
+
+## Review
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/190
