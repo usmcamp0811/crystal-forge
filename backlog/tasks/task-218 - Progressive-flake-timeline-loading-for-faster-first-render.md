@@ -1,7 +1,7 @@
 ---
 id: TASK-218
 title: Progressive flake timeline loading for faster first render
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-03-26 22:55'
 updated_date: '2026-03-26 22:55'
@@ -37,3 +37,7 @@ Load only a small initial subset for immediate render, then progressively hydrat
 ## Lock
 
 LOCK: opencode-gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-218-progressive-flake-timelines
+
+## Review
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/189
