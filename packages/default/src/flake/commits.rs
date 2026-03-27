@@ -607,7 +607,8 @@ fn is_invalid_revision_range_error(err: &anyhow::Error) -> bool {
 }
 
 pub fn is_history_rewrite_error(err: &anyhow::Error) -> bool {
-    err.to_string().contains(HISTORY_REWRITE_ERROR_MARKER)
+    err.chain()
+        .any(|cause| cause.to_string().contains(HISTORY_REWRITE_ERROR_MARKER))
 }
 
 async fn remote_branch_head_hash(repo_url: &str, branch: &str) -> Result<Option<String>> {
@@ -1064,6 +1065,7 @@ async fn try_get_diff_for_branch(
 
 #[cfg(test)]
 mod tests {
+    use anyhow::Context;
     use super::{
         is_history_rewrite_error, is_invalid_revision_range_error, is_remote_head_diverged,
     };
@@ -1084,6 +1086,13 @@ mod tests {
     fn detects_history_rewrite_error_marker() {
         let err = anyhow::anyhow!("history_rewrite_detected: remote history diverged");
         assert!(is_history_rewrite_error(&err));
+    }
+
+    #[test]
+    fn detects_history_rewrite_error_marker_in_error_chain() {
+        let inner = anyhow::anyhow!("history_rewrite_detected: range diverged");
+        let outer = inner.context("Failed to sync commits since last known hash");
+        assert!(is_history_rewrite_error(&outer));
     }
 
     #[test]
