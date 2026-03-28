@@ -1,7 +1,7 @@
 ---
 id: TASK-220
 title: Hotfix flakes view browser crash persists after MR191
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-03-28 15:44'
 updated_date: '2026-03-28 15:44'
@@ -67,6 +67,8 @@ High (production UI becomes unusable on `/flakes`).
 
 <!-- SECTION:NOTES:BEGIN -->
 Promoted to To Do per user emergency hotfix request: browsers still crash on /flakes.
+
+LOCK: opencode-gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-220-fix-flakes-browser-crash
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
