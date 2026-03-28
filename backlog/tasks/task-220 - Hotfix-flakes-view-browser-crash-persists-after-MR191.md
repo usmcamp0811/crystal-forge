@@ -1,10 +1,10 @@
 ---
 id: TASK-220
 title: Hotfix flakes view browser crash persists after MR191
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-03-28 15:44'
-updated_date: '2026-03-28 15:44'
+updated_date: '2026-03-28 15:57'
 labels:
   - bug
   - ui
@@ -69,6 +69,10 @@ High (production UI becomes unusable on `/flakes`).
 Promoted to To Do per user emergency hotfix request: browsers still crash on /flakes.
 
 LOCK: opencode-gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-220-fix-flakes-browser-crash
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/192
+
+Applied hotfix commit ed84201a (same stabilization pattern as prior patch) onto fresh post-merge dev state for emergency redeploy.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
