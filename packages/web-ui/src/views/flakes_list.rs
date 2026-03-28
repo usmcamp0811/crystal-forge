@@ -379,14 +379,16 @@ pub fn FlakesListView() -> Element {
         let mut is_loading = use_signal(|| false);
         
         use_effect(move || {
-            // Prevent re-entry if already loading
+            let flake_ids: Vec<i32> = flakes.read().iter().map(|flake| flake.id).collect();
+            let selected_flake_id = *selected_history_flake.read();
+            
+            // Prevent spawning multiple simultaneous fetches
             if *is_loading.read() {
                 return;
             }
             
-            let flake_ids: Vec<i32> = flakes.read().iter().map(|flake| flake.id).collect();
-            let selected_flake_id = *selected_history_flake.read();
-            let generation = *timeline_generation.read() + 1;
+            // Use peek() to avoid subscribing to timeline_generation (which would cause infinite loop)
+            let generation = *timeline_generation.peek() + 1;
             timeline_generation.set(generation);
             is_loading.set(true);
             
