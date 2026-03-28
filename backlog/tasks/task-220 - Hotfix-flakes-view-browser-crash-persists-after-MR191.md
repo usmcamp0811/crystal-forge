@@ -1,10 +1,10 @@
 ---
 id: TASK-220
 title: Hotfix flakes view browser crash persists after MR191
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-03-28 15:44'
-updated_date: '2026-03-28 16:16'
+updated_date: '2026-03-28 16:17'
 labels:
   - bug
   - ui
@@ -89,6 +89,8 @@ Fix approach:
 Starting implementation now.
 
 Fix implemented: memoized build_flake_commits and debounced timeline batch updates. Code changes in packages/web-ui/src/views/flakes_list.rs. Commit edc4aaa3. Unit test PASS. Integration test running.
+
+MR192 updated with real fix (not duplicate). Branch pushed with commit edc4aaa3. All checks passing. Ready for review and merge.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
