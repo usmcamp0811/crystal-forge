@@ -1,10 +1,10 @@
 ---
 id: TASK-197
 title: Brave browser tab crashes when starting new instance or adding flake
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-03-19 12:38'
-updated_date: '2026-03-19 12:39'
+updated_date: '2026-03-28 13:58'
 labels:
   - bug
   - ui
@@ -70,29 +70,48 @@ The exact trigger is unclear and needs investigation.
 **High** - Users on Brave browser (popular privacy-focused browser) cannot use the application at all if tabs crash.
 <!-- SECTION:DESCRIPTION:END -->
 
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 Opening `/flakes` no longer freezes or crashes the browser in Firefox and Brave during a 2-minute observation window.
+- [ ] #2 Flakes view first render completes and remains interactive (scroll, select flake, open details) with production-like dataset.
+- [ ] #3 CPU usage does not spike into sustained runaway behavior caused by client-side render/update loops when entering `/flakes`.
+- [ ] #4 Regression check: progressive timeline loading, generation-guard behavior, and rewrite warning modal flow still function.
+- [ ] #5 A targeted UI test or integration check covers the failure path that previously caused lock-up.
+<!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Reproduce the freeze locally using current `dev` dataset/profile and capture browser console/performance symptoms.
+2. Identify the hot path triggered by `/flakes` mount (likely polling/subscription/timeline batching/render loop interaction).
+3. Apply minimal-scope fix in flakes view/client state flow to stop runaway updates while preserving existing UX.
+4. Add/adjust targeted check to prevent recurrence.
+5. Run targeted verification and prepare hotfix MR.
+<!-- SECTION:PLAN:END -->
+
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-## Browser Testing Notes (2026-03-19)
+Goal: Restore flakes view stability immediately so entering `/flakes` does not lock the browser.
 
-**Initial report**: Firefox seemed fine, but crash MAY also occur in Firefox
-**Brave**: Crashes (either on load or when adding flake)
-**Firefox**: Uncertain - may also crash, needs more testing
+Non-goals:
+- No redesign of flakes UX.
+- No broad refactor outside flakes-view hot path.
+- No unrelated performance work outside the lock-up root cause.
 
-**Status**: Issue is NOT browser-specific - appears to be a general UI/rendering problem that can affect multiple browsers.
+Architectural constraints:
+- Keep business logic out of UI components.
+- Keep fix scoped to flakes page state/effects and related API client paths only.
+- Preserve existing server contracts and avoid schema/API changes unless strictly required.
 
-This suggests the root cause is likely:
-- Memory leak or excessive memory usage
-- Infinite render loop in Dioxus components
-- Large data payload causing browser OOM
-- WASM memory issue
-- Cascading state updates causing excessive re-renders
+Verification plan:
+- Reproduce before fix, then verify no freeze after fix in local browser run.
+- Run targeted check(s) for web UI flakes flow.
+- Run `nix build .#checks.x86_64-linux.web-ui` if needed to validate integration-level behavior.
 
-Next steps for investigation:
-1. Try to reproduce crash consistently in both browsers
-2. Monitor browser memory usage when loading UI
-3. Check browser console for errors/warnings before crash
-4. Look for infinite loops or excessive re-renders in Dioxus components
-5. Profile memory usage and component render cycles
-6. Check if adding flake triggers large data fetch or render loop
+Impact areas: `packages/web-ui/src/views/flakes_list.rs`, related API client calls, web-ui checks.
+
+Risk level: High (production browser lock-up, user-blocking).
+
+Dependencies: None.
 <!-- SECTION:NOTES:END -->
