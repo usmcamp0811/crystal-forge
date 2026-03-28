@@ -383,6 +383,79 @@ async function unrouteFlakeWarningData(page) {
   await page.unroute("**/api/v1/flakes");
 }
 
+function buildFlakeStressFixture() {
+  const flakeNames = ["platform-core", "infra-core", "edge-fleet", "workstations"];
+  const systemsPattern = [35, 24, 19, 17, 15, 14, 12, 11, 10, 8];
+  const nowMs = Date.now();
+
+  const flakes = flakeNames.map((name, idx) => ({
+    id: idx + 1,
+    name,
+    repo_url: `https://gitlab.com/crystal-forge/${name}.git`,
+    branch: "main",
+    system_count: systemsPattern[0],
+  }));
+
+  const timelines = flakes.map((flake) => {
+    const commits = systemsPattern.map((systemCount, commitIdx) => {
+      const hashSeed = `${flake.id}${commitIdx}`.padEnd(40, `${(commitIdx + 3) % 10}`);
+      const hash = hashSeed.slice(0, 40);
+      const systems = Array.from({ length: systemCount }, (_, systemIdx) =>
+        `${flake.name}-host-${String(systemIdx + 1).padStart(2, "0")}`,
+      );
+
+      return {
+        id: flake.id * 1000 + commitIdx,
+        hash,
+        message: `Synthetic commit ${commitIdx + 1} for ${flake.name}`,
+        author: "load-test-bot",
+        committed_at: new Date(nowMs - commitIdx * 60000 - flake.id * 5000).toISOString(),
+        system_count: systemCount,
+        commits_behind: commitIdx,
+        systems,
+        build_status: commitIdx % 3 === 0 ? "queued" : commitIdx % 4 === 0 ? "building" : "idle",
+        evaluation_status: commitIdx % 5 === 0 ? "failed" : "complete",
+        evaluation_error_message:
+          commitIdx % 5 === 0 ? "synthetic evaluation failure for stress coverage" : null,
+      };
+    });
+
+    return {
+      flake_id: flake.id,
+      flake_name: flake.name,
+      repo_url: flake.repo_url,
+      commits,
+    };
+  });
+
+  return { flakes, timelines };
+}
+
+async function routeFlakesStressData(page) {
+  const fixture = buildFlakeStressFixture();
+
+  await page.route("**/api/v1/flakes/timelines*", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(fixture.timelines),
+    });
+  });
+
+  await page.route("**/api/v1/flakes", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(fixture.flakes),
+    });
+  });
+}
+
+async function unrouteFlakesStressData(page) {
+  await page.unroute("**/api/v1/flakes/timelines*");
+  await page.unroute("**/api/v1/flakes");
+}
+
 // Screenshot steps - executed in order
 const steps = [
   // ============================================================
@@ -1429,6 +1502,30 @@ const steps = [
     action: async (page) => {
       await page.goto(`${baseUrl}/flakes`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
+    },
+  },
+  {
+    name: "13d-flakes-stress-dataset",
+    description: "Flakes view remains responsive with production-shaped timeline payload",
+    action: async (page) => {
+      await routeFlakesStressData(page);
+      await page.goto(`${baseUrl}/flakes`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2500);
+
+      await page.getByText("platform-core").first().waitFor({ timeout: 5000 });
+      await page.getByText("edge-fleet").first().click();
+      await page.waitForTimeout(800);
+
+      const probe = await page.evaluate(() => {
+        window.__cfResponsivenessProbe = (window.__cfResponsivenessProbe || 0) + 1;
+        return window.__cfResponsivenessProbe;
+      });
+
+      if (probe < 1) {
+        throw new Error("Flakes stress dataset responsiveness probe did not execute");
+      }
+
+      await unrouteFlakesStressData(page);
     },
   },
   {
