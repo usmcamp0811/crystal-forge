@@ -474,7 +474,6 @@ pub fn FlakesListView() -> Element {
                             let mut last_manual_sync = last_manual_sync.clone();
                             let mut sync_note = sync_note.clone();
                             let mut rewrite_prompt = rewrite_prompt.clone();
-                            let mut timeline_generation = timeline_generation.clone();
                             let flakes_snapshot = flakes.read().clone();
                             spawn(async move {
                                 let sync_result = if let Some(flake_id) = selected_flake_id {
@@ -500,14 +499,9 @@ pub fn FlakesListView() -> Element {
                                             }
                                         }
 
-                                        let generation = *timeline_generation.read() + 1;
-                                        timeline_generation.set(generation);
-
                                         match fetch_flake_timelines().await {
                                             Ok(timelines) => {
-                                                if *timeline_generation.read() == generation {
-                                                    timelines_signal.set(timelines);
-                                                }
+                                                timelines_signal.set(timelines);
                                             }
                                             Err(_) => {
                                                 refresh_warning = true;
@@ -852,7 +846,6 @@ pub fn FlakesListView() -> Element {
                         let mut last_manual_sync = last_manual_sync.clone();
                         let mut flakes_signal = flakes.clone();
                         let mut timelines_signal = flake_timelines.clone();
-                        let mut timeline_generation = timeline_generation.clone();
                         spawn(async move {
                             match accept_flake_history_rewrite(flake_id).await {
                                 Ok(response) => {
@@ -869,12 +862,8 @@ pub fn FlakesListView() -> Element {
                                         );
                                     }
 
-                                    let generation = *timeline_generation.read() + 1;
-                                    timeline_generation.set(generation);
                                     if let Ok(timelines) = fetch_flake_timelines().await {
-                                        if *timeline_generation.read() == generation {
-                                            timelines_signal.set(timelines);
-                                        }
+                                        timelines_signal.set(timelines);
                                     }
                                 }
                                 Err(error) => {
