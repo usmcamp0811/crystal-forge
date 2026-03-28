@@ -152,6 +152,8 @@ pub async fn fetch_recent_deployments(pool: &PgPool) -> Result<Vec<RecentDeploym
 
 /// Fetch the active build queue (building + queued) from build_jobs.
 pub async fn fetch_build_queue(pool: &PgPool, limit: i64) -> Result<BuildQueueSummary> {
+    const QUEUED_PER_FLAKE_CAP: i64 = 20;
+
     let rows = sqlx::query_as::<
         _,
         (
@@ -168,42 +170,75 @@ pub async fn fetch_build_queue(pool: &PgPool, limit: i64) -> Result<BuildQueueSu
             Option<i64>,
             Option<String>,
             Option<String>,
+            Option<f64>,
+            Option<DateTime<Utc>>,
         ),
     >(
         r#"
+        WITH ranked_jobs AS (
+            SELECT
+                bj.id AS job_id,
+                s.id AS system_id,
+                COALESCE(s.hostname, d.derivation_target, d.derivation_name) AS hostname,
+                f.name AS flake_name,
+                c.git_commit_hash AS commit_hash,
+                NULL::TEXT AS commit_message,
+                bj.status,
+                b.name AS builder_name,
+                bj.created_at AS queued_at,
+                bj.started_at,
+                CASE
+                    WHEN bj.started_at IS NULL THEN NULL
+                    ELSE EXTRACT(EPOCH FROM (now() - bj.started_at))::BIGINT
+                END AS elapsed_secs,
+                bj.logs,
+                e.name AS environment,
+                bj.priority_weight,
+                c.commit_timestamp,
+                CASE
+                    WHEN bj.status = 'queued' THEN ROW_NUMBER() OVER (
+                        PARTITION BY COALESCE(f.id, -1)
+                        ORDER BY bj.priority_weight DESC, c.commit_timestamp DESC NULLS LAST, bj.created_at ASC
+                    )
+                    ELSE 1
+                END AS per_flake_rank
+            FROM build_jobs bj
+            JOIN derivations d ON d.id = bj.derivation_id
+            LEFT JOIN commits c ON c.id = d.commit_id
+            LEFT JOIN flakes f ON f.id = c.flake_id
+            LEFT JOIN systems s ON s.hostname = d.derivation_target
+            LEFT JOIN environments e ON e.id = s.environment_id
+            LEFT JOIN builders b ON b.id = bj.builder_id
+            WHERE bj.status IN ('queued', 'building')
+        )
         SELECT
-            bj.id AS job_id,
-            s.id AS system_id,
-            COALESCE(s.hostname, d.derivation_target, d.derivation_name) AS hostname,
-            f.name AS flake_name,
-            c.git_commit_hash AS commit_hash,
-            NULL::TEXT AS commit_message,
-            bj.status,
-            b.name AS builder_name,
-            bj.created_at AS queued_at,
-            bj.started_at,
-            CASE
-                WHEN bj.started_at IS NULL THEN NULL
-                ELSE EXTRACT(EPOCH FROM (now() - bj.started_at))::BIGINT
-            END AS elapsed_secs,
-            bj.logs,
-            e.name AS environment
-        FROM build_jobs bj
-        JOIN derivations d ON d.id = bj.derivation_id
-        LEFT JOIN commits c ON c.id = d.commit_id
-        LEFT JOIN flakes f ON f.id = c.flake_id
-        LEFT JOIN systems s ON s.hostname = d.derivation_target
-        LEFT JOIN environments e ON e.id = s.environment_id
-        LEFT JOIN builders b ON b.id = bj.builder_id
-        WHERE bj.status IN ('queued', 'building')
+            job_id,
+            system_id,
+            hostname,
+            flake_name,
+            commit_hash,
+            commit_message,
+            status,
+            builder_name,
+            queued_at,
+            started_at,
+            elapsed_secs,
+            logs,
+            environment,
+            priority_weight,
+            commit_timestamp
+        FROM ranked_jobs
+        WHERE status = 'building' OR per_flake_rank <= $2
         ORDER BY
-            CASE WHEN bj.status = 'building' THEN 0 ELSE 1 END,
-            bj.priority_weight DESC,
-            bj.created_at ASC
+            CASE WHEN status = 'building' THEN 0 ELSE 1 END,
+            priority_weight DESC,
+            commit_timestamp DESC NULLS LAST,
+            queued_at ASC
         LIMIT $1
         "#,
     )
     .bind(limit)
+    .bind(QUEUED_PER_FLAKE_CAP)
     .fetch_all(pool)
     .await?;
 
@@ -224,6 +259,8 @@ pub async fn fetch_build_queue(pool: &PgPool, limit: i64) -> Result<BuildQueueSu
                 elapsed_secs,
                 logs,
                 environment,
+                _priority_weight,
+                _commit_timestamp,
             )| {
                 let status = match status.as_str() {
                     "queued" => BuildStatus::Queued,

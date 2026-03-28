@@ -1773,11 +1773,27 @@ const steps = [
   },
 ];
 
+const CI_FAST_STEP_NAMES = new Set([
+  "01-login-page",
+  "02-registration",
+  "03-registration-submit",
+  "04-post-register-login",
+  "05-login-submit",
+  "06-dashboard",
+]);
+
 (async () => {
+  const testProfile = process.env.CF_UI_TEST_PROFILE || "full";
+  const stepsToRun =
+    testProfile === "ci_fast"
+      ? steps.filter((step) => CI_FAST_STEP_NAMES.has(step.name))
+      : steps;
+
   console.log("Starting Crystal Forge Web UI Integration Test");
   console.log(`  Base URL: ${baseUrl}`);
   console.log(`  Output: ${outputDir}`);
-  console.log(`  Steps: ${steps.length}`);
+  console.log(`  Profile: ${testProfile}`);
+  console.log(`  Steps: ${stepsToRun.length}`);
   console.log("");
 
   const browser = await chromium.launch();
@@ -1787,9 +1803,13 @@ const steps = [
   });
   const page = await context.newPage();
 
+  const originalWaitForTimeout = page.waitForTimeout.bind(page);
+  page.waitForTimeout = (ms) =>
+    originalWaitForTimeout(Math.max(50, Math.floor(ms * 0.3)));
+
   const results = [];
 
-  for (const step of steps) {
+  for (const step of stepsToRun) {
     console.log(`Step: ${step.name} - ${step.description}`);
     let ok = true;
     let error = null;
