@@ -1,10 +1,10 @@
 ---
 id: TASK-220
 title: Hotfix flakes view browser crash persists after MR191
-status: Review
+status: In Progress
 assignee: []
 created_date: '2026-03-28 15:44'
-updated_date: '2026-03-28 15:57'
+updated_date: '2026-03-28 16:02'
 labels:
   - bug
   - ui
@@ -73,6 +73,20 @@ LOCK: opencode-gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-
 MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/192
 
 Applied hotfix commit ed84201a (same stabilization pattern as prior patch) onto fresh post-merge dev state for emergency redeploy.
+
+LOCK: claude-sonnet-4-5 on reckless in /home/mcamp/code/crystal-forge/TASK-220-fix-flakes-browser-crash
+
+Diagnosis: MR192 was a duplicate of MR191. Real issue is cascading re-renders from:
+- Unmemoized build_flake_commits() running on every render
+- Timeline batch updates triggering multiple signal updates
+- FlakeHistoryExplorer re-rendering for each batch
+
+Fix approach:
+1. Memoize commit building
+2. Debounce timeline updates
+3. Guard early renders
+
+Starting implementation now.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
