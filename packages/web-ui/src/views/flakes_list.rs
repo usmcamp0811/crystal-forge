@@ -376,17 +376,21 @@ pub fn FlakesListView() -> Element {
         let flakes = flakes.clone();
         let selected_history_flake = selected_history_flake.clone();
         let mut timeline_generation = timeline_generation.clone();
-        
-        // Memoize flake IDs to prevent effect from re-running on every render
-        let flake_ids_memo = use_memo(move || {
-            flakes.read().iter().map(|flake| flake.id).collect::<Vec<i32>>()
-        });
+        let mut is_loading = use_signal(|| false);
         
         use_effect(move || {
-            let flake_ids: Vec<i32> = flake_ids_memo.read().clone();
+            // Prevent re-entry if already loading
+            if *is_loading.read() {
+                return;
+            }
+            
+            let flake_ids: Vec<i32> = flakes.read().iter().map(|flake| flake.id).collect();
             let selected_flake_id = *selected_history_flake.read();
             let generation = *timeline_generation.read() + 1;
             timeline_generation.set(generation);
+            is_loading.set(true);
+            
+            let mut is_loading_clone = is_loading.clone();
             spawn(async move {
                 if flake_ids.is_empty() {
                     if *timeline_generation.read() == generation {
@@ -484,6 +488,9 @@ pub fn FlakesListView() -> Element {
                         }
                     }
                 }
+                
+                // Clear loading flag when done
+                is_loading_clone.set(false);
             });
         });
     }
