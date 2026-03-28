@@ -4,7 +4,7 @@ title: Hotfix flakes view browser crash persists after MR191
 status: Review
 assignee: []
 created_date: '2026-03-28 15:44'
-updated_date: '2026-03-28 19:55'
+updated_date: '2026-03-28 21:38'
 labels:
   - bug
   - ui
@@ -129,6 +129,18 @@ Effect now only re-runs when flakes or selected_history_flake change (intended b
 Moved is_loading check to after dependency reads so effect can still detect changes
 
 Commit 51117d4a pushed. fmf-flake updated. Ready for deployment: sudo nixos-rebuild switch --flake .#reckless
+
+Fix iteration 6 (commit 1629427d): Remove is_loading early return to allow re-fetches on selection change
+
+Problem: is_loading guard was blocking effect from re-running when user changed selected flake, because previous fetch was still in progress
+
+This caused timelines to never load - the effect would hit the is_loading guard and return early even when dependencies legitimately changed
+
+Solution: Remove the is_loading early return check entirely. The generation counter already provides proper cancellation of stale fetches
+
+Flow now: User changes flake -> Effect re-runs (subscribed to selected_history_flake) -> Generation increments -> New fetch starts -> Old fetch aborts on generation mismatch
+
+Commit 1629427d pushed. fmf-flake updated. Ready for deployment: sudo nixos-rebuild switch --flake .#reckless
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
