@@ -1,9 +1,10 @@
 ---
 id: TASK-220
 title: Hotfix flakes view browser crash persists after MR191
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-03-28 15:44'
+updated_date: '2026-03-28 15:44'
 labels:
   - bug
   - ui
@@ -61,6 +62,12 @@ High (production UI becomes unusable on `/flakes`).
 - [ ] #4 A targeted web-ui integration scenario reproduces the formerly crashing path and now passes reliably.
 - [ ] #5 Existing rewrite modal and progressive timeline behaviors remain functional.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Promoted to To Do per user emergency hotfix request: browsers still crash on /flakes.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
