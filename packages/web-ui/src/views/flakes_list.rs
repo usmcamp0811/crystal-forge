@@ -1276,28 +1276,23 @@ fn FlakeHistoryExplorer(
     use crate::hooks::websocket::{use_websocket_eval_stream, SystemEvalStatus};
     let navigator = use_navigator();
 
-    let history = build_flake_history(&timelines);
+    let fallback_flake_id = flakes.first().map(|flake| flake.id).unwrap_or(0);
+    let active_flake_id = (*selected_flake_id.read()).unwrap_or(fallback_flake_id);
 
     // Cache for loaded commit diffs
     let loaded_diffs = use_signal(|| HashMap::<(i32, String), String>::new());
     // Track current active commit hash to force re-render when diff loads
     let current_commit_key = use_signal(|| (0i32, String::new()));
 
-    // Get active commit for WebSocket connection
-    let active_flake_id_for_ws = selected_flake_id
-        .read()
-        .to_owned()
-        .unwrap_or_else(|| flakes.first().map(|f| f.id).unwrap_or(0));
-    let commits_for_ws = history
-        .get(&active_flake_id_for_ws)
-        .cloned()
-        .unwrap_or_default();
+    let commits = build_flake_commits(&timelines, active_flake_id);
+
+    // Only stream eval updates after an explicit commit selection.
+    // Auto-subscribing to the newest commit can flood the client on busy instances.
     let active_commit_for_ws = selected_commit_hash
         .read()
         .as_ref()
-        .and_then(|hash| commits_for_ws.iter().find(|commit| &commit.hash == hash))
-        .map(|commit| commit.clone())
-        .or_else(|| commits_for_ws.first().cloned());
+        .and_then(|hash| commits.iter().find(|commit| &commit.hash == hash))
+        .cloned();
 
     // Connect to WebSocket for active commit's eval status (MUST be unconditional hook call)
     let commit_id_str = active_commit_for_ws
@@ -1317,16 +1312,11 @@ fn FlakeHistoryExplorer(
         };
     }
 
-    let active_flake_id = selected_flake_id
-        .read()
-        .to_owned()
-        .unwrap_or_else(|| flakes[0].id);
     let active_flake = flakes
         .iter()
         .find(|flake| flake.id == active_flake_id)
         .cloned()
         .unwrap_or_else(|| flakes[0].clone());
-    let commits = history.get(&active_flake.id).cloned().unwrap_or_default();
 
     let active_commit = selected_commit_hash
         .read()
@@ -3006,37 +2996,33 @@ fn sync_single_flake_registry(
     flake.last_synced_at = now;
     changed
 }
-fn build_flake_history(timelines: &[FlakeTimeline]) -> HashMap<i32, Vec<FlakeHistoryCommit>> {
-    let mut history = HashMap::new();
+fn build_flake_commits(timelines: &[FlakeTimeline], flake_id: i32) -> Vec<FlakeHistoryCommit> {
+    let Some(timeline) = timelines.iter().find(|timeline| timeline.flake_id == flake_id) else {
+        return Vec::new();
+    };
 
-    for timeline in timelines {
-        let commits: Vec<FlakeHistoryCommit> = timeline
-            .commits
-            .iter()
-            .map(|commit| {
-                let short_hash = commit.hash.chars().take(7).collect::<String>();
-                FlakeHistoryCommit {
-                    id: commit.id,
-                    hash: commit.hash.clone(),
-                    message: normalize_commit_message(&commit.message, &short_hash),
-                    author: normalize_commit_author(&commit.author),
-                    committed_at: commit.committed_at,
-                    files_changed: 0,
-                    insertions: 0,
-                    deletions: 0,
-                    diff: String::new(),
-                    systems: commit.systems.clone(),
-                    build_status: commit.build_status.clone(),
-                    evaluation_status: commit.evaluation_status.clone(),
-                    evaluation_error_message: commit.evaluation_error_message.clone(),
-                }
-            })
-            .collect();
-
-        history.insert(timeline.flake_id, commits);
-    }
-
-    history
+    timeline
+        .commits
+        .iter()
+        .map(|commit| {
+            let short_hash = commit.hash.chars().take(7).collect::<String>();
+            FlakeHistoryCommit {
+                id: commit.id,
+                hash: commit.hash.clone(),
+                message: normalize_commit_message(&commit.message, &short_hash),
+                author: normalize_commit_author(&commit.author),
+                committed_at: commit.committed_at,
+                files_changed: 0,
+                insertions: 0,
+                deletions: 0,
+                diff: String::new(),
+                systems: commit.systems.clone(),
+                build_status: commit.build_status.clone(),
+                evaluation_status: commit.evaluation_status.clone(),
+                evaluation_error_message: commit.evaluation_error_message.clone(),
+            }
+        })
+        .collect()
 }
 
 fn eval_badge_label(status: Option<&str>) -> &'static str {
@@ -3640,5 +3626,54 @@ mod tests {
     #[test]
     fn normalize_commit_author_falls_back_for_empty_value() {
         assert_eq!(normalize_commit_author("  \n"), "Unknown author");
+    }
+
+    #[test]
+    fn build_flake_commits_only_maps_requested_flake() {
+        use crate::api::models::{BuildStatus, FlakeCommit, FlakeTimeline};
+
+        let timelines = vec![
+            FlakeTimeline {
+                flake_id: 10,
+                flake_name: "alpha".to_string(),
+                repo_url: "https://example.com/alpha.git".to_string(),
+                commits: vec![FlakeCommit {
+                    id: 1,
+                    hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                    message: "alpha commit".to_string(),
+                    author: "Alice".to_string(),
+                    committed_at: Utc::now(),
+                    system_count: 1,
+                    commits_behind: 0,
+                    systems: vec!["alpha-host".to_string()],
+                    build_status: Some(BuildStatus::Queued),
+                    evaluation_status: Some("pending".to_string()),
+                    evaluation_error_message: None,
+                }],
+            },
+            FlakeTimeline {
+                flake_id: 20,
+                flake_name: "beta".to_string(),
+                repo_url: "https://example.com/beta.git".to_string(),
+                commits: vec![FlakeCommit {
+                    id: 2,
+                    hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+                    message: "beta commit".to_string(),
+                    author: "Bob".to_string(),
+                    committed_at: Utc::now(),
+                    system_count: 1,
+                    commits_behind: 0,
+                    systems: vec!["beta-host".to_string()],
+                    build_status: Some(BuildStatus::Complete),
+                    evaluation_status: Some("complete".to_string()),
+                    evaluation_error_message: None,
+                }],
+            },
+        ];
+
+        let commits = build_flake_commits(&timelines, 20);
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].id, 2);
+        assert_eq!(commits[0].author, "Bob");
     }
 }
