@@ -396,6 +396,7 @@ pub fn FlakesListView() -> Element {
                     if *timeline_generation.read() == generation {
                         flake_timelines.set(Vec::new());
                     }
+                    is_loading_clone.set(false);
                     return;
                 }
 
@@ -429,6 +430,7 @@ pub fn FlakesListView() -> Element {
                                 &flake_ids,
                             );
                             if *timeline_generation.read() != generation {
+                                is_loading_clone.set(false);
                                 return;
                             }
                             flake_timelines.set(merged_timelines.clone());
@@ -447,6 +449,7 @@ pub fn FlakesListView() -> Element {
                                     }
                                 }
                             }
+                            is_loading_clone.set(false);
                             return;
                         }
                     }
@@ -472,6 +475,7 @@ pub fn FlakesListView() -> Element {
                                 &flake_ids,
                             );
                             if *timeline_generation.read() != generation {
+                                is_loading_clone.set(false);
                                 return;
                             }
                             // Only update signal after the final batch to reduce render churn
