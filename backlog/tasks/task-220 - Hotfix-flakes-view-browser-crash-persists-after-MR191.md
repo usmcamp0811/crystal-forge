@@ -1,7 +1,7 @@
 ---
 id: TASK-220
 title: Hotfix flakes view browser crash persists after MR191
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-03-28 15:44'
 updated_date: '2026-03-28 22:09'
