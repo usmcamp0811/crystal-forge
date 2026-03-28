@@ -4,7 +4,7 @@ title: Hotfix flakes view browser crash persists after MR191
 status: Review
 assignee: []
 created_date: '2026-03-28 15:44'
-updated_date: '2026-03-28 17:26'
+updated_date: '2026-03-28 17:39'
 labels:
   - bug
   - ui
@@ -105,6 +105,16 @@ Current fix: is_loading signal prevents re-entry while effect is running. Line 3
 Compilation verified with nix develop -c cargo check. Commit 3e4d5d9d pushed to branch. fmf-flake updated to reference new commit. campground flake.lock updated.
 
 Ready for deployment: sudo nixos-rebuild switch --flake .#reckless
+
+Fix iteration 4 (commit f856456a): Reset is_loading flag on all early returns
+
+Problem: The is_loading guard was preventing timeline from loading because early return paths weren't resetting the flag
+
+Fixed all 4 early return statements in the async spawn block: (1) Empty flake_ids exit line 400, (2) Generation mismatch after initial fetch line 433, (3) Error fallback path line 453, (4) Generation mismatch in batch loop line 478
+
+Each return now calls is_loading_clone.set(false) before exiting to allow future effect runs
+
+Commit f856456a pushed to branch. fmf-flake updated. Ready for redeployment: sudo nixos-rebuild switch --flake .#reckless
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
