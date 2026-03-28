@@ -448,7 +448,12 @@ pub fn FlakesListView() -> Element {
                     .copied()
                     .collect();
 
+                // Process remaining batches without triggering re-renders per batch
+                let mut batch_count = 0;
+                let total_batches = (remaining_ids.len() + TIMELINE_BATCH_SIZE - 1) / TIMELINE_BATCH_SIZE;
+                
                 for chunk in remaining_ids.chunks(TIMELINE_BATCH_SIZE) {
+                    batch_count += 1;
                     match fetch_flake_timelines_for_ids(chunk).await {
                         Ok(timelines) => {
                             merged_timelines = merge_flake_timeline_batches(
@@ -459,10 +464,17 @@ pub fn FlakesListView() -> Element {
                             if *timeline_generation.read() != generation {
                                 return;
                             }
-                            flake_timelines.set(merged_timelines.clone());
+                            // Only update signal after the final batch to reduce render churn
+                            if batch_count == total_batches {
+                                flake_timelines.set(merged_timelines.clone());
+                            }
                         }
                         Err(_) => {
                             // Keep already-loaded timelines if a later batch fails.
+                            // Still update on final batch even if this one failed
+                            if batch_count == total_batches && *timeline_generation.read() == generation {
+                                flake_timelines.set(merged_timelines.clone());
+                            }
                         }
                     }
                 }
@@ -1284,14 +1296,21 @@ fn FlakeHistoryExplorer(
     // Track current active commit hash to force re-render when diff loads
     let current_commit_key = use_signal(|| (0i32, String::new()));
 
-    let commits = build_flake_commits(&timelines, active_flake_id);
+    // Memoize commit building to prevent recomputation on every render
+    let commits = use_memo(move || {
+        let timelines = timelines.clone();
+        build_flake_commits(&timelines, active_flake_id)
+    });
+    
+    // Clone commits once for this render to avoid repeated .read() calls
+    let commits_vec = commits.read().clone();
 
     // Only stream eval updates after an explicit commit selection.
     // Auto-subscribing to the newest commit can flood the client on busy instances.
     let active_commit_for_ws = selected_commit_hash
         .read()
         .as_ref()
-        .and_then(|hash| commits.iter().find(|commit| &commit.hash == hash))
+        .and_then(|hash| commits_vec.iter().find(|commit| &commit.hash == hash))
         .cloned();
 
     // Connect to WebSocket for active commit's eval status (MUST be unconditional hook call)
@@ -1321,9 +1340,9 @@ fn FlakeHistoryExplorer(
     let active_commit = selected_commit_hash
         .read()
         .as_ref()
-        .and_then(|hash| commits.iter().find(|commit| &commit.hash == hash))
+        .and_then(|hash| commits_vec.iter().find(|commit| &commit.hash == hash))
         .map(|commit| commit.clone())
-        .or_else(|| commits.first().cloned());
+        .or_else(|| commits_vec.first().cloned());
 
     // Load diff for the active commit if not already loaded
     // We read the signal INSIDE use_effect so it tracks the dependency
@@ -1439,7 +1458,7 @@ fn FlakeHistoryExplorer(
                             }
                             div {
                                 class: "max-h-[68vh] overflow-y-auto",
-                                if commits.is_empty() {
+                                if commits_vec.is_empty() {
                                     p { class: "p-4 text-sm {theme::text::SECONDARY}", "No commits available." }
                                 } else {
                                     div {
@@ -1450,7 +1469,7 @@ fn FlakeHistoryExplorer(
                                         }
                                         div {
                                             class: "space-y-3 relative",
-                                            for commit in commits.iter() {
+                                            for commit in commits_vec.iter() {
                                                 {
                                                     let commit_id_for_modal = commit.id;
                                                     let is_active = active_commit
