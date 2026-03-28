@@ -4,7 +4,7 @@ title: Hotfix flakes view browser crash persists after MR191
 status: In Progress
 assignee: []
 created_date: '2026-03-28 15:44'
-updated_date: '2026-03-28 16:02'
+updated_date: '2026-03-28 16:16'
 labels:
   - bug
   - ui
@@ -87,6 +87,8 @@ Fix approach:
 3. Guard early renders
 
 Starting implementation now.
+
+Fix implemented: memoized build_flake_commits and debounced timeline batch updates. Code changes in packages/web-ui/src/views/flakes_list.rs. Commit edc4aaa3. Unit test PASS. Integration test running.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
