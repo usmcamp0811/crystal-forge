@@ -4,7 +4,7 @@ title: Hotfix flakes view browser crash persists after MR191
 status: Review
 assignee: []
 created_date: '2026-03-28 15:44'
-updated_date: '2026-03-28 22:01'
+updated_date: '2026-03-28 22:09'
 labels:
   - bug
   - ui
@@ -155,6 +155,16 @@ Removed entirely: timeline_generation signal, selected_history_flake reading, is
 This was stable in production before 6d8fff40. Back to basics.
 
 Commit c8cec1aa pushed. fmf-flake updated. Deploy: sudo nixos-rebuild switch --flake .#reckless
+
+Fix iteration 7b (commit 4d6225d6): Removed timeline_generation from sync handlers to fix compilation
+
+Compilation errors: timeline_generation was still referenced in manual sync and history rewrite handlers
+
+Removed generation tracking from these handlers since they're simple single-shot user-triggered operations
+
+Compilation now succeeds. Commit 4d6225d6 pushed. fmf-flake updated.
+
+Ready for deployment: sudo nixos-rebuild switch --flake .#reckless
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
