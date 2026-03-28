@@ -4,7 +4,7 @@ title: Hotfix flakes view browser crash persists after MR191
 status: Review
 assignee: []
 created_date: '2026-03-28 15:44'
-updated_date: '2026-03-28 16:17'
+updated_date: '2026-03-28 17:26'
 labels:
   - bug
   - ui
@@ -91,6 +91,20 @@ Starting implementation now.
 Fix implemented: memoized build_flake_commits and debounced timeline batch updates. Code changes in packages/web-ui/src/views/flakes_list.rs. Commit edc4aaa3. Unit test PASS. Integration test running.
 
 MR192 updated with real fix (not duplicate). Branch pushed with commit edc4aaa3. All checks passing. Ready for review and merge.
+
+Fix iteration 3 (commit 3e4d5d9d): Added is_loading guard with proper mut declaration.
+
+Root cause confirmed: use_effect on line ~381 has NO dependency tracking, causing infinite loop: Effect runs -> fetches timeline data -> Timeline signals update (lines 424, 462, 484) -> Component re-renders -> Effect runs again -> infinite loop
+
+This overwhelms both browser and server with request spam.
+
+Previous attempts (edc4aaa3, 4c882189) added memoization but did not stop the effect re-entry.
+
+Current fix: is_loading signal prevents re-entry while effect is running. Line 379: let mut is_loading = use_signal(|| false); Line 383-385: Early return if already loading; Line 391: Set loading = true before spawn; Effect cleanup sets loading = false when done
+
+Compilation verified with nix develop -c cargo check. Commit 3e4d5d9d pushed to branch. fmf-flake updated to reference new commit. campground flake.lock updated.
+
+Ready for deployment: sudo nixos-rebuild switch --flake .#reckless
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
