@@ -4,7 +4,7 @@ title: Hotfix flakes view browser crash persists after MR191
 status: Review
 assignee: []
 created_date: '2026-03-28 15:44'
-updated_date: '2026-03-28 21:38'
+updated_date: '2026-03-28 22:01'
 labels:
   - bug
   - ui
@@ -141,6 +141,20 @@ Solution: Remove the is_loading early return check entirely. The generation coun
 Flow now: User changes flake -> Effect re-runs (subscribed to selected_history_flake) -> Generation increments -> New fetch starts -> Old fetch aborts on generation mismatch
 
 Commit 1629427d pushed. fmf-flake updated. Ready for deployment: sudo nixos-rebuild switch --flake .#reckless
+
+Fix iteration 7 (commit c8cec1aa): REVERTED to pre-generation-guard code (27c0bf8e) - THE REAL FIX
+
+Root cause trace: Commit 6d8fff40 added timeline_generation.read() creating subscription loop. Every fix after that made it worse.
+
+Reverted to last known working version (27c0bf8e) from Mar 26 before generation guards were added
+
+Working behavior: Effect only subscribes to flakes signal, runs once when flakes load, no generation tracking, no prioritization, simple progressive loading
+
+Removed entirely: timeline_generation signal, selected_history_flake reading, is_loading guard, all generation mismatch checks
+
+This was stable in production before 6d8fff40. Back to basics.
+
+Commit c8cec1aa pushed. fmf-flake updated. Deploy: sudo nixos-rebuild switch --flake .#reckless
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
