@@ -26,6 +26,7 @@ in pkgs.testers.runNixOSTest {
 
     virtualisation.memorySize = 4096;
     virtualisation.cores = 2;
+    virtualisation.diskSize = 8192;
 
     environment.systemPackages =
       [ pkgs.chromium pkgs.nodejs pkgs.playwright-test pkgs.curl pkgs.jq ];
@@ -47,11 +48,11 @@ in pkgs.testers.runNixOSTest {
         "host    all   all 127.0.0.1/32 trust"
         "host    all   all ::1/128      trust"
       ];
-      initialScript = pkgs.writeText "init-crystal-forge.sql" ''
-        CREATE USER crystal_forge LOGIN;
-        CREATE DATABASE crystal_forge OWNER crystal_forge;
-        GRANT ALL PRIVILEGES ON DATABASE crystal_forge TO crystal_forge;
-      '';
+      ensureDatabases = [ "crystal_forge" ];
+      ensureUsers = [{
+        name = "crystal_forge";
+        ensureDBOwnership = true;
+      }];
     };
 
     # Crystal Forge server with local auth enabled
