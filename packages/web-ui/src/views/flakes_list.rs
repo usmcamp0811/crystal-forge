@@ -376,8 +376,14 @@ pub fn FlakesListView() -> Element {
         let flakes = flakes.clone();
         let selected_history_flake = selected_history_flake.clone();
         let mut timeline_generation = timeline_generation.clone();
+        
+        // Memoize flake IDs to prevent effect from re-running on every render
+        let flake_ids_memo = use_memo(move || {
+            flakes.read().iter().map(|flake| flake.id).collect::<Vec<i32>>()
+        });
+        
         use_effect(move || {
-            let flake_ids: Vec<i32> = flakes.read().iter().map(|flake| flake.id).collect();
+            let flake_ids: Vec<i32> = flake_ids_memo.read().clone();
             let selected_flake_id = *selected_history_flake.read();
             let generation = *timeline_generation.read() + 1;
             timeline_generation.set(generation);
