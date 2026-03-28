@@ -312,7 +312,6 @@ pub fn FlakesListView() -> Element {
     let mut sync_note = use_signal(|| None::<String>);
     let mut last_manual_sync = use_signal(|| None::<DateTime<Utc>>);
     let mut rewrite_prompt = use_signal(|| None::<(i32, String, String)>);
-    let mut timeline_generation = use_signal(|| 0_u64);
 
     let current_flakes = flakes.read().clone();
     let environments = unique_environments(&current_flakes);
@@ -374,46 +373,15 @@ pub fn FlakesListView() -> Element {
     {
         let mut flake_timelines = flake_timelines.clone();
         let flakes = flakes.clone();
-        let selected_history_flake = selected_history_flake.clone();
-        let mut timeline_generation = timeline_generation.clone();
-        let mut is_loading = use_signal(|| false);
-        
         use_effect(move || {
             let flake_ids: Vec<i32> = flakes.read().iter().map(|flake| flake.id).collect();
-            let selected_flake_id = *selected_history_flake.read();
-            
-            // Use peek() to avoid subscribing to timeline_generation (which would cause infinite loop)
-            // Increment generation to cancel any in-flight requests when dependencies change
-            let generation = *timeline_generation.peek() + 1;
-            timeline_generation.set(generation);
-            
-            // Set loading flag (previous fetch will be cancelled by generation mismatch)
-            is_loading.set(true);
-            
-            let mut is_loading_clone = is_loading.clone();
             spawn(async move {
                 if flake_ids.is_empty() {
-                    if *timeline_generation.read() == generation {
-                        flake_timelines.set(Vec::new());
-                    }
-                    is_loading_clone.set(false);
+                    flake_timelines.set(Vec::new());
                     return;
                 }
 
-                let prioritized_ids = if let Some(selected_id) = selected_flake_id {
-                    if flake_ids.iter().any(|id| *id == selected_id) {
-                        let mut ordered = Vec::with_capacity(flake_ids.len());
-                        ordered.push(selected_id);
-                        ordered.extend(flake_ids.iter().copied().filter(|id| *id != selected_id));
-                        ordered
-                    } else {
-                        flake_ids.clone()
-                    }
-                } else {
-                    flake_ids.clone()
-                };
-
-                let initial_ids: Vec<i32> = prioritized_ids
+                let initial_ids: Vec<i32> = flake_ids
                     .iter()
                     .take(INITIAL_TIMELINE_FLAKES)
                     .copied()
@@ -429,44 +397,30 @@ pub fn FlakesListView() -> Element {
                                 timelines,
                                 &flake_ids,
                             );
-                            if *timeline_generation.read() != generation {
-                                is_loading_clone.set(false);
-                                return;
-                            }
                             flake_timelines.set(merged_timelines.clone());
                         }
                         Err(_error) => {
                             // Fallback to full fetch if subset request fails for any reason.
                             match fetch_flake_timelines().await {
                                 Ok(timelines) => {
-                                    if *timeline_generation.read() == generation {
-                                        flake_timelines.set(timelines);
-                                    }
+                                    flake_timelines.set(timelines);
                                 }
                                 Err(_) => {
-                                    if *timeline_generation.read() == generation {
-                                        flake_timelines.set(Vec::new());
-                                    }
+                                    flake_timelines.set(Vec::new());
                                 }
                             }
-                            is_loading_clone.set(false);
                             return;
                         }
                     }
                 }
 
-                let remaining_ids: Vec<i32> = prioritized_ids
+                let remaining_ids: Vec<i32> = flake_ids
                     .iter()
                     .skip(INITIAL_TIMELINE_FLAKES)
                     .copied()
                     .collect();
 
-                // Process remaining batches without triggering re-renders per batch
-                let mut batch_count = 0;
-                let total_batches = (remaining_ids.len() + TIMELINE_BATCH_SIZE - 1) / TIMELINE_BATCH_SIZE;
-                
                 for chunk in remaining_ids.chunks(TIMELINE_BATCH_SIZE) {
-                    batch_count += 1;
                     match fetch_flake_timelines_for_ids(chunk).await {
                         Ok(timelines) => {
                             merged_timelines = merge_flake_timeline_batches(
@@ -474,27 +428,13 @@ pub fn FlakesListView() -> Element {
                                 timelines,
                                 &flake_ids,
                             );
-                            if *timeline_generation.read() != generation {
-                                is_loading_clone.set(false);
-                                return;
-                            }
-                            // Only update signal after the final batch to reduce render churn
-                            if batch_count == total_batches {
-                                flake_timelines.set(merged_timelines.clone());
-                            }
+                            flake_timelines.set(merged_timelines.clone());
                         }
                         Err(_) => {
                             // Keep already-loaded timelines if a later batch fails.
-                            // Still update on final batch even if this one failed
-                            if batch_count == total_batches && *timeline_generation.read() == generation {
-                                flake_timelines.set(merged_timelines.clone());
-                            }
                         }
                     }
                 }
-                
-                // Clear loading flag when done
-                is_loading_clone.set(false);
             });
         });
     }
