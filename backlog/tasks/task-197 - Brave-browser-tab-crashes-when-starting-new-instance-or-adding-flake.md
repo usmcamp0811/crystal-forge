@@ -1,7 +1,7 @@
 ---
 id: TASK-197
 title: Brave browser tab crashes when starting new instance or adding flake
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-03-19 12:38'
 updated_date: '2026-03-28 13:58'
@@ -114,4 +114,6 @@ Impact areas: `packages/web-ui/src/views/flakes_list.rs`, related API client cal
 Risk level: High (production browser lock-up, user-blocking).
 
 Dependencies: None.
+
+LOCK: opencode-gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-197-fix-flakes-view-browser-lockup
 <!-- SECTION:NOTES:END -->
