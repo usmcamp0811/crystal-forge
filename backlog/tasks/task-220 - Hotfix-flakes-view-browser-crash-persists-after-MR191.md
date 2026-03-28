@@ -4,7 +4,7 @@ title: Hotfix flakes view browser crash persists after MR191
 status: Review
 assignee: []
 created_date: '2026-03-28 15:44'
-updated_date: '2026-03-28 17:39'
+updated_date: '2026-03-28 19:55'
 labels:
   - bug
   - ui
@@ -115,6 +115,20 @@ Fixed all 4 early return statements in the async spawn block: (1) Empty flake_id
 Each return now calls is_loading_clone.set(false) before exiting to allow future effect runs
 
 Commit f856456a pushed to branch. fmf-flake updated. Ready for redeployment: sudo nixos-rebuild switch --flake .#reckless
+
+Fix iteration 5 (commit 51117d4a): Use peek() instead of read() to prevent timeline_generation subscription loop - THE ROOT CAUSE
+
+Real root cause discovered: use_effect was calling timeline_generation.read() which subscribes to the signal, then timeline_generation.set() which re-triggers the effect, creating an infinite loop
+
+The is_loading guard was preventing the infinite loop but also blocking all legitimate re-runs
+
+Solution: Use timeline_generation.peek() on line 392 instead of .read(). peek() reads without subscribing, breaking the loop
+
+Effect now only re-runs when flakes or selected_history_flake change (intended behavior)
+
+Moved is_loading check to after dependency reads so effect can still detect changes
+
+Commit 51117d4a pushed. fmf-flake updated. Ready for deployment: sudo nixos-rebuild switch --flake .#reckless
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
