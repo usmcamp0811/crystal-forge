@@ -382,14 +382,12 @@ pub fn FlakesListView() -> Element {
             let flake_ids: Vec<i32> = flakes.read().iter().map(|flake| flake.id).collect();
             let selected_flake_id = *selected_history_flake.read();
             
-            // Prevent spawning multiple simultaneous fetches
-            if *is_loading.read() {
-                return;
-            }
-            
             // Use peek() to avoid subscribing to timeline_generation (which would cause infinite loop)
+            // Increment generation to cancel any in-flight requests when dependencies change
             let generation = *timeline_generation.peek() + 1;
             timeline_generation.set(generation);
+            
+            // Set loading flag (previous fetch will be cancelled by generation mismatch)
             is_loading.set(true);
             
             let mut is_loading_clone = is_loading.clone();
