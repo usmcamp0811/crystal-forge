@@ -1,6 +1,6 @@
 use crate::config::{CrystalForgeConfig, FlakeConfig};
 use crate::deployment::spawn_deployment_policy_manager;
-use crate::flake::commits::sync_all_watched_flakes_commits;
+use crate::flake::commits::sync_all_watched_flakes_commits_with_ids;
 use crate::log::log_builder_worker_status;
 use crate::models::commits::Commit;
 use crate::models::deployment_policies::DeploymentPolicy;
@@ -10,7 +10,7 @@ use crate::models::evaluate_with_policies::{
 use crate::models::flakes::Flake;
 use crate::queue::QueueNotifier;
 // NOTE: removed increment_commit_list_attempt_count – we now rely on the new evaluation_* fields
-use crate::queries::flakes::get_all_flakes_from_db;
+use crate::queries::flakes::get_all_flakes_from_db_with_ids;
 use anyhow::Result;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -323,11 +323,11 @@ async fn run_flake_polling_loop(
 ) {
     info!("🔄 Starting periodic flake polling loop...");
     loop {
-        // Get all flakes from database instead of just config ones
-        match get_all_flakes_from_db(&pool, &flake_config).await {
-            Ok(db_flakes) => {
+        // Get all flakes from database instead of just config ones (with their IDs for credential loading)
+        match get_all_flakes_from_db_with_ids(&pool, &flake_config).await {
+            Ok((db_flakes, flake_ids)) => {
                 if !db_flakes.is_empty() {
-                    match sync_all_watched_flakes_commits(&pool, &db_flakes).await {
+                    match sync_all_watched_flakes_commits_with_ids(&pool, &db_flakes, &flake_ids).await {
                         Ok(total_inserted) => {
                             if total_inserted > 0 {
                                 info!(

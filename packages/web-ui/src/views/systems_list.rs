@@ -29,7 +29,8 @@ use crate::state::app_state::AppState;
 use crate::state::auth;
 use crate::systems::adapter::{
     create_system_via_api, deactivate_system_via_api, fallback_flake_names, fallback_systems,
-    load_flake_names_with_fallback, load_systems_with_fallback, update_system_public_key_via_api,
+    load_flake_names_with_fallback, load_systems_with_fallback, load_system_detail_with_fallback,
+    update_system_public_key_via_api, update_system_via_api,
 };
 use crate::theme;
 
@@ -184,6 +185,7 @@ pub fn SystemsListView() -> Element {
     let mut draft = use_signal(NewSystemDraft::new);
     let mut pending_remove = use_signal(|| None::<SystemSummary>);
     let mut pending_update_key = use_signal(|| None::<SystemSummary>);
+    let mut editing_system = use_signal(|| None::<uuid::Uuid>);
     let mut show_key_modal = use_signal(|| false);
     let mut generated_keys = use_signal(|| None::<GeneratedKeyPair>);
     let mut update_key_error = use_signal(|| None::<String>);
@@ -383,7 +385,7 @@ pub fn SystemsListView() -> Element {
                 }
             }
 
-            // Add System Form
+            // System Form Modal
             if *show_add_form.read() {
                 AddSystemForm {
                     draft: draft,
@@ -408,6 +410,7 @@ pub fn SystemsListView() -> Element {
                         spawn(async move {
                             match create_system_via_api(
                                 next.hostname.trim().to_string(),
+                                normalize_optional(&next.system_configuration_name),
                                 next.public_key.clone(),
                                 normalize_optional(&next.environment),
                                 normalize_optional(&next.flake_name),
@@ -418,6 +421,7 @@ pub fn SystemsListView() -> Element {
                                     let new_item = SystemSummary {
                                         id: detail.id,
                                         hostname: detail.hostname,
+                                        system_configuration_name: detail.system_configuration_name,
                                         environment: detail.environment,
                                         flake_id: detail.flake.as_ref().map(|flake| flake.id),
                                         primary_ip: detail.network.primary_ip,
@@ -454,8 +458,77 @@ pub fn SystemsListView() -> Element {
                         generated_keys.set(Some(generate_key_pair()));
                         show_key_modal.set(true);
                     },
-                    environments: dropdown_environments,
+                    environments: dropdown_environments.clone(),
                     flake_names: registered_flakes.clone(),
+                    title: "Register System".to_string(),
+                    submit_label: "Save System".to_string(),
+                }
+            }
+
+            if let Some(system_id) = *editing_system.read() {
+                AddSystemForm {
+                    draft: draft,
+                    error: add_error,
+                    show_onboarding_callouts: false,
+                    key_modal_open: *show_key_modal.read(),
+                    on_cancel: move |_| {
+                        draft.set(NewSystemDraft::new());
+                        add_error.set(None);
+                        editing_system.set(None);
+                    },
+                    on_submit: move |_| {
+                        let next = draft.read().clone();
+                        if next.hostname.trim().is_empty() {
+                            add_error.set(Some("Hostname is required.".to_string()));
+                            return;
+                        }
+                        spawn(async move {
+                            match update_system_via_api(
+                                system_id,
+                                next.hostname.trim().to_string(),
+                                normalize_optional(&next.system_configuration_name),
+                                normalize_optional(&next.environment),
+                                normalize_optional(&next.flake_name),
+                                normalize_policy(&next.deployment_policy),
+                            ).await {
+                                Ok(detail) => {
+                                    let updated = SystemSummary {
+                                        id: detail.id,
+                                        hostname: detail.hostname,
+                                        system_configuration_name: detail.system_configuration_name,
+                                        environment: detail.environment,
+                                        flake_id: detail.flake.as_ref().map(|flake| flake.id),
+                                        primary_ip: detail.network.primary_ip,
+                                        health_status: detail.health_status,
+                                        deployment_status: detail.deployment_status,
+                                        pipeline_stage: detail.pipeline_stage,
+                                        cve_counts: detail.cve_counts,
+                                        nixos_version: detail.nixos_version,
+                                        last_seen: detail.last_seen,
+                                        deployment_policy: detail.deployment_policy,
+                                    };
+                                    let mut values = local_systems.read().clone();
+                                    if let Some(item) = values.iter_mut().find(|item| item.id == system_id) {
+                                        *item = updated;
+                                    }
+                                    values.sort_by(|a, b| a.hostname.to_lowercase().cmp(&b.hostname.to_lowercase()));
+                                    local_systems.set(values);
+                                    draft.set(NewSystemDraft::new());
+                                    add_error.set(None);
+                                    editing_system.set(None);
+                                }
+                                Err(error_message) => add_error.set(Some(error_message)),
+                            }
+                        });
+                    },
+                    on_generate_keys: move |_| {
+                        generated_keys.set(Some(generate_key_pair()));
+                        show_key_modal.set(true);
+                    },
+                    environments: dropdown_environments.clone(),
+                    flake_names: registered_flakes.clone(),
+                    title: "Edit System".to_string(),
+                    submit_label: "Save Changes".to_string(),
                 }
             }
 
@@ -517,6 +590,26 @@ pub fn SystemsListView() -> Element {
                             system: system.clone(),
                             on_remove: move |_| remove_system_by_id(local_systems, pending_remove, system.id),
                             on_update_key: move |_| update_key_for_system(local_systems, pending_update_key, system.id),
+                            on_edit: move |_| {
+                                let mut draft = draft.clone();
+                                let mut add_error = add_error.clone();
+                                let mut editing_system = editing_system.clone();
+                                spawn(async move {
+                                    let detail = load_system_detail_with_fallback(&system.id.to_string()).await;
+                                    if let Some(detail) = detail.system {
+                                        draft.set(NewSystemDraft {
+                                            hostname: detail.hostname,
+                                            public_key: String::new(),
+                                            environment: detail.environment.unwrap_or_default(),
+                                            flake_name: detail.flake.map(|flake| flake.name).unwrap_or_default(),
+                                            system_configuration_name: detail.system_configuration_name.unwrap_or_default(),
+                                            deployment_policy: detail.deployment_policy,
+                                        });
+                                        add_error.set(None);
+                                        editing_system.set(Some(system.id));
+                                    }
+                                });
+                            },
                         }
                     }
                 }
@@ -525,6 +618,26 @@ pub fn SystemsListView() -> Element {
                     systems: filtered_systems.clone(),
                     on_remove: move |id| remove_system_by_id(local_systems, pending_remove, id),
                     on_update_key: move |id| update_key_for_system(local_systems, pending_update_key, id),
+                    on_edit: move |id: uuid::Uuid| {
+                        let mut draft = draft.clone();
+                        let mut add_error = add_error.clone();
+                        let mut editing_system = editing_system.clone();
+                        spawn(async move {
+                            let detail = load_system_detail_with_fallback(&id.to_string()).await;
+                            if let Some(detail) = detail.system {
+                                draft.set(NewSystemDraft {
+                                    hostname: detail.hostname,
+                                    public_key: String::new(),
+                                    environment: detail.environment.unwrap_or_default(),
+                                    flake_name: detail.flake.map(|flake| flake.name).unwrap_or_default(),
+                                    system_configuration_name: detail.system_configuration_name.unwrap_or_default(),
+                                    deployment_policy: detail.deployment_policy,
+                                });
+                                add_error.set(None);
+                                editing_system.set(Some(id));
+                            }
+                        });
+                    },
                 }
             }
 

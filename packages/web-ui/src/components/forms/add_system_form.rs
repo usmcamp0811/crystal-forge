@@ -15,6 +15,8 @@ pub struct NewSystemDraft {
     pub environment: String,
     /// Name of the flake this system belongs to
     pub flake_name: String,
+    /// NixOS configuration name inside the flake (defaults to hostname)
+    pub system_configuration_name: String,
     /// Deployment policy ("manual", "auto_latest", "pinned")
     pub deployment_policy: String,
 }
@@ -27,6 +29,7 @@ impl NewSystemDraft {
             public_key: String::new(),
             environment: String::new(),
             flake_name: String::new(),
+            system_configuration_name: String::new(),
             deployment_policy: "manual".to_string(),
         }
     }
@@ -57,6 +60,8 @@ pub fn AddSystemForm(
     /// Whether the key generation modal is currently open (suppresses callouts while open)
     #[props(default = false)]
     key_modal_open: bool,
+    #[props(default = "Register System".to_string())] title: String,
+    #[props(default = "Save System".to_string())] submit_label: String,
 ) -> Element {
     let mut show_hostname_callout = use_signal(|| show_onboarding_callouts);
     let mut show_public_key_callout = use_signal(|| show_onboarding_callouts);
@@ -64,11 +69,15 @@ pub fn AddSystemForm(
     let mut show_flake_callout = use_signal(|| show_onboarding_callouts);
 
     rsx! {
-        crate::components::layout::Card {
-            title: Some("Register System".to_string()),
-            children: rsx! {
+        div {
+            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
+            onclick: move |_| on_cancel.call(()),
+            div {
+                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6 cf-modal-panel-34 w-full max-w-4xl",
+                onclick: |evt| evt.stop_propagation(),
                 div {
                     class: "space-y-4",
+                    h3 { class: "text-lg font-semibold text-white", "{title}" }
                     p {
                         class: "text-sm {theme::text::SECONDARY}",
                         "System IP is discovered from agent heartbeats and is not required at registration."
@@ -122,7 +131,7 @@ pub fn AddSystemForm(
                                     }
                                 }
                                  button {
-                                     class: "px-3 py-2 rounded-lg text-xs font-medium border border-gray-600 text-gray-200 hover:bg-gray-700 transition",
+                                     class: "shrink-0 px-3 py-2 rounded-lg text-xs font-medium text-white {theme::interactive::PRIMARY_BTN}",
                                      onclick: move |_| on_generate_keys.call(()),
                                      "Generate"
                                  }
@@ -216,6 +225,29 @@ pub fn AddSystemForm(
                                 }
                             }
                         }
+                        // Configuration name
+                        label {
+                            class: "space-y-2 block",
+                            span { class: "text-xs uppercase tracking-wide text-gray-500", "Flake Config Name (optional)" }
+                            input {
+                                class: "w-full rounded-lg px-3 py-2 text-sm font-mono {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
+                                value: "{draft.read().system_configuration_name}",
+                                // Placeholder mirrors the hostname so the user can see what value will be used
+                                placeholder: {
+                                    let h = draft.read().hostname.trim().to_string();
+                                    if h.is_empty() { "same as hostname".to_string() } else { h }
+                                },
+                                oninput: move |evt| {
+                                    let mut next = draft.read().clone();
+                                    next.system_configuration_name = evt.value();
+                                    draft.set(next);
+                                }
+                            }
+                            p {
+                                class: "text-xs {theme::text::SECONDARY}",
+                                "Use this when the nixosConfigurations name in the flake differs from the hostname above."
+                            }
+                        }
                         // Deployment Policy
                         label {
                             class: "space-y-2",
@@ -249,7 +281,7 @@ pub fn AddSystemForm(
                         button {
                             class: "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}",
                             onclick: move |_| on_submit.call(()),
-                            "Save System"
+                            "{submit_label}"
                         }
                     }
                 }
@@ -279,6 +311,13 @@ pub fn validate_new_system(
 
     if draft.environment.trim().is_empty() {
         return Err("Environment is required.".to_string());
+    }
+
+    if draft
+        .system_configuration_name
+        .contains(char::is_whitespace)
+    {
+        return Err("Flake config name must not contain whitespace.".to_string());
     }
 
     if draft.flake_name.trim().is_empty() {

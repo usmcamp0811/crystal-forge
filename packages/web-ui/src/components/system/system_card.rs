@@ -12,8 +12,9 @@ use crate::theme;
 #[component]
 pub fn SystemCard(
     system: SystemSummary,
-    on_remove: EventHandler,
-    on_update_key: EventHandler,
+    on_remove: EventHandler<()>,
+    on_update_key: EventHandler<()>,
+    on_edit: EventHandler<()>,
 ) -> Element {
     let navigator = use_navigator();
     let environment = system
@@ -94,6 +95,11 @@ pub fn SystemCard(
             // Actions footer
             div {
                 class: "px-6 py-3 bg-gray-800/50 flex items-center justify-end gap-2 border-t {theme::surface::CARD_BORDER}",
+                button {
+                    class: "text-xs text-emerald-400 hover:text-emerald-300 px-2 py-1 rounded hover:bg-emerald-500/10 transition-colors",
+                    onclick: move |_| on_edit.call(()),
+                    "Edit"
+                }
                 button {
                     class: "text-xs text-blue-400 hover:text-blue-300 px-2 py-1 rounded hover:bg-blue-500/10 transition-colors",
                     onclick: move |_| on_update_key.call(()),

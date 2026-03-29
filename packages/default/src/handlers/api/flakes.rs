@@ -11,26 +11,32 @@ use std::hash::{Hash, Hasher};
 use tracing::{error, info, warn};
 
 use crate::api::models::{
-    ApiError, CommitDiffResponse, CreateFlakeRequest, FlakeRegistryItem, FlakeTimeline,
+    ApiError, CommitDiffResponse, CreateFlakeCredentialRequest, CreateFlakeRequest,
+    FlakeCredentialSummary, FlakeRegistryItem, FlakeTimeline, UpdateFlakeCredentialRequest,
     UpdateFlakeRequest,
 };
-use crate::auth::extractors::{AuthenticatedUser, RequireAdmin, RequireOperator};
+use crate::auth::extractors::{AuthenticatedUser, RequireAdmin, RequireAuth, RequireOperator};
 use crate::config::CrystalForgeConfig;
 use crate::flake::commits::{
-    GitCommitMetadata, branch_exists, get_commit_changed_files, get_commit_diff,
-    get_commit_metadata, get_commit_nixos_configurations, infer_default_branch,
+    GitCommitMetadata, branch_exists, branch_exists_with_creds, get_commit_changed_files,
+    get_commit_diff, get_commit_metadata, get_commit_nixos_configurations, infer_default_branch,
+    infer_default_branch_with_creds,
     is_history_rewrite_error,
-    sync_commits_for_repo,
 };
+use crate::flake::credentials::FlakeCredentialEnv;
 use crate::handlers::agent_request::CFState;
 use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_above};
 use crate::queries::admin::insert_admin_audit_event;
 use crate::queries::commits::insert_commit_with_metadata;
+use crate::flake::commits::sync_commits_for_flake;
 use crate::queries::flakes::{
     cascade_delete_flake, check_flake_dependencies, count_systems_for_flake, delete_flake_by_id,
     fetch_dashboard_flake_timelines, fetch_flake_timelines, get_flake_by_id, get_flake_by_name,
     insert_flake, list_flake_registry, purge_flake_commit_history, soft_delete_flake,
     update_flake,
+};
+use crate::queries::flake_credentials::{
+    delete_flake_credential, get_flake_credential, update_flake_credential, upsert_flake_credential,
 };
 use crate::queries::users::get_by_email;
 
@@ -532,7 +538,12 @@ pub async fn create_flake(
         }
     }
 
-    match insert_flake(&pool, name, repo_url, &branch).await {
+    let build_scope = match normalize_build_scope(payload.build_scope.as_deref()) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+
+    match insert_flake(&pool, name, repo_url, &branch, build_scope).await {
         Ok(flake) => (
             StatusCode::CREATED,
             Json(FlakeRegistryItem {
@@ -540,6 +551,7 @@ pub async fn create_flake(
                 name: flake.name,
                 repo_url: flake.repo_url,
                 branch: flake.branch,
+                build_scope: flake.build_scope,
                 system_count: 0,
             }),
         )
@@ -598,7 +610,12 @@ pub async fn update_flake_handler(
         }
     };
 
-    match update_flake(&pool, flake_id, name, repo_url, &branch).await {
+    let build_scope = match normalize_build_scope(payload.build_scope.as_deref()) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+
+    match update_flake(&pool, flake_id, name, repo_url, &branch, build_scope).await {
         Ok(flake) => (
             StatusCode::OK,
             Json(FlakeRegistryItem {
@@ -606,6 +623,7 @@ pub async fn update_flake_handler(
                 name: flake.name,
                 repo_url: flake.repo_url,
                 branch: flake.branch,
+                build_scope: flake.build_scope,
                 system_count: count_systems_for_flake(&pool, flake_id).await.unwrap_or(0),
             }),
         )
@@ -652,6 +670,202 @@ pub async fn update_flake_handler(
             )
                 .into_response()
         }
+    }
+}
+
+pub async fn get_flake_credentials(
+    RequireAuth(_user): RequireAuth,
+    State(pool): State<PgPool>,
+    Path(flake_id): Path<i32>,
+) -> impl IntoResponse {
+    if get_flake_by_id(&pool, flake_id).await.is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(ApiError {
+                error: "not_found".to_string(),
+                message: "Flake not found".to_string(),
+                details: None,
+            }),
+        )
+            .into_response();
+    }
+
+    match get_flake_credential(&pool, flake_id).await {
+        Ok(Some(credential)) => (StatusCode::OK, Json(summarize_flake_credential(&credential))).into_response(),
+        Ok(None) => (StatusCode::OK, Json(FlakeCredentialSummary {
+            flake_id,
+            auth_type: "none".to_string(),
+            username: None,
+            ssh_username: None,
+            has_secret: false,
+        }))
+            .into_response(),
+        Err(err) => {
+            error!("Failed to load flake credentials for {flake_id}: {err:#}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    error: "internal_error".to_string(),
+                    message: "Failed to load flake credentials".to_string(),
+                    details: None,
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+pub async fn put_flake_credentials(
+    RequireOperator(_user): RequireOperator,
+    State(pool): State<PgPool>,
+    Path(flake_id): Path<i32>,
+    Json(payload): Json<CreateFlakeCredentialRequest>,
+) -> impl IntoResponse {
+    if get_flake_by_id(&pool, flake_id).await.is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(ApiError {
+                error: "not_found".to_string(),
+                message: "Flake not found".to_string(),
+                details: None,
+            }),
+        )
+            .into_response();
+    }
+
+    let create = crate::models::flake_credentials::CreateFlakeCredential {
+        auth_type: payload.auth_type,
+        username: payload.username,
+        secret: payload.secret,
+        ssh_username: payload.ssh_username,
+    };
+
+    match upsert_flake_credential(&pool, flake_id, &create).await {
+        Ok(credential) => (StatusCode::OK, Json(summarize_flake_credential(&credential))).into_response(),
+        Err(err) => {
+            let message = err.to_string();
+            let status = if message.contains("require") || message.contains("invalid") {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+
+            (
+                status,
+                Json(ApiError {
+                    error: if status == StatusCode::BAD_REQUEST {
+                        "validation_error".to_string()
+                    } else {
+                        "internal_error".to_string()
+                    },
+                    message: if status == StatusCode::BAD_REQUEST {
+                        message
+                    } else {
+                        "Failed to save flake credentials".to_string()
+                    },
+                    details: None,
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+pub async fn patch_flake_credentials(
+    RequireOperator(_user): RequireOperator,
+    State(pool): State<PgPool>,
+    Path(flake_id): Path<i32>,
+    Json(payload): Json<UpdateFlakeCredentialRequest>,
+) -> impl IntoResponse {
+    let update = crate::models::flake_credentials::UpdateFlakeCredential {
+        auth_type: payload.auth_type,
+        username: payload.username,
+        secret: payload.secret,
+        ssh_username: payload.ssh_username,
+    };
+
+    match update_flake_credential(&pool, flake_id, &update).await {
+        Ok(Some(credential)) => (StatusCode::OK, Json(summarize_flake_credential(&credential))).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(ApiError {
+                error: "not_found".to_string(),
+                message: "Flake credentials not found".to_string(),
+                details: None,
+            }),
+        )
+            .into_response(),
+        Err(err) => {
+            let message = err.to_string();
+            let status = if message.contains("require") || message.contains("invalid") {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (
+                status,
+                Json(ApiError {
+                    error: if status == StatusCode::BAD_REQUEST {
+                        "validation_error".to_string()
+                    } else {
+                        "internal_error".to_string()
+                    },
+                    message: if status == StatusCode::BAD_REQUEST {
+                        message
+                    } else {
+                        "Failed to update flake credentials".to_string()
+                    },
+                    details: None,
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+pub async fn delete_flake_credentials_handler(
+    RequireOperator(_user): RequireOperator,
+    State(pool): State<PgPool>,
+    Path(flake_id): Path<i32>,
+) -> impl IntoResponse {
+    match delete_flake_credential(&pool, flake_id).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(ApiError {
+                error: "not_found".to_string(),
+                message: "Flake credentials not found".to_string(),
+                details: None,
+            }),
+        )
+            .into_response(),
+        Err(err) => {
+            error!("Failed to delete flake credentials for {flake_id}: {err:#}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    error: "internal_error".to_string(),
+                    message: "Failed to delete flake credentials".to_string(),
+                    details: None,
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+fn summarize_flake_credential(
+    credential: &crate::models::flake_credentials::FlakeCredential,
+) -> FlakeCredentialSummary {
+    FlakeCredentialSummary {
+        flake_id: credential.flake_id,
+        auth_type: credential.auth_type.clone(),
+        username: credential.username.clone(),
+        ssh_username: credential.ssh_username.clone(),
+        has_secret: credential
+            .secret_encrypted
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty()),
     }
 }
 
@@ -951,7 +1165,7 @@ pub async fn refresh_flake(
     State(pool): State<PgPool>,
     Path(flake_id): Path<i32>,
 ) -> impl IntoResponse {
-    use crate::flake::eval::refresh_flake_cache;
+    use crate::flake::eval::refresh_flake_cache_with_creds;
 
     // Get flake details
     let flake = match get_flake_by_id(&pool, flake_id).await {
@@ -984,8 +1198,15 @@ pub async fn refresh_flake(
         }
     };
 
+    let creds = FlakeCredentialEnv::load(&pool, flake_id)
+        .await
+        .unwrap_or_else(|e| {
+            warn!("Failed to load credentials for flake {} during refresh: {e:#}", flake_id);
+            None
+        });
+
     // Refresh the flake cache
-    match refresh_flake_cache(&flake.repo_url, &flake.branch).await {
+    match refresh_flake_cache_with_creds(&flake.repo_url, &flake.branch, creds.as_ref()).await {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -1082,7 +1303,7 @@ pub async fn accept_flake_history_rewrite(
         }
     };
 
-    let inserted = match sync_commits_for_repo(&pool, &flake.repo_url, &flake.branch).await {
+    let inserted = match sync_commits_for_flake(&pool, &flake.repo_url, &flake.branch, flake.id).await {
         Ok(inserted) => inserted,
         Err(e) => {
             error!(
@@ -1195,7 +1416,7 @@ pub async fn sync_all_flakes_handler(
     let mut inserted = 0usize;
     let mut failed = Vec::new();
     for flake in flakes {
-        match sync_commits_for_repo(&pool, &flake.repo_url, &flake.branch).await {
+        match sync_commits_for_flake(&pool, &flake.repo_url, &flake.branch, flake.id).await {
             Ok(new_commits) => {
                 synced += 1;
                 inserted += new_commits;
@@ -1305,7 +1526,52 @@ pub async fn sync_flake_handler(
         };
     }
 
-    match sync_commits_for_repo(&pool, &flake.repo_url, &flake.branch).await {
+    let creds = FlakeCredentialEnv::load(&pool, flake.id)
+        .await
+        .unwrap_or_else(|e| {
+            warn!("Failed to load credentials for flake {} during sync: {e:#}", flake.id);
+            None
+        });
+
+    let sync_branch = match branch_exists_with_creds(&flake.repo_url, &flake.branch, creds.as_ref()).await
+    {
+        Ok(true) => flake.branch.clone(),
+        Ok(false) => match infer_default_branch_with_creds(&flake.repo_url, creds.as_ref()).await {
+            Ok(inferred) => {
+                warn!(
+                    "Configured branch '{}' not found for flake {} ({}); syncing against inferred branch '{}'.",
+                    flake.branch,
+                    flake.name,
+                    flake.repo_url,
+                    inferred
+                );
+                inferred
+            }
+            Err(err) => {
+                warn!(
+                    "Failed to infer fallback branch for flake {} ({}): {err:#}; using configured branch '{}'.",
+                    flake.name,
+                    flake.repo_url,
+                    flake.branch
+                );
+                flake.branch.clone()
+            }
+        },
+        Err(err) => {
+            warn!(
+                "Failed probing configured branch '{}' for flake {} ({}): {err:#}; attempting inferred default branch.",
+                flake.branch,
+                flake.name,
+                flake.repo_url
+            );
+            match infer_default_branch_with_creds(&flake.repo_url, creds.as_ref()).await {
+                Ok(inferred) => inferred,
+                Err(_) => flake.branch.clone(),
+            }
+        }
+    };
+
+    match sync_commits_for_flake(&pool, &flake.repo_url, &sync_branch, flake.id).await {
         Ok(new_commits) => {
             if new_commits > 0 {
                 state.queue_notifier.notify_eval_queue();
@@ -1316,9 +1582,9 @@ pub async fn sync_flake_handler(
                     "status": "ok",
                     "message": format!(
                         "Synced {} from source on {} ({} new commits).",
-                        flake.name, flake.branch, new_commits
+                        flake.name, sync_branch, new_commits
                     ),
-                    "branch": flake.branch,
+                    "branch": sync_branch,
                 })),
             )
                 .into_response()
@@ -1450,6 +1716,12 @@ fn validate_create_payload(payload: &CreateFlakeRequest) -> Result<(), String> {
     if !looks_like_repo_url(repo_url) {
         return Err("Repository URL must look like a git remote".to_string());
     }
+    if let Some(build_scope) = payload.build_scope.as_deref() {
+        let build_scope = build_scope.trim();
+        if !build_scope.is_empty() && !matches!(build_scope, "all_configs" | "cf_systems_only") {
+            return Err("Build scope must be all_configs or cf_systems_only".to_string());
+        }
+    }
 
     Ok(())
 }
@@ -1459,8 +1731,26 @@ fn validate_update_payload(payload: &UpdateFlakeRequest) -> Result<(), String> {
         name: payload.name.clone(),
         repo_url: payload.repo_url.clone(),
         branch: payload.branch.clone(),
+        build_scope: payload.build_scope.clone(),
     };
     validate_create_payload(&create_payload)
+}
+
+fn normalize_build_scope(value: Option<&str>) -> Result<&str, axum::response::Response> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        Some("all_configs") => Ok("all_configs"),
+        Some("cf_systems_only") => Ok("cf_systems_only"),
+        Some(_) => Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "validation_error".to_string(),
+                message: "Build scope must be all_configs or cf_systems_only".to_string(),
+                details: None,
+            }),
+        )
+            .into_response()),
+        None => Ok("cf_systems_only"),
+    }
 }
 
 async fn resolve_requested_branch(
@@ -1471,19 +1761,21 @@ async fn resolve_requested_branch(
         let branch = branch.trim();
         if !branch.is_empty() {
             validate_branch(branch)?;
-            let exists = branch_exists(repo_url, branch)
-                .await
-                .map_err(|e| format!("Repository URL is not reachable as a git remote: {e}"))?;
-            if !exists {
-                return Err(format!("Branch '{branch}' was not found on the repository"));
-            }
             return Ok(branch.to_string());
         }
     }
 
-    infer_default_branch(repo_url)
-        .await
-        .map_err(|e| format!("Failed to infer default branch for repository: {e}"))
+    match infer_default_branch(repo_url).await {
+        Ok(branch) => Ok(branch),
+        Err(error) => {
+            warn!(
+                repo_url,
+                error = %error,
+                "default branch inference failed; falling back to 'main' so credentials can be saved"
+            );
+            Ok("main".to_string())
+        }
+    }
 }
 
 fn validate_branch(branch: &str) -> Result<(), String> {
@@ -1518,6 +1810,7 @@ mod tests {
             name: "   ".to_string(),
             repo_url: "https://github.com/org/repo".to_string(),
             branch: None,
+            build_scope: None,
         };
         let err = validate_create_payload(&payload).unwrap_err();
         assert!(err.contains("name"));
@@ -1529,6 +1822,7 @@ mod tests {
             name: "prod-core".to_string(),
             repo_url: "   ".to_string(),
             branch: None,
+            build_scope: None,
         };
         let err = validate_create_payload(&payload).unwrap_err();
         assert!(err.contains("URL"));
@@ -1540,6 +1834,7 @@ mod tests {
             name: "prod-core".to_string(),
             repo_url: "repo-no-scheme".to_string(),
             branch: None,
+            build_scope: None,
         };
         let err = validate_create_payload(&payload).unwrap_err();
         assert!(err.contains("git remote"));
@@ -1551,6 +1846,7 @@ mod tests {
             name: "prod-core".to_string(),
             repo_url: "git@github.com:org/repo.git".to_string(),
             branch: None,
+            build_scope: None,
         };
         assert!(validate_create_payload(&payload).is_ok());
     }
@@ -1594,7 +1890,13 @@ mod tests {
         use sqlx::PgPool;
 
         async fn setup_test_flake(pool: &PgPool) -> Flake {
-            insert_flake(pool, "test-flake", "https://github.com/test/repo", "main")
+            insert_flake(
+                pool,
+                "test-flake",
+                "https://github.com/test/repo",
+                "main",
+                "cf_systems_only",
+            )
                 .await
                 .expect("Failed to create test flake")
         }
@@ -1681,7 +1983,13 @@ mod tests {
             soft_delete_flake(&pool, flake.id).await.unwrap();
 
             // Re-insert same repo_url
-            let resurrected = insert_flake(&pool, "test-flake-restored", &repo_url, "main")
+            let resurrected = insert_flake(
+                &pool,
+                "test-flake-restored",
+                &repo_url,
+                "main",
+                "cf_systems_only",
+            )
                 .await
                 .expect("Re-insert should succeed");
 
@@ -1837,5 +2145,427 @@ mod tests {
                 "Flake should still exist after rollback"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod task_221_integration_tests {
+    //! DB-backed integration tests for TASK-221.
+    //!
+    //! These tests require a live PostgreSQL connection and are run with:
+    //!   cargo test -p crystal-forge --lib task_221 -- --ignored
+
+    use crate::models::systems::System;
+    use crate::queries::flake_credentials::{
+        delete_flake_credential, get_flake_credential, upsert_flake_credential,
+    };
+    use crate::models::flake_credentials::CreateFlakeCredential;
+    use crate::queries::flakes::insert_flake;
+    use crate::queries::systems::insert_system;
+    use crate::models::evaluate_with_policies::{
+        load_allowed_systems_for_test, should_skip_system_for_test,
+    };
+    use sqlx::PgPool;
+
+    // ── helpers ──────────────────────────────────────────────────────────────
+
+    async fn make_flake(
+        pool: &PgPool,
+        name: &str,
+        build_scope: &str,
+    ) -> crate::models::flakes::Flake {
+        insert_flake(
+            pool,
+            name,
+            &format!("https://github.com/test/{name}"),
+            "main",
+            build_scope,
+        )
+        .await
+        .expect("insert_flake failed")
+    }
+
+    async fn make_system(
+        pool: &PgPool,
+        hostname: &str,
+        flake_id: Option<i32>,
+        config_name: Option<&str>,
+    ) -> System {
+        // Use a deterministic ed25519 key for test systems (same approach as security_regression.rs)
+        use ed25519_dalek::SigningKey;
+        let key = SigningKey::from_bytes(&[42u8; 32]);
+        let verifying = key.verifying_key();
+        let system = System {
+            id: uuid::Uuid::new_v4(),
+            hostname: hostname.to_string(),
+            environment_id: None,
+            is_active: true,
+            public_key: crate::models::public_key::PublicKey::from_verifying_key(verifying),
+            flake_id,
+            derivation: String::new(),
+            system_configuration_name: config_name.map(str::to_string),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            desired_target: None,
+            deployment_policy: "manual".to_string(),
+        };
+        insert_system(pool, &system).await.expect("insert_system failed")
+    }
+
+    // ── flake credentials ────────────────────────────────────────────────────
+
+    async fn get_test_pool() -> PgPool {
+        let db_url = std::env::var("DATABASE_URL")
+            .expect("DATABASE_URL must be set for TASK-221 integration tests");
+        sqlx::PgPool::connect(&db_url)
+            .await
+            .expect("Failed to connect to test DB")
+    }
+
+    /// Set a deterministic test encryption key so credential tests don't require
+    /// a real secret in the environment.  Must be called at the start of any test
+    /// that exercises credential encryption/decryption.
+    fn set_test_encryption_key() {
+        // 64 hex chars = 32-byte AES-256 key — valid for the cache_secrets implementation.
+        // SAFETY: single-threaded test context; no concurrent env reads
+        unsafe {
+            std::env::set_var(
+                "CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY",
+                "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_pat_credential_round_trips_encrypted() {
+        set_test_encryption_key();
+        let pool = get_test_pool().await;
+        let flake = make_flake(&pool, "test-cred-pat", "cf_systems_only").await;
+
+        let create = CreateFlakeCredential {
+            auth_type: "pat".to_string(),
+            username: Some("oauth2".to_string()),
+            secret: Some("glpat-supersecret1234".to_string()),
+            ssh_username: None,
+        };
+
+        let stored = upsert_flake_credential(&pool, flake.id, &create)
+            .await
+            .expect("upsert_flake_credential failed");
+
+        // secret is returned decrypted via the query helper
+        assert_eq!(stored.auth_type, "pat");
+        assert_eq!(stored.username.as_deref(), Some("oauth2"));
+        assert_eq!(stored.secret_encrypted.as_deref(), Some("glpat-supersecret1234"));
+
+        // verify it is actually stored encrypted in the DB (not plaintext)
+        let raw = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT secret_encrypted FROM flake_credentials WHERE flake_id = $1",
+        )
+        .bind(flake.id)
+        .fetch_one(&pool)
+        .await
+        .expect("DB fetch failed");
+
+        let raw_secret = raw.expect("secret should be stored");
+        assert_ne!(
+            raw_secret, "glpat-supersecret1234",
+            "Secret must be encrypted at rest, not stored as plaintext"
+        );
+
+        // re-read via query helper and confirm decryption
+        let fetched = get_flake_credential(&pool, flake.id)
+            .await
+            .expect("get_flake_credential failed")
+            .expect("credential should exist");
+        assert_eq!(fetched.secret_encrypted.as_deref(), Some("glpat-supersecret1234"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_ssh_credential_round_trips_encrypted() {
+        set_test_encryption_key();
+        let pool = get_test_pool().await;
+        let flake = make_flake(&pool, "test-cred-ssh", "cf_systems_only").await;
+
+        let fake_key = "-----BEGIN OPENSSH PRIVATE KEY-----\nfake-key-data\n-----END OPENSSH PRIVATE KEY-----";
+        let create = CreateFlakeCredential {
+            auth_type: "ssh_key".to_string(),
+            username: None,
+            secret: Some(fake_key.to_string()),
+            ssh_username: Some("git".to_string()),
+        };
+
+        let stored = upsert_flake_credential(&pool, flake.id, &create)
+            .await
+            .expect("upsert failed");
+
+        assert_eq!(stored.auth_type, "ssh_key");
+        assert_eq!(stored.ssh_username.as_deref(), Some("git"));
+        assert_eq!(stored.secret_encrypted.as_deref(), Some(fake_key));
+
+        // verify encrypted at rest
+        let raw: Option<String> = sqlx::query_scalar(
+            "SELECT secret_encrypted FROM flake_credentials WHERE flake_id = $1",
+        )
+        .bind(flake.id)
+        .fetch_one(&pool)
+        .await
+        .expect("DB fetch failed");
+        assert_ne!(raw.unwrap(), fake_key, "SSH key must be encrypted at rest");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_delete_credential_removes_record() {
+        set_test_encryption_key();
+        let pool = get_test_pool().await;
+        let flake = make_flake(&pool, "test-cred-delete", "cf_systems_only").await;
+
+        let create = CreateFlakeCredential {
+            auth_type: "pat".to_string(),
+            username: None,
+            secret: Some("tok".to_string()),
+            ssh_username: None,
+        };
+        upsert_flake_credential(&pool, flake.id, &create).await.unwrap();
+
+        let deleted = delete_flake_credential(&pool, flake.id).await.unwrap();
+        assert!(deleted, "delete should return true for existing record");
+
+        let fetched = get_flake_credential(&pool, flake.id).await.unwrap();
+        assert!(fetched.is_none(), "credential should be gone after delete");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_pat_validation_rejects_missing_secret() {
+        set_test_encryption_key();
+        let pool = get_test_pool().await;
+        let flake = make_flake(&pool, "test-cred-pat-invalid", "cf_systems_only").await;
+
+        let create = CreateFlakeCredential {
+            auth_type: "pat".to_string(),
+            username: None,
+            secret: None, // missing — should fail validation
+            ssh_username: None,
+        };
+        let result = upsert_flake_credential(&pool, flake.id, &create).await;
+        assert!(result.is_err(), "PAT credential without secret must fail validation");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("require"), "Error should mention requirement: {msg}");
+    }
+
+    // ── build_scope filtering ────────────────────────────────────────────────
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_build_scope_cf_systems_only_filters_to_mapped_configs() {
+        let pool = get_test_pool().await;
+        let flake = make_flake(&pool, "test-scope-cf", "cf_systems_only").await;
+        // Two systems mapped to this flake
+        make_system(&pool, "sys-alpha", Some(flake.id), Some("nixos-config-alpha")).await;
+        make_system(&pool, "sys-beta", Some(flake.id), None).await; // config_name = hostname
+
+        let allowed = load_allowed_systems_for_test(&pool, &flake, "all")
+            .await
+            .expect("load_allowed_systems failed");
+
+        let allowed = allowed.expect("should produce a restriction list for cf_systems_only");
+        assert!(allowed.contains(&"nixos-config-alpha".to_string()), "custom config name expected");
+        assert!(allowed.contains(&"sys-beta".to_string()), "hostname fallback expected");
+        assert!(!allowed.contains(&"not-in-cf".to_string()), "unlisted system must be absent");
+
+        // should_skip for an unknown config name
+        assert!(
+            should_skip_system_for_test(&Some(allowed.clone()), "not-in-cf"),
+            "unknown config should be skipped"
+        );
+        // should NOT skip for a known config name
+        assert!(
+            !should_skip_system_for_test(&Some(allowed), "nixos-config-alpha"),
+            "known config must not be skipped"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_build_scope_all_configs_produces_no_filter() {
+        let pool = get_test_pool().await;
+        let flake = make_flake(&pool, "test-scope-all", "all_configs").await;
+        make_system(&pool, "sys-gamma", Some(flake.id), None).await;
+
+        let allowed = load_allowed_systems_for_test(&pool, &flake, "all")
+            .await
+            .expect("load_allowed_systems failed");
+
+        assert!(allowed.is_none(), "all_configs scope must not restrict evaluation");
+    }
+
+    // ── system_configuration_name and update endpoint ────────────────────────
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_system_configuration_name_falls_back_to_hostname() {
+        let pool = get_test_pool().await;
+        let flake = make_flake(&pool, "test-sysconfig-fallback", "cf_systems_only").await;
+        let system = make_system(&pool, "host-fallback", Some(flake.id), None).await;
+        assert_eq!(
+            system.configuration_name(), "host-fallback",
+            "configuration_name() must fall back to hostname when column is NULL"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_system_configuration_name_used_when_set() {
+        let pool = get_test_pool().await;
+        let flake = make_flake(&pool, "test-sysconfig-explicit", "cf_systems_only").await;
+        let system = make_system(&pool, "host-explicit", Some(flake.id), Some("custom-nixos-config")).await;
+        assert_eq!(
+            system.configuration_name(), "custom-nixos-config",
+            "configuration_name() must return the explicit config name"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_update_system_metadata_persists_config_name() {
+        let pool = get_test_pool().await;
+        use crate::queries::systems::{get_system_detail_by_id, update_system_metadata};
+        let flake = make_flake(&pool, "test-sysmeta", "cf_systems_only").await;
+        let system = make_system(&pool, "host-meta", Some(flake.id), None).await;
+
+        update_system_metadata(
+            &pool,
+            system.id,
+            "host-meta",
+            None,
+            Some(flake.id),
+            Some("new-config-name"),
+            "manual",
+        )
+        .await
+        .expect("update_system_metadata failed");
+
+        let detail = get_system_detail_by_id(&pool, system.id)
+            .await
+            .expect("query failed")
+            .expect("system should exist");
+
+        assert_eq!(
+            detail.system_configuration_name.as_deref(),
+            Some("new-config-name"),
+            "config name should be persisted after update"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_update_system_metadata_with_unknown_flake_is_rejected_at_handler_level() {
+        let pool = get_test_pool().await;
+        // NOTE: update_system_metadata itself accepts arbitrary flake_id (the FK is enforced by
+        // the DB). The 400 validation for "unknown flake name" happens in update_system_handler
+        // before metadata is written. This test verifies the query layer correctly persists a
+        // known flake_id and that passing an invalid FK gets a DB error (not a silent NULL).
+        use crate::queries::systems::update_system_metadata;
+        let flake = make_flake(&pool, "test-sysmeta-fk", "cf_systems_only").await;
+        let system = make_system(&pool, "host-fk", Some(flake.id), None).await;
+
+        let result = update_system_metadata(
+            &pool,
+            system.id,
+            "host-fk",
+            None,
+            Some(999999), // non-existent flake_id → FK violation
+            None,
+            "manual",
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "Passing a non-existent flake_id to update_system_metadata must produce a DB error"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_migration_adds_system_configuration_name_column() {
+        let pool = get_test_pool().await;
+        // Verify the column exists with the correct type
+        let col_type: Option<String> = sqlx::query_scalar(
+            "SELECT data_type FROM information_schema.columns
+             WHERE table_name = 'systems' AND column_name = 'system_configuration_name'"
+        )
+        .fetch_optional(&pool)
+        .await
+        .expect("information_schema query failed");
+
+        assert_eq!(
+            col_type.as_deref(),
+            Some("text"),
+            "system_configuration_name column must exist with type 'text'"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_migration_adds_build_scope_column_with_constraint() {
+        let pool = get_test_pool().await;
+        // Verify build_scope column and default
+        let default_val: Option<String> = sqlx::query_scalar(
+            "SELECT column_default FROM information_schema.columns
+             WHERE table_name = 'flakes' AND column_name = 'build_scope'"
+        )
+        .fetch_optional(&pool)
+        .await
+        .expect("information_schema query failed");
+
+        assert!(
+            default_val.as_deref().map(|d| d.contains("cf_systems_only")).unwrap_or(false),
+            "build_scope must default to cf_systems_only, got: {:?}", default_val
+        );
+
+        // Verify CHECK constraint rejects bad values
+        let bad_insert = sqlx::query(
+            "INSERT INTO flakes (name, repo_url, branch, build_scope) VALUES ($1,$2,$3,$4)"
+        )
+        .bind("constraint-test")
+        .bind("https://github.com/constraint/test")
+        .bind("main")
+        .bind("invalid_scope_value")
+        .execute(&pool)
+        .await;
+
+        assert!(bad_insert.is_err(), "CHECK constraint must reject invalid build_scope value");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_migration_creates_flake_credentials_table() {
+        let pool = get_test_pool().await;
+        let col_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM information_schema.columns WHERE table_name = 'flake_credentials'"
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("information_schema query failed");
+
+        assert!(col_count >= 7, "flake_credentials table must have at least 7 columns, found {col_count}");
+
+        // Verify auth_type CHECK constraint rejects bad values
+        // (We need a flake to satisfy FK — use a subquery)
+        let flake = make_flake(&pool, "test-cred-constraint", "cf_systems_only").await;
+        let bad_insert = sqlx::query(
+            "INSERT INTO flake_credentials (flake_id, auth_type) VALUES ($1, $2)"
+        )
+        .bind(flake.id)
+        .bind("invalid_auth_type")
+        .execute(&pool)
+        .await;
+
+        assert!(bad_insert.is_err(), "CHECK constraint must reject invalid auth_type value");
     }
 }

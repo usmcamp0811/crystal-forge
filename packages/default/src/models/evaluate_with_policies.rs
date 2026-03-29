@@ -20,6 +20,8 @@ use crate::models::flakes::Flake;
 use crate::queries::derivations::{
     insert_derivation_with_target, mark_derivation_dry_run_complete,
 };
+use crate::flake::credentials::FlakeCredentialEnv;
+use crate::queries::systems::list_configuration_names_for_flake;
 
 /// NixEvalJobResult with meta field
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,6 +61,13 @@ pub async fn evaluate_with_nix_eval_jobs(
     cf_state: Option<&crate::handlers::agent_request::CFState>,
 ) -> Result<(Vec<NixEvalJobResult>, Vec<PolicyCheckResult>)> {
     let flake_ref = build_flake_reference(repo_url, commit_hash);
+    let allowed_systems = load_allowed_systems(pool, flake, target_system).await?;
+
+    // Load per-flake credentials (may be None for public flakes).
+    let creds = FlakeCredentialEnv::load(pool, flake.id).await.unwrap_or_else(|e| {
+        warn!("Failed to load credentials for flake {}: {e:#}", flake.id);
+        None
+    });
 
     // Build ONE Nix expression that includes policy checks
     let nix_expr = build_nix_eval_expression(&flake_ref, policies);
@@ -131,6 +140,12 @@ pub async fn evaluate_with_nix_eval_jobs(
         cmd.arg("--check-cache-status");
     }
     build_config.apply_to_command(&mut cmd);
+
+    // Inject per-flake credentials so Nix can access private repos.
+    if let Some(c) = &creds {
+        c.apply_to_nix_command(&mut cmd);
+    }
+
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let mut child = cmd.spawn()?;
@@ -158,6 +173,15 @@ pub async fn evaluate_with_nix_eval_jobs(
                         match serde_json::from_str::<NixEvalJobResult>(&line) {
                             Ok(result) => {
                                 let system_name = result.attr.clone();
+                                if should_skip_system(&allowed_systems, &system_name) {
+                                    debug!(
+                                        "Skipping evaluated system {} due to flake build_scope={} and target_system={}",
+                                        system_name,
+                                        flake.build_scope,
+                                        target_system
+                                    );
+                                    continue;
+                                }
                                 let has_error = result.error.is_some();
                                 let drv_path = result.drv_path.clone();
 
@@ -851,6 +875,48 @@ fn build_flake_reference(repo_url: &str, commit_hash: &str) -> String {
 fn build_agent_target(repo_url: &str, commit_hash: &str, system_name: &str) -> String {
     let flake_ref = build_flake_reference(repo_url, commit_hash);
     format!("{}#nixosConfigurations.{}", flake_ref, system_name)
+}
+
+#[cfg(test)]
+pub async fn load_allowed_systems_for_test(
+    pool: &PgPool,
+    flake: &Flake,
+    target_system: &str,
+) -> Result<Option<Vec<String>>> {
+    load_allowed_systems(pool, flake, target_system).await
+}
+
+#[cfg(test)]
+pub fn should_skip_system_for_test(
+    allowed_systems: &Option<Vec<String>>,
+    system_name: &str,
+) -> bool {
+    should_skip_system(allowed_systems, system_name)
+}
+
+async fn load_allowed_systems(
+    pool: &PgPool,
+    flake: &Flake,
+    target_system: &str,
+) -> Result<Option<Vec<String>>> {
+    if target_system != "all" {
+        return Ok(None);
+    }
+    if flake.build_scope != "cf_systems_only" {
+        return Ok(None);
+    }
+
+    let mut systems = list_configuration_names_for_flake(pool, flake.id).await?;
+    systems.sort();
+    systems.dedup();
+    Ok(Some(systems))
+}
+
+fn should_skip_system(allowed_systems: &Option<Vec<String>>, system_name: &str) -> bool {
+    match allowed_systems {
+        Some(systems) => !systems.iter().any(|configured| configured == system_name),
+        None => false,
+    }
 }
 
 fn resolve_mock_systems(

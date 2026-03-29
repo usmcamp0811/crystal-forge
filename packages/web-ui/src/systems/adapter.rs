@@ -1,4 +1,4 @@
-//! Systems adapter — API fetch with deterministic fallback.
+//! Systems adapter — API fetch with runtime-safe empty-state fallbacks.
 //!
 //! # Behaviour
 //!
@@ -6,8 +6,8 @@
 //! |-----------------------|---------------------------------------------|
 //! | API returns 2xx       | Real data, no notice                        |
 //! | API returns 401/403   | `redirect_to_login: true`                   |
-//! | API 5xx / network err | Fallback mock data, notice shown            |
-//! | Empty list from API   | Empty `items` vec (not fallback)            |
+//! | API 5xx / network err | Empty list/detail + notice shown            |
+//! | Empty list from API   | Empty `items` vec                            |
 //!
 //! Views MUST NOT call [`crate::api::client`] directly.
 //! All HTTP interactions go through the functions in this module.
@@ -16,15 +16,14 @@ use chrono::{Duration, Utc};
 use uuid::Uuid;
 
 use crate::api::client::{
-    create_system, deactivate_system, fetch_flakes, fetch_system, fetch_systems,
+    create_system, deactivate_system, fetch_flakes, fetch_system, fetch_systems, update_system,
     update_system_public_key, ApiClientError,
 };
 use crate::api::models::{
     CreateSystemRequest, CveSummary, DeploymentStatus, HealthStatus, PaginatedResponse,
     PipelineStage, SystemDetail, SystemHardwareInfo, SystemNetworkInfo, SystemSecurityInfo,
-    SystemSummary, SystemsListParams, UpdateSystemPublicKeyRequest,
+    SystemSummary, SystemsListParams, UpdateSystemPublicKeyRequest, UpdateSystemRequest,
 };
-use crate::views::systems_mock::mock_system_detail_by_id;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Result Types
@@ -64,7 +63,7 @@ pub struct FlakeNamesLoadResult {
 // Public Adapter Functions
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Fetch the systems list from the backend, with fallback to deterministic mock data.
+/// Fetch the systems list from the backend.
 pub async fn load_systems_with_fallback(params: &SystemsListParams) -> SystemsLoadResult {
     match fetch_systems(params).await {
         Ok(PaginatedResponse { items, .. }) => SystemsLoadResult {
@@ -73,30 +72,26 @@ pub async fn load_systems_with_fallback(params: &SystemsListParams) -> SystemsLo
             redirect_to_login: false,
         },
         Err(error) if should_redirect_to_login(&error) => SystemsLoadResult {
-            systems: fallback_systems(),
+            systems: vec![],
             notice: None,
             redirect_to_login: true,
         },
         Err(error) => SystemsLoadResult {
-            systems: fallback_systems(),
-            notice: Some(format!(
-                "Systems API unavailable, using deterministic fallback data: {error}"
-            )),
+            systems: vec![],
+            notice: Some(format!("Systems API unavailable: {error}")),
             redirect_to_login: false,
         },
     }
 }
 
-/// Fetch a single system's detail from the backend, with fallback to deterministic mock data.
+/// Fetch a single system's detail from the backend.
 pub async fn load_system_detail_with_fallback(id: &str) -> SystemDetailLoadResult {
     let uuid = match Uuid::parse_str(id) {
         Ok(uuid) => uuid,
         Err(_) => {
-            // Unparseable ID: try mock lookup first, otherwise return not-found.
-            let system = mock_system_detail_by_id(id);
             return SystemDetailLoadResult {
-                system,
-                notice: Some("Unrecognized system ID format; showing fallback data.".to_string()),
+                system: None,
+                notice: Some("Unrecognized system ID format".to_string()),
                 redirect_to_login: false,
             };
         }
@@ -109,30 +104,19 @@ pub async fn load_system_detail_with_fallback(id: &str) -> SystemDetailLoadResul
             redirect_to_login: false,
         },
         Err(error) if should_redirect_to_login(&error) => SystemDetailLoadResult {
-            system: mock_system_detail_by_id(id),
+            system: None,
             notice: None,
             redirect_to_login: true,
         },
-        Err(error) => {
-            // 404 or other error: try mock, return not-found if also absent.
-            let system = mock_system_detail_by_id(id);
-            let notice = if system.is_some() {
-                Some(format!(
-                    "Systems API unavailable, using deterministic fallback data: {error}"
-                ))
-            } else {
-                None
-            };
-            SystemDetailLoadResult {
-                system,
-                notice,
-                redirect_to_login: false,
-            }
-        }
+        Err(error) => SystemDetailLoadResult {
+            system: None,
+            notice: Some(format!("Systems API unavailable: {error}")),
+            redirect_to_login: false,
+        },
     }
 }
 
-/// Fetch flake names with deterministic fallback for forms.
+/// Fetch flake names for forms.
 pub async fn load_flake_names_with_fallback() -> FlakeNamesLoadResult {
     match fetch_flakes().await {
         Ok(flakes) => {
@@ -146,15 +130,13 @@ pub async fn load_flake_names_with_fallback() -> FlakeNamesLoadResult {
             }
         }
         Err(error) if should_redirect_to_login(&error) => FlakeNamesLoadResult {
-            names: fallback_flake_names(),
+            names: vec![],
             notice: None,
             redirect_to_login: true,
         },
         Err(error) => FlakeNamesLoadResult {
-            names: fallback_flake_names(),
-            notice: Some(format!(
-                "Flakes API unavailable, using fallback flake options: {error}"
-            )),
+            names: vec![],
+            notice: Some(format!("Flakes API unavailable: {error}")),
             redirect_to_login: false,
         },
     }
@@ -163,6 +145,7 @@ pub async fn load_flake_names_with_fallback() -> FlakeNamesLoadResult {
 /// Create a new system via the backend API.
 pub async fn create_system_via_api(
     hostname: String,
+    system_configuration_name: Option<String>,
     public_key: String,
     environment: Option<String>,
     flake_name: Option<String>,
@@ -170,6 +153,7 @@ pub async fn create_system_via_api(
 ) -> Result<SystemDetail, String> {
     let request = CreateSystemRequest {
         hostname,
+        system_configuration_name,
         public_key,
         environment,
         flake_name,
@@ -177,6 +161,33 @@ pub async fn create_system_via_api(
     };
 
     match create_system(&request).await {
+        Ok(detail) => Ok(detail),
+        Err(ApiClientError::Status {
+            code: 401 | 403, ..
+        }) => Err("Authentication required. Please log in.".to_string()),
+        Err(ApiClientError::Status { body, .. }) => Err(body),
+        Err(ApiClientError::Network(msg)) => Err(format!("Network error: {}", msg)),
+        Err(ApiClientError::Deserialize(msg)) => Err(format!("Invalid response: {}", msg)),
+    }
+}
+
+pub async fn update_system_via_api(
+    system_id: Uuid,
+    hostname: String,
+    system_configuration_name: Option<String>,
+    environment: Option<String>,
+    flake_name: Option<String>,
+    deployment_policy: String,
+) -> Result<SystemDetail, String> {
+    let request = UpdateSystemRequest {
+        hostname,
+        system_configuration_name,
+        environment,
+        flake_name,
+        deployment_policy,
+    };
+
+    match update_system(&system_id, &request).await {
         Ok(detail) => Ok(detail),
         Err(ApiClientError::Status {
             code: 401 | 403, ..
@@ -233,6 +244,7 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
         SystemSummary {
             id: Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
             hostname: "atlas-01".to_string(),
+            system_configuration_name: None,
             environment: Some("production".to_string()),
             flake_id: Some(1),
             primary_ip: Some("10.0.1.10".to_string()),
@@ -252,6 +264,7 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
         SystemSummary {
             id: Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap(),
             hostname: "atlas-02".to_string(),
+            system_configuration_name: None,
             environment: Some("production".to_string()),
             flake_id: Some(1),
             primary_ip: Some("10.0.1.11".to_string()),
@@ -271,6 +284,7 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
         SystemSummary {
             id: Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap(),
             hostname: "staging-01".to_string(),
+            system_configuration_name: None,
             environment: Some("staging".to_string()),
             flake_id: Some(2),
             primary_ip: Some("10.0.2.10".to_string()),
@@ -290,6 +304,7 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
         SystemSummary {
             id: Uuid::parse_str("00000000-0000-0000-0000-000000000004").unwrap(),
             hostname: "dev-box".to_string(),
+            system_configuration_name: None,
             environment: Some("development".to_string()),
             flake_id: None,
             primary_ip: Some("10.0.3.20".to_string()),
@@ -323,6 +338,7 @@ pub fn fallback_system_detail() -> SystemDetail {
     SystemDetail {
         id: Uuid::parse_str("00000000-0000-0000-0000-000000000000").unwrap(),
         hostname: "unknown-system".to_string(),
+        system_configuration_name: None,
         environment: None,
         is_active: false,
         deployment_policy: "manual".to_string(),

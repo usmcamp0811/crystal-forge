@@ -21,17 +21,49 @@ pub async fn load_dashboard_with_fallback() -> DashboardLoadResult {
             redirect_to_login: false,
         },
         Err(error) if should_redirect_to_login(&error) => DashboardLoadResult {
-            summary: fallback_dashboard_summary(),
+            summary: empty_dashboard_summary(),
             notice: None,
             redirect_to_login: true,
         },
         Err(error) => DashboardLoadResult {
-            summary: fallback_dashboard_summary(),
-            notice: Some(format!(
-                "Dashboard API unavailable, using deterministic fallback data: {error}"
-            )),
+            summary: empty_dashboard_summary(),
+            notice: Some(format!("Dashboard API unavailable: {error}")),
             redirect_to_login: false,
         },
+    }
+}
+
+pub fn empty_dashboard_summary() -> DashboardSummary {
+    let now = Utc::now();
+    DashboardSummary {
+        fleet_health: FleetHealthSummary {
+            healthy: 0,
+            warning: 0,
+            critical: 0,
+            offline: 0,
+        },
+        deployment_status: DeploymentStatusSummary {
+            up_to_date: 0,
+            behind: 0,
+            never_deployed: 0,
+            unknown: 0,
+        },
+        cve_summary: CveSummary {
+            critical: 0,
+            high: 0,
+            medium: 0,
+            low: 0,
+        },
+        total_systems: 0,
+        active_builds: 0,
+        build_queue: Some(BuildQueueSummary {
+            building_count: 0,
+            queued_count: 0,
+            items: vec![],
+            timestamp: now,
+        }),
+        recent_deployments: vec![],
+        timestamp: now,
     }
 }
 

@@ -89,6 +89,14 @@ pub async fn create_system(request: &CreateSystemRequest) -> Result<SystemDetail
     send_json_with_csrf("POST", &url, Some(request)).await
 }
 
+pub async fn update_system(
+    id: &uuid::Uuid,
+    request: &UpdateSystemRequest,
+) -> Result<SystemDetail, ApiClientError> {
+    let url = format!("{}/systems/{}", base_url(), id);
+    send_json_with_csrf("PATCH", &url, Some(request)).await
+}
+
 /// Update a system's public key.
 pub async fn update_system_public_key(
     id: &uuid::Uuid,
@@ -294,6 +302,38 @@ pub async fn update_flake(
 ) -> Result<FlakeRegistryItem, ApiClientError> {
     let url = format!("{}/flakes/{id}", base_url());
     send_json_with_csrf("PATCH", &url, Some(request)).await
+}
+
+/// Fetch credential summary for a flake.
+pub async fn fetch_flake_credentials(
+    id: i32,
+) -> Result<FlakeCredentialSummary, ApiClientError> {
+    let url = format!("{}/flakes/{id}/credentials", base_url());
+    fetch_json(&url).await
+}
+
+/// Replace flake credentials.
+pub async fn put_flake_credentials(
+    id: i32,
+    request: &CreateFlakeCredentialRequest,
+) -> Result<FlakeCredentialSummary, ApiClientError> {
+    let url = format!("{}/flakes/{id}/credentials", base_url());
+    send_json_with_csrf("PUT", &url, Some(request)).await
+}
+
+/// Partially update flake credentials.
+pub async fn patch_flake_credentials(
+    id: i32,
+    request: &UpdateFlakeCredentialRequest,
+) -> Result<FlakeCredentialSummary, ApiClientError> {
+    let url = format!("{}/flakes/{id}/credentials", base_url());
+    send_json_with_csrf("PATCH", &url, Some(request)).await
+}
+
+/// Delete flake credentials.
+pub async fn delete_flake_credentials(id: i32) -> Result<(), ApiClientError> {
+    let url = format!("{}/flakes/{id}/credentials", base_url());
+    send_empty_with_csrf::<()>("DELETE", &url, None).await
 }
 
 /// Remove a flake by id.

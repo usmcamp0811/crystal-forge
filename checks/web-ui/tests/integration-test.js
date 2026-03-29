@@ -280,6 +280,7 @@ async function routeSystemsWarningData(page) {
     {
       id: "00000000-0000-0000-0000-0000000000a1",
       hostname: "warning-system-01",
+      system_configuration_name: "warning-system-01",
       environment: "production",
       flake_id: null,
       primary_ip: "10.10.0.10",
@@ -293,7 +294,58 @@ async function routeSystemsWarningData(page) {
     },
   ];
 
+  const detail = {
+    id: "00000000-0000-0000-0000-0000000000a1",
+    hostname: "warning-system-01",
+    system_configuration_name: "warning-system-01",
+    environment: "production",
+    is_active: true,
+    deployment_policy: "manual",
+    health_status: "warning",
+    deployment_status: "never_deployed",
+    pipeline_stage: "ready_for_build",
+    nixos_version: "24.11",
+    last_seen: null,
+    cve_counts: { critical: 0, high: 0, medium: 1, low: 2 },
+    flake: {
+      id: 41,
+      name: "platform-core",
+      repo_url: "https://gitlab.com/crystal-forge/platform-core.git",
+      latest_commit: null,
+    },
+    network: {
+      primary_ip: "10.10.0.10",
+      primary_mac: null,
+      gateway_ip: null,
+    },
+    hardware: {
+      cpu_brand: null,
+      cpu_cores: null,
+      memory_gb: null,
+      uptime_secs: null,
+      board_serial: null,
+      bios_version: null,
+      hardware_changed_24h: false,
+      hardware_ever_changed: false,
+    },
+    security: {
+      tpm_present: false,
+      secure_boot_enabled: false,
+      fips_mode: false,
+      selinux_status: null,
+    },
+  };
+
   await page.route("**/api/v1/systems*", async (route) => {
+    const url = route.request().url();
+    if (url.includes("/api/v1/systems/00000000-0000-0000-0000-0000000000a1")) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(detail),
+      });
+      return;
+    }
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -303,6 +355,23 @@ async function routeSystemsWarningData(page) {
 }
 
 async function unrouteSystemsWarningData(page) {
+  await page.unroute("**/api/v1/systems*");
+}
+
+async function routeSystemsApiFailure(page) {
+  await page.route("**/api/v1/systems*", async (route) => {
+    await route.fulfill({
+      status: 500,
+      contentType: "application/json",
+      body: JSON.stringify({
+        error: "internal_error",
+        message: "Failed to list systems",
+      }),
+    });
+  });
+}
+
+async function unrouteSystemsApiFailure(page) {
   await page.unroute("**/api/v1/systems*");
 }
 
@@ -357,6 +426,7 @@ async function routeFlakeWarningData(page) {
       name: "platform-core",
       repo_url: "https://gitlab.com/crystal-forge/platform-core.git",
       branch: "main",
+      build_scope: "cf_systems_only",
       system_count: 2,
     },
   ];
@@ -1497,11 +1567,93 @@ const steps = [
     },
   },
   {
+    name: "12c-systems-modal-config-field",
+    description: "Systems modal with flake config name field",
+    action: async (page) => {
+      await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1500);
+      await page.locator("button:has-text('Add System')").first().click();
+      await page.getByText("Register System").first().waitFor({ timeout: 5000 });
+      await page
+        .getByLabel(/Flake Config Name/i)
+        .fill("example-system-config");
+    },
+  },
+  {
+    name: "12d-systems-api-error-no-mock-fallback",
+    description: "Systems API failures show error state without deterministic mock hosts",
+    action: async (page) => {
+      await routeSystemsApiFailure(page);
+      await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1500);
+
+      await page.getByText(/Systems API unavailable/i).first().waitFor({ timeout: 5000 });
+
+      const deterministicNotice = page.getByText(/deterministic fallback data/i).first();
+      if (await deterministicNotice.isVisible({ timeout: 800 }).catch(() => false)) {
+        throw new Error("Systems view still shows deterministic fallback notice");
+      }
+
+      const atlasHost = page.getByText(/atlas-0[12]/i).first();
+      if (await atlasHost.isVisible({ timeout: 800 }).catch(() => false)) {
+        throw new Error("Systems view still renders deterministic mock hostnames");
+      }
+
+      await unrouteSystemsApiFailure(page);
+    },
+  },
+  {
     name: "13-flakes",
     description: "Flakes registry",
     action: async (page) => {
       await page.goto(`${baseUrl}/flakes`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
+    },
+  },
+  {
+    name: "13e-flakes-add-modal-credentials",
+    description: "Flake add modal with build scope and credential controls",
+    action: async (page) => {
+      await page.goto(`${baseUrl}/flakes`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1500);
+      await page.locator("button:has-text('Add Flake')").first().click();
+      await page.getByText("Register Flake").first().waitFor({ timeout: 5000 });
+      await page.getByLabel(/Authentication Type/i).selectOption("pat");
+      await page.getByLabel(/Token Username/i).fill("oauth2");
+      await page.getByLabel(/Token Secret/i).fill("glpat-example-token");
+      await page.getByLabel(/Build Scope/i).selectOption("all_configs");
+    },
+  },
+  {
+    name: "13f-flakes-edit-modal-credentials",
+    description: "Flake edit modal showing existing build scope and credential controls",
+    action: async (page) => {
+      await routeFlakeWarningData(page);
+      await page.route(/\/api\/v1\/flakes\/\d+\/credentials$/, async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            flake_id: 1,
+            auth_type: "ssh_key",
+            username: null,
+            ssh_username: "git",
+            has_secret: true,
+          }),
+        });
+      });
+
+      await page.goto(`${baseUrl}/flakes`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1500);
+      const editButton = page.locator("button:has-text('Edit')").first();
+      await editButton.waitFor({ timeout: 5000 });
+      await editButton.click();
+      await page.getByRole("heading", { name: "Edit Flake" }).waitFor({ timeout: 5000 });
+      await page.getByLabel(/Build Scope/i).selectOption("cf_systems_only");
+      await page.getByLabel(/Authentication Type/i).selectOption("ssh_key");
+      await page.getByLabel(/SSH Username/i).fill("git");
+      await page.unroute(/\/api\/v1\/flakes\/\d+\/credentials$/);
+      await unrouteFlakeWarningData(page);
     },
   },
   {
@@ -1877,6 +2029,11 @@ const CI_FAST_STEP_NAMES = new Set([
   "04-post-register-login",
   "05-login-submit",
   "06-dashboard",
+  "12c-systems-modal-config-field",
+  "12d-systems-api-error-no-mock-fallback",
+  "13d-flakes-stress-dataset",
+  "13e-flakes-add-modal-credentials",
+  "13f-flakes-edit-modal-credentials",
 ]);
 
 (async () => {
