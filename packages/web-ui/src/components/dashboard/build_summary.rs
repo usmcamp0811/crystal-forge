@@ -90,59 +90,21 @@ pub fn BuildSummaryPanel(
 }
 
 fn build_summary_label(item: &crate::api::models::BuildQueueItem) -> String {
-    let host = compact_hostname(&item.hostname);
-    let flake = compact_flake_name(&item.flake_name);
-    if flake.is_empty() {
-        return host;
-    }
+    // flake_name from the API is already the short name (f.name column).
+    // Format: "<flake name> - <hostname>"
+    let flake = item.flake_name.trim();
+    let host = item.hostname.trim();
 
-    let host_lower = host.to_ascii_lowercase();
-    let flake_lower = flake.to_ascii_lowercase();
-    if host_lower.contains(&flake_lower) {
-        return host;
-    }
-
-    format!("{host} ({flake})")
-}
-
-fn compact_flake_name(raw: &str) -> String {
-    let trimmed = raw.trim().trim_end_matches('/');
-    if trimmed.is_empty() {
-        return String::new();
-    }
-
-    let without_git = trimmed.trim_end_matches(".git");
-    let tail = without_git
-        .rsplit(['/', ':'])
-        .next()
-        .unwrap_or(without_git)
-        .trim();
-
-    if tail.is_empty() {
-        without_git.to_string()
-    } else {
-        tail.to_string()
-    }
-}
-
-fn compact_hostname(raw: &str) -> String {
-    let tokens: Vec<&str> = raw
-        .split_whitespace()
-        .filter(|token| {
-            !token.contains("://") && !token.starts_with("github:") && !token.starts_with("gitlab:")
-        })
-        .collect();
-
-    if tokens.is_empty() {
-        raw.trim().to_string()
-    } else {
-        tokens.join(" ")
+    match (flake.is_empty(), host.is_empty()) {
+        (true, _) => host.to_string(),
+        (false, true) => flake.to_string(),
+        (false, false) => format!("{flake} - {host}"),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{build_summary_label, compact_flake_name, compact_hostname};
+    use super::build_summary_label;
     use crate::api::models::{BuildQueueItem, BuildStatus};
     use chrono::Utc;
     use uuid::Uuid;
@@ -166,29 +128,20 @@ mod tests {
     }
 
     #[test]
-    fn compact_flake_name_reduces_url_like_values() {
-        assert_eq!(
-            compact_flake_name("https://gitlab.com/crystal-forge/fmf-flake.git"),
-            "fmf-flake"
-        );
-        assert_eq!(compact_flake_name("github:org/repo"), "repo");
-    }
-
-    #[test]
     fn build_summary_label_formats_flake_and_hostname() {
-        let label = build_summary_label(&sample_item("github:org/repo", "reckless"));
-        assert_eq!(label, "reckless (repo)");
+        let label = build_summary_label(&sample_item("fmf-flake", "reckless"));
+        assert_eq!(label, "fmf-flake - reckless");
     }
 
     #[test]
-    fn compact_hostname_strips_embedded_url_tokens() {
-        let host = compact_hostname("reckless https://gitlab.com/crystal-forge/fmf-flake.git");
-        assert_eq!(host, "reckless");
-    }
-
-    #[test]
-    fn build_summary_label_avoids_duplicate_flake_name() {
-        let label = build_summary_label(&sample_item("github:org/reckless", "reckless"));
+    fn build_summary_label_fallback_to_host_when_no_flake() {
+        let label = build_summary_label(&sample_item("", "reckless"));
         assert_eq!(label, "reckless");
+    }
+
+    #[test]
+    fn build_summary_label_fallback_to_flake_when_no_host() {
+        let label = build_summary_label(&sample_item("fmf-flake", ""));
+        assert_eq!(label, "fmf-flake");
     }
 }
