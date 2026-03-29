@@ -1,4 +1,4 @@
-//! Systems adapter — API fetch with deterministic fallback.
+//! Systems adapter — API fetch with runtime-safe empty-state fallbacks.
 //!
 //! # Behaviour
 //!
@@ -6,8 +6,8 @@
 //! |-----------------------|---------------------------------------------|
 //! | API returns 2xx       | Real data, no notice                        |
 //! | API returns 401/403   | `redirect_to_login: true`                   |
-//! | API 5xx / network err | Fallback mock data, notice shown            |
-//! | Empty list from API   | Empty `items` vec (not fallback)            |
+//! | API 5xx / network err | Empty list/detail + notice shown            |
+//! | Empty list from API   | Empty `items` vec                            |
 //!
 //! Views MUST NOT call [`crate::api::client`] directly.
 //! All HTTP interactions go through the functions in this module.
@@ -24,7 +24,6 @@ use crate::api::models::{
     PipelineStage, SystemDetail, SystemHardwareInfo, SystemNetworkInfo, SystemSecurityInfo,
     SystemSummary, SystemsListParams, UpdateSystemPublicKeyRequest, UpdateSystemRequest,
 };
-use crate::views::systems_mock::mock_system_detail_by_id;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Result Types
@@ -64,7 +63,7 @@ pub struct FlakeNamesLoadResult {
 // Public Adapter Functions
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Fetch the systems list from the backend, with fallback to deterministic mock data.
+/// Fetch the systems list from the backend.
 pub async fn load_systems_with_fallback(params: &SystemsListParams) -> SystemsLoadResult {
     match fetch_systems(params).await {
         Ok(PaginatedResponse { items, .. }) => SystemsLoadResult {
@@ -73,30 +72,26 @@ pub async fn load_systems_with_fallback(params: &SystemsListParams) -> SystemsLo
             redirect_to_login: false,
         },
         Err(error) if should_redirect_to_login(&error) => SystemsLoadResult {
-            systems: fallback_systems(),
+            systems: vec![],
             notice: None,
             redirect_to_login: true,
         },
         Err(error) => SystemsLoadResult {
-            systems: fallback_systems(),
-            notice: Some(format!(
-                "Systems API unavailable, using deterministic fallback data: {error}"
-            )),
+            systems: vec![],
+            notice: Some(format!("Systems API unavailable: {error}")),
             redirect_to_login: false,
         },
     }
 }
 
-/// Fetch a single system's detail from the backend, with fallback to deterministic mock data.
+/// Fetch a single system's detail from the backend.
 pub async fn load_system_detail_with_fallback(id: &str) -> SystemDetailLoadResult {
     let uuid = match Uuid::parse_str(id) {
         Ok(uuid) => uuid,
         Err(_) => {
-            // Unparseable ID: try mock lookup first, otherwise return not-found.
-            let system = mock_system_detail_by_id(id);
             return SystemDetailLoadResult {
-                system,
-                notice: Some("Unrecognized system ID format; showing fallback data.".to_string()),
+                system: None,
+                notice: Some("Unrecognized system ID format".to_string()),
                 redirect_to_login: false,
             };
         }
@@ -109,30 +104,19 @@ pub async fn load_system_detail_with_fallback(id: &str) -> SystemDetailLoadResul
             redirect_to_login: false,
         },
         Err(error) if should_redirect_to_login(&error) => SystemDetailLoadResult {
-            system: mock_system_detail_by_id(id),
+            system: None,
             notice: None,
             redirect_to_login: true,
         },
-        Err(error) => {
-            // 404 or other error: try mock, return not-found if also absent.
-            let system = mock_system_detail_by_id(id);
-            let notice = if system.is_some() {
-                Some(format!(
-                    "Systems API unavailable, using deterministic fallback data: {error}"
-                ))
-            } else {
-                None
-            };
-            SystemDetailLoadResult {
-                system,
-                notice,
-                redirect_to_login: false,
-            }
-        }
+        Err(error) => SystemDetailLoadResult {
+            system: None,
+            notice: Some(format!("Systems API unavailable: {error}")),
+            redirect_to_login: false,
+        },
     }
 }
 
-/// Fetch flake names with deterministic fallback for forms.
+/// Fetch flake names for forms.
 pub async fn load_flake_names_with_fallback() -> FlakeNamesLoadResult {
     match fetch_flakes().await {
         Ok(flakes) => {
@@ -146,15 +130,13 @@ pub async fn load_flake_names_with_fallback() -> FlakeNamesLoadResult {
             }
         }
         Err(error) if should_redirect_to_login(&error) => FlakeNamesLoadResult {
-            names: fallback_flake_names(),
+            names: vec![],
             notice: None,
             redirect_to_login: true,
         },
         Err(error) => FlakeNamesLoadResult {
-            names: fallback_flake_names(),
-            notice: Some(format!(
-                "Flakes API unavailable, using fallback flake options: {error}"
-            )),
+            names: vec![],
+            notice: Some(format!("Flakes API unavailable: {error}")),
             redirect_to_login: false,
         },
     }
