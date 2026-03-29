@@ -4,7 +4,7 @@ title: Add flake credential management and convert system add/edit to modal UI
 status: In Progress
 assignee: []
 created_date: '2026-03-28 22:14'
-updated_date: '2026-03-28 22:15'
+updated_date: '2026-03-29 00:18'
 labels:
   - backend
   - frontend
@@ -23,7 +23,7 @@ priority: high
 <!-- SECTION:DESCRIPTION:BEGIN -->
 ## Problem
 
-Flakes requiring authentication (private GitLab repos, private GitHub repos, etc.) cannot currently be used by Crystal Forge because there's no way to provide credentials for Nix to access them. Additionally, the current inline system add/edit UI is inconsistent with the rest of the application which uses modal dialogs for entity management.
+Flakes requiring authentication (private GitLab repos, private GitHub repos, etc.) cannot currently be used by Crystal Forge because there's no way to provide credentials for Nix to access them. Additionally, the current inline system add/edit UI is inconsistent with the rest of the application which uses modal dialogs for entity management. Systems are also coupled to their hostname for NixOS configuration name lookup, with no way to decouple them.
 
 When users try to add a flake that requires authentication, Nix operations (evaluation, building) fail with authentication errors. Users have no way to provide:
 - Personal Access Tokens (PAT) for HTTPS access
@@ -41,15 +41,21 @@ The inline system management UI also doesn't match the established modal pattern
    - Securely pass credentials to Nix when evaluating/building flakes
    - Integrate credential configuration into the flake edit/config modal
 
-2. **System Configuration Scope Control:**
+2. **System Configuration Name Decoupling (absorbs TASK-214):**
+   - Add `system_configuration_name` field to the systems table
+   - Decouple the system hostname from the NixOS configuration name in the flake
+   - Migration backfills existing systems with hostname as default config name
+   - Build/evaluation logic uses config name field for flake attribute path construction
+
+3. **System Configuration Scope Control:**
    - Allow users to choose whether to build ALL nixosConfigurations from a flake or only specific ones tied to CF systems
    - Make the nixosConfiguration name definable when adding a system
    - Allow editing this configuration after system creation
 
-3. **Modal-based System UI:**
+4. **Modal-based System UI:**
    - Convert inline system add/edit to modal dialog (consistent with other entity management)
    - Support editing system properties after creation
-   - Include systemConfiguration name field (works with TASK-214)
+   - Include systemConfiguration name field
 
 ## Non-Goals
 
@@ -58,6 +64,7 @@ The inline system management UI also doesn't match the established modal pattern
 - Supporting all possible Nix authentication mechanisms in v1 (start with PAT, SSH, username/password)
 - Modifying flake evaluation caching strategy
 - Changing how Nix itself handles credentials (we're just providing them)
+- Auto-detecting available nixosConfigurations from flakes (could be future enhancement)
 
 ## Scope
 
@@ -68,25 +75,32 @@ The inline system management UI also doesn't match the established modal pattern
 - Credential injection mechanism for Nix operations (env vars, netrc, SSH agent, etc.)
 - Support for: PAT (HTTPS), SSH keys, username/password
 
-### 2. Backend: System Configuration Scope
+### 2. Backend: System Configuration Name (from TASK-214)
+- Add `system_configuration_name` VARCHAR field to systems table (nullable, defaults to hostname)
+- Migration to backfill existing systems with hostname as config name
+- Update system creation/edit API to accept and validate the field
+- Update build queue and deployment logic to use config name for flake attribute path construction
+- Current: `flake#nixosConfigurations.{hostname}` → New: `flake#nixosConfigurations.{config_name}`
+
+### 3. Backend: System Configuration Scope
 - Add `build_scope` field to flakes table: `all_configs` | `cf_systems_only`
 - Use this field when determining which nixosConfigurations to evaluate/build
-- Ensure TASK-214's `system_configuration_name` field is properly used
+- Use the `system_configuration_name` field for proper mapping
 
-### 3. Frontend: Flake Credential UI
+### 4. Frontend: Flake Credential UI
 - Add "Credentials" section to flake edit/config modal
 - UI for selecting credential type (PAT, SSH, username/password)
 - Secure input fields (password-type) for sensitive values
 - Validation and testing of credentials (optional: test connection button)
 
-### 4. Frontend: Build Scope UI
+### 5. Frontend: Build Scope UI
 - Add build scope selector in flake modal: "Build all configurations" vs "Build only CF-managed systems"
 - Help text explaining the difference
 
-### 5. Frontend: System Modal UI
+### 6. Frontend: System Modal UI
 - Create new SystemModal component (similar to FlakeModal, EnvironmentModal, etc.)
 - Replace inline add/edit UI with modal trigger buttons
-- Include systemConfiguration name field (integrates with TASK-214)
+- Include systemConfiguration name field with help text
 - Support edit mode (populate existing system data)
 
 ## Architectural Constraints
@@ -101,6 +115,8 @@ The inline system management UI also doesn't match the established modal pattern
 - Follow established modal component patterns in web-ui
 - Maintain separation between credential management and flake configuration
 - Build scope should default to `cf_systems_only` to avoid unnecessary builds
+- `system_configuration_name` NULL means "use hostname" — backward compatible
+- Hostname remains the primary system identifier
 
 ## Verification Plan
 
@@ -109,12 +125,17 @@ The inline system management UI also doesn't match the established modal pattern
 2. Add PAT credentials for the flake → verify evaluation succeeds
 3. Add a flake with SSH URL, configure SSH key → verify evaluation succeeds
 4. Add username/password credentials → verify they're encrypted in DB
-5. Verify credentials are NOT exposed in API responses (should show "***" or credential type only)
+5. Verify credentials are NOT exposed in API responses (should show masked value or type only)
+
+### System Configuration Name
+1. Create a system with hostname "prod-web-01" using config name "webserver" → verify build uses `flake#nixosConfigurations.webserver`
+2. Create a system without config name → verify defaults to hostname
+3. Verify existing systems continue to work after migration (backfilled with hostname)
+4. Edit system's config name → verify subsequent builds use new name
 
 ### Build Scope
 1. Create flake with multiple nixosConfigurations, set scope to "all" → verify all are evaluated
 2. Change scope to "cf_systems_only" → verify only systems with matching CF system records are built
-3. Verify TASK-214's systemConfiguration name mapping works correctly
 
 ### System Modal UI
 1. Click "Add System" → modal opens with empty form
@@ -127,47 +148,41 @@ The inline system management UI also doesn't match the established modal pattern
 1. Check database directly → verify credentials are encrypted
 2. Check API responses → verify no plaintext credentials
 3. Check logs → verify credentials not logged
-4. Test SSH key permissions → verify keys are only readable by Nix processes
 
 ## Impact Areas
 
 **Backend:**
-- `packages/server/src/db/schema.sql` - new `flake_credentials` table, `build_scope` field on flakes
-- `packages/server/src/db/models/` - FlakeCredential model, updates to Flake model
+- `packages/server/src/db/schema.sql` - new `flake_credentials` table, `build_scope` on flakes, `system_configuration_name` on systems
+- `packages/server/src/db/models/` - FlakeCredential model, updates to Flake and System models
 - `packages/server/src/api/flakes.rs` - credential CRUD endpoints
+- `packages/server/src/api/systems.rs` - system creation/update with config name
 - `packages/server/src/services/nix/` - credential injection into Nix operations
 - `packages/server/src/services/crypto.rs` (or new) - encryption/decryption utilities
-- Build and evaluation logic - use build_scope to filter configurations
+- Build job creation logic - use config name for flake attribute path
+- Evaluation logic - use build_scope to filter configurations
 
 **Frontend:**
 - `packages/web-ui/src/views/flakes.rs` - add credential UI to modal
 - `packages/web-ui/src/views/systems.rs` - replace inline UI with modal
 - `packages/web-ui/src/components/` - new SystemModal component
 - `packages/web-ui/src/api/models.rs` - FlakeCredential, System updates
-- `packages/web-ui/src/api/client.rs` - credential API calls
+- `packages/web-ui/src/api/client.rs` - credential and system API calls
 
 ## Risk Level
 
-**High** - Involves security-sensitive credential storage and changes to core Nix integration flow
-
-### Security Risks
-- Credential exposure if encryption is weak or keys are compromised
-- Credentials in logs or error messages
-- SSH key permission issues
-- Man-in-the-middle if HTTPS verification is bypassed
+**High** - Involves security-sensitive credential storage, database schema changes, and touches core Nix integration flow
 
 ### Mitigation
 - Use industry-standard encryption (AES-256-GCM or similar)
 - Audit all code paths that touch credentials
 - Implement credential masking in all outputs
 - Use Nix's native credential mechanisms (don't reinvent)
-- Add integration tests for credential handling
+- Migration is backward-compatible (NULL config name = use hostname)
 
 ## Dependencies
 
-- TASK-214 (systemConfiguration name field) - should be completed first or in parallel
+- None (TASK-214 has been absorbed into this task)
 - Requires encryption key management setup in server configuration
-- May need to install additional Nix credential helpers depending on chosen implementation
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -181,15 +196,18 @@ The inline system management UI also doesn't match the established modal pattern
 - [ ] #7 Flakes table has build_scope field (all_configs | cf_systems_only) with default cf_systems_only
 - [ ] #8 Flake modal includes build scope selector with explanatory help text
 - [ ] #9 Build/evaluation logic respects build_scope setting (only processes selected configurations)
-- [ ] #10 System add/edit UI converted from inline to modal dialog component
-- [ ] #11 SystemModal includes systemConfiguration name field (integrates with TASK-214)
-- [ ] #12 Existing systems can be edited via modal (click edit button → modal opens with current values)
-- [ ] #13 SystemModal follows same UX patterns as FlakeModal, EnvironmentModal, BuilderModal
-- [ ] #14 Private flake with PAT credentials successfully evaluates and builds
-- [ ] #15 Private flake with SSH key credentials successfully evaluates and builds
-- [ ] #16 Credentials are not exposed in server logs or error messages
-- [ ] #17 Database inspection confirms credentials are encrypted (not plaintext)
-- [ ] #18 All verification plan tests pass
+- [ ] #10 Systems table has system_configuration_name field with migration backfilling hostname for existing systems
+- [ ] #11 System creation API accepts optional system_configuration_name (defaults to hostname if null)
+- [ ] #12 Build jobs use system_configuration_name to construct flake attribute paths (fallback to hostname)
+- [ ] #13 System add/edit UI converted from inline to modal dialog component
+- [ ] #14 SystemModal includes systemConfiguration name field with help text explaining its purpose
+- [ ] #15 Existing systems can be edited via modal (click edit button opens modal with current values)
+- [ ] #16 SystemModal follows same UX patterns as FlakeModal, EnvironmentModal, BuilderModal
+- [ ] #17 Private flake with PAT credentials successfully evaluates and builds
+- [ ] #18 Private flake with SSH key credentials successfully evaluates and builds
+- [ ] #19 Credentials are not exposed in server logs or error messages
+- [ ] #20 Database inspection confirms credentials are encrypted (not plaintext)
+- [ ] #21 Existing systems continue to work unchanged after migration (backward compatible)
 <!-- AC:END -->
 
 ## Implementation Notes
