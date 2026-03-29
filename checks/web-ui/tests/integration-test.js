@@ -358,6 +358,23 @@ async function unrouteSystemsWarningData(page) {
   await page.unroute("**/api/v1/systems*");
 }
 
+async function routeSystemsApiFailure(page) {
+  await page.route("**/api/v1/systems*", async (route) => {
+    await route.fulfill({
+      status: 500,
+      contentType: "application/json",
+      body: JSON.stringify({
+        error: "internal_error",
+        message: "Failed to list systems",
+      }),
+    });
+  });
+}
+
+async function unrouteSystemsApiFailure(page) {
+  await page.unroute("**/api/v1/systems*");
+}
+
 async function routeEnvironmentWarningData(page) {
   const environments = [
     {
@@ -1563,6 +1580,29 @@ const steps = [
     },
   },
   {
+    name: "12d-systems-api-error-no-mock-fallback",
+    description: "Systems API failures show error state without deterministic mock hosts",
+    action: async (page) => {
+      await routeSystemsApiFailure(page);
+      await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1500);
+
+      await page.getByText(/Systems API unavailable/i).first().waitFor({ timeout: 5000 });
+
+      const deterministicNotice = page.getByText(/deterministic fallback data/i).first();
+      if (await deterministicNotice.isVisible({ timeout: 800 }).catch(() => false)) {
+        throw new Error("Systems view still shows deterministic fallback notice");
+      }
+
+      const atlasHost = page.getByText(/atlas-0[12]/i).first();
+      if (await atlasHost.isVisible({ timeout: 800 }).catch(() => false)) {
+        throw new Error("Systems view still renders deterministic mock hostnames");
+      }
+
+      await unrouteSystemsApiFailure(page);
+    },
+  },
+  {
     name: "13-flakes",
     description: "Flakes registry",
     action: async (page) => {
@@ -1990,6 +2030,8 @@ const CI_FAST_STEP_NAMES = new Set([
   "05-login-submit",
   "06-dashboard",
   "12c-systems-modal-config-field",
+  "12d-systems-api-error-no-mock-fallback",
+  "13d-flakes-stress-dataset",
   "13e-flakes-add-modal-credentials",
   "13f-flakes-edit-modal-credentials",
 ]);

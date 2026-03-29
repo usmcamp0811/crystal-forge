@@ -18,10 +18,12 @@ use crate::api::models::{
 use crate::auth::extractors::{AuthenticatedUser, RequireAdmin, RequireAuth, RequireOperator};
 use crate::config::CrystalForgeConfig;
 use crate::flake::commits::{
-    GitCommitMetadata, branch_exists, get_commit_changed_files, get_commit_diff,
-    get_commit_metadata, get_commit_nixos_configurations, infer_default_branch,
+    GitCommitMetadata, branch_exists, branch_exists_with_creds, get_commit_changed_files,
+    get_commit_diff, get_commit_metadata, get_commit_nixos_configurations, infer_default_branch,
+    infer_default_branch_with_creds,
     is_history_rewrite_error,
 };
+use crate::flake::credentials::FlakeCredentialEnv;
 use crate::handlers::agent_request::CFState;
 use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_above};
 use crate::queries::admin::insert_admin_audit_event;
@@ -1517,7 +1519,52 @@ pub async fn sync_flake_handler(
         };
     }
 
-    match sync_commits_for_flake(&pool, &flake.repo_url, &flake.branch, flake.id).await {
+    let creds = FlakeCredentialEnv::load(&pool, flake.id)
+        .await
+        .unwrap_or_else(|e| {
+            warn!("Failed to load credentials for flake {} during sync: {e:#}", flake.id);
+            None
+        });
+
+    let sync_branch = match branch_exists_with_creds(&flake.repo_url, &flake.branch, creds.as_ref()).await
+    {
+        Ok(true) => flake.branch.clone(),
+        Ok(false) => match infer_default_branch_with_creds(&flake.repo_url, creds.as_ref()).await {
+            Ok(inferred) => {
+                warn!(
+                    "Configured branch '{}' not found for flake {} ({}); syncing against inferred branch '{}'.",
+                    flake.branch,
+                    flake.name,
+                    flake.repo_url,
+                    inferred
+                );
+                inferred
+            }
+            Err(err) => {
+                warn!(
+                    "Failed to infer fallback branch for flake {} ({}): {err:#}; using configured branch '{}'.",
+                    flake.name,
+                    flake.repo_url,
+                    flake.branch
+                );
+                flake.branch.clone()
+            }
+        },
+        Err(err) => {
+            warn!(
+                "Failed probing configured branch '{}' for flake {} ({}): {err:#}; attempting inferred default branch.",
+                flake.branch,
+                flake.name,
+                flake.repo_url
+            );
+            match infer_default_branch_with_creds(&flake.repo_url, creds.as_ref()).await {
+                Ok(inferred) => inferred,
+                Err(_) => flake.branch.clone(),
+            }
+        }
+    };
+
+    match sync_commits_for_flake(&pool, &flake.repo_url, &sync_branch, flake.id).await {
         Ok(new_commits) => {
             if new_commits > 0 {
                 state.queue_notifier.notify_eval_queue();
@@ -1528,9 +1575,9 @@ pub async fn sync_flake_handler(
                     "status": "ok",
                     "message": format!(
                         "Synced {} from source on {} ({} new commits).",
-                        flake.name, flake.branch, new_commits
+                        flake.name, sync_branch, new_commits
                     ),
-                    "branch": flake.branch,
+                    "branch": sync_branch,
                 })),
             )
                 .into_response()
