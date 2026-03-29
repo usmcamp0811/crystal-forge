@@ -4,7 +4,7 @@ title: Hotfix restore missing migration 0101 to unblock server startup
 status: Review
 assignee: []
 created_date: '2026-03-29 14:35'
-updated_date: '2026-03-29 14:41'
+updated_date: '2026-03-29 15:01'
 labels:
   - hotfix
   - database
@@ -76,6 +76,12 @@ MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/195
 Restored migration file from historical commit 098fe16df4ef4026a149ec56830f160e189863e5.
 
 Verification note: `nix develop -c cargo check` in packages/default failed in this environment due SQLx DB connection refused (os error 111), unrelated to migration-file restore scope.
+
+Root-cause context captured: migration `0101` was introduced on `TASK-221-flake-credentials-modal-ui` (commit `098fe16df4ef4026a149ec56830f160e189863e5`) and had already been applied in production DB. Later deploys from `dev` lacked the file, causing SQLx startup failure (`migration 101 ... missing in resolved migrations`).
+
+Hotfix strategy intentionally restores the exact historical `0101` file content instead of modifying `_sqlx_migrations` DB records, to preserve migration-chain integrity and prevent checksum/order drift.
+
+Conflict resolution note: original TASK-224 branch had backlog-history conflict noise during rebase; clean branch was rebuilt from `origin/dev` and hotfix commit was cherry-picked, resulting in commit `1d7ed9a7` on MR195.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
