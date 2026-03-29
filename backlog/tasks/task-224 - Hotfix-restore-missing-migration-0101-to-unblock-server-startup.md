@@ -1,10 +1,10 @@
 ---
 id: TASK-224
 title: Hotfix restore missing migration 0101 to unblock server startup
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-03-29 14:35'
-updated_date: '2026-03-29 14:36'
+updated_date: '2026-03-29 14:41'
 labels:
   - hotfix
   - database
@@ -70,6 +70,12 @@ High (production outage until fixed).
 Promoted to To Do by maintainer emergency request to unblock production startup.
 
 LOCK: opencode-gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-224-restore-migration-0101
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/195
+
+Restored migration file from historical commit 098fe16df4ef4026a149ec56830f160e189863e5.
+
+Verification note: `nix develop -c cargo check` in packages/default failed in this environment due SQLx DB connection refused (os error 111), unrelated to migration-file restore scope.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
