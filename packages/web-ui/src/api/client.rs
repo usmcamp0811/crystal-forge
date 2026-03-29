@@ -919,6 +919,13 @@ async fn send_request(
 
     let mut opts = web_sys::RequestInit::new();
     opts.set_method(method);
+    if method.eq_ignore_ascii_case("GET") {
+        let _ = js_sys::Reflect::set(
+            opts.as_ref(),
+            &JsValue::from_str("cache"),
+            &JsValue::from_str("no-store"),
+        );
+    }
     let _ = js_sys::Reflect::set(
         opts.as_ref(),
         &JsValue::from_str("credentials"),

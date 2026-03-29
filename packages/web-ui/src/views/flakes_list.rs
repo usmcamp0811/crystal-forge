@@ -471,6 +471,7 @@ pub fn FlakesListView() -> Element {
                             let selected_flake_id = *selected_history_flake.read();
                             let mut flakes_signal = flakes.clone();
                             let mut timelines_signal = flake_timelines.clone();
+                            let mut selected_history_commit = selected_history_commit.clone();
                             let mut last_manual_sync = last_manual_sync.clone();
                             let mut sync_note = sync_note.clone();
                             let mut rewrite_prompt = rewrite_prompt.clone();
@@ -502,6 +503,7 @@ pub fn FlakesListView() -> Element {
                                         match fetch_flake_timelines().await {
                                             Ok(timelines) => {
                                                 timelines_signal.set(timelines);
+                                                selected_history_commit.set(None);
                                             }
                                             Err(_) => {
                                                 refresh_warning = true;
