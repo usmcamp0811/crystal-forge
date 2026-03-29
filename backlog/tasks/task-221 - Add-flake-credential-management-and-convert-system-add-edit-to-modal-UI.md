@@ -1,10 +1,10 @@
 ---
 id: TASK-221
 title: Add flake credential management and convert system add/edit to modal UI
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-03-28 22:14'
-updated_date: '2026-03-29 00:18'
+updated_date: '2026-03-29 03:36'
 labels:
   - backend
   - frontend
@@ -214,6 +214,8 @@ The inline system management UI also doesn't match the established modal pattern
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: agent-claude on gray in ~/code/crystal-forge/TASK-221-flake-credentials-modal-ui
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/194
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
