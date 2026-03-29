@@ -378,6 +378,7 @@ pub(super) fn build_system_detail(
     SystemDetail {
         id: Uuid::from_u128(id),
         hostname: hostname.to_string(),
+        system_configuration_name: None,
         environment: Some(environment.to_string()),
         is_active,
         deployment_policy: deployment_policy.to_string(),

@@ -1,4 +1,5 @@
 use crate::config;
+use crate::flake::credentials::FlakeCredentialEnv;
 use crate::models::commits::Commit;
 use crate::queries::commits::{
     flake_has_commits, flake_last_commit, insert_commit, insert_commit_with_metadata,
@@ -84,7 +85,43 @@ pub async fn fetch_and_insert_recent_commits(
     branch: &str,
     limit: Option<usize>,
 ) -> Result<Vec<String>> {
-    let commits = get_commits_with_full_metadata(repo_url, branch, limit, None).await?;
+    let commits = get_commits_with_full_metadata(repo_url, branch, limit, None, None).await?;
+
+    let mut inserted = Vec::new();
+    for commit_data in commits {
+        if let Err(e) = insert_commit_with_metadata(
+            pool,
+            &commit_data.hash,
+            repo_url,
+            commit_data.timestamp,
+            Some(&commit_data.message),
+            Some(&commit_data.author),
+        )
+        .await
+        {
+            warn!("Failed to insert commit {}: {}", commit_data.hash, e);
+        } else {
+            inserted.push(commit_data.hash);
+        }
+    }
+
+    Ok(inserted)
+}
+
+/// Like [`fetch_and_insert_recent_commits`] but loads flake credentials from the DB
+/// and injects them into git operations.
+pub async fn fetch_and_insert_recent_commits_with_creds(
+    pool: &PgPool,
+    repo_url: &str,
+    branch: &str,
+    limit: Option<usize>,
+    flake_id: i32,
+) -> Result<Vec<String>> {
+    let creds = FlakeCredentialEnv::load(pool, flake_id).await.unwrap_or_else(|e| {
+        warn!("Failed to load credentials for flake {flake_id}: {e:#}");
+        None
+    });
+    let commits = get_commits_with_full_metadata(repo_url, branch, limit, None, creds.as_ref()).await?;
 
     let mut inserted = Vec::new();
     for commit_data in commits {
@@ -170,10 +207,32 @@ pub async fn initialize_flake_commits(
     Ok(())
 }
 
-/// Sync commits for all watched flakes that have auto_poll enabled (for regular polling)
+/// Sync commits for all watched flakes that have auto_poll enabled (for regular polling).
+///
+/// `watched_flakes` is a slice of `(WatchedFlake, Option<flake_id>)`.  When a flake_id is
+/// present the polling loop loads per-flake credentials from the DB and injects them.
 pub async fn sync_all_watched_flakes_commits(
     pool: &PgPool,
     watched_flakes: &[config::WatchedFlake],
+) -> Result<usize> {
+    sync_all_watched_flakes_commits_inner(pool, watched_flakes, &[]).await
+}
+
+/// Like [`sync_all_watched_flakes_commits`] but also takes a parallel slice of DB flake IDs
+/// so that per-flake credentials can be loaded.  `flake_ids[i]` corresponds to
+/// `watched_flakes[i]`; a value of `None` means the flake has no DB record yet.
+pub async fn sync_all_watched_flakes_commits_with_ids(
+    pool: &PgPool,
+    watched_flakes: &[config::WatchedFlake],
+    flake_ids: &[Option<i32>],
+) -> Result<usize> {
+    sync_all_watched_flakes_commits_inner(pool, watched_flakes, flake_ids).await
+}
+
+async fn sync_all_watched_flakes_commits_inner(
+    pool: &PgPool,
+    watched_flakes: &[config::WatchedFlake],
+    flake_ids: &[Option<i32>],
 ) -> Result<usize> {
     info!(
         "🔄 Syncing commits for {} watched flakes",
@@ -182,73 +241,33 @@ pub async fn sync_all_watched_flakes_commits(
 
     let mut total_inserted = 0;
 
-    for flake in watched_flakes {
+    for (idx, flake) in watched_flakes.iter().enumerate() {
         if !flake.auto_poll {
             debug!("⭐️ Skipping {} (auto_poll = false)", flake.name);
             continue;
         }
 
+        let flake_id_opt = flake_ids.get(idx).copied().flatten();
+
         info!("🔗 Syncing commits for flake: {}", flake.name);
 
-        // Check if flake has commits first
-        match flake_has_commits(pool, &flake.repo_url).await {
-            Ok(true) => {
-                // Has commits, do incremental sync
-                match flake_last_commit(pool, &flake.repo_url).await {
-                    Ok(last_commit) => {
-                        match fetch_and_insert_commits_since(
-                            pool,
-                            &flake.repo_url,
-                            &flake.branch(),
-                            &last_commit,
-                        )
-                        .await
-                        {
-                            Ok(new_commits) => {
-                                let count = new_commits.len();
-                                total_inserted += count;
-                                if count > 0 {
-                                    info!("✅ Found {} new commits for {}", count, flake.name);
-                                } else {
-                                    debug!("📍 No new commits for {}", flake.name);
-                                }
-                            }
-                            Err(e) => {
-                                warn!("⚠️ Failed to sync new commits for {}: {}", flake.name, e);
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        warn!("⚠️ Failed to get last commit for {}: {}", flake.name, e);
-                    }
-                }
-            }
-            Ok(false) => {
-                // No commits, initialize
-                info!("🔄 Initializing commits for flake: {}", flake.name);
-                match fetch_and_insert_recent_commits_with_retry(
-                    pool,
-                    &flake.repo_url,
-                    &flake.branch(),
-                    Some(flake.initial_commit_depth),
-                )
-                .await
-                {
-                    Ok(commits) => {
-                        let count = commits.len();
-                        total_inserted += count;
-                        info!(
-                            "✅ Successfully initialized {} commits for {}",
-                            count, flake.name
-                        );
-                    }
-                    Err(e) => {
-                        warn!("⚠️ Failed to initialize commits for {}: {}", flake.name, e);
-                    }
+        let inserted = if let Some(flake_id) = flake_id_opt {
+            sync_commits_for_flake(pool, &flake.repo_url, &flake.branch(), flake_id).await
+        } else {
+            sync_commits_for_repo(pool, &flake.repo_url, &flake.branch()).await
+        };
+
+        match inserted {
+            Ok(count) => {
+                total_inserted += count;
+                if count > 0 {
+                    info!("✅ Found {} new commits for {}", count, flake.name);
+                } else {
+                    debug!("📍 No new commits for {}", flake.name);
                 }
             }
             Err(e) => {
-                warn!("⚠️ Failed to check commits for {}: {}", flake.name, e);
+                warn!("⚠️ Failed to sync commits for {}: {}", flake.name, e);
             }
         }
     }
@@ -260,22 +279,66 @@ pub async fn sync_all_watched_flakes_commits(
 ///
 /// Returns the number of newly inserted commits.
 pub async fn sync_commits_for_repo(pool: &PgPool, repo_url: &str, branch: &str) -> Result<usize> {
+    sync_commits_for_repo_inner(pool, repo_url, branch, None).await
+}
+
+/// Sync commits for a single flake, loading per-flake credentials from the DB.
+///
+/// Use this instead of [`sync_commits_for_repo`] when the caller has a `flake_id`
+/// available and the flake may require authentication.
+pub async fn sync_commits_for_flake(
+    pool: &PgPool,
+    repo_url: &str,
+    branch: &str,
+    flake_id: i32,
+) -> Result<usize> {
+    let creds = FlakeCredentialEnv::load(pool, flake_id).await.unwrap_or_else(|e| {
+        warn!("Failed to load credentials for flake {flake_id}: {e:#}");
+        None
+    });
+    sync_commits_for_repo_inner(pool, repo_url, branch, creds.as_ref()).await
+}
+
+async fn sync_commits_for_repo_inner(
+    pool: &PgPool,
+    repo_url: &str,
+    branch: &str,
+    creds: Option<&FlakeCredentialEnv>,
+) -> Result<usize> {
     match flake_has_commits(pool, repo_url).await {
         Ok(true) => {
             let last_commit = flake_last_commit(pool, repo_url)
                 .await
                 .with_context(|| format!("Failed to load last commit for {repo_url}"))?;
-            let inserted = fetch_and_insert_commits_since(pool, repo_url, branch, &last_commit)
-                .await
-                .with_context(|| {
-                    format!("Failed to sync commits since last known hash for {repo_url}")
-                })?;
+            let inserted =
+                fetch_and_insert_commits_since_with_creds(pool, repo_url, branch, &last_commit, creds)
+                    .await
+                    .with_context(|| {
+                        format!("Failed to sync commits since last known hash for {repo_url}")
+                    })?;
             Ok(inserted.len())
         }
         Ok(false) => {
-            let inserted = fetch_and_insert_recent_commits(pool, repo_url, branch, Some(10))
+            let commits = get_commits_with_full_metadata(repo_url, branch, Some(10), None, creds)
                 .await
                 .with_context(|| format!("Failed to initialize commits for {repo_url}"))?;
+            let mut inserted = Vec::new();
+            for commit_data in commits {
+                if let Err(e) = insert_commit_with_metadata(
+                    pool,
+                    &commit_data.hash,
+                    repo_url,
+                    commit_data.timestamp,
+                    Some(&commit_data.message),
+                    Some(&commit_data.author),
+                )
+                .await
+                {
+                    warn!("Failed to insert commit {}: {}", commit_data.hash, e);
+                } else {
+                    inserted.push(commit_data.hash);
+                }
+            }
             Ok(inserted.len())
         }
         Err(e) => Err(e).with_context(|| format!("Failed to inspect commit state for {repo_url}")),
@@ -284,12 +347,20 @@ pub async fn sync_commits_for_repo(pool: &PgPool, repo_url: &str, branch: &str) 
 
 /// Resolve the remote default branch name for a repository.
 pub async fn infer_default_branch(repo_url: &str) -> Result<String> {
+    infer_default_branch_with_creds(repo_url, None).await
+}
+
+pub async fn infer_default_branch_with_creds(
+    repo_url: &str,
+    creds: Option<&FlakeCredentialEnv>,
+) -> Result<String> {
     let git_url = normalize_repo_url_for_git(repo_url);
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.args(["ls-remote", "--symref", &git_url, "HEAD"]);
+    apply_optional_creds(&mut cmd, creds);
     let output = timeout(
         GIT_PROBE_TIMEOUT,
-        tokio::process::Command::new("git")
-            .args(["ls-remote", "--symref", &git_url, "HEAD"])
-            .output(),
+        cmd.output(),
     )
     .await
     .with_context(|| format!("Timed out probing default branch for {repo_url}"))?
@@ -318,14 +389,23 @@ pub async fn infer_default_branch(repo_url: &str) -> Result<String> {
 
 /// Check whether a specific branch exists on the remote repository.
 pub async fn branch_exists(repo_url: &str, branch: &str) -> Result<bool> {
+    branch_exists_with_creds(repo_url, branch, None).await
+}
+
+pub async fn branch_exists_with_creds(
+    repo_url: &str,
+    branch: &str,
+    creds: Option<&FlakeCredentialEnv>,
+) -> Result<bool> {
     let git_url = normalize_repo_url_for_git(repo_url);
     let refspec = format!("refs/heads/{branch}");
 
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.args(["ls-remote", &git_url, &refspec]);
+    apply_optional_creds(&mut cmd, creds);
     let output = timeout(
         GIT_PROBE_TIMEOUT,
-        tokio::process::Command::new("git")
-            .args(["ls-remote", &git_url, &refspec])
-            .output(),
+        cmd.output(),
     )
     .await
     .with_context(|| format!("Timed out probing branch {branch} for {repo_url}"))?
@@ -340,6 +420,19 @@ pub async fn branch_exists(repo_url: &str, branch: &str) -> Result<bool> {
     }
 
     Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
+}
+
+/// Apply optional flake credentials to a git command.
+///
+/// Injects netrc / SSH-key environment variables when `creds` is `Some`.
+/// This is a thin pass-through so callers don't have to match on `Option`.
+fn apply_optional_creds(
+    cmd: &mut tokio::process::Command,
+    creds: Option<&FlakeCredentialEnv>,
+) {
+    if let Some(c) = creds {
+        c.apply_to_git_command(cmd);
+    }
 }
 
 fn normalize_repo_url_for_git(repo_url: &str) -> String {
@@ -378,6 +471,7 @@ async fn get_commits_with_full_metadata(
     branch: &str,
     limit: Option<usize>,
     since_commit: Option<&str>,
+    creds: Option<&FlakeCredentialEnv>,
 ) -> Result<Vec<CommitData>> {
     let git_url = normalize_repo_url_for_git(repo_url);
     let temp_dir = tempfile::tempdir().context("Failed to create temporary directory")?;
@@ -385,7 +479,8 @@ async fn get_commits_with_full_metadata(
 
     // Clone
     let depth = limit.unwrap_or(10).to_string();
-    let clone_output = tokio::process::Command::new("git")
+    let mut clone_cmd = tokio::process::Command::new("git");
+    clone_cmd
         .args(&[
             "clone",
             "--depth",
@@ -396,9 +491,9 @@ async fn get_commits_with_full_metadata(
             &git_url,
             ".",
         ])
-        .current_dir(clone_path)
-        .output()
-        .await?;
+        .current_dir(clone_path);
+    apply_optional_creds(&mut clone_cmd, creds);
+    let clone_output = clone_cmd.output().await?;
 
     if !clone_output.status.success() {
         let stderr = String::from_utf8_lossy(&clone_output.stderr);
@@ -494,7 +589,7 @@ async fn get_commits_with_timestamps(
     limit: Option<usize>,
     since_commit: Option<&str>,
 ) -> Result<Vec<(String, chrono::DateTime<chrono::Utc>)>> {
-    let commits = get_commits_with_full_metadata(repo_url, branch, limit, since_commit).await?;
+    let commits = get_commits_with_full_metadata(repo_url, branch, limit, since_commit, None).await?;
     Ok(commits.into_iter().map(|c| (c.hash, c.timestamp)).collect())
 }
 
@@ -505,11 +600,23 @@ pub async fn fetch_and_insert_commits_since(
     branch: &str,
     since_commit: &Commit,
 ) -> Result<Vec<String>> {
+    fetch_and_insert_commits_since_with_creds(pool, repo_url, branch, since_commit, None).await
+}
+
+/// Like [`fetch_and_insert_commits_since`] but accepts per-flake credentials.
+pub async fn fetch_and_insert_commits_since_with_creds(
+    pool: &PgPool,
+    repo_url: &str,
+    branch: &str,
+    since_commit: &Commit,
+    creds: Option<&FlakeCredentialEnv>,
+) -> Result<Vec<String>> {
     let commits = match get_commits_with_full_metadata(
         repo_url,
         branch,
         Some(50),
         Some(&since_commit.git_commit_hash),
+        creds,
     )
     .await
     {

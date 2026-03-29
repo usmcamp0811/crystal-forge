@@ -16,13 +16,13 @@ use chrono::{Duration, Utc};
 use uuid::Uuid;
 
 use crate::api::client::{
-    create_system, deactivate_system, fetch_flakes, fetch_system, fetch_systems,
+    create_system, deactivate_system, fetch_flakes, fetch_system, fetch_systems, update_system,
     update_system_public_key, ApiClientError,
 };
 use crate::api::models::{
     CreateSystemRequest, CveSummary, DeploymentStatus, HealthStatus, PaginatedResponse,
     PipelineStage, SystemDetail, SystemHardwareInfo, SystemNetworkInfo, SystemSecurityInfo,
-    SystemSummary, SystemsListParams, UpdateSystemPublicKeyRequest,
+    SystemSummary, SystemsListParams, UpdateSystemPublicKeyRequest, UpdateSystemRequest,
 };
 use crate::views::systems_mock::mock_system_detail_by_id;
 
@@ -163,6 +163,7 @@ pub async fn load_flake_names_with_fallback() -> FlakeNamesLoadResult {
 /// Create a new system via the backend API.
 pub async fn create_system_via_api(
     hostname: String,
+    system_configuration_name: Option<String>,
     public_key: String,
     environment: Option<String>,
     flake_name: Option<String>,
@@ -170,6 +171,7 @@ pub async fn create_system_via_api(
 ) -> Result<SystemDetail, String> {
     let request = CreateSystemRequest {
         hostname,
+        system_configuration_name,
         public_key,
         environment,
         flake_name,
@@ -177,6 +179,33 @@ pub async fn create_system_via_api(
     };
 
     match create_system(&request).await {
+        Ok(detail) => Ok(detail),
+        Err(ApiClientError::Status {
+            code: 401 | 403, ..
+        }) => Err("Authentication required. Please log in.".to_string()),
+        Err(ApiClientError::Status { body, .. }) => Err(body),
+        Err(ApiClientError::Network(msg)) => Err(format!("Network error: {}", msg)),
+        Err(ApiClientError::Deserialize(msg)) => Err(format!("Invalid response: {}", msg)),
+    }
+}
+
+pub async fn update_system_via_api(
+    system_id: Uuid,
+    hostname: String,
+    system_configuration_name: Option<String>,
+    environment: Option<String>,
+    flake_name: Option<String>,
+    deployment_policy: String,
+) -> Result<SystemDetail, String> {
+    let request = UpdateSystemRequest {
+        hostname,
+        system_configuration_name,
+        environment,
+        flake_name,
+        deployment_policy,
+    };
+
+    match update_system(&system_id, &request).await {
         Ok(detail) => Ok(detail),
         Err(ApiClientError::Status {
             code: 401 | 403, ..
@@ -233,6 +262,7 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
         SystemSummary {
             id: Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
             hostname: "atlas-01".to_string(),
+            system_configuration_name: None,
             environment: Some("production".to_string()),
             flake_id: Some(1),
             primary_ip: Some("10.0.1.10".to_string()),
@@ -252,6 +282,7 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
         SystemSummary {
             id: Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap(),
             hostname: "atlas-02".to_string(),
+            system_configuration_name: None,
             environment: Some("production".to_string()),
             flake_id: Some(1),
             primary_ip: Some("10.0.1.11".to_string()),
@@ -271,6 +302,7 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
         SystemSummary {
             id: Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap(),
             hostname: "staging-01".to_string(),
+            system_configuration_name: None,
             environment: Some("staging".to_string()),
             flake_id: Some(2),
             primary_ip: Some("10.0.2.10".to_string()),
@@ -290,6 +322,7 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
         SystemSummary {
             id: Uuid::parse_str("00000000-0000-0000-0000-000000000004").unwrap(),
             hostname: "dev-box".to_string(),
+            system_configuration_name: None,
             environment: Some("development".to_string()),
             flake_id: None,
             primary_ip: Some("10.0.3.20".to_string()),
@@ -323,6 +356,7 @@ pub fn fallback_system_detail() -> SystemDetail {
     SystemDetail {
         id: Uuid::parse_str("00000000-0000-0000-0000-000000000000").unwrap(),
         hostname: "unknown-system".to_string(),
+        system_configuration_name: None,
         environment: None,
         is_active: false,
         deployment_policy: "manual".to_string(),

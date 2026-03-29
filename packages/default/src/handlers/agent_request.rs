@@ -271,6 +271,7 @@ mod tests {
             public_key,
             flake_id: Some(1),
             derivation: "/nix/store/test-system".to_string(),
+            system_configuration_name: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
             desired_target: None,

@@ -285,6 +285,7 @@ impl FlakeBuilder {
             name: self.name.clone(),
             repo_url: self.repo_url.clone(),
             branch: self.branch.clone(),
+            build_scope: "cf_systems_only".to_string(),
             deleted_at: None,
         }
     }
@@ -546,6 +547,7 @@ impl SystemSummaryBuilder {
         SystemSummary {
             id: self.id,
             hostname: self.hostname.clone(),
+            system_configuration_name: None,
             environment: self.environment.clone(),
             flake_id: Some(1),
             health_status: self.health_status,

@@ -32,6 +32,8 @@ pub fn SystemsTable(
     on_remove: EventHandler<Uuid>,
     /// Called when user clicks update key on a system
     on_update_key: EventHandler<Uuid>,
+    /// Called when user clicks edit on a system
+    on_edit: EventHandler<Uuid>,
 ) -> Element {
     let navigator = use_navigator();
     let mut sort_column = use_signal(|| None::<SystemsSortColumn>);
@@ -194,6 +196,14 @@ pub fn SystemsTable(
                                     class: "{theme::spacing::TABLE_CELL} text-right",
                                     div {
                                         class: "flex gap-2 justify-end",
+                                        button {
+                                            class: "text-xs text-emerald-400 hover:text-emerald-300 px-2 py-1 rounded hover:bg-emerald-500/10 transition-colors",
+                                            onclick: move |evt| {
+                                                evt.stop_propagation();
+                                                on_edit.call(system.id);
+                                            },
+                                            "Edit"
+                                        }
                                         button {
                                             class: "text-xs text-blue-400 hover:text-blue-300 px-2 py-1 rounded hover:bg-blue-500/10 transition-colors",
                                             onclick: move |evt| {

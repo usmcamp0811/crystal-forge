@@ -12,6 +12,7 @@ use crate::api::models::{
     ApiError, AuditAction, CreateSystemRequest, CveSummary, DeploymentStatus, PipelineStage,
     SortOrder, SystemDetail, SystemHardwareInfo, SystemMutationResponse, SystemNetworkInfo,
     SystemRollbackRequest, SystemSecurityInfo, SystemSummary, SystemsListParams,
+    UpdateSystemRequest,
     UpdateSystemPublicKeyRequest,
 };
 use crate::auth::models::Role;
@@ -21,6 +22,7 @@ use crate::queries::systems::{
     SystemAccessRow, SystemDetailRow, SystemListRow, deactivate_system, find_system_access_row,
     get_system_detail_by_id, get_user_environment_membership_ids, list_system_access_rows,
     touch_system_updated_at, update_public_key, update_system_desired_target,
+    update_system_metadata,
 };
 use crate::services::systems::SystemsListContext;
 
@@ -135,6 +137,11 @@ pub async fn create_system(
         true, // is_active
         public_key.to_string(),
         flake_id,
+        payload
+            .system_configuration_name
+            .as_ref()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
         None, // desired_target
         payload.deployment_policy.clone(),
     )
@@ -196,6 +203,96 @@ pub async fn get_system(
     // For now, simplified - in production you'd check environment membership
 
     let detail = detail_row_to_api_model(row);
+
+    (StatusCode::OK, Json(detail)).into_response()
+}
+
+pub async fn update_system_handler(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(system_id): Path<Uuid>,
+    Json(payload): Json<UpdateSystemRequest>,
+) -> impl IntoResponse {
+    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+
+    if !caller_role.can_mutate_systems() {
+        return forbidden_mutation();
+    }
+
+    let hostname = payload.hostname.trim();
+    if hostname.is_empty() {
+        return bad_request("Hostname is required");
+    }
+    if !matches!(payload.deployment_policy.as_str(), "manual" | "auto_latest" | "pinned") {
+        return bad_request("Invalid deployment policy (must be: manual, auto_latest, or pinned)");
+    }
+
+    let environment_id = if let Some(env_name) = payload.environment.as_ref() {
+        let env_name_trimmed = env_name.trim();
+        if !env_name_trimmed.is_empty() {
+            match sqlx::query_scalar::<_, Uuid>("SELECT id FROM environments WHERE name = $1")
+                .bind(env_name_trimmed)
+                .fetch_optional(&pool)
+                .await
+            {
+                Ok(id) => id,
+                Err(_) => return internal_error("Failed to lookup environment"),
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let flake_id = if let Some(flake_name) = payload.flake_name.as_ref() {
+        let flake_name_trimmed = flake_name.trim();
+        if !flake_name_trimmed.is_empty() {
+            match sqlx::query_scalar::<_, i32>("SELECT id FROM flakes WHERE name = $1")
+                .bind(flake_name_trimmed)
+                .fetch_optional(&pool)
+                .await
+            {
+                Ok(id) => id,
+                Err(_) => return internal_error("Failed to lookup flake"),
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    if update_system_metadata(
+        &pool,
+        system_id,
+        hostname,
+        environment_id,
+        flake_id,
+        payload
+            .system_configuration_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        &payload.deployment_policy,
+    )
+    .await
+    .is_err()
+    {
+        return internal_error("Failed to update system");
+    }
+
+    let detail = match get_system_detail_by_id(&pool, system_id).await {
+        Ok(Some(row)) => detail_row_to_api_model(row),
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load updated system"),
+    };
 
     (StatusCode::OK, Json(detail)).into_response()
 }
@@ -540,6 +637,7 @@ fn detail_row_to_api_model(row: SystemDetailRow) -> SystemDetail {
     SystemDetail {
         id: row.id,
         hostname: row.hostname,
+        system_configuration_name: row.system_configuration_name,
         environment: row.environment,
         is_active: row.is_active,
         deployment_policy: row.deployment_policy,

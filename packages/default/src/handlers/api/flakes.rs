@@ -11,26 +11,30 @@ use std::hash::{Hash, Hasher};
 use tracing::{error, info, warn};
 
 use crate::api::models::{
-    ApiError, CommitDiffResponse, CreateFlakeRequest, FlakeRegistryItem, FlakeTimeline,
+    ApiError, CommitDiffResponse, CreateFlakeCredentialRequest, CreateFlakeRequest,
+    FlakeCredentialSummary, FlakeRegistryItem, FlakeTimeline, UpdateFlakeCredentialRequest,
     UpdateFlakeRequest,
 };
-use crate::auth::extractors::{AuthenticatedUser, RequireAdmin, RequireOperator};
+use crate::auth::extractors::{AuthenticatedUser, RequireAdmin, RequireAuth, RequireOperator};
 use crate::config::CrystalForgeConfig;
 use crate::flake::commits::{
     GitCommitMetadata, branch_exists, get_commit_changed_files, get_commit_diff,
     get_commit_metadata, get_commit_nixos_configurations, infer_default_branch,
     is_history_rewrite_error,
-    sync_commits_for_repo,
 };
 use crate::handlers::agent_request::CFState;
 use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_above};
 use crate::queries::admin::insert_admin_audit_event;
 use crate::queries::commits::insert_commit_with_metadata;
+use crate::flake::commits::sync_commits_for_flake;
 use crate::queries::flakes::{
     cascade_delete_flake, check_flake_dependencies, count_systems_for_flake, delete_flake_by_id,
     fetch_dashboard_flake_timelines, fetch_flake_timelines, get_flake_by_id, get_flake_by_name,
     insert_flake, list_flake_registry, purge_flake_commit_history, soft_delete_flake,
     update_flake,
+};
+use crate::queries::flake_credentials::{
+    delete_flake_credential, get_flake_credential, update_flake_credential, upsert_flake_credential,
 };
 use crate::queries::users::get_by_email;
 
@@ -532,7 +536,12 @@ pub async fn create_flake(
         }
     }
 
-    match insert_flake(&pool, name, repo_url, &branch).await {
+    let build_scope = match normalize_build_scope(payload.build_scope.as_deref()) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+
+    match insert_flake(&pool, name, repo_url, &branch, build_scope).await {
         Ok(flake) => (
             StatusCode::CREATED,
             Json(FlakeRegistryItem {
@@ -540,6 +549,7 @@ pub async fn create_flake(
                 name: flake.name,
                 repo_url: flake.repo_url,
                 branch: flake.branch,
+                build_scope: flake.build_scope,
                 system_count: 0,
             }),
         )
@@ -598,7 +608,12 @@ pub async fn update_flake_handler(
         }
     };
 
-    match update_flake(&pool, flake_id, name, repo_url, &branch).await {
+    let build_scope = match normalize_build_scope(payload.build_scope.as_deref()) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+
+    match update_flake(&pool, flake_id, name, repo_url, &branch, build_scope).await {
         Ok(flake) => (
             StatusCode::OK,
             Json(FlakeRegistryItem {
@@ -606,6 +621,7 @@ pub async fn update_flake_handler(
                 name: flake.name,
                 repo_url: flake.repo_url,
                 branch: flake.branch,
+                build_scope: flake.build_scope,
                 system_count: count_systems_for_flake(&pool, flake_id).await.unwrap_or(0),
             }),
         )
@@ -652,6 +668,202 @@ pub async fn update_flake_handler(
             )
                 .into_response()
         }
+    }
+}
+
+pub async fn get_flake_credentials(
+    RequireAuth(_user): RequireAuth,
+    State(pool): State<PgPool>,
+    Path(flake_id): Path<i32>,
+) -> impl IntoResponse {
+    if get_flake_by_id(&pool, flake_id).await.is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(ApiError {
+                error: "not_found".to_string(),
+                message: "Flake not found".to_string(),
+                details: None,
+            }),
+        )
+            .into_response();
+    }
+
+    match get_flake_credential(&pool, flake_id).await {
+        Ok(Some(credential)) => (StatusCode::OK, Json(summarize_flake_credential(&credential))).into_response(),
+        Ok(None) => (StatusCode::OK, Json(FlakeCredentialSummary {
+            flake_id,
+            auth_type: "none".to_string(),
+            username: None,
+            ssh_username: None,
+            has_secret: false,
+        }))
+            .into_response(),
+        Err(err) => {
+            error!("Failed to load flake credentials for {flake_id}: {err:#}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    error: "internal_error".to_string(),
+                    message: "Failed to load flake credentials".to_string(),
+                    details: None,
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+pub async fn put_flake_credentials(
+    RequireOperator(_user): RequireOperator,
+    State(pool): State<PgPool>,
+    Path(flake_id): Path<i32>,
+    Json(payload): Json<CreateFlakeCredentialRequest>,
+) -> impl IntoResponse {
+    if get_flake_by_id(&pool, flake_id).await.is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(ApiError {
+                error: "not_found".to_string(),
+                message: "Flake not found".to_string(),
+                details: None,
+            }),
+        )
+            .into_response();
+    }
+
+    let create = crate::models::flake_credentials::CreateFlakeCredential {
+        auth_type: payload.auth_type,
+        username: payload.username,
+        secret: payload.secret,
+        ssh_username: payload.ssh_username,
+    };
+
+    match upsert_flake_credential(&pool, flake_id, &create).await {
+        Ok(credential) => (StatusCode::OK, Json(summarize_flake_credential(&credential))).into_response(),
+        Err(err) => {
+            let message = err.to_string();
+            let status = if message.contains("require") || message.contains("invalid") {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+
+            (
+                status,
+                Json(ApiError {
+                    error: if status == StatusCode::BAD_REQUEST {
+                        "validation_error".to_string()
+                    } else {
+                        "internal_error".to_string()
+                    },
+                    message: if status == StatusCode::BAD_REQUEST {
+                        message
+                    } else {
+                        "Failed to save flake credentials".to_string()
+                    },
+                    details: None,
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+pub async fn patch_flake_credentials(
+    RequireOperator(_user): RequireOperator,
+    State(pool): State<PgPool>,
+    Path(flake_id): Path<i32>,
+    Json(payload): Json<UpdateFlakeCredentialRequest>,
+) -> impl IntoResponse {
+    let update = crate::models::flake_credentials::UpdateFlakeCredential {
+        auth_type: payload.auth_type,
+        username: payload.username,
+        secret: payload.secret,
+        ssh_username: payload.ssh_username,
+    };
+
+    match update_flake_credential(&pool, flake_id, &update).await {
+        Ok(Some(credential)) => (StatusCode::OK, Json(summarize_flake_credential(&credential))).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(ApiError {
+                error: "not_found".to_string(),
+                message: "Flake credentials not found".to_string(),
+                details: None,
+            }),
+        )
+            .into_response(),
+        Err(err) => {
+            let message = err.to_string();
+            let status = if message.contains("require") || message.contains("invalid") {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (
+                status,
+                Json(ApiError {
+                    error: if status == StatusCode::BAD_REQUEST {
+                        "validation_error".to_string()
+                    } else {
+                        "internal_error".to_string()
+                    },
+                    message: if status == StatusCode::BAD_REQUEST {
+                        message
+                    } else {
+                        "Failed to update flake credentials".to_string()
+                    },
+                    details: None,
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+pub async fn delete_flake_credentials_handler(
+    RequireOperator(_user): RequireOperator,
+    State(pool): State<PgPool>,
+    Path(flake_id): Path<i32>,
+) -> impl IntoResponse {
+    match delete_flake_credential(&pool, flake_id).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(ApiError {
+                error: "not_found".to_string(),
+                message: "Flake credentials not found".to_string(),
+                details: None,
+            }),
+        )
+            .into_response(),
+        Err(err) => {
+            error!("Failed to delete flake credentials for {flake_id}: {err:#}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    error: "internal_error".to_string(),
+                    message: "Failed to delete flake credentials".to_string(),
+                    details: None,
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+fn summarize_flake_credential(
+    credential: &crate::models::flake_credentials::FlakeCredential,
+) -> FlakeCredentialSummary {
+    FlakeCredentialSummary {
+        flake_id: credential.flake_id,
+        auth_type: credential.auth_type.clone(),
+        username: credential.username.clone(),
+        ssh_username: credential.ssh_username.clone(),
+        has_secret: credential
+            .secret_encrypted
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty()),
     }
 }
 
@@ -1082,7 +1294,7 @@ pub async fn accept_flake_history_rewrite(
         }
     };
 
-    let inserted = match sync_commits_for_repo(&pool, &flake.repo_url, &flake.branch).await {
+    let inserted = match sync_commits_for_flake(&pool, &flake.repo_url, &flake.branch, flake.id).await {
         Ok(inserted) => inserted,
         Err(e) => {
             error!(
@@ -1195,7 +1407,7 @@ pub async fn sync_all_flakes_handler(
     let mut inserted = 0usize;
     let mut failed = Vec::new();
     for flake in flakes {
-        match sync_commits_for_repo(&pool, &flake.repo_url, &flake.branch).await {
+        match sync_commits_for_flake(&pool, &flake.repo_url, &flake.branch, flake.id).await {
             Ok(new_commits) => {
                 synced += 1;
                 inserted += new_commits;
@@ -1305,7 +1517,7 @@ pub async fn sync_flake_handler(
         };
     }
 
-    match sync_commits_for_repo(&pool, &flake.repo_url, &flake.branch).await {
+    match sync_commits_for_flake(&pool, &flake.repo_url, &flake.branch, flake.id).await {
         Ok(new_commits) => {
             if new_commits > 0 {
                 state.queue_notifier.notify_eval_queue();
@@ -1450,6 +1662,12 @@ fn validate_create_payload(payload: &CreateFlakeRequest) -> Result<(), String> {
     if !looks_like_repo_url(repo_url) {
         return Err("Repository URL must look like a git remote".to_string());
     }
+    if let Some(build_scope) = payload.build_scope.as_deref() {
+        let build_scope = build_scope.trim();
+        if !build_scope.is_empty() && !matches!(build_scope, "all_configs" | "cf_systems_only") {
+            return Err("Build scope must be all_configs or cf_systems_only".to_string());
+        }
+    }
 
     Ok(())
 }
@@ -1459,8 +1677,26 @@ fn validate_update_payload(payload: &UpdateFlakeRequest) -> Result<(), String> {
         name: payload.name.clone(),
         repo_url: payload.repo_url.clone(),
         branch: payload.branch.clone(),
+        build_scope: payload.build_scope.clone(),
     };
     validate_create_payload(&create_payload)
+}
+
+fn normalize_build_scope(value: Option<&str>) -> Result<&str, axum::response::Response> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        Some("all_configs") => Ok("all_configs"),
+        Some("cf_systems_only") => Ok("cf_systems_only"),
+        Some(_) => Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "validation_error".to_string(),
+                message: "Build scope must be all_configs or cf_systems_only".to_string(),
+                details: None,
+            }),
+        )
+            .into_response()),
+        None => Ok("cf_systems_only"),
+    }
 }
 
 async fn resolve_requested_branch(
@@ -1518,6 +1754,7 @@ mod tests {
             name: "   ".to_string(),
             repo_url: "https://github.com/org/repo".to_string(),
             branch: None,
+            build_scope: None,
         };
         let err = validate_create_payload(&payload).unwrap_err();
         assert!(err.contains("name"));
@@ -1529,6 +1766,7 @@ mod tests {
             name: "prod-core".to_string(),
             repo_url: "   ".to_string(),
             branch: None,
+            build_scope: None,
         };
         let err = validate_create_payload(&payload).unwrap_err();
         assert!(err.contains("URL"));
@@ -1540,6 +1778,7 @@ mod tests {
             name: "prod-core".to_string(),
             repo_url: "repo-no-scheme".to_string(),
             branch: None,
+            build_scope: None,
         };
         let err = validate_create_payload(&payload).unwrap_err();
         assert!(err.contains("git remote"));
@@ -1551,6 +1790,7 @@ mod tests {
             name: "prod-core".to_string(),
             repo_url: "git@github.com:org/repo.git".to_string(),
             branch: None,
+            build_scope: None,
         };
         assert!(validate_create_payload(&payload).is_ok());
     }
@@ -1594,7 +1834,13 @@ mod tests {
         use sqlx::PgPool;
 
         async fn setup_test_flake(pool: &PgPool) -> Flake {
-            insert_flake(pool, "test-flake", "https://github.com/test/repo", "main")
+            insert_flake(
+                pool,
+                "test-flake",
+                "https://github.com/test/repo",
+                "main",
+                "cf_systems_only",
+            )
                 .await
                 .expect("Failed to create test flake")
         }
@@ -1681,7 +1927,13 @@ mod tests {
             soft_delete_flake(&pool, flake.id).await.unwrap();
 
             // Re-insert same repo_url
-            let resurrected = insert_flake(&pool, "test-flake-restored", &repo_url, "main")
+            let resurrected = insert_flake(
+                &pool,
+                "test-flake-restored",
+                &repo_url,
+                "main",
+                "cf_systems_only",
+            )
                 .await
                 .expect("Re-insert should succeed");
 

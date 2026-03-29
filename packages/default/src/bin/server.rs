@@ -170,7 +170,10 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/systems",
             get(systems::list_systems).post(systems::create_system),
         )
-        .route("/api/v1/systems/:id", get(systems::get_system))
+        .route(
+            "/api/v1/systems/:id",
+            get(systems::get_system).patch(systems::update_system_handler),
+        )
         .route("/api/v1/systems/:id/sync", post(systems::sync_system))
         .route(
             "/api/v1/systems/:id/rollback",
@@ -224,6 +227,13 @@ async fn main() -> anyhow::Result<()> {
             patch(flakes::update_flake_handler).delete(flakes::delete_flake),
         )
         .route("/api/v1/flakes/:id/sync", post(flakes::sync_flake_handler))
+        .route(
+            "/api/v1/flakes/:id/credentials",
+            get(flakes::get_flake_credentials)
+                .put(flakes::put_flake_credentials)
+                .patch(flakes::patch_flake_credentials)
+                .delete(flakes::delete_flake_credentials_handler),
+        )
         .route("/api/v1/flakes/:id/refresh", post(flakes::refresh_flake))
         .route(
             "/api/v1/flakes/:id/accept-rewrite",

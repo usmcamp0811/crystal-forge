@@ -10,14 +10,16 @@ pub async fn insert_flake(
     name: &str,
     repo_url: &str,
     branch: &str,
+    build_scope: &str,
 ) -> Result<Flake> {
     let flake = sqlx::query_as::<_, Flake>(
         "
-        INSERT INTO flakes (name, repo_url, branch)
-        VALUES ($1, $2, $3)
+        INSERT INTO flakes (name, repo_url, branch, build_scope)
+        VALUES ($1, $2, $3, $4)
         ON CONFLICT (repo_url) DO UPDATE SET 
             name = EXCLUDED.name, 
             branch = EXCLUDED.branch,
+            build_scope = EXCLUDED.build_scope,
             deleted_at = NULL
         RETURNING *
         ",
@@ -25,6 +27,7 @@ pub async fn insert_flake(
     .bind(name)
     .bind(repo_url)
     .bind(branch)
+    .bind(build_scope)
     .fetch_one(pool)
     .await?;
 
@@ -57,20 +60,23 @@ pub async fn update_flake(
     name: &str,
     repo_url: &str,
     branch: &str,
+    build_scope: &str,
 ) -> Result<Flake> {
     let flake = sqlx::query_as::<_, Flake>(
         r#"
         UPDATE flakes
         SET name = $1,
             repo_url = $2,
-            branch = $3
-        WHERE id = $4 AND deleted_at IS NULL
+            branch = $3,
+            build_scope = $4
+        WHERE id = $5 AND deleted_at IS NULL
         RETURNING *
         "#,
     )
     .bind(name)
     .bind(repo_url)
     .bind(branch)
+    .bind(build_scope)
     .bind(flake_id)
     .fetch_one(pool)
     .await?;
@@ -93,25 +99,38 @@ pub async fn get_all_flakes_from_db(
     pool: &PgPool,
     config: &FlakeConfig,
 ) -> Result<Vec<WatchedFlake>> {
-    let rows = sqlx::query!("SELECT name, repo_url, branch FROM flakes WHERE deleted_at IS NULL")
-        .fetch_all(pool)
-        .await?;
+    let (flakes, _ids) = get_all_flakes_from_db_with_ids(pool, config).await?;
+    Ok(flakes)
+}
 
-    Ok(rows
-        .into_iter()
-        .map(|row| {
-            // Look for matching config flake to get the proper initial_commit_depth
-            let config_flake = config.watched.iter().find(|f| f.repo_url == row.repo_url);
+/// Returns both the `WatchedFlake` list and a parallel vec of database flake IDs.
+pub async fn get_all_flakes_from_db_with_ids(
+    pool: &PgPool,
+    config: &FlakeConfig,
+) -> Result<(Vec<WatchedFlake>, Vec<Option<i32>>)> {
+    // Use query_as so we don't require an updated sqlx offline cache.
+    let rows = sqlx::query_as::<_, (i32, String, String, String)>(
+        "SELECT id, name, repo_url, branch FROM flakes WHERE deleted_at IS NULL",
+    )
+    .fetch_all(pool)
+    .await?;
 
-            WatchedFlake {
-                name: row.name,
-                repo_url: row.repo_url,
-                branch: Some(row.branch),
-                auto_poll: true,
-                initial_commit_depth: config_flake.map(|f| f.initial_commit_depth).unwrap_or(5), // fallback to 5 for database-only flakes
-            }
-        })
-        .collect())
+    let mut flakes = Vec::with_capacity(rows.len());
+    let mut ids: Vec<Option<i32>> = Vec::with_capacity(rows.len());
+
+    for (id, name, repo_url, branch) in rows {
+        let config_flake = config.watched.iter().find(|f| f.repo_url == repo_url);
+        flakes.push(WatchedFlake {
+            name,
+            repo_url,
+            branch: Some(branch),
+            auto_poll: true,
+            initial_commit_depth: config_flake.map(|f| f.initial_commit_depth).unwrap_or(5),
+        });
+        ids.push(Some(id));
+    }
+
+    Ok((flakes, ids))
 }
 
 pub async fn find_flake_by_repo_urls(
@@ -119,10 +138,9 @@ pub async fn find_flake_by_repo_urls(
     possible_urls: &[String],
     preferred_url: &str,
 ) -> Result<Option<crate::models::flakes::Flake>> {
-    sqlx::query_as!(
-        crate::models::flakes::Flake,
+    sqlx::query_as::<_, crate::models::flakes::Flake>(
         r#"
-        SELECT id, name, repo_url, branch, deleted_at
+        SELECT id, name, repo_url, branch, build_scope, deleted_at
         FROM flakes 
         WHERE repo_url = ANY($1) AND deleted_at IS NULL
         ORDER BY 
@@ -132,27 +150,28 @@ pub async fn find_flake_by_repo_urls(
             END
         LIMIT 1
         "#,
-        possible_urls,
-        preferred_url
     )
+    .bind(possible_urls)
+    .bind(preferred_url)
     .fetch_optional(pool)
     .await
     .context("Failed to find flake by repo URLs")
 }
 
 pub async fn list_flake_registry(pool: &PgPool) -> Result<Vec<FlakeRegistryItem>> {
-    let rows = sqlx::query_as::<_, (i32, String, String, String, i64)>(
+    let rows = sqlx::query_as::<_, (i32, String, String, String, String, i64)>(
         r#"
         SELECT
             f.id,
             f.name,
             f.repo_url,
             f.branch,
+            f.build_scope,
             COUNT(s.id)::bigint AS system_count
         FROM flakes f
         LEFT JOIN systems s ON s.flake_id = f.id
         WHERE f.deleted_at IS NULL
-        GROUP BY f.id, f.name, f.repo_url, f.branch
+        GROUP BY f.id, f.name, f.repo_url, f.branch, f.build_scope
         ORDER BY lower(f.name) ASC
         "#,
     )
@@ -162,11 +181,12 @@ pub async fn list_flake_registry(pool: &PgPool) -> Result<Vec<FlakeRegistryItem>
     Ok(rows
         .into_iter()
         .map(
-            |(id, name, repo_url, branch, system_count)| FlakeRegistryItem {
+            |(id, name, repo_url, branch, build_scope, system_count)| FlakeRegistryItem {
                 id,
                 name,
                 repo_url,
                 branch,
+                build_scope,
                 system_count,
             },
         )

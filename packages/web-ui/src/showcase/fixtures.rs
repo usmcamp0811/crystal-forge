@@ -288,6 +288,7 @@ pub fn system_summary_fixtures() -> Vec<SystemSummary> {
         SystemSummary {
             id: mock_uuid(1),
             hostname: "web-server-1".to_string(),
+            system_configuration_name: None,
             environment: Some("production".to_string()),
             flake_id: Some(1),
             primary_ip: Some("192.168.1.10".to_string()),
@@ -308,6 +309,7 @@ pub fn system_summary_fixtures() -> Vec<SystemSummary> {
         SystemSummary {
             id: mock_uuid(2),
             hostname: "staging-app".to_string(),
+            system_configuration_name: None,
             environment: Some("staging".to_string()),
             flake_id: Some(1),
             primary_ip: Some("192.168.2.20".to_string()),
@@ -328,6 +330,7 @@ pub fn system_summary_fixtures() -> Vec<SystemSummary> {
         SystemSummary {
             id: mock_uuid(3),
             hostname: "dev-machine".to_string(),
+            system_configuration_name: None,
             environment: Some("development".to_string()),
             flake_id: Some(2),
             primary_ip: Some("10.0.0.50".to_string()),
@@ -348,6 +351,7 @@ pub fn system_summary_fixtures() -> Vec<SystemSummary> {
         SystemSummary {
             id: mock_uuid(4),
             hostname: "legacy-server".to_string(),
+            system_configuration_name: None,
             environment: None,
             flake_id: None,
             primary_ip: None,
@@ -368,6 +372,7 @@ pub fn system_summary_fixtures() -> Vec<SystemSummary> {
         SystemSummary {
             id: mock_uuid(5),
             hostname: "production-worker-node-with-very-long-hostname-01".to_string(),
+            system_configuration_name: None,
             environment: Some("production".to_string()),
             flake_id: Some(1),
             primary_ip: Some("172.16.100.200".to_string()),
@@ -388,6 +393,7 @@ pub fn system_summary_fixtures() -> Vec<SystemSummary> {
         SystemSummary {
             id: mock_uuid(6),
             hostname: "db-primary".to_string(),
+            system_configuration_name: None,
             environment: Some("production".to_string()),
             flake_id: Some(1),
             primary_ip: Some("192.168.1.20".to_string()),
