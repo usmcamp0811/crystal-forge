@@ -1,10 +1,10 @@
 ---
 id: TASK-221
 title: Add flake credential management and convert system add/edit to modal UI
-status: Review
+status: In Progress
 assignee: []
 created_date: '2026-03-28 22:14'
-updated_date: '2026-03-29 13:14'
+updated_date: '2026-03-29 19:03'
 labels:
   - backend
   - frontend
@@ -218,6 +218,10 @@ LOCK: agent-claude on gray in ~/code/crystal-forge/TASK-221-flake-credentials-mo
 MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/194
 
 Reviewer feedback addressed in second commit da15a560: (1) update_system_handler now returns 400 for unknown env/flake name instead of silently NULLing; (2) get_system_detail_by_id fixed to join systems table for system_configuration_name; (3) 13 DB-backed integration tests added and all pass; (4) cargo sqlx prepare re-run; (5) AddFlakeForm converted to modal; (6) EditFlakeDialog widened; (7) Generate button themed; (8) config-name placeholder mirrors hostname.
+
+LOCK takeover approved by maintainer: opencode-gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-221-flake-credentials-modal-ui
+
+Emergency follow-up: investigate and patch `/flakes` tab crash reproducible on TASK-221 branch (dev does not reproduce).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
