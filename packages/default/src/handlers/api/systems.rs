@@ -233,6 +233,8 @@ pub async fn update_system_handler(
         return bad_request("Invalid deployment policy (must be: manual, auto_latest, or pinned)");
     }
 
+    // Resolve environment name → id.
+    // A non-empty name that does not match any environment is a 400, not a silent NULL.
     let environment_id = if let Some(env_name) = payload.environment.as_ref() {
         let env_name_trimmed = env_name.trim();
         if !env_name_trimmed.is_empty() {
@@ -241,7 +243,13 @@ pub async fn update_system_handler(
                 .fetch_optional(&pool)
                 .await
             {
-                Ok(id) => id,
+                Ok(Some(id)) => Some(id),
+                Ok(None) => {
+                    return bad_request(&format!(
+                        "Environment '{}' not found",
+                        env_name_trimmed
+                    ));
+                }
                 Err(_) => return internal_error("Failed to lookup environment"),
             }
         } else {
@@ -251,15 +259,25 @@ pub async fn update_system_handler(
         None
     };
 
+    // Resolve flake name → id.
+    // A non-empty name that does not match any registered flake is a 400, not a silent NULL.
     let flake_id = if let Some(flake_name) = payload.flake_name.as_ref() {
         let flake_name_trimmed = flake_name.trim();
         if !flake_name_trimmed.is_empty() {
-            match sqlx::query_scalar::<_, i32>("SELECT id FROM flakes WHERE name = $1")
-                .bind(flake_name_trimmed)
-                .fetch_optional(&pool)
-                .await
+            match sqlx::query_scalar::<_, i32>(
+                "SELECT id FROM flakes WHERE name = $1 AND deleted_at IS NULL",
+            )
+            .bind(flake_name_trimmed)
+            .fetch_optional(&pool)
+            .await
             {
-                Ok(id) => id,
+                Ok(Some(id)) => Some(id),
+                Ok(None) => {
+                    return bad_request(&format!(
+                        "Flake '{}' not found",
+                        flake_name_trimmed
+                    ));
+                }
                 Err(_) => return internal_error("Failed to lookup flake"),
             }
         } else {

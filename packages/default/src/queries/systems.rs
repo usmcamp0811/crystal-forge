@@ -305,11 +305,15 @@ pub async fn get_system_detail_by_id(
     pool: &PgPool,
     system_id: Uuid,
 ) -> Result<Option<SystemDetailRow>> {
-    let row =
-        sqlx::query_as::<_, SystemDetailRow>("SELECT * FROM view_system_detail WHERE id = $1")
-            .bind(system_id)
-            .fetch_optional(pool)
-            .await?;
+    let row = sqlx::query_as::<_, SystemDetailRow>(
+        "SELECT vsd.*, s.system_configuration_name
+         FROM view_system_detail vsd
+         JOIN systems s ON s.id = vsd.id
+         WHERE vsd.id = $1",
+    )
+    .bind(system_id)
+    .fetch_optional(pool)
+    .await?;
     Ok(row)
 }
 

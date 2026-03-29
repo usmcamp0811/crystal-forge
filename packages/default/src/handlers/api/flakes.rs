@@ -2091,3 +2091,425 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod task_221_integration_tests {
+    //! DB-backed integration tests for TASK-221.
+    //!
+    //! These tests require a live PostgreSQL connection and are run with:
+    //!   cargo test -p crystal-forge --lib task_221 -- --ignored
+
+    use crate::models::systems::System;
+    use crate::queries::flake_credentials::{
+        delete_flake_credential, get_flake_credential, upsert_flake_credential,
+    };
+    use crate::models::flake_credentials::CreateFlakeCredential;
+    use crate::queries::flakes::insert_flake;
+    use crate::queries::systems::insert_system;
+    use crate::models::evaluate_with_policies::{
+        load_allowed_systems_for_test, should_skip_system_for_test,
+    };
+    use sqlx::PgPool;
+
+    // ── helpers ──────────────────────────────────────────────────────────────
+
+    async fn make_flake(
+        pool: &PgPool,
+        name: &str,
+        build_scope: &str,
+    ) -> crate::models::flakes::Flake {
+        insert_flake(
+            pool,
+            name,
+            &format!("https://github.com/test/{name}"),
+            "main",
+            build_scope,
+        )
+        .await
+        .expect("insert_flake failed")
+    }
+
+    async fn make_system(
+        pool: &PgPool,
+        hostname: &str,
+        flake_id: Option<i32>,
+        config_name: Option<&str>,
+    ) -> System {
+        // Use a deterministic ed25519 key for test systems (same approach as security_regression.rs)
+        use ed25519_dalek::SigningKey;
+        let key = SigningKey::from_bytes(&[42u8; 32]);
+        let verifying = key.verifying_key();
+        let system = System {
+            id: uuid::Uuid::new_v4(),
+            hostname: hostname.to_string(),
+            environment_id: None,
+            is_active: true,
+            public_key: crate::models::public_key::PublicKey::from_verifying_key(verifying),
+            flake_id,
+            derivation: String::new(),
+            system_configuration_name: config_name.map(str::to_string),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            desired_target: None,
+            deployment_policy: "manual".to_string(),
+        };
+        insert_system(pool, &system).await.expect("insert_system failed")
+    }
+
+    // ── flake credentials ────────────────────────────────────────────────────
+
+    async fn get_test_pool() -> PgPool {
+        let db_url = std::env::var("DATABASE_URL")
+            .expect("DATABASE_URL must be set for TASK-221 integration tests");
+        sqlx::PgPool::connect(&db_url)
+            .await
+            .expect("Failed to connect to test DB")
+    }
+
+    /// Set a deterministic test encryption key so credential tests don't require
+    /// a real secret in the environment.  Must be called at the start of any test
+    /// that exercises credential encryption/decryption.
+    fn set_test_encryption_key() {
+        // 64 hex chars = 32-byte AES-256 key — valid for the cache_secrets implementation.
+        // SAFETY: single-threaded test context; no concurrent env reads
+        unsafe {
+            std::env::set_var(
+                "CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY",
+                "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_pat_credential_round_trips_encrypted() {
+        set_test_encryption_key();
+        let pool = get_test_pool().await;
+        let flake = make_flake(&pool, "test-cred-pat", "cf_systems_only").await;
+
+        let create = CreateFlakeCredential {
+            auth_type: "pat".to_string(),
+            username: Some("oauth2".to_string()),
+            secret: Some("glpat-supersecret1234".to_string()),
+            ssh_username: None,
+        };
+
+        let stored = upsert_flake_credential(&pool, flake.id, &create)
+            .await
+            .expect("upsert_flake_credential failed");
+
+        // secret is returned decrypted via the query helper
+        assert_eq!(stored.auth_type, "pat");
+        assert_eq!(stored.username.as_deref(), Some("oauth2"));
+        assert_eq!(stored.secret_encrypted.as_deref(), Some("glpat-supersecret1234"));
+
+        // verify it is actually stored encrypted in the DB (not plaintext)
+        let raw = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT secret_encrypted FROM flake_credentials WHERE flake_id = $1",
+        )
+        .bind(flake.id)
+        .fetch_one(&pool)
+        .await
+        .expect("DB fetch failed");
+
+        let raw_secret = raw.expect("secret should be stored");
+        assert_ne!(
+            raw_secret, "glpat-supersecret1234",
+            "Secret must be encrypted at rest, not stored as plaintext"
+        );
+
+        // re-read via query helper and confirm decryption
+        let fetched = get_flake_credential(&pool, flake.id)
+            .await
+            .expect("get_flake_credential failed")
+            .expect("credential should exist");
+        assert_eq!(fetched.secret_encrypted.as_deref(), Some("glpat-supersecret1234"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_ssh_credential_round_trips_encrypted() {
+        set_test_encryption_key();
+        let pool = get_test_pool().await;
+        let flake = make_flake(&pool, "test-cred-ssh", "cf_systems_only").await;
+
+        let fake_key = "-----BEGIN OPENSSH PRIVATE KEY-----\nfake-key-data\n-----END OPENSSH PRIVATE KEY-----";
+        let create = CreateFlakeCredential {
+            auth_type: "ssh_key".to_string(),
+            username: None,
+            secret: Some(fake_key.to_string()),
+            ssh_username: Some("git".to_string()),
+        };
+
+        let stored = upsert_flake_credential(&pool, flake.id, &create)
+            .await
+            .expect("upsert failed");
+
+        assert_eq!(stored.auth_type, "ssh_key");
+        assert_eq!(stored.ssh_username.as_deref(), Some("git"));
+        assert_eq!(stored.secret_encrypted.as_deref(), Some(fake_key));
+
+        // verify encrypted at rest
+        let raw: Option<String> = sqlx::query_scalar(
+            "SELECT secret_encrypted FROM flake_credentials WHERE flake_id = $1",
+        )
+        .bind(flake.id)
+        .fetch_one(&pool)
+        .await
+        .expect("DB fetch failed");
+        assert_ne!(raw.unwrap(), fake_key, "SSH key must be encrypted at rest");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_delete_credential_removes_record() {
+        set_test_encryption_key();
+        let pool = get_test_pool().await;
+        let flake = make_flake(&pool, "test-cred-delete", "cf_systems_only").await;
+
+        let create = CreateFlakeCredential {
+            auth_type: "pat".to_string(),
+            username: None,
+            secret: Some("tok".to_string()),
+            ssh_username: None,
+        };
+        upsert_flake_credential(&pool, flake.id, &create).await.unwrap();
+
+        let deleted = delete_flake_credential(&pool, flake.id).await.unwrap();
+        assert!(deleted, "delete should return true for existing record");
+
+        let fetched = get_flake_credential(&pool, flake.id).await.unwrap();
+        assert!(fetched.is_none(), "credential should be gone after delete");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_pat_validation_rejects_missing_secret() {
+        set_test_encryption_key();
+        let pool = get_test_pool().await;
+        let flake = make_flake(&pool, "test-cred-pat-invalid", "cf_systems_only").await;
+
+        let create = CreateFlakeCredential {
+            auth_type: "pat".to_string(),
+            username: None,
+            secret: None, // missing — should fail validation
+            ssh_username: None,
+        };
+        let result = upsert_flake_credential(&pool, flake.id, &create).await;
+        assert!(result.is_err(), "PAT credential without secret must fail validation");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("require"), "Error should mention requirement: {msg}");
+    }
+
+    // ── build_scope filtering ────────────────────────────────────────────────
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_build_scope_cf_systems_only_filters_to_mapped_configs() {
+        let pool = get_test_pool().await;
+        let flake = make_flake(&pool, "test-scope-cf", "cf_systems_only").await;
+        // Two systems mapped to this flake
+        make_system(&pool, "sys-alpha", Some(flake.id), Some("nixos-config-alpha")).await;
+        make_system(&pool, "sys-beta", Some(flake.id), None).await; // config_name = hostname
+
+        let allowed = load_allowed_systems_for_test(&pool, &flake, "all")
+            .await
+            .expect("load_allowed_systems failed");
+
+        let allowed = allowed.expect("should produce a restriction list for cf_systems_only");
+        assert!(allowed.contains(&"nixos-config-alpha".to_string()), "custom config name expected");
+        assert!(allowed.contains(&"sys-beta".to_string()), "hostname fallback expected");
+        assert!(!allowed.contains(&"not-in-cf".to_string()), "unlisted system must be absent");
+
+        // should_skip for an unknown config name
+        assert!(
+            should_skip_system_for_test(&Some(allowed.clone()), "not-in-cf"),
+            "unknown config should be skipped"
+        );
+        // should NOT skip for a known config name
+        assert!(
+            !should_skip_system_for_test(&Some(allowed), "nixos-config-alpha"),
+            "known config must not be skipped"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_build_scope_all_configs_produces_no_filter() {
+        let pool = get_test_pool().await;
+        let flake = make_flake(&pool, "test-scope-all", "all_configs").await;
+        make_system(&pool, "sys-gamma", Some(flake.id), None).await;
+
+        let allowed = load_allowed_systems_for_test(&pool, &flake, "all")
+            .await
+            .expect("load_allowed_systems failed");
+
+        assert!(allowed.is_none(), "all_configs scope must not restrict evaluation");
+    }
+
+    // ── system_configuration_name and update endpoint ────────────────────────
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_system_configuration_name_falls_back_to_hostname() {
+        let pool = get_test_pool().await;
+        let flake = make_flake(&pool, "test-sysconfig-fallback", "cf_systems_only").await;
+        let system = make_system(&pool, "host-fallback", Some(flake.id), None).await;
+        assert_eq!(
+            system.configuration_name(), "host-fallback",
+            "configuration_name() must fall back to hostname when column is NULL"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_system_configuration_name_used_when_set() {
+        let pool = get_test_pool().await;
+        let flake = make_flake(&pool, "test-sysconfig-explicit", "cf_systems_only").await;
+        let system = make_system(&pool, "host-explicit", Some(flake.id), Some("custom-nixos-config")).await;
+        assert_eq!(
+            system.configuration_name(), "custom-nixos-config",
+            "configuration_name() must return the explicit config name"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_update_system_metadata_persists_config_name() {
+        let pool = get_test_pool().await;
+        use crate::queries::systems::{get_system_detail_by_id, update_system_metadata};
+        let flake = make_flake(&pool, "test-sysmeta", "cf_systems_only").await;
+        let system = make_system(&pool, "host-meta", Some(flake.id), None).await;
+
+        update_system_metadata(
+            &pool,
+            system.id,
+            "host-meta",
+            None,
+            Some(flake.id),
+            Some("new-config-name"),
+            "manual",
+        )
+        .await
+        .expect("update_system_metadata failed");
+
+        let detail = get_system_detail_by_id(&pool, system.id)
+            .await
+            .expect("query failed")
+            .expect("system should exist");
+
+        assert_eq!(
+            detail.system_configuration_name.as_deref(),
+            Some("new-config-name"),
+            "config name should be persisted after update"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_update_system_metadata_with_unknown_flake_is_rejected_at_handler_level() {
+        let pool = get_test_pool().await;
+        // NOTE: update_system_metadata itself accepts arbitrary flake_id (the FK is enforced by
+        // the DB). The 400 validation for "unknown flake name" happens in update_system_handler
+        // before metadata is written. This test verifies the query layer correctly persists a
+        // known flake_id and that passing an invalid FK gets a DB error (not a silent NULL).
+        use crate::queries::systems::update_system_metadata;
+        let flake = make_flake(&pool, "test-sysmeta-fk", "cf_systems_only").await;
+        let system = make_system(&pool, "host-fk", Some(flake.id), None).await;
+
+        let result = update_system_metadata(
+            &pool,
+            system.id,
+            "host-fk",
+            None,
+            Some(999999), // non-existent flake_id → FK violation
+            None,
+            "manual",
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "Passing a non-existent flake_id to update_system_metadata must produce a DB error"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_migration_adds_system_configuration_name_column() {
+        let pool = get_test_pool().await;
+        // Verify the column exists with the correct type
+        let col_type: Option<String> = sqlx::query_scalar(
+            "SELECT data_type FROM information_schema.columns
+             WHERE table_name = 'systems' AND column_name = 'system_configuration_name'"
+        )
+        .fetch_optional(&pool)
+        .await
+        .expect("information_schema query failed");
+
+        assert_eq!(
+            col_type.as_deref(),
+            Some("text"),
+            "system_configuration_name column must exist with type 'text'"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_migration_adds_build_scope_column_with_constraint() {
+        let pool = get_test_pool().await;
+        // Verify build_scope column and default
+        let default_val: Option<String> = sqlx::query_scalar(
+            "SELECT column_default FROM information_schema.columns
+             WHERE table_name = 'flakes' AND column_name = 'build_scope'"
+        )
+        .fetch_optional(&pool)
+        .await
+        .expect("information_schema query failed");
+
+        assert!(
+            default_val.as_deref().map(|d| d.contains("cf_systems_only")).unwrap_or(false),
+            "build_scope must default to cf_systems_only, got: {:?}", default_val
+        );
+
+        // Verify CHECK constraint rejects bad values
+        let bad_insert = sqlx::query(
+            "INSERT INTO flakes (name, repo_url, branch, build_scope) VALUES ($1,$2,$3,$4)"
+        )
+        .bind("constraint-test")
+        .bind("https://github.com/constraint/test")
+        .bind("main")
+        .bind("invalid_scope_value")
+        .execute(&pool)
+        .await;
+
+        assert!(bad_insert.is_err(), "CHECK constraint must reject invalid build_scope value");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn test_migration_creates_flake_credentials_table() {
+        let pool = get_test_pool().await;
+        let col_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM information_schema.columns WHERE table_name = 'flake_credentials'"
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("information_schema query failed");
+
+        assert!(col_count >= 7, "flake_credentials table must have at least 7 columns, found {col_count}");
+
+        // Verify auth_type CHECK constraint rejects bad values
+        // (We need a flake to satisfy FK — use a subquery)
+        let flake = make_flake(&pool, "test-cred-constraint", "cf_systems_only").await;
+        let bad_insert = sqlx::query(
+            "INSERT INTO flake_credentials (flake_id, auth_type) VALUES ($1, $2)"
+        )
+        .bind(flake.id)
+        .bind("invalid_auth_type")
+        .execute(&pool)
+        .await;
+
+        assert!(bad_insert.is_err(), "CHECK constraint must reject invalid auth_type value");
+    }
+}

@@ -1888,9 +1888,13 @@ fn AddFlakeForm(
     let mut show_branch_callout = use_signal(|| show_onboarding_callouts);
 
     rsx! {
-        Card {
-            title: Some("Register Flake".to_string()),
-            children: rsx! {
+        div {
+            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
+            onclick: move |_| on_cancel.call(()),
+            div {
+                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6 cf-modal-panel-44",
+                onclick: |evt| evt.stop_propagation(),
+                h3 { class: "text-lg font-semibold text-white mb-1", "Register Flake" }
                 div {
                     class: "space-y-4",
                     p {
@@ -2301,7 +2305,7 @@ fn EditFlakeDialog(
             class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
             onclick: move |_| on_cancel.call(()),
             div {
-                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6 cf-modal-panel-34",
+                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6 cf-modal-panel-44",
                 onclick: |evt| evt.stop_propagation(),
                 h3 {
                     class: "text-lg font-semibold text-white mb-2",

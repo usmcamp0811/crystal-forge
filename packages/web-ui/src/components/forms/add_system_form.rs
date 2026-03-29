@@ -131,7 +131,7 @@ pub fn AddSystemForm(
                                     }
                                 }
                                  button {
-                                     class: "px-3 py-2 rounded-lg text-xs font-medium border border-gray-600 text-gray-200 hover:bg-gray-700 transition",
+                                     class: "shrink-0 px-3 py-2 rounded-lg text-xs font-medium text-white {theme::interactive::PRIMARY_BTN}",
                                      onclick: move |_| on_generate_keys.call(()),
                                      "Generate"
                                  }
@@ -232,7 +232,11 @@ pub fn AddSystemForm(
                             input {
                                 class: "w-full rounded-lg px-3 py-2 text-sm font-mono {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
                                 value: "{draft.read().system_configuration_name}",
-                                placeholder: "defaults to hostname",
+                                // Placeholder mirrors the hostname so the user can see what value will be used
+                                placeholder: {
+                                    let h = draft.read().hostname.trim().to_string();
+                                    if h.is_empty() { "same as hostname".to_string() } else { h }
+                                },
                                 oninput: move |evt| {
                                     let mut next = draft.read().clone();
                                     next.system_configuration_name = evt.value();
@@ -241,7 +245,7 @@ pub fn AddSystemForm(
                             }
                             p {
                                 class: "text-xs {theme::text::SECONDARY}",
-                                "Use this when the system hostname differs from the nixosConfigurations name exported by the flake."
+                                "Use this when the nixosConfigurations name in the flake differs from the hostname above."
                             }
                         }
                         // Deployment Policy

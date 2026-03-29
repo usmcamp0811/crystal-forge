@@ -877,6 +877,23 @@ fn build_agent_target(repo_url: &str, commit_hash: &str, system_name: &str) -> S
     format!("{}#nixosConfigurations.{}", flake_ref, system_name)
 }
 
+#[cfg(test)]
+pub async fn load_allowed_systems_for_test(
+    pool: &PgPool,
+    flake: &Flake,
+    target_system: &str,
+) -> Result<Option<Vec<String>>> {
+    load_allowed_systems(pool, flake, target_system).await
+}
+
+#[cfg(test)]
+pub fn should_skip_system_for_test(
+    allowed_systems: &Option<Vec<String>>,
+    system_name: &str,
+) -> bool {
+    should_skip_system(allowed_systems, system_name)
+}
+
 async fn load_allowed_systems(
     pool: &PgPool,
     flake: &Flake,
