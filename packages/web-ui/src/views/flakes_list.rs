@@ -1244,14 +1244,9 @@ fn FlakeHistoryExplorer(
     // Track current active commit hash to force re-render when diff loads
     let current_commit_key = use_signal(|| (0i32, String::new()));
 
-    // Memoize commit building to prevent recomputation on every render
-    let commits = use_memo(move || {
-        let timelines = timelines.clone();
-        build_flake_commits(&timelines, active_flake_id)
-    });
-    
-    // Clone commits once for this render to avoid repeated .read() calls
-    let commits_vec = commits.read().clone();
+    // Build only the active flake's commits for this render.
+    // Keep this non-memoized so newly fetched timeline props are reflected immediately.
+    let commits_vec = build_flake_commits(&timelines, active_flake_id);
 
     // Only stream eval updates after an explicit commit selection.
     // Auto-subscribing to the newest commit can flood the client on busy instances.
