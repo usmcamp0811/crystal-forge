@@ -1,10 +1,10 @@
 ---
 id: TASK-224
 title: Hotfix restore missing migration 0101 to unblock server startup
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-03-29 14:35'
-updated_date: '2026-03-29 14:35'
+updated_date: '2026-03-29 14:36'
 labels:
   - hotfix
   - database
@@ -68,6 +68,8 @@ High (production outage until fixed).
 
 <!-- SECTION:NOTES:BEGIN -->
 Promoted to To Do by maintainer emergency request to unblock production startup.
+
+LOCK: opencode-gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-224-restore-migration-0101
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
