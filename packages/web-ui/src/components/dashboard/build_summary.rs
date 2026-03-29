@@ -73,14 +73,13 @@ pub fn BuildSummaryPanel(
 
 fn build_summary_label(item: &crate::api::models::BuildQueueItem) -> String {
     // flake_name from the API is already the short name (f.name column).
-    // Format: "<flake name> - <hostname>"
+    // Keep build summary labels terse and stable: just the flake name.
     let flake = item.flake_name.trim();
-    let host = item.hostname.trim();
 
-    match (flake.is_empty(), host.is_empty()) {
-        (true, _) => host.to_string(),
-        (false, true) => flake.to_string(),
-        (false, false) => format!("{flake} - {host}"),
+    if flake.is_empty() {
+        item.hostname.trim().to_string()
+    } else {
+        flake.to_string()
     }
 }
 
@@ -110,9 +109,9 @@ mod tests {
     }
 
     #[test]
-    fn build_summary_label_formats_flake_and_hostname() {
+    fn build_summary_label_uses_flake_name_only() {
         let label = build_summary_label(&sample_item("fmf-flake", "reckless"));
-        assert_eq!(label, "fmf-flake - reckless");
+        assert_eq!(label, "fmf-flake");
     }
 
     #[test]
