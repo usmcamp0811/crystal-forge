@@ -4,7 +4,7 @@ title: Add flake credential management and convert system add/edit to modal UI
 status: In Progress
 assignee: []
 created_date: '2026-03-28 22:14'
-updated_date: '2026-03-29 19:03'
+updated_date: '2026-03-29 19:15'
 labels:
   - backend
   - frontend
@@ -222,6 +222,8 @@ Reviewer feedback addressed in second commit da15a560: (1) update_system_handler
 LOCK takeover approved by maintainer: opencode-gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-221-flake-credentials-modal-ui
 
 Emergency follow-up: investigate and patch `/flakes` tab crash reproducible on TASK-221 branch (dev does not reproduce).
+
+Emergency crash mitigation pushed in commit 367b46de on MR194: cap per-commit stored systems to 120, cap rendered chips to 24, truncate oversized chip labels (96 chars), and disable eval websocket stream for commits with >80 systems to prevent browser tab crashes on /flakes under high-payload scenarios.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
