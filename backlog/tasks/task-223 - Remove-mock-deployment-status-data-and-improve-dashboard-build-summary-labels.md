@@ -1,9 +1,10 @@
 ---
 id: TASK-223
 title: Remove mock deployment-status data and improve dashboard build summary labels
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-03-29 03:01'
+updated_date: '2026-03-29 03:03'
 labels:
   - dashboard
   - ui
@@ -68,6 +69,12 @@ Medium (dashboard correctness + usability).
 - [ ] #4 No fallback fake entity names are shown in either widget when data is absent; empty states are explicit and non-misleading.
 - [ ] #5 `nix build .#checks.x86_64-linux.web-ui` passes with dashboard widget behavior validated.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Selected for immediate execution per maintainer instruction: include this in current dashboard correctness push.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
