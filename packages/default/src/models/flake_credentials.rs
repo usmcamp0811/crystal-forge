@@ -66,11 +66,18 @@ impl CreateFlakeCredential {
 
 impl UpdateFlakeCredential {
     pub fn validate_against(&self, current: &FlakeCredential) -> Result<(), String> {
-        let auth_type = self.auth_type.as_deref().unwrap_or(&current.auth_type);
+        let auth_type = self
+            .auth_type
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&current.auth_type);
         let username = self.username.as_deref().or(current.username.as_deref());
         let secret = self
             .secret
             .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
             .or(current.secret_encrypted.as_deref());
         let ssh_username = self
             .ssh_username
@@ -116,4 +123,33 @@ fn validate_flake_credential_shape(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FlakeCredential, UpdateFlakeCredential};
+    use chrono::Utc;
+
+    #[test]
+    fn validate_against_treats_blank_secret_as_keep_existing() {
+        let current = FlakeCredential {
+            id: 1,
+            flake_id: 1,
+            auth_type: "pat".to_string(),
+            username: Some("x-access-token".to_string()),
+            secret_encrypted: Some("existing-secret".to_string()),
+            ssh_username: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let update = UpdateFlakeCredential {
+            auth_type: Some("pat".to_string()),
+            username: Some("x-access-token".to_string()),
+            secret: Some("   ".to_string()),
+            ssh_username: None,
+        };
+
+        assert!(update.validate_against(&current).is_ok());
+    }
 }

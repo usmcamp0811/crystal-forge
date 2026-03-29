@@ -70,10 +70,22 @@ pub async fn update_flake_credential(
 
     update.validate_against(&current).map_err(anyhow::Error::msg)?;
 
-    let auth_type = update.auth_type.clone().unwrap_or(current.auth_type.clone());
+    let auth_type = update
+        .auth_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or(current.auth_type.clone());
     let username = update.username.clone().or(current.username.clone());
     let ssh_username = update.ssh_username.clone().or(current.ssh_username.clone());
-    let secret = update.secret.clone().or(current.secret_encrypted.clone());
+    let secret = update
+        .secret
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or(current.secret_encrypted.clone());
     let encrypted_secret = flake_secrets::encrypt_optional(secret.as_deref())?;
 
     let credential = sqlx::query_as::<_, FlakeCredential>(
