@@ -1,10 +1,10 @@
 ---
 id: TASK-223
 title: Remove mock deployment-status data and improve dashboard build summary labels
-status: In Progress
+status: Backlog
 assignee: []
 created_date: '2026-03-29 03:01'
-updated_date: '2026-03-29 03:03'
+updated_date: '2026-03-29 03:04'
 labels:
   - dashboard
   - ui
@@ -76,6 +76,8 @@ Medium (dashboard correctness + usability).
 Selected for immediate execution per maintainer instruction: include this in current dashboard correctness push.
 
 LOCK: opencode-gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-223-dashboard-widget-data-correctness
+
+Execution paused before code changes: maintainer requested this work be folded into TASK-201 MR193 instead.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
