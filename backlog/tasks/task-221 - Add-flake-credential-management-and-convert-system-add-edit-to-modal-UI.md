@@ -4,7 +4,7 @@ title: Add flake credential management and convert system add/edit to modal UI
 status: Review
 assignee: []
 created_date: '2026-03-28 22:14'
-updated_date: '2026-03-29 03:36'
+updated_date: '2026-03-29 13:14'
 labels:
   - backend
   - frontend
@@ -216,6 +216,8 @@ The inline system management UI also doesn't match the established modal pattern
 LOCK: agent-claude on gray in ~/code/crystal-forge/TASK-221-flake-credentials-modal-ui
 
 MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/194
+
+Reviewer feedback addressed in second commit da15a560: (1) update_system_handler now returns 400 for unknown env/flake name instead of silently NULLing; (2) get_system_detail_by_id fixed to join systems table for system_configuration_name; (3) 13 DB-backed integration tests added and all pass; (4) cargo sqlx prepare re-run; (5) AddFlakeForm converted to modal; (6) EditFlakeDialog widened; (7) Generate button themed; (8) config-name placeholder mirrors hostname.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
