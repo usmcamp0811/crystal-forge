@@ -10,51 +10,26 @@ use crate::components::charts::{DonutChartWithLegend, DonutSegment};
 pub fn DeploymentStatusBreakdown(
     status: DeploymentStatusSummary,
     #[props(default)] flake_filter: Option<String>,
+    #[props(default)] up_to_date_hosts: Vec<String>,
+    #[props(default)] behind_hosts: Vec<String>,
+    #[props(default)] never_deployed_hosts: Vec<String>,
+    #[props(default)] unknown_hosts: Vec<String>,
 ) -> Element {
-    // Apply filter - in real app, this would come from API
-    let display_status = if let Some(ref _flake_name) = flake_filter {
-        DeploymentStatusSummary {
-            up_to_date: status.up_to_date / 3,
-            behind: status.behind / 3,
-            never_deployed: status.never_deployed.min(1),
-            unknown: 0,
-        }
-    } else {
-        status.clone()
-    };
+    let display_status = status;
+    let filter_label = flake_filter;
 
     let total = display_status.total().max(1) as f64;
     let total_count = display_status.total();
 
-    // Mock system lists
-    let up_to_date_systems: Vec<String> = (1..=display_status.up_to_date.min(50))
-        .map(|i| format!("prod-{:02}", i))
-        .collect();
-    let behind_systems: Vec<String> = if flake_filter.is_some() {
-        vec![
-            "staging-01".into(),
-            "staging-02".into(),
-            "dev-server".into(),
-            "qa-box".into(),
-        ]
-    } else {
-        vec![
-            "staging-01".into(),
-            "staging-02".into(),
-            "dev-server".into(),
-            "qa-box".into(),
-            "perf-test".into(),
-            "sandbox-01".into(),
-            "demo-server".into(),
-            "training-vm".into(),
-            "backup-01".into(),
-            "backup-02".into(),
-            "dr-site".into(),
-            "edge-node".into(),
-        ]
-    };
-    let never_deployed_systems: Vec<String> = vec!["new-server-01".into()];
-    let unknown_systems: Vec<String> = vec![];
+    let up_to_date_systems =
+        status_display_entries(display_status.up_to_date, "up to date", up_to_date_hosts);
+    let behind_systems = status_display_entries(display_status.behind, "behind", behind_hosts);
+    let never_deployed_systems = status_display_entries(
+        display_status.never_deployed,
+        "never deployed",
+        never_deployed_hosts,
+    );
+    let unknown_systems = status_display_entries(display_status.unknown, "unknown", unknown_hosts);
 
     let segments = vec![
         DonutSegment {
@@ -93,7 +68,7 @@ pub fn DeploymentStatusBreakdown(
             "data-testid": "deployment-status",
 
             // Show filter indicator if filtered
-            if let Some(ref flake_name) = flake_filter {
+            if let Some(ref flake_name) = filter_label {
                 div {
                     class: "text-xs text-blue-400 mb-1 flex items-center gap-1",
                     svg {
@@ -108,7 +83,7 @@ pub fn DeploymentStatusBreakdown(
                             d: "M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z"
                         }
                     }
-                    span { "{flake_name}" }
+                    span { "{flake_name} (global deployment status)" }
                 }
             }
 
@@ -121,5 +96,43 @@ pub fn DeploymentStatusBreakdown(
                 }
             }
         }
+    }
+}
+
+fn status_display_entries(count: i64, status: &str, mut hosts: Vec<String>) -> Vec<String> {
+    if count <= 0 {
+        return vec![format!("No systems currently {status}")];
+    }
+
+    if hosts.is_empty() {
+        return vec![format!("{count} systems currently {status}")];
+    }
+
+    let known = hosts.len() as i64;
+    if count > known {
+        hosts.push(format!("+{} more", count - known));
+    }
+
+    hosts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::status_display_entries;
+
+    #[test]
+    fn status_display_entries_prefers_hosts_and_adds_remainder() {
+        let entries = status_display_entries(
+            5,
+            "never deployed",
+            vec!["nuc-1".to_string(), "nuc-2".to_string()],
+        );
+        assert_eq!(entries, vec!["nuc-1", "nuc-2", "+3 more"]);
+    }
+
+    #[test]
+    fn status_display_entries_reports_empty_state() {
+        let entries = status_display_entries(0, "behind", vec![]);
+        assert_eq!(entries, vec!["No systems currently behind"]);
     }
 }
