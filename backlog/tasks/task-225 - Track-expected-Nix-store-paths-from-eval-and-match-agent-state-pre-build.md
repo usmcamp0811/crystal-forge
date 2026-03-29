@@ -1,10 +1,10 @@
 ---
 id: TASK-225
 title: Track expected Nix store paths from eval and match agent state pre-build
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-03-29 23:39'
-updated_date: '2026-03-29 23:39'
+updated_date: '2026-03-29 23:41'
 labels:
   - backend
   - nix
@@ -65,4 +65,6 @@ High (incorrect matching could misreport deployment state and affect rollout saf
 
 <!-- SECTION:NOTES:BEGIN -->
 Moved to To Do explicitly per user sprint selection request on 2026-03-29.
+
+LOCK: claude-sonnet-4-6 on reckless in /home/mcamp/code/crystal-forge/TASK-225-expected-store-paths
 <!-- SECTION:NOTES:END -->
