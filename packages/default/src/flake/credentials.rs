@@ -253,6 +253,45 @@ fn extract_repo_host(repo_url: &str) -> Option<String> {
     None
 }
 
+#[cfg(test)]
+mod credential_env_tests {
+    use super::*;
+    use crate::models::flake_credentials::FlakeCredential;
+    use chrono::Utc;
+
+    fn sample_pat_credential() -> FlakeCredential {
+        FlakeCredential {
+            id: 1,
+            flake_id: 42,
+            auth_type: "pat".to_string(),
+            username: Some("x-access-token".to_string()),
+            secret_encrypted: Some("ghp_test_token".to_string()),
+            ssh_username: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_to_nix_command_exposes_netrc_for_pat() {
+        let env = FlakeCredentialEnv::materialise(
+            sample_pat_credential(),
+            "https://github.com/example/private-repo.git",
+        )
+        .expect("credential materialization should succeed");
+
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.args(["-c", "test -n \"$NETRC\" && test -f \"$NETRC\""]);
+        env.apply_to_nix_command(&mut cmd);
+
+        let output = cmd.output().await.expect("command should execute");
+        assert!(
+            output.status.success(),
+            "expected NETRC to be set and existing for nix command"
+        );
+    }
+}
+
 fn write_secret_file(path: &PathBuf, content: &str) -> Result<()> {
     let mut file = fs::File::create(path)?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;

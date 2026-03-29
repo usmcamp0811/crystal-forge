@@ -642,7 +642,7 @@ pub async fn fetch_and_insert_commits_since_with_creds(
     };
 
     if commits.is_empty() {
-        let remote_head_hash = remote_branch_head_hash(repo_url, branch).await?;
+        let remote_head_hash = remote_branch_head_hash(repo_url, branch, creds).await?;
         let diverged = is_remote_head_diverged(
             &since_commit.git_commit_hash,
             remote_head_hash.as_deref(),
@@ -718,16 +718,19 @@ pub fn is_history_rewrite_error(err: &anyhow::Error) -> bool {
         .any(|cause| cause.to_string().contains(HISTORY_REWRITE_ERROR_MARKER))
 }
 
-async fn remote_branch_head_hash(repo_url: &str, branch: &str) -> Result<Option<String>> {
+async fn remote_branch_head_hash(
+    repo_url: &str,
+    branch: &str,
+    creds: Option<&FlakeCredentialEnv>,
+) -> Result<Option<String>> {
     let git_url = normalize_repo_url_for_git(repo_url);
     let refspec = format!("refs/heads/{branch}");
 
-    let output = timeout(
-        GIT_PROBE_TIMEOUT,
-        tokio::process::Command::new("git")
-            .args(["ls-remote", &git_url, &refspec])
-            .output(),
-    )
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.args(["ls-remote", &git_url, &refspec]);
+    apply_optional_creds(&mut cmd, creds);
+
+    let output = timeout(GIT_PROBE_TIMEOUT, cmd.output())
     .await
     .with_context(|| format!("Timed out probing remote HEAD for {repo_url} on {branch}"))?
     .with_context(|| format!("Failed to probe remote HEAD for {repo_url} on {branch}"))?;

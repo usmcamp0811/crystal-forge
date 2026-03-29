@@ -1165,7 +1165,7 @@ pub async fn refresh_flake(
     State(pool): State<PgPool>,
     Path(flake_id): Path<i32>,
 ) -> impl IntoResponse {
-    use crate::flake::eval::refresh_flake_cache;
+    use crate::flake::eval::refresh_flake_cache_with_creds;
 
     // Get flake details
     let flake = match get_flake_by_id(&pool, flake_id).await {
@@ -1198,8 +1198,15 @@ pub async fn refresh_flake(
         }
     };
 
+    let creds = FlakeCredentialEnv::load(&pool, flake_id)
+        .await
+        .unwrap_or_else(|e| {
+            warn!("Failed to load credentials for flake {} during refresh: {e:#}", flake_id);
+            None
+        });
+
     // Refresh the flake cache
-    match refresh_flake_cache(&flake.repo_url, &flake.branch).await {
+    match refresh_flake_cache_with_creds(&flake.repo_url, &flake.branch, creds.as_ref()).await {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({
