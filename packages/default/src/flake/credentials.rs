@@ -1,6 +1,6 @@
 //! Credential injection for flake access.
 //!
-//! This module resolves per-flake credentials from the database and materialises them
+//! This module resolves per-flake credentials from the database and materializes them
 //! into environment variables or temporary files so that `git` and `nix` commands can
 //! access private repositories transparently.
 //!
@@ -24,12 +24,14 @@ use sqlx::PgPool;
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 use tracing::{debug, info};
+use url::Url;
 
 use crate::models::flake_credentials::{FlakeCredential, FlakeCredentialAuthType};
 use crate::queries::flake_credentials::get_flake_credential;
+use crate::queries::flakes::get_flake_by_id;
 
 /// An active credential environment for a flake command.
 ///
@@ -41,11 +43,10 @@ pub struct FlakeCredentialEnv {
     netrc_path: Option<PathBuf>,
     /// If set, the path of the temp SSH private-key file.
     ssh_key_path: Option<PathBuf>,
-    /// The SSH username to use (default "git"); reserved for future SSH config generation.
-    #[allow(dead_code)]
+    /// If set, the path of the temp known_hosts file.
+    ssh_known_hosts_path: Option<PathBuf>,
+    /// The SSH username to use (default "git").
     ssh_username: String,
-    /// Strict host checking disabled flag for SSH.
-    strict_host_check_disabled: bool,
     /// Keeps the TempDir alive so files are cleaned up on drop.
     _tmpdir: Option<TempDir>,
 }
@@ -57,7 +58,10 @@ impl FlakeCredentialEnv {
     pub async fn load(pool: &PgPool, flake_id: i32) -> Result<Option<Self>> {
         let credential = get_flake_credential(pool, flake_id).await?;
         match credential {
-            Some(c) => Ok(Some(Self::materialise(c)?)),
+            Some(c) => {
+                let flake = get_flake_by_id(pool, flake_id).await?;
+                Ok(Some(Self::materialise(c, &flake.repo_url)?))
+            }
             None => Ok(None),
         }
     }
@@ -79,43 +83,31 @@ impl FlakeCredentialEnv {
 
         if let Some(netrc) = &self.netrc_path {
             debug!("Injecting netrc for git command: {:?}", netrc);
-            // Git honours $HOME/.netrc, but we use GIT_CONFIG_COUNT to override the
-            // credential helper so we can point at our temp file instead.
             cmd.env("GIT_CONFIG_COUNT", "1");
             cmd.env("GIT_CONFIG_KEY_0", "credential.helper");
             cmd.env(
                 "GIT_CONFIG_VALUE_0",
-                format!(
-                    "store --file {}",
-                    netrc.to_string_lossy()
-                ),
+                format!("store --file {}", netrc.to_string_lossy()),
             );
-            // Also set NETRC directly so libcurl-backed git transports pick it up.
             cmd.env("NETRC", netrc);
         }
 
         if let Some(ssh_key) = &self.ssh_key_path {
             debug!("Injecting SSH key for git command");
-            let strict = if self.strict_host_check_disabled {
-                "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
-            } else {
-                ""
-            };
-            let ssh_cmd = format!(
-                "ssh -i {} -o BatchMode=yes {}",
-                ssh_key.to_string_lossy(),
-                strict,
+            let ssh_cmd = build_ssh_command(
+                ssh_key,
+                self.ssh_known_hosts_path.as_deref(),
+                &self.ssh_username,
             );
-            cmd.env("GIT_SSH_COMMAND", ssh_cmd.trim());
+            cmd.env("GIT_SSH_COMMAND", ssh_cmd);
         }
     }
 
     /// Apply credential environment variables to a Nix/nix-eval-jobs command.
     ///
     /// For HTTPS PAT, Nix reads `$NETRC` (or `netrc-file` in nix.conf) to authenticate
-    /// against fetchers.  For SSH, it reads `$GIT_SSH_COMMAND`.
+    /// against fetchers. For SSH, it reads `$GIT_SSH_COMMAND`.
     pub fn apply_to_nix_command(&self, cmd: &mut tokio::process::Command) {
-        // Disable interactive prompts — Nix evaluations must never block on stdin.
         cmd.env("GIT_TERMINAL_PROMPT", "0");
 
         if let Some(netrc) = &self.netrc_path {
@@ -125,29 +117,25 @@ impl FlakeCredentialEnv {
 
         if let Some(ssh_key) = &self.ssh_key_path {
             debug!("Injecting SSH key for nix command");
-            let strict = if self.strict_host_check_disabled {
-                "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
-            } else {
-                ""
-            };
-            let ssh_cmd = format!(
-                "ssh -i {} -o BatchMode=yes {}",
-                ssh_key.to_string_lossy(),
-                strict,
+            let ssh_cmd = build_ssh_command(
+                ssh_key,
+                self.ssh_known_hosts_path.as_deref(),
+                &self.ssh_username,
             );
-            cmd.env("GIT_SSH_COMMAND", ssh_cmd.trim());
+            cmd.env("GIT_SSH_COMMAND", ssh_cmd);
         }
     }
 
-    // ── internals ──────────────────────────────────────────────────────────────
-
-    fn materialise(credential: FlakeCredential) -> Result<Self> {
-        let auth_type = credential.auth_type.parse::<FlakeCredentialAuthType>()
+    fn materialise(credential: FlakeCredential, repo_url: &str) -> Result<Self> {
+        let auth_type = credential
+            .auth_type
+            .parse::<FlakeCredentialAuthType>()
             .unwrap_or(FlakeCredentialAuthType::Pat);
 
         let tmpdir = tempfile::tempdir()?;
         let mut netrc_path: Option<PathBuf> = None;
         let mut ssh_key_path: Option<PathBuf> = None;
+        let mut ssh_known_hosts_path: Option<PathBuf> = None;
         let ssh_username = credential
             .ssh_username
             .as_deref()
@@ -170,12 +158,17 @@ impl FlakeCredentialEnv {
                                 "user"
                             });
 
-                        // Write a netrc file with a catch-all machine entry.
-                        // Nix/git will use the first matching entry.
+                        let repo_host = extract_repo_host(repo_url).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "failed to determine repository host for flake {} from repo_url '{}'",
+                                credential.flake_id,
+                                repo_url
+                            )
+                        })?;
+
                         let netrc_file = tmpdir.path().join("netrc");
-                        let netrc_content = format!(
-                            "default login {username} password {secret}\n"
-                        );
+                        let netrc_content =
+                            format!("machine {repo_host} login {username} password {secret}\n");
                         write_secret_file(&netrc_file, &netrc_content)?;
                         info!("Prepared netrc credential for flake {}", credential.flake_id);
                         netrc_path = Some(netrc_file);
@@ -187,15 +180,19 @@ impl FlakeCredentialEnv {
                     let secret = secret.trim();
                     if !secret.is_empty() {
                         let key_file = tmpdir.path().join("id_ed25519");
-                        // Ensure trailing newline for OpenSSH
                         let key_content = if secret.ends_with('\n') {
                             secret.to_string()
                         } else {
                             format!("{secret}\n")
                         };
                         write_secret_file(&key_file, &key_content)?;
+
+                        let known_hosts_file = tmpdir.path().join("known_hosts");
+                        write_secret_file(&known_hosts_file, "")?;
+
                         info!("Prepared SSH key for flake {}", credential.flake_id);
                         ssh_key_path = Some(key_file);
+                        ssh_known_hosts_path = Some(known_hosts_file);
                     }
                 }
             }
@@ -204,17 +201,116 @@ impl FlakeCredentialEnv {
         Ok(Self {
             netrc_path,
             ssh_key_path,
+            ssh_known_hosts_path,
             ssh_username,
-            strict_host_check_disabled: true, // safe default for CI/server context
             _tmpdir: Some(tmpdir),
         })
     }
 }
 
-/// Write `content` to `path` with mode 0o600 (owner read/write only).
+fn build_ssh_command(ssh_key: &Path, known_hosts: Option<&Path>, username: &str) -> String {
+    let mut command = format!(
+        "ssh -i {} -o BatchMode=yes -o StrictHostKeyChecking=accept-new",
+        ssh_key.to_string_lossy()
+    );
+
+    if let Some(path) = known_hosts {
+        command.push_str(&format!(" -o UserKnownHostsFile={}", path.to_string_lossy()));
+    }
+
+    if !username.trim().is_empty() {
+        command.push_str(&format!(" -l {}", username.trim()));
+    }
+
+    command
+}
+
+fn extract_repo_host(repo_url: &str) -> Option<String> {
+    let trimmed = repo_url.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let normalized = trimmed.strip_prefix("git+").unwrap_or(trimmed);
+
+    if let Ok(parsed) = Url::parse(normalized) {
+        if let Some(host) = parsed.host_str() {
+            return Some(host.to_string());
+        }
+    }
+
+    if !normalized.contains("://") {
+        let host_part = normalized
+            .rsplit_once('@')
+            .map_or(normalized, |(_, rhs)| rhs);
+        if let Some((host, _)) = host_part.split_once(':') {
+            if !host.trim().is_empty() {
+                return Some(host.trim().to_string());
+            }
+        }
+    }
+
+    None
+}
+
 fn write_secret_file(path: &PathBuf, content: &str) -> Result<()> {
     let mut file = fs::File::create(path)?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     file.write_all(content.as_bytes())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_ssh_command, extract_repo_host};
+    use std::path::Path;
+
+    #[test]
+    fn extracts_host_from_https_repo_url() {
+        assert_eq!(
+            extract_repo_host("https://github.com/org/repo.git"),
+            Some("github.com".to_string())
+        );
+    }
+
+    #[test]
+    fn extracts_host_from_scp_repo_url() {
+        assert_eq!(
+            extract_repo_host("git@github.com:org/repo.git"),
+            Some("github.com".to_string())
+        );
+    }
+
+    #[test]
+    fn extracts_host_from_git_prefixed_repo_url() {
+        assert_eq!(
+            extract_repo_host("git+ssh://git@gitlab.com/org/repo"),
+            Some("gitlab.com".to_string())
+        );
+    }
+
+    #[test]
+    fn ssh_command_enables_known_hosts_and_username() {
+        let cmd = build_ssh_command(
+            Path::new("/tmp/id_ed25519"),
+            Some(Path::new("/tmp/known_hosts")),
+            "deploy",
+        );
+
+        assert!(cmd.contains("StrictHostKeyChecking=accept-new"));
+        assert!(cmd.contains("UserKnownHostsFile=/tmp/known_hosts"));
+        assert!(cmd.contains(" -l deploy"));
+        assert!(!cmd.contains("StrictHostKeyChecking=no"));
+    }
+
+    #[test]
+    fn ssh_command_omits_login_when_username_is_blank() {
+        let cmd = build_ssh_command(Path::new("/tmp/id_ed25519"), None, "   ");
+        assert!(!cmd.contains(" -l "));
+    }
+
+    #[test]
+    fn returns_none_for_non_parseable_repo_host() {
+        assert_eq!(extract_repo_host("not-a-repo"), None);
+    }
 }
