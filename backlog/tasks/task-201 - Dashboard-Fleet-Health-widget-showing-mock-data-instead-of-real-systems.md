@@ -1,10 +1,10 @@
 ---
 id: TASK-201
 title: Dashboard Fleet Health widget showing mock data instead of real systems
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-03-20 13:40'
-updated_date: '2026-03-29 01:35'
+updated_date: '2026-03-29 01:57'
 labels:
   - frontend
   - dashboard
@@ -208,6 +208,8 @@ Sprint-ready execution notes:
 - Preserve existing component boundaries (container fetch logic vs presentational card).
 - If additional data fields are needed, prefer extending existing dashboard response mapping before introducing new API surface.
 - Create follow-up backlog tasks for any out-of-scope findings discovered during implementation.
+
+LOCK: opencode-gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-201-fleet-health-real-data
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
