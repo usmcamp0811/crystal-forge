@@ -52,10 +52,25 @@ const VIEW_PREF_KEY: &str = "crystal_forge.flakes.view";
 const FLAKE_TABLE_SCHEMA_NOTE: &str = "flakes(name, repo_url UNIQUE, branch)";
 const INITIAL_TIMELINE_FLAKES: usize = 1;
 const TIMELINE_BATCH_SIZE: usize = 2;
+const MAX_SYSTEM_CHIPS_RENDER: usize = 24;
+const MAX_SYSTEMS_STORED_PER_COMMIT: usize = 120;
+const MAX_SYSTEM_LABEL_CHARS: usize = 96;
+const MAX_WS_STREAM_SYSTEMS: usize = 80;
 
 fn preview_systems(systems: &[String]) -> &[String] {
-    let end = systems.len().min(60);
+    let end = systems.len().min(MAX_SYSTEM_CHIPS_RENDER);
     &systems[..end]
+}
+
+fn truncate_system_label(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let mut iter = trimmed.chars();
+    let short: String = iter.by_ref().take(MAX_SYSTEM_LABEL_CHARS).collect();
+    if iter.next().is_some() {
+        format!("{short}...")
+    } else {
+        short
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -192,6 +207,7 @@ struct FlakeHistoryCommit {
     deletions: usize,
     diff: String,
     systems: Vec<String>,
+    total_system_count: usize,
     build_status: Option<ApiBuildStatus>,
     evaluation_status: Option<String>,
     evaluation_error_message: Option<String>,
@@ -1293,6 +1309,7 @@ fn FlakeHistoryExplorer(
         .read()
         .as_ref()
         .and_then(|hash| commits_vec.iter().find(|commit| &commit.hash == hash))
+        .filter(|commit| commit.total_system_count <= MAX_WS_STREAM_SYSTEMS)
         .cloned();
 
     // Connect to WebSocket for active commit's eval status (MUST be unconditional hook call)
@@ -1640,7 +1657,7 @@ fn FlakeHistoryExplorer(
                                                         "build: {build_badge_label(&build_status)}"
                                                     }
                                                 }
-                                                span { class: "px-2 py-1 rounded bg-slate-700/70 text-slate-200", "{commit.systems.len()} configs" }
+                                                span { class: "px-2 py-1 rounded bg-slate-700/70 text-slate-200", "{commit.total_system_count} configs" }
                                             }
                                             // Show evaluation error message if present
                                             if let Some(error_msg) = commit.evaluation_error_message.as_ref() {
@@ -1667,7 +1684,7 @@ fn FlakeHistoryExplorer(
                                     } else {
                                         div {
                                             class: "flex flex-wrap gap-2",
-                                            for hostname in preview_systems(&commit.systems).iter() {
+                                            for (idx, hostname) in preview_systems(&commit.systems).iter().enumerate() {
                                                 {
                                                     let status = system_status.read().get(hostname).cloned();
                                                     let chip_style = system_chip_style(status.as_ref());
@@ -1678,7 +1695,7 @@ fn FlakeHistoryExplorer(
                                                     };
                                                     rsx! {
                                                         span {
-                                                            key: "{hostname}",
+                                                            key: "{idx}-{hostname}",
                                                             class: "{chip_class}",
                                                             style: "{chip_style}",
                                                             "{hostname}"
@@ -1687,10 +1704,15 @@ fn FlakeHistoryExplorer(
                                                 }
                                             }
                                         }
-                                        if commit.systems.len() > 60 {
+                                        if commit.total_system_count > commit.systems.len() {
                                             p {
                                                 class: "text-xs text-amber-300",
-                                                "Showing first 60 of {commit.systems.len()} configurations to keep the UI responsive."
+                                                "Showing {commit.systems.len()} of {commit.total_system_count} configurations to keep the UI responsive."
+                                            }
+                                        } else if commit.total_system_count > MAX_SYSTEM_CHIPS_RENDER {
+                                            p {
+                                                class: "text-xs text-amber-300",
+                                                "Showing first {MAX_SYSTEM_CHIPS_RENDER} of {commit.total_system_count} configurations to keep the UI responsive."
                                             }
                                         }
                                         p {
@@ -3247,6 +3269,16 @@ fn build_flake_commits(timelines: &[FlakeTimeline], flake_id: i32) -> Vec<FlakeH
         .iter()
         .map(|commit| {
             let short_hash = commit.hash.chars().take(7).collect::<String>();
+            let total_system_count = usize::try_from(commit.system_count)
+                .ok()
+                .unwrap_or(0)
+                .max(commit.systems.len());
+            let systems = commit
+                .systems
+                .iter()
+                .take(MAX_SYSTEMS_STORED_PER_COMMIT)
+                .map(|name| truncate_system_label(name))
+                .collect();
             FlakeHistoryCommit {
                 id: commit.id,
                 hash: commit.hash.clone(),
@@ -3257,7 +3289,8 @@ fn build_flake_commits(timelines: &[FlakeTimeline], flake_id: i32) -> Vec<FlakeH
                 insertions: 0,
                 deletions: 0,
                 diff: String::new(),
-                systems: commit.systems.clone(),
+                systems,
+                total_system_count,
                 build_status: commit.build_status.clone(),
                 evaluation_status: commit.evaluation_status.clone(),
                 evaluation_error_message: commit.evaluation_error_message.clone(),
