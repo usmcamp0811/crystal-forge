@@ -6,8 +6,8 @@ use std::collections::HashSet;
 
 use crate::api::client::{ApiClientError, fetch_systems};
 use crate::api::models::{
-    BuildStatus, DeploymentStatus, FlakeCommit, FlakeTimeline, HealthStatus, SystemSummary,
-    SystemsListParams,
+    BuildQueueSummary, BuildStatus, DeploymentStatus, FlakeCommit, FlakeTimeline, HealthStatus,
+    SystemSummary, SystemsListParams,
 };
 use crate::components::dashboard::{
     BuildQueuePanel, BuildSummaryPanel, CveSummaryPanel, DeploymentStatusBreakdown,
@@ -19,8 +19,8 @@ use crate::components::notifications::{AlertBanner, AlertSeverity};
 use crate::components::stat_card::StatCard;
 use crate::components::widget_grid::{GridWidget, WidgetGrid};
 use crate::dashboard::adapter::{
-    deterministic_mock_timestamp, fallback_build_queue_summary, fallback_dashboard_summary,
-    load_dashboard_with_fallback, load_flake_timelines_with_fallback,
+    deterministic_mock_timestamp, empty_dashboard_summary, load_dashboard_with_fallback,
+    load_flake_timelines_with_fallback,
 };
 use crate::routes::Route;
 use crate::state::app_state::AppState;
@@ -138,7 +138,7 @@ fn default_widget_positions() -> Vec<WidgetPosition> {
 pub fn DashboardView() -> Element {
     let nav = navigator();
 
-    let dashboard = use_signal(fallback_dashboard_summary);
+    let dashboard = use_signal(empty_dashboard_summary);
     let dashboard_notice = use_signal(|| None::<String>);
     let loading_dashboard = use_signal(|| true);
     let redirect_to_login = use_signal(|| false);
@@ -238,7 +238,12 @@ pub fn DashboardView() -> Element {
     let build_queue = dashboard
         .build_queue
         .clone()
-        .unwrap_or_else(|| fallback_build_queue_summary(dashboard.timestamp));
+        .unwrap_or_else(|| BuildQueueSummary {
+            building_count: 0,
+            queued_count: 0,
+            items: vec![],
+            timestamp: dashboard.timestamp,
+        });
 
     let healthy_hosts = hostnames_for_health(&systems, HealthStatus::Healthy);
     let warning_hosts = hostnames_for_health(&systems, HealthStatus::Warning);
