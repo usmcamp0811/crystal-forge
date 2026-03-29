@@ -1,9 +1,10 @@
 ---
 id: TASK-225
 title: Track expected Nix store paths from eval and match agent state pre-build
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-03-29 23:39'
+updated_date: '2026-03-29 23:39'
 labels:
   - backend
   - nix
@@ -59,3 +60,9 @@ High (incorrect matching could misreport deployment state and affect rollout saf
 - [ ] #6 Existing build pipeline behavior remains intact; build-complete store_path updates still work and are tested.
 - [ ] #7 Targeted backend tests pass in nix develop, including new unit/integration coverage for this feature.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Moved to To Do explicitly per user sprint selection request on 2026-03-29.
+<!-- SECTION:NOTES:END -->
