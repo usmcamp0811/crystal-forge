@@ -4,7 +4,11 @@ use chrono::Duration;
 use dioxus::prelude::*;
 use std::collections::HashSet;
 
-use crate::api::models::{BuildStatus, FlakeCommit, FlakeTimeline};
+use crate::api::client::{ApiClientError, fetch_systems};
+use crate::api::models::{
+    BuildStatus, DeploymentStatus, FlakeCommit, FlakeTimeline, HealthStatus, SystemSummary,
+    SystemsListParams,
+};
 use crate::components::dashboard::{
     BuildQueuePanel, BuildSummaryPanel, CveSummaryPanel, DeploymentStatusBreakdown,
     FleetHealthBreakdown, RecentDeploymentsList,
@@ -148,6 +152,7 @@ pub fn DashboardView() -> Element {
     let flake_timelines = use_signal(Vec::<FlakeTimeline>::new);
     let timelines_notice = use_signal(|| None::<String>);
     let loading_timelines = use_signal(|| true);
+    let dashboard_systems = use_signal(Vec::<SystemSummary>::new);
 
     {
         let mut dashboard = dashboard.clone();
@@ -168,6 +173,25 @@ pub fn DashboardView() -> Element {
                 dashboard.set(load_result.summary);
                 dashboard_notice.set(load_result.notice);
                 loading_dashboard.set(false);
+            });
+        });
+    }
+
+    {
+        let mut dashboard_systems = dashboard_systems.clone();
+        let mut redirect_to_login = redirect_to_login.clone();
+
+        use_effect(move || {
+            spawn(async move {
+                match load_dashboard_systems().await {
+                    Ok(systems) => dashboard_systems.set(systems),
+                    Err(error) if should_redirect_to_login(&error) => {
+                        redirect_to_login.set(true);
+                    }
+                    Err(_) => {
+                        // Keep widget-level summaries usable even if host sampling fetch fails.
+                    }
+                }
             });
         });
     }
@@ -210,10 +234,25 @@ pub fn DashboardView() -> Element {
 
     let dashboard = dashboard.read().clone();
     let timelines = flake_timelines.read().clone();
+    let systems = dashboard_systems.read().clone();
     let build_queue = dashboard
         .build_queue
         .clone()
         .unwrap_or_else(|| fallback_build_queue_summary(dashboard.timestamp));
+
+    let healthy_hosts = hostnames_for_health(&systems, HealthStatus::Healthy);
+    let warning_hosts = hostnames_for_health(&systems, HealthStatus::Warning);
+    let critical_hosts = hostnames_for_health(&systems, HealthStatus::Critical);
+    let offline_hosts = hostnames_for_health(&systems, HealthStatus::Offline);
+
+    let up_to_date_hosts = hostnames_for_deployment(&systems, &[DeploymentStatus::UpToDate]);
+    let behind_hosts = hostnames_for_deployment(&systems, &[DeploymentStatus::Behind]);
+    let never_deployed_hosts =
+        hostnames_for_deployment(&systems, &[DeploymentStatus::NeverDeployed]);
+    let unknown_hosts = hostnames_for_deployment(
+        &systems,
+        &[DeploymentStatus::Unknown, DeploymentStatus::NoCommitsAvailable],
+    );
 
     // Global filter state - shared across all widgets (multi-select)
     let mut dashboard_filter = use_signal(DashboardFilter::default);
@@ -383,13 +422,21 @@ pub fn DashboardView() -> Element {
             "fleet-health" => rsx! {
                 FleetHealthBreakdown {
                     health: dashboard.fleet_health.clone(),
-                    flake_filter: filter_display.clone()
+                    flake_filter: filter_display.clone(),
+                    healthy_hosts: healthy_hosts.clone(),
+                    warning_hosts: warning_hosts.clone(),
+                    critical_hosts: critical_hosts.clone(),
+                    offline_hosts: offline_hosts.clone(),
                 }
             },
             "deployment-status" => rsx! {
                 DeploymentStatusBreakdown {
                     status: dashboard.deployment_status.clone(),
-                    flake_filter: filter_display.clone()
+                    flake_filter: filter_display.clone(),
+                    up_to_date_hosts: up_to_date_hosts.clone(),
+                    behind_hosts: behind_hosts.clone(),
+                    never_deployed_hosts: never_deployed_hosts.clone(),
+                    unknown_hosts: unknown_hosts.clone(),
                 }
             },
             "build-summary" => rsx! {
@@ -749,4 +796,62 @@ pub fn mock_flake_timelines() -> Vec<FlakeTimeline> {
             }],
         },
     ]
+}
+
+fn should_redirect_to_login(error: &ApiClientError) -> bool {
+    matches!(
+        error,
+        ApiClientError::Status { code, .. } if *code == 401 || *code == 403
+    )
+}
+
+async fn load_dashboard_systems() -> Result<Vec<SystemSummary>, ApiClientError> {
+    let mut page = 1;
+    let per_page = 200;
+    let mut systems = Vec::new();
+
+    loop {
+        let response = fetch_systems(&SystemsListParams {
+            page: Some(page),
+            per_page: Some(per_page),
+            search: None,
+            health_status: None,
+            deployment_status: None,
+            environment: None,
+            sort_by: None,
+            sort_order: None,
+        })
+        .await?;
+
+        let total_pages = response.total_pages();
+        systems.extend(response.items);
+
+        if page >= total_pages || total_pages == 0 {
+            break;
+        }
+        page += 1;
+    }
+
+    Ok(systems)
+}
+
+fn hostnames_for_health(systems: &[SystemSummary], status: HealthStatus) -> Vec<String> {
+    systems
+        .iter()
+        .filter(|system| system.health_status == status)
+        .map(|system| system.hostname.clone())
+        .take(24)
+        .collect()
+}
+
+fn hostnames_for_deployment(
+    systems: &[SystemSummary],
+    statuses: &[DeploymentStatus],
+) -> Vec<String> {
+    systems
+        .iter()
+        .filter(|system| statuses.contains(&system.deployment_status))
+        .map(|system| system.hostname.clone())
+        .take(24)
+        .collect()
 }

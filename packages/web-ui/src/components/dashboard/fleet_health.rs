@@ -4,51 +4,28 @@ use dioxus::prelude::*;
 
 use crate::api::models::FleetHealthSummary;
 use crate::components::charts::{DonutChartWithLegend, DonutSegment};
-use crate::theme;
 
 /// Fleet health breakdown with colored donut chart.
 #[component]
 pub fn FleetHealthBreakdown(
     health: FleetHealthSummary,
     #[props(default)] flake_filter: Option<String>,
+    #[props(default)] healthy_hosts: Vec<String>,
+    #[props(default)] warning_hosts: Vec<String>,
+    #[props(default)] critical_hosts: Vec<String>,
+    #[props(default)] offline_hosts: Vec<String>,
 ) -> Element {
-    // When a flake is selected, we would filter the health data
-    // For now, we show a filtered label and adjust the mock data slightly
-    let (display_health, filter_label) = if let Some(ref flake_name) = flake_filter {
-        // Simulate filtered data (in real app, this would come from API)
-        let filtered = FleetHealthSummary {
-            healthy: health.healthy / 3,
-            warning: health.warning / 3,
-            critical: health.critical.min(1),
-            offline: health.offline.min(1),
-        };
-        (filtered, Some(flake_name.clone()))
-    } else {
-        (health.clone(), None)
-    };
+    let display_health = health;
+    let filter_label = flake_filter;
 
     let total = display_health.total().max(1) as f64;
     let total_count = display_health.total();
 
-    // Mock system lists for each category
-    let healthy_systems: Vec<String> = (1..=display_health.healthy.min(50))
-        .map(|i| format!("server-{:02}", i))
-        .collect();
-    let warning_systems: Vec<String> = if flake_filter.is_some() {
-        vec!["db-replica-01".into(), "cache-02".into()]
-    } else {
-        vec![
-            "db-replica-01".into(),
-            "cache-02".into(),
-            "worker-07".into(),
-            "api-staging".into(),
-            "monitor-01".into(),
-            "backup-srv".into(),
-            "dev-box".into(),
-        ]
-    };
-    let critical_systems: Vec<String> = vec!["db-primary".into()];
-    let offline_systems: Vec<String> = vec!["legacy-app".into()];
+    let healthy_systems = status_display_entries(display_health.healthy, "healthy", healthy_hosts);
+    let warning_systems = status_display_entries(display_health.warning, "warning", warning_hosts);
+    let critical_systems =
+        status_display_entries(display_health.critical, "critical", critical_hosts);
+    let offline_systems = status_display_entries(display_health.offline, "offline", offline_hosts);
 
     let segments = vec![
         DonutSegment {
@@ -102,7 +79,7 @@ pub fn FleetHealthBreakdown(
                             d: "M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z"
                         }
                     }
-                    span { "{flake_name}" }
+                    span { "{flake_name} (global fleet health)" }
                 }
             }
 
@@ -115,5 +92,40 @@ pub fn FleetHealthBreakdown(
                 }
             }
         }
+    }
+}
+
+fn status_display_entries(count: i64, status: &str, mut hosts: Vec<String>) -> Vec<String> {
+    if count <= 0 {
+        return vec![format!("No systems currently {status}")];
+    }
+
+    if hosts.is_empty() {
+        return vec![format!("{count} systems currently {status}")];
+    }
+
+    let known = hosts.len() as i64;
+    if count > known {
+        hosts.push(format!("+{} more", count - known));
+    }
+
+    hosts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::status_display_entries;
+
+    #[test]
+    fn status_display_entries_prefers_hosts_and_adds_remainder() {
+        let entries =
+            status_display_entries(4, "warning", vec!["alpha".to_string(), "beta".to_string()]);
+        assert_eq!(entries, vec!["alpha", "beta", "+2 more"]);
+    }
+
+    #[test]
+    fn status_display_entries_reports_empty_state() {
+        let entries = status_display_entries(0, "offline", vec![]);
+        assert_eq!(entries, vec!["No systems currently offline"]);
     }
 }

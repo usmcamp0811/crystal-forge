@@ -4,7 +4,7 @@ title: Dashboard Fleet Health widget showing mock data instead of real systems
 status: To Do
 assignee: []
 created_date: '2026-03-20 13:40'
-updated_date: '2026-03-20 13:40'
+updated_date: '2026-03-29 01:35'
 labels:
   - frontend
   - dashboard
@@ -18,6 +18,48 @@ references:
 priority: high
 ordinal: 1200
 ---
+
+## Description
+
+<!-- SECTION:DESCRIPTION:BEGIN -->
+## Problem Statement
+
+The Dashboard Fleet Health widget is showing mock/demo values instead of reflecting real system health data, which makes the dashboard misleading for operators.
+
+## Goal
+
+Wire Fleet Health to real backend dashboard/system data so the widget displays accurate live counts and percentages for system health states.
+
+## Non-Goals
+
+- No visual redesign of dashboard layout or card styling.
+- No changes to unrelated dashboard widgets.
+- No backend schema/migration changes.
+- No new auth/permission model changes.
+
+## Architectural Constraints
+
+- Keep data-fetch orchestration in dashboard view/state layer, not in pure presentational components.
+- Keep Fleet Health component presentational and reusable.
+- Follow existing API model contracts used by other dashboard widgets.
+- Avoid introducing global mutable state.
+
+## Verification Plan
+
+- Confirm Fleet Health widget values are sourced from API response, not mock constants.
+- Validate loading/error/empty states behave correctly.
+- Run targeted web-ui build/check for dashboard path and full `web-ui` integration check.
+
+## Impact Areas
+
+- `packages/web-ui/src/views/dashboard.rs`
+- `packages/web-ui/src/components/dashboard/fleet_health.rs`
+- Optional: shared dashboard API/model mapping files if required by existing pattern.
+
+## Risk Level
+
+Medium (operator-facing correctness issue on main dashboard).
+<!-- SECTION:DESCRIPTION:END -->
 
 # Dashboard Fleet Health widget showing mock data instead of real systems
 
@@ -138,3 +180,39 @@ None
 - Add filtering by environment to Fleet Health widget
 - Add drill-down to system detail from Fleet Health widget
 - Add configurable health status thresholds
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 Fleet Health widget on Dashboard reads from real backend data and no longer displays hardcoded/mock values.
+- [ ] #2 Displayed counts/percentages match current system health states from API response in the same session.
+- [ ] #3 Widget shows sensible loading and error states without falling back to fake data.
+- [ ] #4 Dashboard remains responsive and no regressions are introduced in adjacent widgets.
+- [ ] #5 `nix build .#checks.x86_64-linux.web-ui` passes with Fleet Health behavior validated.
+<!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Inspect dashboard view wiring and identify where Fleet Health currently receives mock data.
+2. Replace mock wiring with real API-backed data mapping using existing dashboard/system summary response.
+3. Ensure Fleet Health widget handles loading, error, and no-data states consistently with surrounding dashboard widgets.
+4. Add or adjust focused UI regression coverage for Fleet Health real-data rendering path.
+5. Run verification commands and prepare MR notes with before/after behavior.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Sprint-ready execution notes:
+- Prioritize minimal-scope bug fix with no redesign.
+- Preserve existing component boundaries (container fetch logic vs presentational card).
+- If additional data fields are needed, prefer extending existing dashboard response mapping before introducing new API surface.
+- Create follow-up backlog tasks for any out-of-scope findings discovered during implementation.
+<!-- SECTION:NOTES:END -->
+
+## Definition of Done
+<!-- DOD:BEGIN -->
+- [ ] #1 Implementation is scoped to Fleet Health data wiring and related mapping only.
+- [ ] #2 MR description includes verification evidence that values are real-data driven (not mock).
+- [ ] #3 Any discovered follow-up improvements are captured as separate Backlog tasks.
+<!-- DOD:END -->
