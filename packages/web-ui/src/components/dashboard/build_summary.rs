@@ -19,13 +19,13 @@ pub fn BuildSummaryPanel(
         .items
         .iter()
         .filter(|item| item.status == BuildStatus::Building)
-        .map(|item| item.hostname.clone())
+        .map(build_summary_label)
         .collect();
     let queued_systems: Vec<String> = queue
         .items
         .iter()
         .filter(|item| item.status == BuildStatus::Queued)
-        .map(|item| item.hostname.clone())
+        .map(build_summary_label)
         .collect();
 
     let segments = vec![
@@ -86,5 +86,75 @@ pub fn BuildSummaryPanel(
                 }
             }
         }
+    }
+}
+
+fn build_summary_label(item: &crate::api::models::BuildQueueItem) -> String {
+    let flake = compact_flake_name(&item.flake_name);
+    if flake.is_empty() {
+        return item.hostname.clone();
+    }
+
+    format!("{flake} - {}", item.hostname)
+}
+
+fn compact_flake_name(raw: &str) -> String {
+    let trimmed = raw.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let without_git = trimmed.trim_end_matches(".git");
+    let tail = without_git
+        .rsplit(['/', ':'])
+        .next()
+        .unwrap_or(without_git)
+        .trim();
+
+    if tail.is_empty() {
+        without_git.to_string()
+    } else {
+        tail.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_summary_label, compact_flake_name};
+    use crate::api::models::{BuildQueueItem, BuildStatus};
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    fn sample_item(flake_name: &str, hostname: &str) -> BuildQueueItem {
+        BuildQueueItem {
+            job_id: Some(Uuid::nil()),
+            system_id: Some(Uuid::nil()),
+            hostname: hostname.to_string(),
+            flake_name: flake_name.to_string(),
+            commit_hash: "abcdef123456".to_string(),
+            commit_message: Some("msg".to_string()),
+            status: BuildStatus::Queued,
+            builder_name: Some("builder".to_string()),
+            queued_at: Utc::now(),
+            started_at: None,
+            elapsed_secs: None,
+            logs: None,
+            environment: Some("prod".to_string()),
+        }
+    }
+
+    #[test]
+    fn compact_flake_name_reduces_url_like_values() {
+        assert_eq!(
+            compact_flake_name("https://gitlab.com/crystal-forge/fmf-flake.git"),
+            "fmf-flake"
+        );
+        assert_eq!(compact_flake_name("github:org/repo"), "repo");
+    }
+
+    #[test]
+    fn build_summary_label_formats_flake_and_hostname() {
+        let label = build_summary_label(&sample_item("github:org/repo", "reckless"));
+        assert_eq!(label, "repo - reckless");
     }
 }
