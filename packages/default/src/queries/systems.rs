@@ -451,7 +451,7 @@ pub async fn list_systems_scoped(
         // No filters - simple case
         (None, None, _, _) => {
             sqlx::query_as::<_, SystemListRow>(&format!(
-                "SELECT vsl.*, s.flake_id
+                "SELECT vsl.*, s.flake_id, s.system_configuration_name
                  FROM view_system_list vsl
                  JOIN systems s ON s.id = vsl.id
                  ORDER BY {} OFFSET $1 LIMIT $2",
@@ -465,7 +465,7 @@ pub async fn list_systems_scoped(
         // Only search filter
         (Some(_), None, _, _) => {
             sqlx::query_as::<_, SystemListRow>(&format!(
-                "SELECT vsl.*, s.flake_id
+                "SELECT vsl.*, s.flake_id, s.system_configuration_name
                  FROM view_system_list vsl
                  JOIN systems s ON s.id = vsl.id
                  WHERE vsl.hostname ILIKE $1 ORDER BY {} OFFSET $2 LIMIT $3",
@@ -480,7 +480,7 @@ pub async fn list_systems_scoped(
         // Only environment filter
         (None, Some(_), _, _) => {
             sqlx::query_as::<_, SystemListRow>(&format!(
-                "SELECT vsl.*, s.flake_id
+                "SELECT vsl.*, s.flake_id, s.system_configuration_name
                  FROM view_system_list vsl
                  JOIN systems s ON s.id = vsl.id
                  WHERE vsl.environment ILIKE $1 ORDER BY {} OFFSET $2 LIMIT $3",
@@ -495,7 +495,7 @@ pub async fn list_systems_scoped(
         // Both search and environment filters
         (Some(_), Some(_), _, _) => {
             sqlx::query_as::<_, SystemListRow>(&format!(
-                "SELECT vsl.*, s.flake_id
+                "SELECT vsl.*, s.flake_id, s.system_configuration_name
                  FROM view_system_list vsl
                  JOIN systems s ON s.id = vsl.id
                  WHERE vsl.hostname ILIKE $1 AND vsl.environment ILIKE $2 ORDER BY {} OFFSET $3 LIMIT $4",
