@@ -90,12 +90,19 @@ pub fn BuildSummaryPanel(
 }
 
 fn build_summary_label(item: &crate::api::models::BuildQueueItem) -> String {
+    let host = compact_hostname(&item.hostname);
     let flake = compact_flake_name(&item.flake_name);
     if flake.is_empty() {
-        return item.hostname.clone();
+        return host;
     }
 
-    format!("{flake} - {}", item.hostname)
+    let host_lower = host.to_ascii_lowercase();
+    let flake_lower = flake.to_ascii_lowercase();
+    if host_lower.contains(&flake_lower) {
+        return host;
+    }
+
+    format!("{host} ({flake})")
 }
 
 fn compact_flake_name(raw: &str) -> String {
@@ -118,9 +125,24 @@ fn compact_flake_name(raw: &str) -> String {
     }
 }
 
+fn compact_hostname(raw: &str) -> String {
+    let tokens: Vec<&str> = raw
+        .split_whitespace()
+        .filter(|token| {
+            !token.contains("://") && !token.starts_with("github:") && !token.starts_with("gitlab:")
+        })
+        .collect();
+
+    if tokens.is_empty() {
+        raw.trim().to_string()
+    } else {
+        tokens.join(" ")
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{build_summary_label, compact_flake_name};
+    use super::{build_summary_label, compact_flake_name, compact_hostname};
     use crate::api::models::{BuildQueueItem, BuildStatus};
     use chrono::Utc;
     use uuid::Uuid;
@@ -155,6 +177,18 @@ mod tests {
     #[test]
     fn build_summary_label_formats_flake_and_hostname() {
         let label = build_summary_label(&sample_item("github:org/repo", "reckless"));
-        assert_eq!(label, "repo - reckless");
+        assert_eq!(label, "reckless (repo)");
+    }
+
+    #[test]
+    fn compact_hostname_strips_embedded_url_tokens() {
+        let host = compact_hostname("reckless https://gitlab.com/crystal-forge/fmf-flake.git");
+        assert_eq!(host, "reckless");
+    }
+
+    #[test]
+    fn build_summary_label_avoids_duplicate_flake_name() {
+        let label = build_summary_label(&sample_item("github:org/reckless", "reckless"));
+        assert_eq!(label, "reckless");
     }
 }

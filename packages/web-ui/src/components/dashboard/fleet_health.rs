@@ -4,13 +4,16 @@ use dioxus::prelude::*;
 
 use crate::api::models::FleetHealthSummary;
 use crate::components::charts::{DonutChartWithLegend, DonutSegment};
-use crate::theme;
 
 /// Fleet health breakdown with colored donut chart.
 #[component]
 pub fn FleetHealthBreakdown(
     health: FleetHealthSummary,
     #[props(default)] flake_filter: Option<String>,
+    #[props(default)] healthy_hosts: Vec<String>,
+    #[props(default)] warning_hosts: Vec<String>,
+    #[props(default)] critical_hosts: Vec<String>,
+    #[props(default)] offline_hosts: Vec<String>,
 ) -> Element {
     let display_health = health;
     let filter_label = flake_filter;
@@ -18,10 +21,11 @@ pub fn FleetHealthBreakdown(
     let total = display_health.total().max(1) as f64;
     let total_count = display_health.total();
 
-    let healthy_systems = status_summary_entries(display_health.healthy, "healthy");
-    let warning_systems = status_summary_entries(display_health.warning, "warning");
-    let critical_systems = status_summary_entries(display_health.critical, "critical");
-    let offline_systems = status_summary_entries(display_health.offline, "offline");
+    let healthy_systems = status_display_entries(display_health.healthy, "healthy", healthy_hosts);
+    let warning_systems = status_display_entries(display_health.warning, "warning", warning_hosts);
+    let critical_systems =
+        status_display_entries(display_health.critical, "critical", critical_hosts);
+    let offline_systems = status_display_entries(display_health.offline, "offline", offline_hosts);
 
     let segments = vec![
         DonutSegment {
@@ -91,27 +95,37 @@ pub fn FleetHealthBreakdown(
     }
 }
 
-fn status_summary_entries(count: i64, status: &str) -> Vec<String> {
-    if count > 0 {
-        vec![format!("{count} systems currently {status}")]
-    } else {
-        vec![format!("No systems currently {status}")]
+fn status_display_entries(count: i64, status: &str, mut hosts: Vec<String>) -> Vec<String> {
+    if count <= 0 {
+        return vec![format!("No systems currently {status}")];
     }
+
+    if hosts.is_empty() {
+        return vec![format!("{count} systems currently {status}")];
+    }
+
+    let known = hosts.len() as i64;
+    if count > known {
+        hosts.push(format!("+{} more", count - known));
+    }
+
+    hosts
 }
 
 #[cfg(test)]
 mod tests {
-    use super::status_summary_entries;
+    use super::status_display_entries;
 
     #[test]
-    fn status_summary_entries_reports_count_when_present() {
-        let entries = status_summary_entries(3, "warning");
-        assert_eq!(entries, vec!["3 systems currently warning"]);
+    fn status_display_entries_prefers_hosts_and_adds_remainder() {
+        let entries =
+            status_display_entries(4, "warning", vec!["alpha".to_string(), "beta".to_string()]);
+        assert_eq!(entries, vec!["alpha", "beta", "+2 more"]);
     }
 
     #[test]
-    fn status_summary_entries_reports_empty_state() {
-        let entries = status_summary_entries(0, "offline");
+    fn status_display_entries_reports_empty_state() {
+        let entries = status_display_entries(0, "offline", vec![]);
         assert_eq!(entries, vec!["No systems currently offline"]);
     }
 }
