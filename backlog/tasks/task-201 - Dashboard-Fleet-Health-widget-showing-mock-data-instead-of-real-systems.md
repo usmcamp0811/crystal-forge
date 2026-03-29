@@ -1,10 +1,10 @@
 ---
 id: TASK-201
 title: Dashboard Fleet Health widget showing mock data instead of real systems
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-03-20 13:40'
-updated_date: '2026-03-29 01:57'
+updated_date: '2026-03-29 02:29'
 labels:
   - frontend
   - dashboard
@@ -210,6 +210,10 @@ Sprint-ready execution notes:
 - Create follow-up backlog tasks for any out-of-scope findings discovered during implementation.
 
 LOCK: opencode-gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-201-fleet-health-real-data
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/193
+
+Commit: ae54c542
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
