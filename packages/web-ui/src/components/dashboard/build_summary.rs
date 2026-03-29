@@ -27,7 +27,7 @@ pub fn BuildSummaryPanel(
         .filter(|item| item.status == BuildStatus::Queued)
         .map(build_summary_label)
         .collect();
-    let filter_label = flake_filter.as_ref().map(|name| compact_filter_label(name));
+    let _ = flake_filter;
 
     let segments = vec![
         DonutSegment {
@@ -59,25 +59,6 @@ pub fn BuildSummaryPanel(
             class: "h-full flex flex-col",
             "data-testid": "build-summary-panel",
 
-            if let Some(ref filter_label) = filter_label {
-                div {
-                    class: "text-xs text-blue-400 mb-1 flex items-center gap-1",
-                    svg {
-                        class: "w-3 h-3",
-                        fill: "none",
-                        stroke: "currentColor",
-                        view_box: "0 0 24 24",
-                        path {
-                            stroke_linecap: "round",
-                            stroke_linejoin: "round",
-                            stroke_width: "2",
-                            d: "M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z"
-                        }
-                    }
-                    span { "{filter_label}" }
-                }
-            }
-
             div {
                 class: "flex-1",
                 DonutChartWithLegend {
@@ -103,29 +84,9 @@ fn build_summary_label(item: &crate::api::models::BuildQueueItem) -> String {
     }
 }
 
-fn compact_filter_label(raw: &str) -> String {
-    let trimmed = raw.trim().trim_end_matches('/');
-    if trimmed.is_empty() {
-        return String::new();
-    }
-
-    let without_git = trimmed.trim_end_matches(".git");
-    let tail = without_git
-        .rsplit(['/', ':'])
-        .next()
-        .unwrap_or(without_git)
-        .trim();
-
-    if tail.is_empty() {
-        without_git.to_string()
-    } else {
-        tail.to_string()
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{build_summary_label, compact_filter_label};
+    use super::build_summary_label;
     use crate::api::models::{BuildQueueItem, BuildStatus};
     use chrono::Utc;
     use uuid::Uuid;
@@ -164,13 +125,5 @@ mod tests {
     fn build_summary_label_fallback_to_flake_when_no_host() {
         let label = build_summary_label(&sample_item("fmf-flake", ""));
         assert_eq!(label, "fmf-flake");
-    }
-
-    #[test]
-    fn compact_filter_label_removes_url_noise() {
-        assert_eq!(
-            compact_filter_label("https://gitlab.com/crystal-forge/fmf-flake.git"),
-            "fmf-flake"
-        );
     }
 }
