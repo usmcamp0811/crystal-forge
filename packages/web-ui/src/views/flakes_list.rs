@@ -312,7 +312,6 @@ pub fn FlakesListView() -> Element {
     let mut sync_note = use_signal(|| None::<String>);
     let mut last_manual_sync = use_signal(|| None::<DateTime<Utc>>);
     let mut rewrite_prompt = use_signal(|| None::<(i32, String, String)>);
-    let mut timeline_generation = use_signal(|| 0_u64);
 
     let current_flakes = flakes.read().clone();
     let environments = unique_environments(&current_flakes);
@@ -374,35 +373,15 @@ pub fn FlakesListView() -> Element {
     {
         let mut flake_timelines = flake_timelines.clone();
         let flakes = flakes.clone();
-        let selected_history_flake = selected_history_flake.clone();
-        let mut timeline_generation = timeline_generation.clone();
         use_effect(move || {
             let flake_ids: Vec<i32> = flakes.read().iter().map(|flake| flake.id).collect();
-            let selected_flake_id = *selected_history_flake.read();
-            let generation = *timeline_generation.read() + 1;
-            timeline_generation.set(generation);
             spawn(async move {
                 if flake_ids.is_empty() {
-                    if *timeline_generation.read() == generation {
-                        flake_timelines.set(Vec::new());
-                    }
+                    flake_timelines.set(Vec::new());
                     return;
                 }
 
-                let prioritized_ids = if let Some(selected_id) = selected_flake_id {
-                    if flake_ids.iter().any(|id| *id == selected_id) {
-                        let mut ordered = Vec::with_capacity(flake_ids.len());
-                        ordered.push(selected_id);
-                        ordered.extend(flake_ids.iter().copied().filter(|id| *id != selected_id));
-                        ordered
-                    } else {
-                        flake_ids.clone()
-                    }
-                } else {
-                    flake_ids.clone()
-                };
-
-                let initial_ids: Vec<i32> = prioritized_ids
+                let initial_ids: Vec<i32> = flake_ids
                     .iter()
                     .take(INITIAL_TIMELINE_FLAKES)
                     .copied()
@@ -418,23 +397,16 @@ pub fn FlakesListView() -> Element {
                                 timelines,
                                 &flake_ids,
                             );
-                            if *timeline_generation.read() != generation {
-                                return;
-                            }
                             flake_timelines.set(merged_timelines.clone());
                         }
                         Err(_error) => {
                             // Fallback to full fetch if subset request fails for any reason.
                             match fetch_flake_timelines().await {
                                 Ok(timelines) => {
-                                    if *timeline_generation.read() == generation {
-                                        flake_timelines.set(timelines);
-                                    }
+                                    flake_timelines.set(timelines);
                                 }
                                 Err(_) => {
-                                    if *timeline_generation.read() == generation {
-                                        flake_timelines.set(Vec::new());
-                                    }
+                                    flake_timelines.set(Vec::new());
                                 }
                             }
                             return;
@@ -442,7 +414,7 @@ pub fn FlakesListView() -> Element {
                     }
                 }
 
-                let remaining_ids: Vec<i32> = prioritized_ids
+                let remaining_ids: Vec<i32> = flake_ids
                     .iter()
                     .skip(INITIAL_TIMELINE_FLAKES)
                     .copied()
@@ -456,9 +428,6 @@ pub fn FlakesListView() -> Element {
                                 timelines,
                                 &flake_ids,
                             );
-                            if *timeline_generation.read() != generation {
-                                return;
-                            }
                             flake_timelines.set(merged_timelines.clone());
                         }
                         Err(_) => {
@@ -502,10 +471,10 @@ pub fn FlakesListView() -> Element {
                             let selected_flake_id = *selected_history_flake.read();
                             let mut flakes_signal = flakes.clone();
                             let mut timelines_signal = flake_timelines.clone();
+                            let mut selected_history_commit = selected_history_commit.clone();
                             let mut last_manual_sync = last_manual_sync.clone();
                             let mut sync_note = sync_note.clone();
                             let mut rewrite_prompt = rewrite_prompt.clone();
-                            let mut timeline_generation = timeline_generation.clone();
                             let flakes_snapshot = flakes.read().clone();
                             spawn(async move {
                                 let sync_result = if let Some(flake_id) = selected_flake_id {
@@ -531,14 +500,10 @@ pub fn FlakesListView() -> Element {
                                             }
                                         }
 
-                                        let generation = *timeline_generation.read() + 1;
-                                        timeline_generation.set(generation);
-
                                         match fetch_flake_timelines().await {
                                             Ok(timelines) => {
-                                                if *timeline_generation.read() == generation {
-                                                    timelines_signal.set(timelines);
-                                                }
+                                                timelines_signal.set(timelines);
+                                                selected_history_commit.set(None);
                                             }
                                             Err(_) => {
                                                 refresh_warning = true;
@@ -883,7 +848,6 @@ pub fn FlakesListView() -> Element {
                         let mut last_manual_sync = last_manual_sync.clone();
                         let mut flakes_signal = flakes.clone();
                         let mut timelines_signal = flake_timelines.clone();
-                        let mut timeline_generation = timeline_generation.clone();
                         spawn(async move {
                             match accept_flake_history_rewrite(flake_id).await {
                                 Ok(response) => {
@@ -900,12 +864,8 @@ pub fn FlakesListView() -> Element {
                                         );
                                     }
 
-                                    let generation = *timeline_generation.read() + 1;
-                                    timeline_generation.set(generation);
                                     if let Ok(timelines) = fetch_flake_timelines().await {
-                                        if *timeline_generation.read() == generation {
-                                            timelines_signal.set(timelines);
-                                        }
+                                        timelines_signal.set(timelines);
                                     }
                                 }
                                 Err(error) => {
@@ -1284,14 +1244,16 @@ fn FlakeHistoryExplorer(
     // Track current active commit hash to force re-render when diff loads
     let current_commit_key = use_signal(|| (0i32, String::new()));
 
-    let commits = build_flake_commits(&timelines, active_flake_id);
+    // Build only the active flake's commits for this render.
+    // Keep this non-memoized so newly fetched timeline props are reflected immediately.
+    let commits_vec = build_flake_commits(&timelines, active_flake_id);
 
     // Only stream eval updates after an explicit commit selection.
     // Auto-subscribing to the newest commit can flood the client on busy instances.
     let active_commit_for_ws = selected_commit_hash
         .read()
         .as_ref()
-        .and_then(|hash| commits.iter().find(|commit| &commit.hash == hash))
+        .and_then(|hash| commits_vec.iter().find(|commit| &commit.hash == hash))
         .cloned();
 
     // Connect to WebSocket for active commit's eval status (MUST be unconditional hook call)
@@ -1321,9 +1283,9 @@ fn FlakeHistoryExplorer(
     let active_commit = selected_commit_hash
         .read()
         .as_ref()
-        .and_then(|hash| commits.iter().find(|commit| &commit.hash == hash))
+        .and_then(|hash| commits_vec.iter().find(|commit| &commit.hash == hash))
         .map(|commit| commit.clone())
-        .or_else(|| commits.first().cloned());
+        .or_else(|| commits_vec.first().cloned());
 
     // Load diff for the active commit if not already loaded
     // We read the signal INSIDE use_effect so it tracks the dependency
@@ -1439,7 +1401,7 @@ fn FlakeHistoryExplorer(
                             }
                             div {
                                 class: "max-h-[68vh] overflow-y-auto",
-                                if commits.is_empty() {
+                                if commits_vec.is_empty() {
                                     p { class: "p-4 text-sm {theme::text::SECONDARY}", "No commits available." }
                                 } else {
                                     div {
@@ -1450,7 +1412,7 @@ fn FlakeHistoryExplorer(
                                         }
                                         div {
                                             class: "space-y-3 relative",
-                                            for commit in commits.iter() {
+                                            for commit in commits_vec.iter() {
                                                 {
                                                     let commit_id_for_modal = commit.id;
                                                     let is_active = active_commit
