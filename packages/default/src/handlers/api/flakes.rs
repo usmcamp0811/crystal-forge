@@ -1707,19 +1707,21 @@ async fn resolve_requested_branch(
         let branch = branch.trim();
         if !branch.is_empty() {
             validate_branch(branch)?;
-            let exists = branch_exists(repo_url, branch)
-                .await
-                .map_err(|e| format!("Repository URL is not reachable as a git remote: {e}"))?;
-            if !exists {
-                return Err(format!("Branch '{branch}' was not found on the repository"));
-            }
             return Ok(branch.to_string());
         }
     }
 
-    infer_default_branch(repo_url)
-        .await
-        .map_err(|e| format!("Failed to infer default branch for repository: {e}"))
+    match infer_default_branch(repo_url).await {
+        Ok(branch) => Ok(branch),
+        Err(error) => {
+            warn!(
+                repo_url,
+                error = %error,
+                "default branch inference failed; falling back to 'main' so credentials can be saved"
+            );
+            Ok("main".to_string())
+        }
+    }
 }
 
 fn validate_branch(branch: &str) -> Result<(), String> {
