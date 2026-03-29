@@ -1,9 +1,10 @@
 ---
 id: TASK-224
 title: Hotfix restore missing migration 0101 to unblock server startup
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-03-29 14:35'
+updated_date: '2026-03-29 14:35'
 labels:
   - hotfix
   - database
@@ -62,6 +63,12 @@ High (production outage until fixed).
 - [ ] #3 No unrelated files are changed by the hotfix.
 - [ ] #4 Server startup no longer fails with SQLx migration mismatch after deploy.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Promoted to To Do by maintainer emergency request to unblock production startup.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
