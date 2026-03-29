@@ -72,20 +72,64 @@ pub fn BuildSummaryPanel(
 }
 
 fn build_summary_label(item: &crate::api::models::BuildQueueItem) -> String {
-    // flake_name from the API is already the short name (f.name column).
-    // Keep build summary labels terse and stable: just the flake name.
     let flake = item.flake_name.trim();
+    let config = extract_nixos_configuration_name(&item.hostname);
 
-    if flake.is_empty() {
-        item.hostname.trim().to_string()
+    match (flake.is_empty(), config.is_empty()) {
+        (false, false) => format!("{flake} - {config}"),
+        (false, true) => flake.to_string(),
+        (true, false) => config,
+        (true, true) => item.hostname.trim().to_string(),
+    }
+}
+
+fn extract_nixos_configuration_name(raw: &str) -> String {
+    let value = raw.trim();
+    if value.is_empty() {
+        return String::new();
+    }
+
+    if let Some(name) = extract_attr_name(value, "nixosConfigurations.") {
+        return name;
+    }
+
+    if let Some(hash_pos) = value.find('#') {
+        let after_hash = &value[hash_pos + 1..];
+        if let Some(name) = extract_attr_name(after_hash, "nixosConfigurations.") {
+            return name;
+        }
+    }
+
+    if !value.contains("://")
+        && !value.starts_with("git+")
+        && !value.starts_with("github:")
+        && !value.starts_with("gitlab:")
+    {
+        return value.to_string();
+    }
+
+    String::new()
+}
+
+fn extract_attr_name(source: &str, marker: &str) -> Option<String> {
+    let start = source.find(marker)? + marker.len();
+    let tail = &source[start..];
+    let raw_name: String = tail
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || *c == '.')
+        .collect();
+    let name = raw_name.split(".config.").next().unwrap_or("").to_string();
+
+    if name.is_empty() {
+        None
     } else {
-        flake.to_string()
+        Some(name)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::build_summary_label;
+    use super::{build_summary_label, extract_nixos_configuration_name};
     use crate::api::models::{BuildQueueItem, BuildStatus};
     use chrono::Utc;
     use uuid::Uuid;
@@ -109,9 +153,9 @@ mod tests {
     }
 
     #[test]
-    fn build_summary_label_uses_flake_name_only() {
+    fn build_summary_label_formats_flake_and_config_name() {
         let label = build_summary_label(&sample_item("fmf-flake", "reckless"));
-        assert_eq!(label, "fmf-flake");
+        assert_eq!(label, "fmf-flake - reckless");
     }
 
     #[test]
@@ -124,5 +168,12 @@ mod tests {
     fn build_summary_label_fallback_to_flake_when_no_host() {
         let label = build_summary_label(&sample_item("fmf-flake", ""));
         assert_eq!(label, "fmf-flake");
+    }
+
+    #[test]
+    fn extract_nixos_configuration_name_from_attr_path() {
+        let host =
+            "git+https://gitlab.com/crystal-forge/fmf-flake?ref=main#nixosConfigurations.reckless.config.system.build.toplevel";
+        assert_eq!(extract_nixos_configuration_name(host), "reckless");
     }
 }
