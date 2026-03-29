@@ -275,6 +275,7 @@ impl CrystalForgeConfig {
                             &watched_flake.name,
                             &watched_flake.repo_url,
                             &watched_flake.branch(),
+                            "cf_systems_only",
                         )
                         .await?
                         .id
@@ -292,6 +293,7 @@ impl CrystalForgeConfig {
                 true,
                 config.public_key.clone(),
                 flake_id,
+                None,
                 config.desired_target.clone(),
                 config.deployment_policy.clone(),
             )

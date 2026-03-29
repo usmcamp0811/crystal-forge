@@ -256,7 +256,7 @@ Click **Add Flake** to open the registration modal.
 
 ### Guided Tour: Add Flake Form
 
-The form shows progressive field callouts guiding you through **Name → Repository → Branch** in sequence.
+The form shows progressive field callouts guiding you through **Name → Repository → Branch**, plus **Build Scope** and **Credentials** for private repositories.
 
 ![Flake Form with Callouts](./screenshots/06c2-onboarding-flakes-form-callouts.png)
 
@@ -265,6 +265,8 @@ The form shows progressive field callouts guiding you through **Name → Reposit
 - **Name**: A friendly identifier for this flake (e.g., `infrastructure`, `web-servers`)
 - **Repository URL**: Git URL in the format Crystal Forge expects
 - **Branch**: Which branch to track (e.g., `main`, `production`)
+- **Build Scope**: Choose whether to evaluate all `nixosConfigurations` or only Crystal Forge-managed systems
+- **Credentials** (optional for public repos, required for private repos): Select auth type and provide secret material
 
 #### Repository URL Formats
 
@@ -281,6 +283,37 @@ Crystal Forge supports:
 - **Auto-polling**: Crystal Forge periodically checks for new commits on the tracked branch
 - **Evaluation**: New commits are evaluated automatically to determine derivations
 - **Build Queue**: Derivations are queued for building based on your builder capacity
+
+For private repositories, setting the branch explicitly (for example `main`) is recommended so onboarding is deterministic.
+
+#### Private Repository Authentication
+
+Crystal Forge supports three repository authentication modes:
+
+- **PAT (personal access token)**
+  - Use for HTTPS-based private repos on GitHub/GitLab.
+  - GitHub recommended values:
+    - Auth type: `pat`
+    - Username: `x-access-token`
+    - Secret: your classic/fine-grained PAT with repo read access
+  - GitLab common values:
+    - Auth type: `pat`
+    - Username: `oauth2` (or your service user)
+    - Secret: PAT with read access to the target project
+
+- **SSH private key**
+  - Use for `git+ssh://` style repository URLs.
+  - Provide the private key in the Credentials section and optional SSH username (`git` in most hosted providers).
+
+- **Username/password**
+  - Use only when PAT/SSH is unavailable.
+  - Provide repository username and password (or app password/token-style secret if your provider requires it).
+
+Security notes:
+
+- Secrets are stored encrypted at rest.
+- Plaintext secrets are not returned in API responses.
+- You can leave the secret field blank during edits to keep the existing stored secret unchanged.
 
 ![Flake Created](./screenshots/06c3-onboarding-flakes-create.png)
 

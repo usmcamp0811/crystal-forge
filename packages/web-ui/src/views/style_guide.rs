@@ -401,42 +401,48 @@ pub fn StyleGuideView() -> Element {
                                 SystemCard {
                                     system: systems[0].clone(),
                                     on_remove: move |_| {},
-                                    on_update_key: move |_| {}
+                                    on_update_key: move |_| {},
+                                    on_edit: move |_| {}
                                 }
                             }
                             StateTile { label: "warning + behind",
                                 SystemCard {
                                     system: systems[1].clone(),
                                     on_remove: move |_| {},
-                                    on_update_key: move |_| {}
+                                    on_update_key: move |_| {},
+                                    on_edit: move |_| {}
                                 }
                             }
                             StateTile { label: "critical + never deployed",
                                 SystemCard {
                                     system: systems[2].clone(),
                                     on_remove: move |_| {},
-                                    on_update_key: move |_| {}
+                                    on_update_key: move |_| {},
+                                    on_edit: move |_| {}
                                 }
                             }
                             StateTile { label: "offline + unknown",
                                 SystemCard {
                                     system: systems[3].clone(),
                                     on_remove: move |_| {},
-                                    on_update_key: move |_| {}
+                                    on_update_key: move |_| {},
+                                    on_edit: move |_| {}
                                 }
                             }
                             StateTile { label: "overflow (long hostname)",
                                 SystemCard {
                                     system: systems[4].clone(),
                                     on_remove: move |_| {},
-                                    on_update_key: move |_| {}
+                                    on_update_key: move |_| {},
+                                    on_edit: move |_| {}
                                 }
                             }
                             StateTile { label: "building state",
                                 SystemCard {
                                     system: systems[5].clone(),
                                     on_remove: move |_| {},
-                                    on_update_key: move |_| {}
+                                    on_update_key: move |_| {},
+                                    on_edit: move |_| {}
                                 }
                             }
                         }
@@ -454,7 +460,8 @@ pub fn StyleGuideView() -> Element {
                                     SystemCard {
                                         system: systems[0].clone(),
                                         on_remove: move |_| {},
-                                        on_update_key: move |_| {}
+                                        on_update_key: move |_| {},
+                                        on_edit: move |_| {}
                                     }
                                 }
                             }
@@ -470,12 +477,14 @@ pub fn StyleGuideView() -> Element {
                                     SystemCard {
                                         system: systems[0].clone(),
                                         on_remove: move |_| {},
-                                        on_update_key: move |_| {}
+                                        on_update_key: move |_| {},
+                                        on_edit: move |_| {}
                                     }
                                     SystemCard {
                                         system: systems[1].clone(),
                                         on_remove: move |_| {},
-                                        on_update_key: move |_| {}
+                                        on_update_key: move |_| {},
+                                        on_edit: move |_| {}
                                     }
                                 }
                             }
@@ -491,17 +500,20 @@ pub fn StyleGuideView() -> Element {
                                     SystemCard {
                                         system: systems[0].clone(),
                                         on_remove: move |_| {},
-                                        on_update_key: move |_| {}
+                                        on_update_key: move |_| {},
+                                        on_edit: move |_| {}
                                     }
                                     SystemCard {
                                         system: systems[1].clone(),
                                         on_remove: move |_| {},
-                                        on_update_key: move |_| {}
+                                        on_update_key: move |_| {},
+                                        on_edit: move |_| {}
                                     }
                                     SystemCard {
                                         system: systems[2].clone(),
                                         on_remove: move |_| {},
-                                        on_update_key: move |_| {}
+                                        on_update_key: move |_| {},
+                                        on_edit: move |_| {}
                                     }
                                 }
                             }

@@ -17,14 +17,14 @@ use web_sys::console;
 use web_sys::{window, Node};
 
 use crate::api::client::{
-    ApiClientError, accept_flake_history_rewrite, create_flake, delete_flake, fetch_commit_diff,
-    fetch_flake_timelines, fetch_flake_timelines_for_ids, fetch_flakes, request_sync_all_flakes,
-    request_sync_flake,
-    update_flake,
+    ApiClientError, accept_flake_history_rewrite, create_flake, delete_flake,
+    delete_flake_credentials, fetch_commit_diff, fetch_flake_credentials, fetch_flake_timelines,
+    fetch_flake_timelines_for_ids, fetch_flakes, put_flake_credentials,
+    request_sync_all_flakes, request_sync_flake, update_flake,
 };
 use crate::api::models::{
-    BuildStatus as ApiBuildStatus, CreateFlakeRequest, FlakeRegistryItem, FlakeTimeline,
-    UpdateFlakeRequest,
+    BuildStatus as ApiBuildStatus, CreateFlakeCredentialRequest, CreateFlakeRequest,
+    FlakeRegistryItem, FlakeTimeline, UpdateFlakeRequest,
 };
 use crate::components::layout::Card;
 use crate::components::notifications::{AlertBanner, AlertSeverity};
@@ -52,10 +52,25 @@ const VIEW_PREF_KEY: &str = "crystal_forge.flakes.view";
 const FLAKE_TABLE_SCHEMA_NOTE: &str = "flakes(name, repo_url UNIQUE, branch)";
 const INITIAL_TIMELINE_FLAKES: usize = 1;
 const TIMELINE_BATCH_SIZE: usize = 2;
+const MAX_SYSTEM_CHIPS_RENDER: usize = 24;
+const MAX_SYSTEMS_STORED_PER_COMMIT: usize = 120;
+const MAX_SYSTEM_LABEL_CHARS: usize = 96;
+const MAX_WS_STREAM_SYSTEMS: usize = 80;
 
 fn preview_systems(systems: &[String]) -> &[String] {
-    let end = systems.len().min(60);
+    let end = systems.len().min(MAX_SYSTEM_CHIPS_RENDER);
     &systems[..end]
+}
+
+fn truncate_system_label(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let mut iter = trimmed.chars();
+    let short: String = iter.by_ref().take(MAX_SYSTEM_LABEL_CHARS).collect();
+    if iter.next().is_some() {
+        format!("{short}...")
+    } else {
+        short
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -157,6 +172,7 @@ struct FlakeListItem {
     name: String,
     repo_url: String,
     branch: String,
+    build_scope: String,
     latest_commit: Option<String>,
     system_count: usize,
     environments: Vec<String>,
@@ -170,6 +186,7 @@ impl FlakeListItem {
             name: item.name,
             repo_url: item.repo_url,
             branch: item.branch,
+            build_scope: item.build_scope,
             latest_commit: None,
             system_count: item.system_count.max(0) as usize,
             environments: Vec::new(),
@@ -190,6 +207,7 @@ struct FlakeHistoryCommit {
     deletions: usize,
     diff: String,
     systems: Vec<String>,
+    total_system_count: usize,
     build_status: Option<ApiBuildStatus>,
     evaluation_status: Option<String>,
     evaluation_error_message: Option<String>,
@@ -218,6 +236,11 @@ struct NewFlakeDraft {
     name: String,
     repo_url: String,
     branch: String,
+    build_scope: String,
+    credential_type: String,
+    credential_username: String,
+    credential_secret: String,
+    credential_ssh_username: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -226,6 +249,12 @@ struct EditFlakeDraft {
     name: String,
     repo_url: String,
     branch: String,
+    build_scope: String,
+    credential_type: String,
+    credential_username: String,
+    credential_secret: String,
+    credential_ssh_username: String,
+    has_existing_secret: bool,
 }
 
 /// Flakes list with toggles and filters.
@@ -302,6 +331,11 @@ pub fn FlakesListView() -> Element {
         name: String::new(),
         repo_url: String::new(),
         branch: String::new(),
+        build_scope: "cf_systems_only".to_string(),
+        credential_type: "none".to_string(),
+        credential_username: String::new(),
+        credential_secret: String::new(),
+        credential_ssh_username: String::new(),
     });
     let mut pending_remove = use_signal(|| None::<FlakeListItem>);
     let mut editing_flake = use_signal(|| None::<EditFlakeDraft>);
@@ -644,6 +678,11 @@ pub fn FlakesListView() -> Element {
                             name: String::new(),
                             repo_url: String::new(),
                             branch: String::new(),
+                            build_scope: "cf_systems_only".to_string(),
+                            credential_type: "none".to_string(),
+                            credential_username: String::new(),
+                            credential_secret: String::new(),
+                            credential_ssh_username: String::new(),
                         });
                         add_error.set(None);
                         show_add_form.set(false);
@@ -665,10 +704,15 @@ pub fn FlakesListView() -> Element {
                                 name: next.name.trim().to_string(),
                                 repo_url: next.repo_url.trim().to_string(),
                                 branch: normalize_optional_branch(&next.branch),
+                                build_scope: Some(next.build_scope.clone()),
                             };
 
                             match create_flake(&request).await {
                                 Ok(created) => {
+                                    if let Err(error) = save_flake_credentials(created.id, &next).await {
+                                        add_error.set(Some(error));
+                                        return;
+                                    }
                                     let mut values = flakes.read().clone();
                                     values.push(FlakeListItem::from_registry(created));
                                     values
@@ -678,6 +722,11 @@ pub fn FlakesListView() -> Element {
                                         name: String::new(),
                                         repo_url: String::new(),
                                         branch: String::new(),
+                                        build_scope: "cf_systems_only".to_string(),
+                                        credential_type: "none".to_string(),
+                                        credential_username: String::new(),
+                                        credential_secret: String::new(),
+                                        credential_ssh_username: String::new(),
                                     });
                                     add_error.set(None);
                                     server_notice.set(None);
@@ -781,16 +830,22 @@ pub fn FlakesListView() -> Element {
                                 name: next.name.trim().to_string(),
                                 repo_url: next.repo_url.trim().to_string(),
                                 branch: normalize_optional_branch(&next.branch),
+                                build_scope: Some(next.build_scope.clone()),
                             };
 
                             match update_flake(next.id, &request).await {
                                 Ok(updated) => {
+                                    if let Err(error) = save_flake_credentials(updated.id, &next).await {
+                                        edit_error.set(Some(error));
+                                        return;
+                                    }
                                     let mut values = flakes.read().clone();
                                     if let Some(target) = values.iter_mut().find(|item| item.id == updated.id)
                                     {
                                         target.name = updated.name;
                                         target.repo_url = updated.repo_url;
                                         target.branch = updated.branch;
+                                        target.build_scope = updated.build_scope;
                                         target.system_count = updated.system_count.max(0) as usize;
                                     }
                                     values.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -1254,6 +1309,7 @@ fn FlakeHistoryExplorer(
         .read()
         .as_ref()
         .and_then(|hash| commits_vec.iter().find(|commit| &commit.hash == hash))
+        .filter(|commit| commit.total_system_count <= MAX_WS_STREAM_SYSTEMS)
         .cloned();
 
     // Connect to WebSocket for active commit's eval status (MUST be unconditional hook call)
@@ -1601,7 +1657,7 @@ fn FlakeHistoryExplorer(
                                                         "build: {build_badge_label(&build_status)}"
                                                     }
                                                 }
-                                                span { class: "px-2 py-1 rounded bg-slate-700/70 text-slate-200", "{commit.systems.len()} configs" }
+                                                span { class: "px-2 py-1 rounded bg-slate-700/70 text-slate-200", "{commit.total_system_count} configs" }
                                             }
                                             // Show evaluation error message if present
                                             if let Some(error_msg) = commit.evaluation_error_message.as_ref() {
@@ -1628,7 +1684,7 @@ fn FlakeHistoryExplorer(
                                     } else {
                                         div {
                                             class: "flex flex-wrap gap-2",
-                                            for hostname in preview_systems(&commit.systems).iter() {
+                                            for (idx, hostname) in preview_systems(&commit.systems).iter().enumerate() {
                                                 {
                                                     let status = system_status.read().get(hostname).cloned();
                                                     let chip_style = system_chip_style(status.as_ref());
@@ -1639,7 +1695,7 @@ fn FlakeHistoryExplorer(
                                                     };
                                                     rsx! {
                                                         span {
-                                                            key: "{hostname}",
+                                                            key: "{idx}-{hostname}",
                                                             class: "{chip_class}",
                                                             style: "{chip_style}",
                                                             "{hostname}"
@@ -1648,10 +1704,15 @@ fn FlakeHistoryExplorer(
                                                 }
                                             }
                                         }
-                                        if commit.systems.len() > 60 {
+                                        if commit.total_system_count > commit.systems.len() {
                                             p {
                                                 class: "text-xs text-amber-300",
-                                                "Showing first 60 of {commit.systems.len()} configurations to keep the UI responsive."
+                                                "Showing {commit.systems.len()} of {commit.total_system_count} configurations to keep the UI responsive."
+                                            }
+                                        } else if commit.total_system_count > MAX_SYSTEM_CHIPS_RENDER {
+                                            p {
+                                                class: "text-xs text-amber-300",
+                                                "Showing first {MAX_SYSTEM_CHIPS_RENDER} of {commit.total_system_count} configurations to keep the UI responsive."
                                             }
                                         }
                                         p {
@@ -1849,9 +1910,13 @@ fn AddFlakeForm(
     let mut show_branch_callout = use_signal(|| show_onboarding_callouts);
 
     rsx! {
-        Card {
-            title: Some("Register Flake".to_string()),
-            children: rsx! {
+        div {
+            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
+            onclick: move |_| on_cancel.call(()),
+            div {
+                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6 cf-modal-panel-44",
+                onclick: |evt| evt.stop_propagation(),
+                h3 { class: "text-lg font-semibold text-white mb-1", "Register Flake" }
                 div {
                     class: "space-y-4",
                     p {
@@ -1859,7 +1924,7 @@ fn AddFlakeForm(
                         "Schema context: {FLAKE_TABLE_SCHEMA_NOTE}."
                     }
                     div {
-                        class: "grid grid-cols-1 md:grid-cols-3 gap-4",
+                        class: "grid grid-cols-1 md:grid-cols-2 gap-4",
                         label {
                             class: "relative block space-y-2 overflow-visible",
                             span { class: "text-xs uppercase tracking-wide text-gray-500", "Flake Name" }
@@ -1946,6 +2011,43 @@ fn AddFlakeForm(
                                     p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
                                     p { style: "margin:2px 0 0 0;", "Optional: pick a branch if deployments should track something other than the repo default." }
                                 }
+                            }
+                        }
+                        label {
+                            class: "space-y-2 block md:col-span-2",
+                            span { class: "text-xs uppercase tracking-wide text-gray-500", "Build Scope" }
+                            select {
+                                class: "w-full rounded-lg px-3 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
+                                value: "{draft.read().build_scope}",
+                                onchange: move |evt| {
+                                    let mut next = draft.read().clone();
+                                    next.build_scope = evt.value();
+                                    draft.set(next);
+                                },
+                                option { value: "cf_systems_only", "Only Crystal Forge systems" }
+                                option { value: "all_configs", "All nixosConfigurations in flake" }
+                            }
+                            p {
+                                class: "text-xs {theme::text::SECONDARY}",
+                                "Choose whether Crystal Forge should only build configurations mapped to managed systems or every configuration exported by the flake."
+                            }
+                        }
+                        FlakeCredentialFields {
+                            credential_type: draft.read().credential_type.clone(),
+                            credential_username: draft.read().credential_username.clone(),
+                            credential_secret: draft.read().credential_secret.clone(),
+                            credential_ssh_username: draft.read().credential_ssh_username.clone(),
+                            has_existing_secret: false,
+                            on_change: move |(field, value): (String, String)| {
+                                let mut next = draft.read().clone();
+                                match field.as_str() {
+                                    "credential_type" => next.credential_type = value,
+                                    "credential_username" => next.credential_username = value,
+                                    "credential_secret" => next.credential_secret = value,
+                                    "credential_ssh_username" => next.credential_ssh_username = value,
+                                    _ => {}
+                                }
+                                draft.set(next);
                             }
                         }
                     }
@@ -2217,13 +2319,15 @@ fn EditFlakeDialog(
     let draft_for_name = draft.clone();
     let draft_for_repo = draft.clone();
     let draft_for_branch = draft.clone();
+    let draft_for_build_scope = draft.clone();
+    let draft_for_credentials = draft.clone();
 
     rsx! {
         div {
             class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
             onclick: move |_| on_cancel.call(()),
             div {
-                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6 cf-modal-panel-34",
+                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6 cf-modal-panel-44",
                 onclick: |evt| evt.stop_propagation(),
                 h3 {
                     class: "text-lg font-semibold text-white mb-2",
@@ -2275,6 +2379,43 @@ fn EditFlakeDialog(
                             }
                         }
                     }
+                    label {
+                        class: "space-y-2 block",
+                        span { class: "text-xs uppercase tracking-wide text-gray-500", "Build Scope" }
+                        select {
+                            class: "w-full rounded-lg px-3 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
+                            value: "{draft.build_scope}",
+                            onchange: move |evt| {
+                                let mut next = draft_for_build_scope.clone();
+                                next.build_scope = evt.value();
+                                on_change.call(next);
+                            },
+                            option { value: "cf_systems_only", "Only Crystal Forge systems" }
+                            option { value: "all_configs", "All nixosConfigurations in flake" }
+                        }
+                        p {
+                            class: "text-xs {theme::text::SECONDARY}",
+                            "Use all configurations when you want Crystal Forge to evaluate every exported system, even if it is not registered yet."
+                        }
+                    }
+                    FlakeCredentialFields {
+                        credential_type: draft.credential_type.clone(),
+                        credential_username: draft.credential_username.clone(),
+                        credential_secret: draft.credential_secret.clone(),
+                        credential_ssh_username: draft.credential_ssh_username.clone(),
+                        has_existing_secret: draft.has_existing_secret,
+                        on_change: move |(field, value): (String, String)| {
+                            let mut next = draft_for_credentials.clone();
+                            match field.as_str() {
+                                "credential_type" => next.credential_type = value,
+                                "credential_username" => next.credential_username = value,
+                                "credential_secret" => next.credential_secret = value,
+                                "credential_ssh_username" => next.credential_ssh_username = value,
+                                _ => {}
+                            }
+                            on_change.call(next);
+                        }
+                    }
                     if let Some(message) = error.read().clone() {
                         p { class: "text-sm text-red-300", "{message}" }
                     }
@@ -2290,6 +2431,79 @@ fn EditFlakeDialog(
                         class: "flex-1 px-4 py-2 rounded-lg font-medium text-sm text-white {theme::interactive::PRIMARY_BTN}",
                         onclick: move |_| on_submit.call(()),
                         "Save Changes"
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn FlakeCredentialFields(
+    credential_type: String,
+    credential_username: String,
+    credential_secret: String,
+    credential_ssh_username: String,
+    has_existing_secret: bool,
+    on_change: EventHandler<(String, String)>,
+) -> Element {
+    rsx! {
+        div {
+            class: "rounded-lg border border-gray-700/80 bg-gray-950/40 p-4 space-y-3",
+            h4 { class: "text-sm font-semibold text-white", "Credentials" }
+            p {
+                class: "text-xs {theme::text::SECONDARY}",
+                "Configure repository access for private flakes. PAT, SSH key, and username/password are supported."
+            }
+            label {
+                class: "space-y-2 block",
+                span { class: "text-xs uppercase tracking-wide text-gray-500", "Authentication Type" }
+                select {
+                    class: "w-full rounded-lg px-3 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
+                    value: "{credential_type}",
+                    onchange: move |evt| on_change.call(("credential_type".to_string(), evt.value())),
+                    option { value: "none", "No credentials" }
+                    option { value: "pat", "Personal access token" }
+                    option { value: "ssh_key", "SSH private key" }
+                    option { value: "username_password", "Username and password" }
+                }
+            }
+            if credential_type == "username_password" || credential_type == "pat" {
+                label {
+                    class: "space-y-2 block",
+                    span { class: "text-xs uppercase tracking-wide text-gray-500", if credential_type == "pat" { "Token Username (optional)" } else { "Username" } }
+                    input {
+                        class: "w-full rounded-lg px-3 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
+                        value: "{credential_username}",
+                        placeholder: if credential_type == "pat" { "oauth2 or git" } else { "username" },
+                        oninput: move |evt| on_change.call(("credential_username".to_string(), evt.value())),
+                    }
+                }
+            }
+            if credential_type == "ssh_key" {
+                label {
+                    class: "space-y-2 block",
+                    span { class: "text-xs uppercase tracking-wide text-gray-500", "SSH Username (optional)" }
+                    input {
+                        class: "w-full rounded-lg px-3 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
+                        value: "{credential_ssh_username}",
+                        placeholder: "git",
+                        oninput: move |evt| on_change.call(("credential_ssh_username".to_string(), evt.value())),
+                    }
+                }
+            }
+            if credential_type != "none" {
+                label {
+                    class: "space-y-2 block",
+                    span { class: "text-xs uppercase tracking-wide text-gray-500", if credential_type == "ssh_key" { "Private Key" } else if credential_type == "pat" { "Token Secret" } else { "Password" } }
+                    textarea {
+                        class: "w-full min-h-[110px] rounded-lg px-3 py-2 text-sm font-mono {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
+                        value: "{credential_secret}",
+                        placeholder: if has_existing_secret { "Leave blank to keep existing secret" } else { "Paste secret value" },
+                        oninput: move |evt| on_change.call(("credential_secret".to_string(), evt.value())),
+                    }
+                    if has_existing_secret {
+                        p { class: "text-xs text-amber-300", "A secret is already stored. Leave this blank to keep it unchanged." }
                     }
                 }
             }
@@ -2329,8 +2543,94 @@ fn start_edit_flake(
             name: flake.name,
             repo_url: flake.repo_url,
             branch: flake.branch,
+            build_scope: flake.build_scope,
+            credential_type: "none".to_string(),
+            credential_username: String::new(),
+            credential_secret: String::new(),
+            credential_ssh_username: String::new(),
+            has_existing_secret: false,
         }));
         edit_error.set(None);
+
+        spawn(async move {
+            match fetch_flake_credentials(flake_id).await {
+                Ok(summary) => {
+                    let current_value = editing_flake.read().clone();
+                    if let Some(mut current) = current_value {
+                        current.credential_type = summary.auth_type;
+                        current.credential_username = summary.username.unwrap_or_default();
+                        current.credential_ssh_username = summary.ssh_username.unwrap_or_default();
+                        current.has_existing_secret = summary.has_secret;
+                        editing_flake.set(Some(current));
+                    }
+                }
+                Err(error) => {
+                    edit_error.set(Some(format!("Failed to load credentials: {error}")));
+                }
+            }
+        });
+    }
+}
+
+async fn save_flake_credentials(flake_id: i32, draft: &impl FlakeCredentialDraft) -> Result<(), String> {
+    if draft.credential_type() == "none" {
+        if !draft.has_existing_secret() {
+            return Ok(());
+        }
+        delete_flake_credentials(flake_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    let secret = draft.credential_secret().trim().to_string();
+    let request = CreateFlakeCredentialRequest {
+        auth_type: draft.credential_type().to_string(),
+        username: normalize_optional_value(draft.credential_username()),
+        secret: if secret.is_empty() && draft.has_existing_secret() {
+            None
+        } else {
+            normalize_optional_value(&secret)
+        },
+        ssh_username: normalize_optional_value(draft.credential_ssh_username()),
+    };
+
+    put_flake_credentials(flake_id, &request)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+trait FlakeCredentialDraft {
+    fn credential_type(&self) -> &str;
+    fn credential_username(&self) -> &str;
+    fn credential_secret(&self) -> &str;
+    fn credential_ssh_username(&self) -> &str;
+    fn has_existing_secret(&self) -> bool;
+}
+
+impl FlakeCredentialDraft for NewFlakeDraft {
+    fn credential_type(&self) -> &str { &self.credential_type }
+    fn credential_username(&self) -> &str { &self.credential_username }
+    fn credential_secret(&self) -> &str { &self.credential_secret }
+    fn credential_ssh_username(&self) -> &str { &self.credential_ssh_username }
+    fn has_existing_secret(&self) -> bool { false }
+}
+
+impl FlakeCredentialDraft for EditFlakeDraft {
+    fn credential_type(&self) -> &str { &self.credential_type }
+    fn credential_username(&self) -> &str { &self.credential_username }
+    fn credential_secret(&self) -> &str { &self.credential_secret }
+    fn credential_ssh_username(&self) -> &str { &self.credential_ssh_username }
+    fn has_existing_secret(&self) -> bool { self.has_existing_secret }
+}
+
+fn normalize_optional_value(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }
 
@@ -2823,6 +3123,7 @@ fn mock_flakes() -> Vec<FlakeListItem> {
             name: flake.name.clone(),
             repo_url: flake.repo_url.clone(),
             branch: "main".to_string(),
+            build_scope: "cf_systems_only".to_string(),
             latest_commit: flake.latest_commit.clone(),
             system_count: 0,
             environments: Vec::new(),
@@ -2968,6 +3269,16 @@ fn build_flake_commits(timelines: &[FlakeTimeline], flake_id: i32) -> Vec<FlakeH
         .iter()
         .map(|commit| {
             let short_hash = commit.hash.chars().take(7).collect::<String>();
+            let total_system_count = usize::try_from(commit.system_count)
+                .ok()
+                .unwrap_or(0)
+                .max(commit.systems.len());
+            let systems = commit
+                .systems
+                .iter()
+                .take(MAX_SYSTEMS_STORED_PER_COMMIT)
+                .map(|name| truncate_system_label(name))
+                .collect();
             FlakeHistoryCommit {
                 id: commit.id,
                 hash: commit.hash.clone(),
@@ -2978,7 +3289,8 @@ fn build_flake_commits(timelines: &[FlakeTimeline], flake_id: i32) -> Vec<FlakeH
                 insertions: 0,
                 deletions: 0,
                 diff: String::new(),
-                systems: commit.systems.clone(),
+                systems,
+                total_system_count,
                 build_status: commit.build_status.clone(),
                 evaluation_status: commit.evaluation_status.clone(),
                 evaluation_error_message: commit.evaluation_error_message.clone(),

@@ -8,5 +8,6 @@ pub struct Flake {
     pub name: String,
     pub repo_url: String,
     pub branch: String,
+    pub build_scope: String,
     pub deleted_at: Option<DateTime<Utc>>,
 }

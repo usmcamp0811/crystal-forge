@@ -118,6 +118,7 @@ mod tests {
         SystemSummary {
             id: Uuid::parse_str("00000000-0000-0000-0000-0000000000aa").expect("valid uuid"),
             hostname: "sample-host".to_string(),
+            system_configuration_name: None,
             environment: environment.map(ToString::to_string),
             flake_id: Some(1),
             primary_ip: None,

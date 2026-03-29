@@ -259,6 +259,11 @@ pub async fn create_system(
         true, // is_active
         public_key.to_string(),
         flake_id,
+        payload
+            .system_configuration_name
+            .as_ref()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
         None, // desired_target
         payload.deployment_policy.clone(),
     )
@@ -281,6 +286,7 @@ fn list_row_to_summary(row: queries::SystemListRow) -> SystemSummary {
     SystemSummary {
         id: row.id,
         hostname: row.hostname,
+        system_configuration_name: row.system_configuration_name,
         environment: row.environment,
         flake_id: row.flake_id,
         health_status: parse_health_status(&row.health_status),
@@ -306,6 +312,7 @@ fn detail_row_to_api_model(row: queries::SystemDetailRow) -> SystemDetail {
     SystemDetail {
         id: row.id,
         hostname: row.hostname,
+        system_configuration_name: row.system_configuration_name,
         environment: row.environment,
         is_active: row.is_active,
         deployment_policy: row.deployment_policy,

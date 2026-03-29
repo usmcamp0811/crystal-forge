@@ -275,6 +275,8 @@ pub struct RecentDeployment {
 pub struct SystemSummary {
     pub id: Uuid,
     pub hostname: String,
+    #[serde(default)]
+    pub system_configuration_name: Option<String>,
     pub environment: Option<String>,
     #[serde(default)]
     pub flake_id: Option<i32>,
@@ -297,6 +299,8 @@ pub struct SystemSummary {
 pub struct SystemDetail {
     pub id: Uuid,
     pub hostname: String,
+    #[serde(default)]
+    pub system_configuration_name: Option<String>,
     pub environment: Option<String>,
     pub is_active: bool,
     pub deployment_policy: String,
@@ -361,7 +365,18 @@ pub struct FlakeRegistryItem {
     pub name: String,
     pub repo_url: String,
     pub branch: String,
+    #[serde(default = "default_flake_build_scope")]
+    pub build_scope: String,
     pub system_count: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FlakeCredentialSummary {
+    pub flake_id: i32,
+    pub auth_type: String,
+    pub username: Option<String>,
+    pub ssh_username: Option<String>,
+    pub has_secret: bool,
 }
 
 /// Request payload for creating a flake.
@@ -370,6 +385,7 @@ pub struct CreateFlakeRequest {
     pub name: String,
     pub repo_url: String,
     pub branch: Option<String>,
+    pub build_scope: Option<String>,
 }
 
 /// Request payload for updating a flake.
@@ -378,6 +394,23 @@ pub struct UpdateFlakeRequest {
     pub name: String,
     pub repo_url: String,
     pub branch: Option<String>,
+    pub build_scope: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateFlakeCredentialRequest {
+    pub auth_type: String,
+    pub username: Option<String>,
+    pub secret: Option<String>,
+    pub ssh_username: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpdateFlakeCredentialRequest {
+    pub auth_type: Option<String>,
+    pub username: Option<String>,
+    pub secret: Option<String>,
+    pub ssh_username: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -730,10 +763,24 @@ pub struct SystemMutationResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateSystemRequest {
     pub hostname: String,
+    pub system_configuration_name: Option<String>,
     pub public_key: String,
     pub environment: Option<String>,
     pub flake_name: Option<String>,
     pub deployment_policy: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateSystemRequest {
+    pub hostname: String,
+    pub system_configuration_name: Option<String>,
+    pub environment: Option<String>,
+    pub flake_name: Option<String>,
+    pub deployment_policy: String,
+}
+
+fn default_flake_build_scope() -> String {
+    "cf_systems_only".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

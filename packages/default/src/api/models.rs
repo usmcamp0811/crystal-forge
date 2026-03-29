@@ -276,6 +276,7 @@ pub struct ReorderEvalQueueRequest {
 pub struct SystemSummary {
     pub id: Uuid,
     pub hostname: String,
+    pub system_configuration_name: Option<String>,
     pub environment: Option<String>,
     pub flake_id: Option<i32>,
     pub health_status: HealthStatus,
@@ -293,6 +294,7 @@ pub struct SystemDetail {
     /// Core identity.
     pub id: Uuid,
     pub hostname: String,
+    pub system_configuration_name: Option<String>,
     pub environment: Option<String>,
     pub is_active: bool,
     pub deployment_policy: String,
@@ -373,7 +375,17 @@ pub struct FlakeRegistryItem {
     pub name: String,
     pub repo_url: String,
     pub branch: String,
+    pub build_scope: String,
     pub system_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlakeCredentialSummary {
+    pub flake_id: i32,
+    pub auth_type: String,
+    pub username: Option<String>,
+    pub ssh_username: Option<String>,
+    pub has_secret: bool,
 }
 
 /// Environment summary for API responses.
@@ -448,6 +460,7 @@ pub struct CreateFlakeRequest {
     pub name: String,
     pub repo_url: String,
     pub branch: Option<String>,
+    pub build_scope: Option<String>,
 }
 
 /// Request payload for updating a flake registry entry.
@@ -456,6 +469,23 @@ pub struct UpdateFlakeRequest {
     pub name: String,
     pub repo_url: String,
     pub branch: Option<String>,
+    pub build_scope: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateFlakeCredentialRequest {
+    pub auth_type: String,
+    pub username: Option<String>,
+    pub secret: Option<String>,
+    pub ssh_username: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateFlakeCredentialRequest {
+    pub auth_type: Option<String>,
+    pub username: Option<String>,
+    pub secret: Option<String>,
+    pub ssh_username: Option<String>,
 }
 
 /// A flake with its commit timeline for the dashboard widget.
@@ -516,7 +546,17 @@ pub struct CommitDiffResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateSystemRequest {
     pub hostname: String,
+    pub system_configuration_name: Option<String>,
     pub public_key: String,
+    pub environment: Option<String>,
+    pub flake_name: Option<String>,
+    pub deployment_policy: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateSystemRequest {
+    pub hostname: String,
+    pub system_configuration_name: Option<String>,
     pub environment: Option<String>,
     pub flake_name: Option<String>,
     pub deployment_policy: String,

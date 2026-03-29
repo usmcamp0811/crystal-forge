@@ -1,5 +1,6 @@
 use crate::models::commits::Commit;
 use crate::queries::commits::increment_commit_list_attempt_count;
+use crate::flake::credentials::FlakeCredentialEnv;
 use anyhow::{Context, Result};
 use sqlx::PgPool;
 use std::path::Path;
@@ -147,6 +148,14 @@ fn build_flake_uri_with_ref(repo_url: &str, branch: &str) -> String {
 /// # Errors
 /// Returns an error if `nix flake update --refresh` fails
 pub async fn refresh_flake_cache(repo_url: &str, branch: &str) -> Result<()> {
+    refresh_flake_cache_with_creds(repo_url, branch, None).await
+}
+
+pub async fn refresh_flake_cache_with_creds(
+    repo_url: &str,
+    branch: &str,
+    creds: Option<&FlakeCredentialEnv>,
+) -> Result<()> {
     // Normalize repo_url to a proper Nix flake URI with ref parameter
     let flake_uri = build_flake_uri_with_ref(repo_url, branch);
 
@@ -154,12 +163,13 @@ pub async fn refresh_flake_cache(repo_url: &str, branch: &str) -> Result<()> {
 
     // Use `nix flake metadata --refresh` to force Nix to re-fetch from remote
     // This is safer than `nix flake update` which might modify lock files
-    let output = timeout(
-        Duration::from_secs(60),
-        Command::new("nix")
-            .args(&["flake", "metadata", "--refresh", "--json", &flake_uri])
-            .output(),
-    )
+    let mut cmd = Command::new("nix");
+    cmd.args(["flake", "metadata", "--refresh", "--json", &flake_uri]);
+    if let Some(creds) = creds {
+        creds.apply_to_nix_command(&mut cmd);
+    }
+
+    let output = timeout(Duration::from_secs(60), cmd.output())
     .await
     .context("Timeout refreshing flake cache")?
     .context("Failed to spawn nix flake metadata command")?;

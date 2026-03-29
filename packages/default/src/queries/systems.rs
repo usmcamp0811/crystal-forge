@@ -23,6 +23,36 @@ pub async fn update_public_key(pool: &PgPool, system_id: Uuid, new_public_key: &
     Ok(())
 }
 
+pub async fn update_system_metadata(
+    pool: &PgPool,
+    system_id: Uuid,
+    hostname: &str,
+    environment_id: Option<Uuid>,
+    flake_id: Option<i32>,
+    system_configuration_name: Option<&str>,
+    deployment_policy: &str,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE systems
+         SET hostname = $1,
+             environment_id = $2,
+             flake_id = $3,
+             system_configuration_name = $4,
+             deployment_policy = $5,
+             updated_at = NOW()
+         WHERE id = $6",
+    )
+    .bind(hostname)
+    .bind(environment_id)
+    .bind(flake_id)
+    .bind(system_configuration_name)
+    .bind(deployment_policy)
+    .bind(system_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub async fn get_by_hostname(pool: &PgPool, hostname: &str) -> Result<Option<System>> {
     let system = sqlx::query_as::<_, System>("SELECT * FROM systems WHERE hostname = $1")
         .bind(hostname)
@@ -49,18 +79,20 @@ pub async fn insert_system(pool: &PgPool, system: &System) -> Result<System> {
         public_key,
         flake_id,
         derivation,
+        system_configuration_name,
         created_at,
         updated_at,
         desired_target,
         deployment_policy
     )
-    VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW(), $7, $8)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW(), $8, $9)
     ON CONFLICT (hostname) DO UPDATE SET
         environment_id = EXCLUDED.environment_id,
         is_active = EXCLUDED.is_active,
         public_key = EXCLUDED.public_key,
         flake_id = EXCLUDED.flake_id,
         derivation = EXCLUDED.derivation,
+        system_configuration_name = EXCLUDED.system_configuration_name,
         desired_target = EXCLUDED.desired_target,
         deployment_policy = EXCLUDED.deployment_policy,
         updated_at = NOW()
@@ -73,6 +105,7 @@ pub async fn insert_system(pool: &PgPool, system: &System) -> Result<System> {
     .bind(&system.public_key.to_base64())
     .bind(system.flake_id)
     .bind(&system.derivation)
+    .bind(&system.system_configuration_name)
     .bind(&system.desired_target)
     .bind(&system.deployment_policy)
     .fetch_one(pool)
@@ -104,6 +137,21 @@ pub async fn get_desired_target_by_id(pool: &PgPool, system_id: i32) -> Result<O
 
     // Handle the nested Option from fetch_optional + nullable column
     Ok(result.flatten())
+}
+
+pub async fn list_configuration_names_for_flake(
+    pool: &PgPool,
+    flake_id: i32,
+) -> Result<Vec<String>> {
+    let rows = sqlx::query_scalar::<_, String>(
+        "SELECT COALESCE(NULLIF(BTRIM(system_configuration_name), ''), hostname)
+         FROM systems
+         WHERE flake_id = $1 AND is_active = TRUE",
+    )
+    .bind(flake_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -206,6 +254,7 @@ pub async fn get_user_environment_membership_ids(
 pub struct SystemDetailRow {
     pub id: Uuid,
     pub hostname: String,
+    pub system_configuration_name: Option<String>,
     pub environment: Option<String>,
     pub is_active: bool,
     pub deployment_policy: String,
@@ -256,11 +305,15 @@ pub async fn get_system_detail_by_id(
     pool: &PgPool,
     system_id: Uuid,
 ) -> Result<Option<SystemDetailRow>> {
-    let row =
-        sqlx::query_as::<_, SystemDetailRow>("SELECT * FROM view_system_detail WHERE id = $1")
-            .bind(system_id)
-            .fetch_optional(pool)
-            .await?;
+    let row = sqlx::query_as::<_, SystemDetailRow>(
+        "SELECT vsd.*, s.system_configuration_name
+         FROM view_system_detail vsd
+         JOIN systems s ON s.id = vsd.id
+         WHERE vsd.id = $1",
+    )
+    .bind(system_id)
+    .fetch_optional(pool)
+    .await?;
     Ok(row)
 }
 
@@ -269,6 +322,7 @@ pub async fn get_system_detail_by_id(
 pub struct SystemListRow {
     pub id: Uuid,
     pub hostname: String,
+    pub system_configuration_name: Option<String>,
     pub environment: Option<String>,
     pub flake_id: Option<i32>,
     pub primary_ip_address: Option<String>,
@@ -287,7 +341,7 @@ pub struct SystemListRow {
 /// Fetch all active systems from view_system_list
 pub async fn list_systems_from_view(pool: &PgPool) -> Result<Vec<SystemListRow>> {
     let rows = sqlx::query_as::<_, SystemListRow>(
-        "SELECT vsl.*, s.flake_id
+        "SELECT vsl.*, s.flake_id, s.system_configuration_name
          FROM view_system_list vsl
          JOIN systems s ON s.id = vsl.id
          ORDER BY vsl.hostname",
@@ -397,7 +451,7 @@ pub async fn list_systems_scoped(
         // No filters - simple case
         (None, None, _, _) => {
             sqlx::query_as::<_, SystemListRow>(&format!(
-                "SELECT vsl.*, s.flake_id
+                "SELECT vsl.*, s.flake_id, s.system_configuration_name
                  FROM view_system_list vsl
                  JOIN systems s ON s.id = vsl.id
                  ORDER BY {} OFFSET $1 LIMIT $2",
@@ -411,7 +465,7 @@ pub async fn list_systems_scoped(
         // Only search filter
         (Some(_), None, _, _) => {
             sqlx::query_as::<_, SystemListRow>(&format!(
-                "SELECT vsl.*, s.flake_id
+                "SELECT vsl.*, s.flake_id, s.system_configuration_name
                  FROM view_system_list vsl
                  JOIN systems s ON s.id = vsl.id
                  WHERE vsl.hostname ILIKE $1 ORDER BY {} OFFSET $2 LIMIT $3",
@@ -426,7 +480,7 @@ pub async fn list_systems_scoped(
         // Only environment filter
         (None, Some(_), _, _) => {
             sqlx::query_as::<_, SystemListRow>(&format!(
-                "SELECT vsl.*, s.flake_id
+                "SELECT vsl.*, s.flake_id, s.system_configuration_name
                  FROM view_system_list vsl
                  JOIN systems s ON s.id = vsl.id
                  WHERE vsl.environment ILIKE $1 ORDER BY {} OFFSET $2 LIMIT $3",
@@ -441,7 +495,7 @@ pub async fn list_systems_scoped(
         // Both search and environment filters
         (Some(_), Some(_), _, _) => {
             sqlx::query_as::<_, SystemListRow>(&format!(
-                "SELECT vsl.*, s.flake_id
+                "SELECT vsl.*, s.flake_id, s.system_configuration_name
                  FROM view_system_list vsl
                  JOIN systems s ON s.id = vsl.id
                  WHERE vsl.hostname ILIKE $1 AND vsl.environment ILIKE $2 ORDER BY {} OFFSET $3 LIMIT $4",
