@@ -4,7 +4,7 @@ title: Track expected Nix store paths from eval and match agent state pre-build
 status: Review
 assignee: []
 created_date: '2026-03-29 23:39'
-updated_date: '2026-03-30 00:06'
+updated_date: '2026-03-30 00:14'
 labels:
   - backend
   - nix
@@ -71,4 +71,6 @@ LOCK: claude-sonnet-4-6 on reckless in /home/mcamp/code/crystal-forge/TASK-225-e
 MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/196
 
 cargo check: 0 errors (SQLX_OFFLINE=true). cargo sqlx prepare: success. 3 unit tests pass.
+
+Fix pushed (ef54e688): corrected latest_derivation join key (derivation_name not derivation_target) and per-system policy log level. cargo check: 0 errors. 3 unit tests pass.
 <!-- SECTION:NOTES:END -->
