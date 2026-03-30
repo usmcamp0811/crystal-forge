@@ -20,15 +20,14 @@ use crate::config::CrystalForgeConfig;
 use crate::flake::commits::{
     GitCommitMetadata, branch_exists, branch_exists_with_creds, get_commit_changed_files,
     get_commit_diff, get_commit_metadata, get_commit_nixos_configurations, infer_default_branch,
-    infer_default_branch_with_creds,
+    infer_default_branch_with_creds, sync_commit_hashes_for_flake,
     is_history_rewrite_error,
 };
 use crate::flake::credentials::FlakeCredentialEnv;
 use crate::handlers::agent_request::CFState;
 use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_above};
 use crate::queries::admin::insert_admin_audit_event;
-use crate::queries::commits::insert_commit_with_metadata;
-use crate::flake::commits::sync_commits_for_flake;
+use crate::queries::commits::{insert_commit_with_metadata, promote_pending_commits_by_hashes};
 use crate::queries::flakes::{
     cascade_delete_flake, check_flake_dependencies, count_systems_for_flake, delete_flake_by_id,
     fetch_dashboard_flake_timelines, fetch_flake_timelines, get_flake_by_id, get_flake_by_name,
@@ -1303,8 +1302,9 @@ pub async fn accept_flake_history_rewrite(
         }
     };
 
-    let inserted = match sync_commits_for_flake(&pool, &flake.repo_url, &flake.branch, flake.id).await {
-        Ok(inserted) => inserted,
+    let inserted_hashes =
+        match sync_commit_hashes_for_flake(&pool, &flake.repo_url, &flake.branch, flake.id).await {
+            Ok(inserted) => inserted,
         Err(e) => {
             error!(
                 "Failed re-syncing flake {} ({}) after rewrite acceptance: {e:#}",
@@ -1325,6 +1325,8 @@ pub async fn accept_flake_history_rewrite(
         }
     };
 
+    let inserted = inserted_hashes.len();
+
     info!(
         "history_rewrite_accepted flake_id={} flake_name={} deleted_commits={} inserted_commits={} actor={}",
         flake.id,
@@ -1335,6 +1337,12 @@ pub async fn accept_flake_history_rewrite(
     );
 
     if inserted > 0 {
+        if let Err(e) = promote_pending_commits_by_hashes(&pool, flake.id, &inserted_hashes).await {
+            warn!(
+                "Failed promoting rewrite-sync commits for flake {} ({}): {e:#}",
+                flake.name, flake.repo_url
+            );
+        }
         state.queue_notifier.notify_eval_queue();
     }
 
@@ -1416,10 +1424,21 @@ pub async fn sync_all_flakes_handler(
     let mut inserted = 0usize;
     let mut failed = Vec::new();
     for flake in flakes {
-        match sync_commits_for_flake(&pool, &flake.repo_url, &flake.branch, flake.id).await {
-            Ok(new_commits) => {
+        match sync_commit_hashes_for_flake(&pool, &flake.repo_url, &flake.branch, flake.id).await {
+            Ok(new_commit_hashes) => {
+                let new_commits = new_commit_hashes.len();
                 synced += 1;
                 inserted += new_commits;
+                if new_commits > 0 {
+                    if let Err(e) =
+                        promote_pending_commits_by_hashes(&pool, flake.id, &new_commit_hashes).await
+                    {
+                        warn!(
+                            "Failed promoting sync-all commits for flake {} ({}): {e:#}",
+                            flake.name, flake.repo_url
+                        );
+                    }
+                }
             }
             Err(e) => {
                 error!(
@@ -1571,9 +1590,18 @@ pub async fn sync_flake_handler(
         }
     };
 
-    match sync_commits_for_flake(&pool, &flake.repo_url, &sync_branch, flake.id).await {
-        Ok(new_commits) => {
+    match sync_commit_hashes_for_flake(&pool, &flake.repo_url, &sync_branch, flake.id).await {
+        Ok(new_commit_hashes) => {
+            let new_commits = new_commit_hashes.len();
             if new_commits > 0 {
+                if let Err(e) =
+                    promote_pending_commits_by_hashes(&pool, flake.id, &new_commit_hashes).await
+                {
+                    warn!(
+                        "Failed promoting sync commits for flake {} ({}): {e:#}",
+                        flake.name, flake.repo_url
+                    );
+                }
                 state.queue_notifier.notify_eval_queue();
             }
             (
