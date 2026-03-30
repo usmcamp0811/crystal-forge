@@ -61,6 +61,15 @@ High (incorrect matching could misreport deployment state and affect rollout saf
 - [ ] #7 Targeted backend tests pass in nix develop, including new unit/integration coverage for this feature.
 <!-- AC:END -->
 
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Reproduce the current CI migration failure locally by running the database flake check in the TASK-225 worktree and capture the exact SQL error location in migration 0102.
+2. Patch migration `0102_add_expected_store_path_to_derivations.sql` with minimal scope so `view_system_detail` replacement preserves column ordering/names compatible with PostgreSQL `CREATE OR REPLACE VIEW` semantics.
+3. Re-run targeted verification in Nix dev environment: migration/database check and focused server checks needed to prove no query/model regressions.
+4. Commit only the scoped fix, push to the MR branch, and report what changed plus remaining verification status for merge readiness.
+<!-- SECTION:PLAN:END -->
+
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
