@@ -1,10 +1,10 @@
 ---
 id: TASK-225
 title: Track expected Nix store paths from eval and match agent state pre-build
-status: Review
+status: Done
 assignee: []
 created_date: '2026-03-29 23:39'
-updated_date: '2026-03-30 02:06'
+updated_date: '2026-03-30 02:44'
 labels:
   - backend
   - nix
@@ -96,4 +96,8 @@ Root cause: migration 0102 used CREATE OR REPLACE VIEW with `expected_store_path
 Fix: keep existing column order unchanged and append `expected_store_path` at end of `view_system_detail` SELECT list in migration 0102.
 
 Verification (local, non-production only): `nix build .#checks.x86_64-linux.database -L --show-trace` PASS; `nix build .#checks.x86_64-linux.server -L --show-trace` PASS; `nix develop -c env SQLX_OFFLINE=true cargo check --package crystal-forge` PASS; `nix develop -c env SQLX_OFFLINE=true cargo test --package crystal-forge derivations::utils::tests` PASS.
+
+MR-196 merged into dev at 2026-03-30T02:42:32Z.
+
+Post-merge cleanup complete: removed dedicated worktree `/home/mcamp/code/crystal-forge/TASK-225-expected-store-paths` and ran `git worktree prune`.
 <!-- SECTION:NOTES:END -->
