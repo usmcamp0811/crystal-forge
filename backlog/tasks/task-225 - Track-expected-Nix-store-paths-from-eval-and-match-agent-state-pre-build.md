@@ -1,10 +1,10 @@
 ---
 id: TASK-225
 title: Track expected Nix store paths from eval and match agent state pre-build
-status: Review
+status: In Progress
 assignee: []
 created_date: '2026-03-29 23:39'
-updated_date: '2026-03-30 00:14'
+updated_date: '2026-03-30 01:48'
 labels:
   - backend
   - nix
@@ -73,4 +73,10 @@ MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/196
 cargo check: 0 errors (SQLX_OFFLINE=true). cargo sqlx prepare: success. 3 unit tests pass.
 
 Fix pushed (ef54e688): corrected latest_derivation join key (derivation_name not derivation_target) and per-system policy log level. cargo check: 0 errors. 3 unit tests pass.
+
+LOCK: opencode-gpt5 on reckless in /home/mcamp/code/crystal-forge/TASK-225-expected-store-paths
+
+Takeover: user requested reassignment from prior lock owner to unblock MR-196 CI remediation.
+
+Initial CI triage from pipeline 2416773994: migration 0102 fails with `ERROR: cannot change name of view column "cpu_brand" to "expected_store_path"` during crystal-forge-migrate in database check.
 <!-- SECTION:NOTES:END -->
