@@ -27,7 +27,7 @@ use crate::flake::credentials::FlakeCredentialEnv;
 use crate::handlers::agent_request::CFState;
 use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_above};
 use crate::queries::admin::insert_admin_audit_event;
-use crate::queries::commits::insert_commit_with_metadata;
+use crate::queries::commits::{insert_commit_with_metadata, promote_latest_pending_commits_for_flake};
 use crate::flake::commits::sync_commits_for_flake;
 use crate::queries::flakes::{
     cascade_delete_flake, check_flake_dependencies, count_systems_for_flake, delete_flake_by_id,
@@ -1335,6 +1335,12 @@ pub async fn accept_flake_history_rewrite(
     );
 
     if inserted > 0 {
+        if let Err(e) = promote_latest_pending_commits_for_flake(&pool, flake.id, inserted).await {
+            warn!(
+                "Failed promoting rewrite-sync commits for flake {} ({}): {e:#}",
+                flake.name, flake.repo_url
+            );
+        }
         state.queue_notifier.notify_eval_queue();
     }
 
@@ -1420,6 +1426,16 @@ pub async fn sync_all_flakes_handler(
             Ok(new_commits) => {
                 synced += 1;
                 inserted += new_commits;
+                if new_commits > 0 {
+                    if let Err(e) =
+                        promote_latest_pending_commits_for_flake(&pool, flake.id, new_commits).await
+                    {
+                        warn!(
+                            "Failed promoting sync-all commits for flake {} ({}): {e:#}",
+                            flake.name, flake.repo_url
+                        );
+                    }
+                }
             }
             Err(e) => {
                 error!(
@@ -1574,6 +1590,14 @@ pub async fn sync_flake_handler(
     match sync_commits_for_flake(&pool, &flake.repo_url, &sync_branch, flake.id).await {
         Ok(new_commits) => {
             if new_commits > 0 {
+                if let Err(e) =
+                    promote_latest_pending_commits_for_flake(&pool, flake.id, new_commits).await
+                {
+                    warn!(
+                        "Failed promoting sync commits for flake {} ({}): {e:#}",
+                        flake.name, flake.repo_url
+                    );
+                }
                 state.queue_notifier.notify_eval_queue();
             }
             (

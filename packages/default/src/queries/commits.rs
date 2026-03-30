@@ -472,6 +472,111 @@ pub async fn reorder_eval_queue(pool: &PgPool, ordered_commit_ids: &[i32]) -> Re
     Ok(())
 }
 
+pub async fn promote_latest_pending_commits_for_flake(
+    pool: &PgPool,
+    flake_id: i32,
+    new_commit_count: usize,
+) -> Result<()> {
+    if new_commit_count == 0 {
+        return Ok(());
+    }
+
+    let limit = i64::try_from(new_commit_count).context("new_commit_count overflow")?;
+    let mut tx = pool.begin().await?;
+
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(EVAL_QUEUE_ADVISORY_LOCK_KEY)
+        .execute(&mut *tx)
+        .await?;
+
+    let promoted_ids: Vec<i32> = sqlx::query_scalar(
+        r#"
+        SELECT c.id
+        FROM commits c
+        WHERE c.flake_id = $1
+          AND COALESCE(c.evaluation_status, 'pending') = 'pending'
+        ORDER BY c.commit_timestamp DESC, c.id DESC
+        LIMIT $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(flake_id)
+    .bind(limit)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    if promoted_ids.is_empty() {
+        tx.commit().await?;
+        return Ok(());
+    }
+
+    let in_progress_ids: Vec<i32> = sqlx::query_scalar(
+        r#"
+        SELECT c.id
+        FROM commits c
+        WHERE COALESCE(c.evaluation_status, 'pending') = 'in_progress'
+        ORDER BY COALESCE(c.eval_queue_position, 9223372036854775807), c.commit_timestamp DESC, c.id DESC
+        FOR UPDATE
+        "#,
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+
+    let pending_ids: Vec<i32> = sqlx::query_scalar(
+        r#"
+        SELECT c.id
+        FROM commits c
+        WHERE COALESCE(c.evaluation_status, 'pending') = 'pending'
+        ORDER BY COALESCE(c.eval_queue_position, 9223372036854775807), c.commit_timestamp DESC, c.id DESC
+        FOR UPDATE
+        "#,
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+
+    let ordered_commit_ids = merge_promoted_pending_ids(&in_progress_ids, &pending_ids, &promoted_ids);
+
+    sqlx::query(
+        r#"
+        WITH ordered AS (
+            SELECT commit_id, ordinality::bigint AS position
+            FROM UNNEST($1::int[]) WITH ORDINALITY AS t(commit_id, ordinality)
+        )
+        UPDATE commits c
+        SET eval_queue_position = o.position
+        FROM ordered o
+        WHERE c.id = o.commit_id
+          AND COALESCE(c.evaluation_status, 'pending') IN ('pending', 'in_progress')
+        "#,
+    )
+    .bind(&ordered_commit_ids)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(())
+}
+
+fn merge_promoted_pending_ids(
+    in_progress_ids: &[i32],
+    pending_ids: &[i32],
+    promoted_ids: &[i32],
+) -> Vec<i32> {
+    let promoted: HashSet<i32> = promoted_ids.iter().copied().collect();
+    let mut ordered = Vec::with_capacity(in_progress_ids.len() + pending_ids.len());
+
+    ordered.extend_from_slice(in_progress_ids);
+    ordered.extend_from_slice(promoted_ids);
+    ordered.extend(
+        pending_ids
+            .iter()
+            .copied()
+            .filter(|commit_id| !promoted.contains(commit_id)),
+    );
+
+    ordered
+}
+
 fn validate_eval_queue_reorder_payload(
     active_commit_ids: &[i32],
     ordered_commit_ids: &[i32],
@@ -520,7 +625,7 @@ fn validate_eval_queue_reorder_payload(
 
 #[cfg(test)]
 mod tests {
-    use super::validate_eval_queue_reorder_payload;
+    use super::{merge_promoted_pending_ids, validate_eval_queue_reorder_payload};
 
     #[test]
     fn reorder_validation_rejects_duplicates() {
@@ -576,5 +681,15 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(positions, vec![(13, 1), (10, 2), (12, 3), (11, 4)]);
+    }
+
+    #[test]
+    fn merge_promoted_pending_keeps_in_progress_first_then_new_sync_commits() {
+        let in_progress = vec![50];
+        let pending = vec![10, 11, 12, 13];
+        let promoted = vec![13, 12];
+
+        let ordered = merge_promoted_pending_ids(&in_progress, &pending, &promoted);
+        assert_eq!(ordered, vec![50, 13, 12, 10, 11]);
     }
 }
