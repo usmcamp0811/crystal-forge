@@ -166,6 +166,7 @@ impl DerivationBuilder {
             build_last_heartbeat: self.build_last_heartbeat,
             cf_agent_enabled: self.cf_agent_enabled,
             store_path: self.store_path.clone(),
+            expected_store_path: None,
         }
     }
 }

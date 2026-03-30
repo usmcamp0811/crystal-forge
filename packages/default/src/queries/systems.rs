@@ -265,6 +265,8 @@ pub struct SystemDetailRow {
     pub kernel: Option<String>,
     pub agent_version: Option<String>,
     pub current_store_path: Option<String>,
+    /// Expected output store path from eval (pre-build).
+    pub expected_store_path: Option<String>,
     // Hardware
     pub cpu_brand: Option<String>,
     pub cpu_cores: Option<i32>,

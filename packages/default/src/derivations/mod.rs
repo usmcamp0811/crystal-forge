@@ -43,6 +43,12 @@ pub struct Derivation {
     #[serde(default)]
     pub cf_agent_enabled: Option<bool>,
     pub store_path: Option<String>,
+    /// Expected output store path resolved from the `.drv` at eval time via
+    /// `nix-store --query --outputs`.  Set before building; `store_path` is set
+    /// after a successful build.  Deployment matching uses
+    /// `COALESCE(store_path, expected_store_path)` so we can correlate a
+    /// system's `/run/current-system` even before the builder has run.
+    pub expected_store_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, PartialEq)]
