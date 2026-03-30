@@ -3,10 +3,10 @@ id: TASK-229
 title: >-
   Show expected/current config store paths in Flakes commit details to resolve
   unknown deployment status
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-03-30 03:17'
-updated_date: '2026-03-30 03:17'
+updated_date: '2026-03-30 03:21'
 labels:
   - flakes
   - ui
@@ -78,4 +78,6 @@ Medium-High (incorrect path mapping can mislead deployment confidence and operat
 Moved Backlog -> To Do per explicit human sprint selection request in chat.
 
 Task authored to Sprint-Ready quality: includes problem, goal, non-goals, constraints, verification plan, impact areas, risk, dependencies, and objective acceptance criteria.
+
+LOCK: opencode-gpt5 on reckless in /home/mcamp/code/crystal-forge/TASK-229-commit-config-paths
 <!-- SECTION:NOTES:END -->
