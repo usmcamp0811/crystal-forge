@@ -234,11 +234,17 @@ pub async fn evaluate_with_nix_eval_jobs(
 
                                         cf_agent_enabled = check.cf_agent_enabled;
 
-                                        // Log policy results
+                                        // Log policy results.
+                                        // Use per-system failed_policies to determine log level,
+                                        // not the global policy list, to avoid mislabelling
+                                        // non-strict failures as errors.
                                         if !check.meets_requirements {
-                                            let has_strict = policies.iter().any(|p| p.is_strict());
+                                            let has_strict_failure = check
+                                                .failed_policies
+                                                .iter()
+                                                .any(|(_, is_strict)| *is_strict);
                                             for warning in &check.warnings {
-                                                if has_strict {
+                                                if has_strict_failure {
                                                     error!("❌ {}", warning);
                                                 } else {
                                                     warn!("⚠️  {}", warning);

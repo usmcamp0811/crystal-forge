@@ -243,17 +243,18 @@ flake_info AS (
     FROM systems s
     LEFT JOIN flakes f ON f.id = s.flake_id
 ),
--- Latest evaluated derivation for each system (by derivation_target = hostname).
--- Provides expected_store_path for pre-build deployment matching.
+-- Latest evaluated derivation for each system.
+-- derivation_name holds the plain NixOS configuration name (e.g. "reckless"),
+-- which matches systems.hostname directly.
+-- derivation_target holds the full flake ref string and must NOT be used here.
 latest_derivation AS (
-    SELECT DISTINCT ON (d.derivation_target)
-        d.derivation_target AS hostname,
+    SELECT DISTINCT ON (d.derivation_name)
+        d.derivation_name AS hostname,
         d.expected_store_path
     FROM derivations d
     WHERE d.derivation_type = 'nixos'
-      AND d.derivation_target IS NOT NULL
       AND d.expected_store_path IS NOT NULL
-    ORDER BY d.derivation_target, d.completed_at DESC NULLS LAST, d.id DESC
+    ORDER BY d.derivation_name, d.completed_at DESC NULLS LAST, d.id DESC
 )
 SELECT
     s.id,
