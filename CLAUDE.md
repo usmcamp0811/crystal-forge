@@ -446,7 +446,7 @@ You MUST NOT mark a task complete with failing tests.
 
 If database-backed compile checks are required:
 You MUST use the appropriate offline mode or start required services.
-
+NEVER! use "postgresql://crystal_forge@127.0.0.1:5432/crystal_forge" for testing or for running sqlx prepare!
 </CRITICAL_INSTRUCTION>
 
 ---
