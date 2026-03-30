@@ -24,11 +24,10 @@ CREATE INDEX IF NOT EXISTS idx_derivations_expected_store_path
     ON derivations (expected_store_path)
     WHERE expected_store_path IS NOT NULL;
 
--- Recreate view_system_deployment_status to match on COALESCE(d.store_path, d.expected_store_path).
--- This replaces the previous version which only matched on d.store_path.
-DROP VIEW IF EXISTS view_system_deployment_status CASCADE;
-
-CREATE VIEW view_system_deployment_status AS
+-- Rebuild view_system_deployment_status to match on
+-- COALESCE(d.store_path, d.expected_store_path).
+-- Use CREATE OR REPLACE (no CASCADE) so dependent views are preserved.
+CREATE OR REPLACE VIEW view_system_deployment_status AS
 WITH latest_system_states AS (
     SELECT DISTINCT ON (hostname)
         hostname,
@@ -132,8 +131,7 @@ ORDER BY
 -- We add a CTE that finds the latest derivation for each system (by matching
 -- the system hostname to derivation_target) and exposes its expected_store_path.
 -- This depends on view_system_deployment_status which was already recreated above.
-DROP VIEW IF EXISTS public.view_system_detail CASCADE;
-
+-- Use CREATE OR REPLACE (no CASCADE) so dependent views are preserved.
 CREATE OR REPLACE VIEW public.view_system_detail AS
 WITH latest_system_state AS (
     SELECT DISTINCT ON (s.id)
