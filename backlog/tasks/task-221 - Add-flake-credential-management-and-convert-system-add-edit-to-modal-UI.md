@@ -4,7 +4,7 @@ title: Add flake credential management and convert system add/edit to modal UI
 status: In Progress
 assignee: []
 created_date: '2026-03-28 22:14'
-updated_date: '2026-03-29 00:18'
+updated_date: '2026-03-29 19:37'
 labels:
   - backend
   - frontend
@@ -214,6 +214,20 @@ The inline system management UI also doesn't match the established modal pattern
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: agent-claude on gray in ~/code/crystal-forge/TASK-221-flake-credentials-modal-ui
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/194
+
+Reviewer feedback addressed in second commit da15a560: (1) update_system_handler now returns 400 for unknown env/flake name instead of silently NULLing; (2) get_system_detail_by_id fixed to join systems table for system_configuration_name; (3) 13 DB-backed integration tests added and all pass; (4) cargo sqlx prepare re-run; (5) AddFlakeForm converted to modal; (6) EditFlakeDialog widened; (7) Generate button themed; (8) config-name placeholder mirrors hostname.
+
+LOCK takeover approved by maintainer: opencode-gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-221-flake-credentials-modal-ui
+
+Emergency follow-up: investigate and patch `/flakes` tab crash reproducible on TASK-221 branch (dev does not reproduce).
+
+Emergency crash mitigation pushed in commit 367b46de on MR194: cap per-commit stored systems to 120, cap rendered chips to 24, truncate oversized chip labels (96 chars), and disable eval websocket stream for commits with >80 systems to prevent browser tab crashes on /flakes under high-payload scenarios.
+
+Private repo onboarding fix pushed in commit a53b4d8a: create/update flake no longer require pre-credential remote branch reachability; explicit branches are syntax-validated only, and default-branch inference falls back to `main` when remote probing fails so credentials can be saved immediately afterward.
+
+Onboarding documentation updated at docs/onboarding-guide.md with supported flake auth modes (PAT, SSH key, username/password), GitHub/GitLab guidance, and private-repo setup notes.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
