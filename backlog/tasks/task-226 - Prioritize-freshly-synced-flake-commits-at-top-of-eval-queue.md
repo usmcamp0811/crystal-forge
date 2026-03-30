@@ -4,7 +4,7 @@ title: Prioritize freshly synced flake commits at top of eval queue
 status: Review
 assignee: []
 created_date: '2026-03-30 01:56'
-updated_date: '2026-03-30 02:13'
+updated_date: '2026-03-30 02:36'
 labels:
   - queueing
   - flakes
@@ -89,6 +89,8 @@ MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/197
 Commit: 9a8cf9c1
 
 Implemented sync-priority queue promotion: newly synced pending commits are promoted ahead of older pending commits (after in-progress), with deterministic newest-first ordering among promoted commits.
+
+Reviewer concern addressed in commit 71b6c5c3: queue promotion now targets exact inserted sync commit hashes instead of selecting latest pending commits by timestamp. This fixes history-rewrite and older-commit insertion edge cases.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
