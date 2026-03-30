@@ -17,8 +17,10 @@ use crate::models::deployment_policies::{
     DeploymentPolicy, PolicyCheckResult, build_nix_eval_expression,
 };
 use crate::models::flakes::Flake;
+use crate::derivations::utils::resolve_expected_store_path;
 use crate::queries::derivations::{
     insert_derivation_with_target, mark_derivation_dry_run_complete,
+    set_derivation_expected_store_path,
 };
 use crate::flake::credentials::FlakeCredentialEnv;
 use crate::queries::systems::list_configuration_names_for_flake;
@@ -538,6 +540,27 @@ pub async fn evaluate_with_nix_eval_jobs(
                         deriv_id, e
                     );
                 }
+            }
+
+            // Resolve expected output store path from the .drv without building.
+            // This allows deployment matching against /run/current-system before the
+            // builder has completed.
+            if let Some(expected_path) = resolve_expected_store_path(drv_path).await {
+                match set_derivation_expected_store_path(pool, *deriv_id, &expected_path).await {
+                    Ok(_) => debug!(
+                        "📍 Stored expected_store_path for derivation {}: {}",
+                        deriv_id, expected_path
+                    ),
+                    Err(e) => warn!(
+                        "⚠️  Failed to store expected_store_path for derivation {}: {}",
+                        deriv_id, e
+                    ),
+                }
+            } else {
+                debug!(
+                    "ℹ️  No expected_store_path resolved for derivation {} ({})",
+                    deriv_id, drv_path
+                );
             }
         }
 

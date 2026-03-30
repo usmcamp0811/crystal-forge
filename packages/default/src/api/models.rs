@@ -308,7 +308,11 @@ pub struct SystemDetail {
     pub nixos_version: Option<String>,
     pub kernel: Option<String>,
     pub agent_version: Option<String>,
+    /// The store path currently reported by the running system's agent.
     pub current_store_path: Option<String>,
+    /// The expected output store path resolved from the `.drv` at eval time.
+    /// Present before a build completes; `None` if not yet evaluated.
+    pub expected_store_path: Option<String>,
 
     /// Hardware information.
     pub hardware: SystemHardwareInfo,

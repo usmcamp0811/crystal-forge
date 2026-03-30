@@ -269,7 +269,7 @@ pub async fn claim_next_derivation(pool: &PgPool, worker_id: &str) -> Result<Opt
             scheduled_at, completed_at, started_at, attempt_count,
             evaluation_duration_ms, error_message, pname, version, status_id,
             build_elapsed_seconds, build_current_target, build_last_activity_seconds,
-            build_last_heartbeat, cf_agent_enabled, store_path
+            build_last_heartbeat, cf_agent_enabled, store_path, expected_store_path
         FROM derivations
         WHERE id = $1
         "#,

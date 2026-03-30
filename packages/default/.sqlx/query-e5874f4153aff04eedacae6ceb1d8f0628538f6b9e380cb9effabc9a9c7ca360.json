@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n                    UPDATE derivations SET \n                        status_id = $1,\n                        completed_at = NOW(),\n                        evaluation_duration_ms = EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000,\n                        error_message = $2\n                    WHERE id = $3\n                    RETURNING\n                        id,\n                        commit_id,\n                        derivation_type as \"derivation_type: DerivationType\",\n                        derivation_name,\n                        derivation_path,\n                        derivation_target,\n                        scheduled_at,\n                        completed_at,\n                        started_at,\n                        attempt_count,\n                        evaluation_duration_ms,\n                        error_message,\n                        pname,\n                        version,\n                        status_id,\n                        build_elapsed_seconds,\n                        build_current_target,\n                        build_last_activity_seconds,\n                        build_last_heartbeat,\n                        cf_agent_enabled,\n                        store_path\n                    ",
+  "query": "\n        SELECT\n            d.id,\n            d.commit_id,\n            d.derivation_type as \"derivation_type: DerivationType\",\n            d.derivation_name,\n            d.derivation_path,\n            d.derivation_target,\n            d.scheduled_at,\n            d.completed_at,\n            d.started_at,\n            d.attempt_count,\n            d.evaluation_duration_ms,\n            d.error_message,\n            d.pname,\n            d.version,\n            d.status_id,\n            d.build_elapsed_seconds,\n            d.build_current_target,\n            d.build_last_activity_seconds,\n            d.build_last_heartbeat,\n            d.cf_agent_enabled,\n            d.store_path,\n            d.expected_store_path\n        FROM derivations d\n        INNER JOIN view_buildable_derivations vbd ON d.id = vbd.id\n        ORDER BY vbd.queue_position\n        ",
   "describe": {
     "columns": [
       {
@@ -107,14 +107,15 @@
         "ordinal": 20,
         "name": "store_path",
         "type_info": "Text"
+      },
+      {
+        "ordinal": 21,
+        "name": "expected_store_path",
+        "type_info": "Text"
       }
     ],
     "parameters": {
-      "Left": [
-        "Int4",
-        "Text",
-        "Int4"
-      ]
+      "Left": []
     },
     "nullable": [
       false,
@@ -137,8 +138,9 @@
       true,
       true,
       true,
+      true,
       true
     ]
   },
-  "hash": "a440152b0c0ae4aa3d3c3ed32a68e7485da8d257d7fa6350702cf9dd22fbd27a"
+  "hash": "e5874f4153aff04eedacae6ceb1d8f0628538f6b9e380cb9effabc9a9c7ca360"
 }

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n                    UPDATE derivations SET\n                        status_id = $1,\n                        started_at = NOW(),\n                        store_path = $3\n                    WHERE id = $2\n                    RETURNING\n                        id,\n                        commit_id,\n                        derivation_type as \"derivation_type: DerivationType\",\n                        derivation_name,\n                        derivation_path,\n                        derivation_target,\n                        scheduled_at,\n                        completed_at,\n                        started_at,\n                        attempt_count,\n                        evaluation_duration_ms,\n                        error_message,\n                        pname,\n                        version,\n                        status_id,\n                        build_elapsed_seconds,\n                        build_current_target,\n                        build_last_activity_seconds,\n                        build_last_heartbeat,\n                        cf_agent_enabled,\n                        store_path\n                    ",
+  "query": "\n                    UPDATE derivations SET status_id = $1\n                    WHERE id = $2\n                    RETURNING\n                        id,\n                        commit_id,\n                        derivation_type as \"derivation_type: DerivationType\",\n                        derivation_name,\n                        derivation_path,\n                        derivation_target,\n                        scheduled_at,\n                        completed_at,\n                        started_at,\n                        attempt_count,\n                        evaluation_duration_ms,\n                        error_message,\n                        pname,\n                        version,\n                        status_id,\n                        build_elapsed_seconds,\n                        build_current_target,\n                        build_last_activity_seconds,\n                        build_last_heartbeat,\n                        cf_agent_enabled,\n                        store_path,\n                        expected_store_path\n                    ",
   "describe": {
     "columns": [
       {
@@ -107,13 +107,17 @@
         "ordinal": 20,
         "name": "store_path",
         "type_info": "Text"
+      },
+      {
+        "ordinal": 21,
+        "name": "expected_store_path",
+        "type_info": "Text"
       }
     ],
     "parameters": {
       "Left": [
         "Int4",
-        "Int4",
-        "Text"
+        "Int4"
       ]
     },
     "nullable": [
@@ -137,8 +141,9 @@
       true,
       true,
       true,
+      true,
       true
     ]
   },
-  "hash": "2cca52565a66873a7434426ab261d72642cced9713419ba82a2fe3247e442b29"
+  "hash": "0f28cdad30633f95e16c77964a68f981d2137cec91b746b49801b6f002861d27"
 }

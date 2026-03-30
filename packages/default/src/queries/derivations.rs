@@ -98,7 +98,8 @@ pub async fn insert_derivation(
             build_last_activity_seconds,
             build_last_heartbeat,
             cf_agent_enabled,
-            store_path
+            store_path,
+            expected_store_path
         "#,
         commit_id,
         derivation_type,
@@ -172,7 +173,8 @@ pub async fn insert_derivation_with_target(
             build_last_activity_seconds,
             build_last_heartbeat,
             cf_agent_enabled,
-            store_path
+            store_path,
+            expected_store_path
         "#,
         // $1..$5
         commit_id,
@@ -248,7 +250,8 @@ pub async fn insert_package_derivation(
             build_last_activity_seconds,
             build_last_heartbeat,
             cf_agent_enabled,
-            store_path
+            store_path,
+            expected_store_path
         "#,
         None::<i32>, // commit_id is NULL for standalone packages
         "package",
@@ -313,7 +316,8 @@ pub async fn update_derivation_status(
                         build_last_activity_seconds,
                         build_last_heartbeat,
                         cf_agent_enabled,
-                        store_path
+                        store_path,
+                        expected_store_path
                     "#,
                     status_id,
                     path,
@@ -355,7 +359,8 @@ pub async fn update_derivation_status(
                         build_last_activity_seconds,
                         build_last_heartbeat,
                         cf_agent_enabled,
-                        store_path
+                        store_path,
+                        expected_store_path
                     "#,
                     status_id,
                     path,
@@ -402,7 +407,8 @@ pub async fn update_derivation_status(
                         build_last_activity_seconds,
                         build_last_heartbeat,
                         cf_agent_enabled,
-                        store_path
+                        store_path,
+                        expected_store_path
                     "#,
                     status_id,
                     path,
@@ -442,7 +448,8 @@ pub async fn update_derivation_status(
                         build_last_activity_seconds,
                         build_last_heartbeat,
                         cf_agent_enabled,
-                        store_path
+                        store_path,
+                        expected_store_path
                     "#,
                     status_id,
                     path,
@@ -487,7 +494,8 @@ pub async fn update_derivation_status(
                         build_last_activity_seconds,
                         build_last_heartbeat,
                         cf_agent_enabled,
-                        store_path
+                        store_path,
+                        expected_store_path
                     "#,
                     status_id,
                     path,
@@ -525,7 +533,8 @@ pub async fn update_derivation_status(
                         build_last_activity_seconds,
                         build_last_heartbeat,
                         cf_agent_enabled,
-                        store_path
+                        store_path,
+                        expected_store_path
                     "#,
                     status_id,
                     path,
@@ -570,7 +579,8 @@ pub async fn update_derivation_status(
                         build_last_activity_seconds,
                         build_last_heartbeat,
                         cf_agent_enabled,
-                        store_path
+                        store_path,
+                        expected_store_path
                     "#,
                     status_id,
                     path,
@@ -610,7 +620,8 @@ pub async fn update_derivation_status(
                         build_last_activity_seconds,
                         build_last_heartbeat,
                         cf_agent_enabled,
-                        store_path
+                        store_path,
+                        expected_store_path
                     "#,
                     status_id,
                     path,
@@ -656,7 +667,8 @@ pub async fn update_derivation_status(
                         build_last_activity_seconds,
                         build_last_heartbeat,
                         cf_agent_enabled,
-                        store_path
+                        store_path,
+                        expected_store_path
                     "#,
                     status_id,
                     err,
@@ -696,7 +708,8 @@ pub async fn update_derivation_status(
                         build_last_activity_seconds,
                         build_last_heartbeat,
                         cf_agent_enabled,
-                        store_path
+                        store_path,
+                        expected_store_path
                     "#,
                     status_id,
                     err,
@@ -741,7 +754,8 @@ pub async fn update_derivation_status(
                         build_last_activity_seconds,
                         build_last_heartbeat,
                         cf_agent_enabled,
-                        store_path
+                        store_path,
+                        expected_store_path
                     "#,
                     status_id,
                     err,
@@ -779,7 +793,8 @@ pub async fn update_derivation_status(
                         build_last_activity_seconds,
                         build_last_heartbeat,
                         cf_agent_enabled,
-                        store_path
+                        store_path,
+                        expected_store_path
                     "#,
                     status_id,
                     err,
@@ -823,7 +838,8 @@ pub async fn update_derivation_status(
                         build_last_activity_seconds,
                         build_last_heartbeat,
                         cf_agent_enabled,
-                        store_path
+                        store_path,
+                        expected_store_path
                     "#,
                     status_id,
                     target_id,
@@ -861,7 +877,8 @@ pub async fn update_derivation_status(
                         build_last_activity_seconds,
                         build_last_heartbeat,
                         cf_agent_enabled,
-                        store_path
+                        store_path,
+                        expected_store_path
                     "#,
                     status_id,
                     target_id,
@@ -898,7 +915,8 @@ pub async fn update_derivation_status(
                         build_last_activity_seconds,
                         build_last_heartbeat,
                         cf_agent_enabled,
-                        store_path
+                        store_path,
+                        expected_store_path
                     "#,
                     status_id,
                     target_id,
@@ -940,7 +958,8 @@ pub async fn update_derivation_status(
                         build_last_activity_seconds,
                         build_last_heartbeat,
                         cf_agent_enabled,
-                        store_path
+                        store_path,
+                        expected_store_path
                     "#,
                     status_id,
                     target_id
@@ -977,7 +996,8 @@ pub async fn update_derivation_status(
                         build_last_activity_seconds,
                         build_last_heartbeat,
                         cf_agent_enabled,
-                        store_path
+                        store_path,
+                        expected_store_path
                     "#,
                     status_id,
                     target_id
@@ -1011,7 +1031,8 @@ pub async fn update_derivation_status(
                         build_last_activity_seconds,
                         build_last_heartbeat,
                         cf_agent_enabled,
-                        store_path
+                        store_path,
+                        expected_store_path
                     "#,
                     status_id,
                     target_id
@@ -1039,6 +1060,30 @@ pub async fn mark_derivation_dry_run_in_progress(
         None,
     )
     .await
+}
+
+/// Persist the expected output store path resolved at eval time.
+///
+/// This is a lightweight UPDATE that only touches `expected_store_path`; it
+/// does not change status, so callers can call it independently of
+/// `mark_derivation_dry_run_complete`.
+pub async fn set_derivation_expected_store_path(
+    pool: &PgPool,
+    derivation_id: i32,
+    expected_store_path: &str,
+) -> Result<()> {
+    sqlx::query!(
+        r#"
+        UPDATE derivations
+        SET expected_store_path = $1
+        WHERE id = $2
+        "#,
+        expected_store_path,
+        derivation_id
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 pub async fn mark_derivation_dry_run_complete(
@@ -1136,7 +1181,7 @@ pub async fn get_derivations_by_paths(pool: &PgPool, paths: &[&str]) -> Result<V
             evaluation_duration_ms, error_message, pname, version,
             status_id, build_elapsed_seconds, build_current_target,
             build_last_activity_seconds, build_last_heartbeat,
-            cf_agent_enabled, store_path
+            cf_agent_enabled, store_path, expected_store_path
         FROM derivations
         WHERE derivation_path = ANY($1)
         "#,
@@ -1172,7 +1217,8 @@ pub async fn get_derivation_by_id(pool: &PgPool, target_id: i32) -> Result<Deriv
             build_last_activity_seconds,
             build_last_heartbeat,
             cf_agent_enabled,
-            store_path
+            store_path,
+            expected_store_path
         FROM derivations
         WHERE id = $1
         "#,
@@ -1210,7 +1256,8 @@ pub async fn get_pending_dry_run_derivations(pool: &PgPool) -> Result<Vec<Deriva
             d.build_last_activity_seconds,
             d.build_last_heartbeat,
             d.cf_agent_enabled,
-            d.store_path
+            d.store_path,
+            d.expected_store_path
         FROM derivations d
         LEFT JOIN commits c ON d.commit_id = c.id
         WHERE d.status_id = $1
@@ -1251,7 +1298,8 @@ pub async fn get_derivations_ready_for_build(pool: &PgPool) -> Result<Vec<Deriva
             d.build_last_activity_seconds,
             d.build_last_heartbeat,
             d.cf_agent_enabled,
-            d.store_path
+            d.store_path,
+            d.expected_store_path
         FROM derivations d
         INNER JOIN view_buildable_derivations vbd ON d.id = vbd.id
         ORDER BY vbd.queue_position

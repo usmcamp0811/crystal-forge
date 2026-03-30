@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n                    UPDATE derivations SET \n                        status_id = $1,\n                        started_at = NOW(),\n                        derivation_path = $2,\n                        store_path = $4\n                    WHERE id = $3\n                    RETURNING\n                        id,\n                        commit_id,\n                        derivation_type as \"derivation_type: DerivationType\",\n                        derivation_name,\n                        derivation_path,\n                        derivation_target,\n                        scheduled_at,\n                        completed_at,\n                        started_at,\n                        attempt_count,\n                        evaluation_duration_ms,\n                        error_message,\n                        pname,\n                        version,\n                        status_id,\n                        build_elapsed_seconds,\n                        build_current_target,\n                        build_last_activity_seconds,\n                        build_last_heartbeat,\n                        cf_agent_enabled,\n                        store_path\n                    ",
+  "query": "\n        SELECT \n            id, commit_id, \n            derivation_type as \"derivation_type: DerivationType\",\n            derivation_name, derivation_path, derivation_target,\n            scheduled_at, completed_at, started_at, attempt_count,\n            evaluation_duration_ms, error_message, pname, version,\n            status_id, build_elapsed_seconds, build_current_target,\n            build_last_activity_seconds, build_last_heartbeat,\n            cf_agent_enabled, store_path, expected_store_path\n        FROM derivations\n        WHERE derivation_path = ANY($1)\n        ",
   "describe": {
     "columns": [
       {
@@ -107,14 +107,16 @@
         "ordinal": 20,
         "name": "store_path",
         "type_info": "Text"
+      },
+      {
+        "ordinal": 21,
+        "name": "expected_store_path",
+        "type_info": "Text"
       }
     ],
     "parameters": {
       "Left": [
-        "Int4",
-        "Text",
-        "Int4",
-        "Text"
+        "TextArray"
       ]
     },
     "nullable": [
@@ -138,8 +140,9 @@
       true,
       true,
       true,
+      true,
       true
     ]
   },
-  "hash": "5b695913ce721cc4cdea30186b96cbce9441499c541187a6dd8d1cb18c86967b"
+  "hash": "a4b299ba7629205fd5e44ba80816373e91a13df2ba6645894dc6deb04e9dd00e"
 }
