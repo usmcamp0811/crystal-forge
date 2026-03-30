@@ -3,9 +3,10 @@ id: TASK-229
 title: >-
   Show expected/current config store paths in Flakes commit details to resolve
   unknown deployment status
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-03-30 03:17'
+updated_date: '2026-03-30 03:17'
 labels:
   - flakes
   - ui
@@ -70,3 +71,11 @@ Medium-High (incorrect path mapping can mislead deployment confidence and operat
 - [ ] #5 Backend/API and UI tests cover: matching path, non-matching path, and missing path cases.
 - [ ] #6 The implementation is documented in task notes with precedence rules for matching (e.g., built path vs expected path) used by commit details.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Moved Backlog -> To Do per explicit human sprint selection request in chat.
+
+Task authored to Sprint-Ready quality: includes problem, goal, non-goals, constraints, verification plan, impact areas, risk, dependencies, and objective acceptance criteria.
+<!-- SECTION:NOTES:END -->
