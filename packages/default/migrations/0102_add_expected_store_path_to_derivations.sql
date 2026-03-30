@@ -277,7 +277,6 @@ SELECT
     lss.kernel,
     lss.agent_version,
     lss.store_path AS current_store_path,
-    ld.expected_store_path,
     lss.cpu_brand,
     lss.cpu_cores,
     lss.memory_gb,
@@ -306,7 +305,8 @@ SELECT
         COALESCE(lss.last_seen, '1970-01-01'::timestamptz)
     ) AS last_seen,
     s.created_at,
-    s.updated_at
+    s.updated_at,
+    ld.expected_store_path
 FROM systems s
 LEFT JOIN environments e ON e.id = s.environment_id
 LEFT JOIN latest_system_state lss ON lss.system_id = s.id
