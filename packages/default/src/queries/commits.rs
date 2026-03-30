@@ -472,16 +472,15 @@ pub async fn reorder_eval_queue(pool: &PgPool, ordered_commit_ids: &[i32]) -> Re
     Ok(())
 }
 
-pub async fn promote_latest_pending_commits_for_flake(
+pub async fn promote_pending_commits_by_hashes(
     pool: &PgPool,
     flake_id: i32,
-    new_commit_count: usize,
+    inserted_commit_hashes: &[String],
 ) -> Result<()> {
-    if new_commit_count == 0 {
+    if inserted_commit_hashes.is_empty() {
         return Ok(());
     }
 
-    let limit = i64::try_from(new_commit_count).context("new_commit_count overflow")?;
     let mut tx = pool.begin().await?;
 
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
@@ -495,13 +494,13 @@ pub async fn promote_latest_pending_commits_for_flake(
         FROM commits c
         WHERE c.flake_id = $1
           AND COALESCE(c.evaluation_status, 'pending') = 'pending'
+          AND c.git_commit_hash = ANY($2)
         ORDER BY c.commit_timestamp DESC, c.id DESC
-        LIMIT $2
         FOR UPDATE
         "#,
     )
     .bind(flake_id)
-    .bind(limit)
+    .bind(inserted_commit_hashes)
     .fetch_all(&mut *tx)
     .await?;
 

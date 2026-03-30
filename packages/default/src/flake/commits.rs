@@ -279,7 +279,9 @@ async fn sync_all_watched_flakes_commits_inner(
 ///
 /// Returns the number of newly inserted commits.
 pub async fn sync_commits_for_repo(pool: &PgPool, repo_url: &str, branch: &str) -> Result<usize> {
-    sync_commits_for_repo_inner(pool, repo_url, branch, None).await
+    Ok(sync_commit_hashes_for_repo_inner(pool, repo_url, branch, None)
+        .await?
+        .len())
 }
 
 /// Sync commits for a single flake, loading per-flake credentials from the DB.
@@ -292,19 +294,30 @@ pub async fn sync_commits_for_flake(
     branch: &str,
     flake_id: i32,
 ) -> Result<usize> {
+    Ok(sync_commit_hashes_for_flake(pool, repo_url, branch, flake_id)
+        .await?
+        .len())
+}
+
+pub async fn sync_commit_hashes_for_flake(
+    pool: &PgPool,
+    repo_url: &str,
+    branch: &str,
+    flake_id: i32,
+) -> Result<Vec<String>> {
     let creds = FlakeCredentialEnv::load(pool, flake_id).await.unwrap_or_else(|e| {
         warn!("Failed to load credentials for flake {flake_id}: {e:#}");
         None
     });
-    sync_commits_for_repo_inner(pool, repo_url, branch, creds.as_ref()).await
+    sync_commit_hashes_for_repo_inner(pool, repo_url, branch, creds.as_ref()).await
 }
 
-async fn sync_commits_for_repo_inner(
+async fn sync_commit_hashes_for_repo_inner(
     pool: &PgPool,
     repo_url: &str,
     branch: &str,
     creds: Option<&FlakeCredentialEnv>,
-) -> Result<usize> {
+) -> Result<Vec<String>> {
     match flake_has_commits(pool, repo_url).await {
         Ok(true) => {
             let last_commit = flake_last_commit(pool, repo_url)
@@ -316,7 +329,7 @@ async fn sync_commits_for_repo_inner(
                     .with_context(|| {
                         format!("Failed to sync commits since last known hash for {repo_url}")
                     })?;
-            Ok(inserted.len())
+            Ok(inserted)
         }
         Ok(false) => {
             let commits = get_commits_with_full_metadata(repo_url, branch, Some(10), None, creds)
@@ -339,7 +352,7 @@ async fn sync_commits_for_repo_inner(
                     inserted.push(commit_data.hash);
                 }
             }
-            Ok(inserted.len())
+            Ok(inserted)
         }
         Err(e) => Err(e).with_context(|| format!("Failed to inspect commit state for {repo_url}")),
     }
