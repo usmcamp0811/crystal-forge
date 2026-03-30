@@ -4,7 +4,7 @@ title: Show expected/current config store paths in Flakes commit details
 status: In Progress
 assignee: []
 created_date: '2026-03-30 03:17'
-updated_date: '2026-03-30 03:36'
+updated_date: '2026-03-30 04:02'
 labels:
   - flakes
   - ui
@@ -75,4 +75,10 @@ Task authored to Sprint-Ready quality: includes problem, goal, non-goals, constr
 LOCK: opencode-gpt5 on reckless in /home/mcamp/code/crystal-forge/TASK-229-commit-config-paths
 
 Scope adjustment per user: remove up-to-date/unknown status-fix expectations from this task; focus only on exposing path details in Flakes commit details.
+
+Implementation detail: commit-details now project per-config path data with precedence `expected_store_path := derivations.store_path for commit/config`, `current_store_path := latest system_states.store_path for mapped active CF system (flake_id + system_configuration_name|hostname match)`.
+
+UI behavior: Flakes commit details retain config names and now render expected/current path lines per config, including explicit `unavailable` / `not reported` states when data is missing.
+
+Verification run (non-production): `nix develop -c env SQLX_OFFLINE=true cargo check --package crystal-forge` PASS; `nix develop -c env SQLX_OFFLINE=true cargo test --package crystal-forge mark_cf_system_matches_appends_marker_when_config_maps_to_cf_system` PASS; `nix develop -c env SQLX_OFFLINE=true cargo test --package crystal-forge build_commit_system_paths_includes_path_details_and_unavailable_states` PASS; `nix build .#checks.x86_64-linux.web-ui --no-link` PASS; `nix build .#checks.x86_64-linux.server --no-link` PASS.
 <!-- SECTION:NOTES:END -->
