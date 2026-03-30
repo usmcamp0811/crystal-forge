@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE derivations\n        SET expected_store_path = $1\n        WHERE id = $2\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "478b6a3fa60c602d5e93315bc8067c3fa1ab1ebe6a15c2012906a4b7094e94b0"
+}
