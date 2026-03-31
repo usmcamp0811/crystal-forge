@@ -3,10 +3,10 @@ id: TASK-230
 title: >-
   Improve build queue UX: ordering, pagination, search/filter, and build log
   parity
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-03-31 02:48'
-updated_date: '2026-03-31 02:48'
+updated_date: '2026-03-31 02:49'
 labels:
   - builds
   - queue
@@ -112,6 +112,8 @@ Medium-High (operator workflow and queue observability behavior).
 Moved Backlog -> To Do per explicit human sprint selection in chat.
 
 User-selected defaults captured: single combined task; newest-first queue order; server-side pagination; must-have filters = commit hash, flake/repo, system/config, time range; build logs require live + historical behavior.
+
+LOCK: claude-sonnet-4-6 on reckless in /home/mcamp/code/crystal-forge/TASK-230-build-queue-ux
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
