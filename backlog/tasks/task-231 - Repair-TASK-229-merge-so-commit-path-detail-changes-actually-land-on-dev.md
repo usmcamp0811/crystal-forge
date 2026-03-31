@@ -1,7 +1,7 @@
 ---
 id: TASK-231
 title: Repair TASK-229 merge so commit-path detail changes actually land on dev
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-03-31 03:07'
 updated_date: '2026-03-31 03:08'
@@ -61,4 +61,6 @@ Medium (operator-facing path diagnostics can mislead if wrong values/wording are
 
 <!-- SECTION:NOTES:BEGIN -->
 Moved Backlog -> To Do per explicit human sprint selection in chat to repair missing TASK-229 changes on dev.
+
+LOCK: opencode-gpt5 on reckless in /home/mcamp/code/crystal-forge/TASK-231-repair-task229-merge
 <!-- SECTION:NOTES:END -->
