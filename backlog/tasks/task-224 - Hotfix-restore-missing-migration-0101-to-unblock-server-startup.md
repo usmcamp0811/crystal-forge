@@ -1,10 +1,10 @@
 ---
 id: TASK-224
 title: Hotfix restore missing migration 0101 to unblock server startup
-status: Review
+status: Done
 assignee: []
 created_date: '2026-03-29 14:35'
-updated_date: '2026-03-29 15:01'
+updated_date: '2026-03-31 01:57'
 labels:
   - hotfix
   - database
