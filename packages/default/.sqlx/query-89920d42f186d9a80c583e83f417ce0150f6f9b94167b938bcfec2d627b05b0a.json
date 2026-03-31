@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n                    UPDATE derivations SET \n                        status_id = $1,\n                        started_at = NOW(),\n                        error_message = $2,\n                        store_path = $4\n                    WHERE id = $3\n                    RETURNING\n                        id,\n                        commit_id,\n                        derivation_type as \"derivation_type: DerivationType\",\n                        derivation_name,\n                        derivation_path,\n                        derivation_target,\n                        scheduled_at,\n                        completed_at,\n                        started_at,\n                        attempt_count,\n                        evaluation_duration_ms,\n                        error_message,\n                        pname,\n                        version,\n                        status_id,\n                        build_elapsed_seconds,\n                        build_current_target,\n                        build_last_activity_seconds,\n                        build_last_heartbeat,\n                        cf_agent_enabled,\n                        store_path\n                    ",
+  "query": "\n        SELECT\n            d.id,\n            d.commit_id,\n            d.derivation_type as \"derivation_type: DerivationType\",\n            d.derivation_name,\n            d.derivation_path,\n            d.derivation_target,\n            d.scheduled_at,\n            d.completed_at,\n            d.started_at,\n            d.attempt_count,\n            d.evaluation_duration_ms,\n            d.error_message,\n            d.pname,\n            d.version,\n            d.status_id,\n            d.build_elapsed_seconds,\n            d.build_current_target,\n            d.build_last_activity_seconds,\n            d.build_last_heartbeat,\n            d.cf_agent_enabled,\n            d.store_path,\n            d.expected_store_path\n        FROM derivations d\n        LEFT JOIN commits c ON d.commit_id = c.id\n        WHERE d.status_id = $1\n        AND d.attempt_count < 5\n        ORDER BY c.commit_timestamp DESC NULLS LAST\n        ",
   "describe": {
     "columns": [
       {
@@ -107,14 +107,16 @@
         "ordinal": 20,
         "name": "store_path",
         "type_info": "Text"
+      },
+      {
+        "ordinal": 21,
+        "name": "expected_store_path",
+        "type_info": "Text"
       }
     ],
     "parameters": {
       "Left": [
-        "Int4",
-        "Text",
-        "Int4",
-        "Text"
+        "Int4"
       ]
     },
     "nullable": [
@@ -138,8 +140,9 @@
       true,
       true,
       true,
+      true,
       true
     ]
   },
-  "hash": "c0645a4226cbb91d7474f6faa9d31671d73c1c082fd73f95213bfccbe5cfeb7f"
+  "hash": "89920d42f186d9a80c583e83f417ce0150f6f9b94167b938bcfec2d627b05b0a"
 }

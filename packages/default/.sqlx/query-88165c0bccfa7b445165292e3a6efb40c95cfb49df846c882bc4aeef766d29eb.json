@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            id,\n            commit_id,\n            derivation_type as \"derivation_type: DerivationType\",\n            derivation_name,\n            derivation_path,\n            derivation_target,\n            scheduled_at,\n            completed_at,\n            started_at,\n            attempt_count,\n            evaluation_duration_ms,\n            error_message,\n            pname,\n            version,\n            status_id,\n            build_elapsed_seconds,\n            build_current_target,\n            build_last_activity_seconds,\n            build_last_heartbeat,\n            cf_agent_enabled,\n            store_path\n        FROM derivations\n        WHERE id = $1\n        ",
+  "query": "\n        SELECT\n            id,\n            commit_id,\n            derivation_type as \"derivation_type: DerivationType\",\n            derivation_name,\n            derivation_path,\n            derivation_target,\n            scheduled_at,\n            completed_at,\n            started_at,\n            attempt_count,\n            evaluation_duration_ms,\n            error_message,\n            pname,\n            version,\n            status_id,\n            build_elapsed_seconds,\n            build_current_target,\n            build_last_activity_seconds,\n            build_last_heartbeat,\n            cf_agent_enabled,\n            store_path,\n            expected_store_path\n        FROM derivations\n        WHERE id = $1\n        ",
   "describe": {
     "columns": [
       {
@@ -107,6 +107,11 @@
         "ordinal": 20,
         "name": "store_path",
         "type_info": "Text"
+      },
+      {
+        "ordinal": 21,
+        "name": "expected_store_path",
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -135,8 +140,9 @@
       true,
       true,
       true,
+      true,
       true
     ]
   },
-  "hash": "3823134477356818614ee9ddaa74d5ffb40b0414c8f784c569898899c1b4d5ec"
+  "hash": "88165c0bccfa7b445165292e3a6efb40c95cfb49df846c882bc4aeef766d29eb"
 }

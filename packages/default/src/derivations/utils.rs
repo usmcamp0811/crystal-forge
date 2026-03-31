@@ -343,6 +343,98 @@ pub async fn get_store_path_from_drv(drv_path: &str) -> Result<String> {
     Ok(String::from_utf8(output.stdout)?.trim().to_string())
 }
 
+/// Resolve the first expected output store path from a `.drv` path without
+/// building.
+///
+/// Runs `nix-store --query --outputs <drv>` and returns the first output path.
+/// For standard NixOS toplevel derivations there is exactly one output (`out`).
+///
+/// Returns `None` (and logs a warning) rather than propagating an error when
+/// the Nix command fails so that a single unhealthy derivation does not abort
+/// the entire evaluation pipeline.
+pub async fn resolve_expected_store_path(drv_path: &str) -> Option<String> {
+    let output = Command::new("nix-store")
+        .args(["--query", "--outputs", drv_path])
+        .output()
+        .await;
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let raw = String::from_utf8_lossy(&out.stdout);
+            // nix-store outputs one path per line; take the first non-empty one.
+            let path = raw
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty() && l.starts_with("/nix/store/"))
+                .map(str::to_string);
+
+            if path.is_none() {
+                warn!(
+                    "nix-store --query --outputs produced no /nix/store/ paths for {}",
+                    drv_path
+                );
+            }
+            path
+        }
+        Ok(out) => {
+            warn!(
+                "nix-store --query --outputs failed for {}: {}",
+                drv_path,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            None
+        }
+        Err(e) => {
+            warn!(
+                "Failed to spawn nix-store for expected store path of {}: {}",
+                drv_path, e
+            );
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Validates that the path-extraction logic inside `resolve_expected_store_path`
+    /// works correctly without needing a live Nix store.
+    #[test]
+    fn first_nix_store_line_is_selected() {
+        let raw = "/nix/store/abc123-system-x86_64-linux\n/nix/store/def456-other\n";
+        let path = raw
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty() && l.starts_with("/nix/store/"))
+            .map(str::to_string);
+        assert_eq!(
+            path,
+            Some("/nix/store/abc123-system-x86_64-linux".to_string())
+        );
+    }
+
+    #[test]
+    fn empty_output_yields_none() {
+        let raw = "   \n\n";
+        let path = raw
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty() && l.starts_with("/nix/store/"))
+            .map(str::to_string);
+        assert!(path.is_none());
+    }
+
+    #[test]
+    fn non_store_output_yields_none() {
+        let raw = "error: something went wrong\n";
+        let path = raw
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty() && l.starts_with("/nix/store/"))
+            .map(str::to_string);
+        assert!(path.is_none());
+    }
+}
+
 /// Enhanced version that gets closure with cache status in one pass
 pub async fn get_complete_closure_with_cache_status(
     derivation_path: &str,

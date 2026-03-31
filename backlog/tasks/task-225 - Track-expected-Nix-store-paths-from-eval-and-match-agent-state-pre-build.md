@@ -1,10 +1,10 @@
 ---
 id: TASK-225
 title: Track expected Nix store paths from eval and match agent state pre-build
-status: Done
+status: In Progress
 assignee: []
 created_date: '2026-03-29 23:39'
-updated_date: '2026-03-30 02:44'
+updated_date: '2026-03-30 01:48'
 labels:
   - backend
   - nix
@@ -88,16 +88,4 @@ LOCK: opencode-gpt5 on reckless in /home/mcamp/code/crystal-forge/TASK-225-expec
 Takeover: user requested reassignment from prior lock owner to unblock MR-196 CI remediation.
 
 Initial CI triage from pipeline 2416773994: migration 0102 fails with `ERROR: cannot change name of view column "cpu_brand" to "expected_store_path"` during crystal-forge-migrate in database check.
-
-Takeover fix commit pushed: 7eb46544 (MR-196 branch).
-
-Root cause: migration 0102 used CREATE OR REPLACE VIEW with `expected_store_path` inserted before existing columns in `view_system_detail`, causing PostgreSQL column rename errors (`cpu_brand` then `created_at`) during migration replay.
-
-Fix: keep existing column order unchanged and append `expected_store_path` at end of `view_system_detail` SELECT list in migration 0102.
-
-Verification (local, non-production only): `nix build .#checks.x86_64-linux.database -L --show-trace` PASS; `nix build .#checks.x86_64-linux.server -L --show-trace` PASS; `nix develop -c env SQLX_OFFLINE=true cargo check --package crystal-forge` PASS; `nix develop -c env SQLX_OFFLINE=true cargo test --package crystal-forge derivations::utils::tests` PASS.
-
-MR-196 merged into dev at 2026-03-30T02:42:32Z.
-
-Post-merge cleanup complete: removed dedicated worktree `/home/mcamp/code/crystal-forge/TASK-225-expected-store-paths` and ran `git worktree prune`.
 <!-- SECTION:NOTES:END -->
