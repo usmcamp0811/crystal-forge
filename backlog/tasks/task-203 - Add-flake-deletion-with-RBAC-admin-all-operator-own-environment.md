@@ -1,11 +1,11 @@
 ---
 id: TASK-203
-title: Add flake deletion with RBAC - admin all, operator own environment
-status: Review
+title: 'Add flake deletion with RBAC - admin all, operator own environment'
+status: Done
 assignee:
   - Claude
 created_date: '2026-03-20 13:40'
-updated_date: '2026-03-20'
+updated_date: '2026-03-31 01:56'
 labels:
   - backend
   - frontend

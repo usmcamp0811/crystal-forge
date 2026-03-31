@@ -1,19 +1,10 @@
 ---
 id: TASK-199
 title: OIDC group mapping not granting admin role to crystal-forge-admins group
-status: Review
+status: Done
 assignee: []
 created_date: '2026-03-20 13:40'
-updated_date: '2026-03-20 14:15'
-notes: |
-  LOCK: claude-agent on dev workstation in ~/code/crystal-forge/TASK-199-oidc-admin-role-fix
-  MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/176
-  
-  Implementation completed:
-  - Fixed case-sensitivity bug in bootstrap admin group mapping (normalize before storing)
-  - Added comprehensive structured logging throughout OIDC authentication flow
-  - Logs now show groups extracted, mappings found, derived role, and final assignment
-  - Ready for manual testing on reckless deployment
+updated_date: '2026-03-31 01:56'
 labels:
   - auth
   - oidc
