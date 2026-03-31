@@ -3,10 +3,10 @@ id: TASK-232
 title: >-
   Restore missing migration 0102 on dev to resolve startup failure against
   applied DB version
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-03-31 12:34'
-updated_date: '2026-03-31 12:34'
+updated_date: '2026-03-31 12:35'
 labels:
   - hotfix
   - database
@@ -47,4 +47,6 @@ Production/startup fails with `migration 102 was previously applied but is missi
 
 <!-- SECTION:NOTES:BEGIN -->
 Moved Backlog -> To Do per explicit user request to repair outage.
+
+LOCK: opencode-gpt5 on reckless in /home/mcamp/code/crystal-forge/TASK-232-restore-migration-0102
 <!-- SECTION:NOTES:END -->
