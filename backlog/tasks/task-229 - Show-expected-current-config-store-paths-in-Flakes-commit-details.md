@@ -4,7 +4,7 @@ title: Show expected/current config store paths in Flakes commit details
 status: Review
 assignee: []
 created_date: '2026-03-30 03:17'
-updated_date: '2026-03-31 01:54'
+updated_date: '2026-03-31 02:15'
 labels:
   - flakes
   - ui
@@ -95,4 +95,10 @@ Backend selection for displayed host/path changed from `systems.updated_at DESC 
 Resolved merge conflicts after merging `origin/dev` into branch (conflicts were backlog task markdown add/add); kept `origin/dev` versions for conflicted backlog files.
 
 Follow-up commits pushed to MR-198: `94263c8e` (host-scoped fix) and `4a6d11ac` (merge conflict resolution merge commit).
+
+Addressed merge blocker: `fetch_commit_config_paths` now projects expected path from `derivations.expected_store_path` (not `derivations.store_path`) to preserve evaluated-vs-built semantics for commit details.
+
+Follow-up commit pushed to MR-198: `89b1e704` (`fix: source expected path from expected_store_path`).
+
+Verification rerun (non-production): `nix develop -c env SQLX_OFFLINE=true cargo check --package crystal-forge` PASS; `nix develop -c env SQLX_OFFLINE=true cargo test --package crystal-forge build_commit_system_paths_includes_path_details_and_unavailable_states` PASS.
 <!-- SECTION:NOTES:END -->
