@@ -315,7 +315,7 @@ async fn fetch_commit_config_paths(
             d.derivation_name,
             COALESCE(mapped_hosts.mapped_host_count, 0)::bigint,
             selected_state.hostname,
-            d.store_path,
+            d.expected_store_path,
             selected_state.store_path
         FROM commits c
         JOIN derivations d
