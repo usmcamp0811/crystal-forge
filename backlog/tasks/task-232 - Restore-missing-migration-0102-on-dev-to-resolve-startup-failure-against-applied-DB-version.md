@@ -3,9 +3,10 @@ id: TASK-232
 title: >-
   Restore missing migration 0102 on dev to resolve startup failure against
   applied DB version
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-03-31 12:34'
+updated_date: '2026-03-31 12:34'
 labels:
   - hotfix
   - database
@@ -41,3 +42,9 @@ Production/startup fails with `migration 102 was previously applied but is missi
 - [ ] #2 `nix build .#checks.x86_64-linux.database --no-link` passes locally.
 - [ ] #3 Emergency MR to `dev` is opened with outage context and verification evidence.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Moved Backlog -> To Do per explicit user request to repair outage.
+<!-- SECTION:NOTES:END -->
