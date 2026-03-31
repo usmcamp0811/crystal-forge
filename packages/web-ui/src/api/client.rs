@@ -138,6 +138,51 @@ pub async fn reorder_eval_queue(ordered_commit_ids: &[i32]) -> Result<(), ApiCli
     send_empty_with_csrf("POST", &url, Some(&request)).await
 }
 
+/// Fetch build jobs with pagination and optional filtering.
+pub async fn fetch_build_queue_paginated(
+    params: &crate::api::models::BuildQueueParams,
+) -> Result<crate::api::models::BuildQueuePageResponse, ApiClientError> {
+    let mut url = format!("{}/build-jobs", base_url());
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(p) = params.page {
+        parts.push(format!("page={}", p));
+    }
+    if let Some(l) = params.limit {
+        parts.push(format!("limit={}", l));
+    }
+    if let Some(s) = &params.status {
+        if !s.is_empty() {
+            parts.push(format!("status={}", s));
+        }
+    }
+    if let Some(ch) = &params.commit_hash {
+        if !ch.is_empty() {
+            parts.push(format!("commit_hash={}", ch));
+        }
+    }
+    if let Some(fn_) = &params.flake_name {
+        if !fn_.is_empty() {
+            parts.push(format!("flake_name={}", fn_));
+        }
+    }
+    if let Some(cn) = &params.config_name {
+        if !cn.is_empty() {
+            parts.push(format!("config_name={}", cn));
+        }
+    }
+    if let Some(qa) = params.queued_after {
+        parts.push(format!("queued_after={}", qa.to_rfc3339()));
+    }
+    if let Some(qb) = params.queued_before {
+        parts.push(format!("queued_before={}", qb.to_rfc3339()));
+    }
+    if !parts.is_empty() {
+        url.push('?');
+        url.push_str(&parts.join("&"));
+    }
+    fetch_json(&url).await
+}
+
 /// Move a queued build job to the front of the queue (admin/operator).
 pub async fn prioritize_build_job(job_id: &uuid::Uuid) -> Result<(), ApiClientError> {
     let url = format!("{}/build-jobs/{}/prioritize", base_url(), job_id);

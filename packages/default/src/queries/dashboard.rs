@@ -9,8 +9,8 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::api::models::{
-    BuildQueueItem, BuildQueueSummary, BuildStatus, CveSummary, DeploymentStatus,
-    DeploymentStatusSummary, FleetHealthSummary, RecentDeployment,
+    BuildQueueItem, BuildQueuePageResponse, BuildQueueParams, BuildQueueSummary, BuildStatus,
+    CveSummary, DeploymentStatus, DeploymentStatusSummary, FleetHealthSummary, RecentDeployment,
 };
 
 /// Query `view_fleet_health_status` for system counts by health category.
@@ -404,4 +404,213 @@ pub async fn fetch_recent_build_history(pool: &PgPool, limit: i64) -> Result<Vec
             },
         )
         .collect())
+}
+
+/// Fetch build jobs with pagination, filtering, and newest-first ordering.
+///
+/// Supports filtering by status, commit hash, flake name, config/hostname, and time range.
+/// Returns a total row count alongside the page of items so the caller can render pagination.
+pub async fn list_build_queue_paginated(
+    pool: &PgPool,
+    params: &BuildQueueParams,
+) -> Result<BuildQueuePageResponse> {
+    let limit = params.limit.min(200).max(1);
+    let page = params.page.max(1);
+    let offset = (page - 1) * limit;
+
+    // Build status filter list. Empty means "all statuses".
+    let status_filter: Vec<String> = params
+        .status
+        .as_deref()
+        .unwrap_or("")
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    // Shared type aliases for the raw row tuple.
+    type BuildRow = (
+        Option<Uuid>,        // job_id
+        Option<Uuid>,        // system_id
+        Option<String>,      // hostname
+        Option<String>,      // flake_name
+        Option<String>,      // commit_hash
+        String,              // status
+        Option<String>,      // builder_name
+        DateTime<Utc>,       // queued_at
+        Option<DateTime<Utc>>, // started_at
+        Option<i64>,         // elapsed_secs
+        Option<String>,      // logs
+        Option<String>,      // environment
+        i64,                 // total_count
+    );
+
+    let rows = sqlx::query_as::<_, BuildRow>(
+        r#"
+        SELECT
+            bj.id AS job_id,
+            s.id AS system_id,
+            COALESCE(s.hostname, d.derivation_target, d.derivation_name) AS hostname,
+            f.name AS flake_name,
+            c.git_commit_hash AS commit_hash,
+            bj.status,
+            b.name AS builder_name,
+            bj.created_at AS queued_at,
+            bj.started_at,
+            CASE
+                WHEN bj.status IN ('success', 'failed') THEN
+                    CASE
+                        WHEN bj.started_at IS NULL OR bj.completed_at IS NULL THEN NULL
+                        ELSE EXTRACT(EPOCH FROM (bj.completed_at - bj.started_at))::BIGINT
+                    END
+                ELSE
+                    CASE
+                        WHEN bj.started_at IS NULL THEN NULL
+                        ELSE EXTRACT(EPOCH FROM (now() - bj.started_at))::BIGINT
+                    END
+            END AS elapsed_secs,
+            bj.logs,
+            e.name AS environment,
+            COUNT(*) OVER () AS total_count
+        FROM build_jobs bj
+        JOIN derivations d ON d.id = bj.derivation_id
+        LEFT JOIN commits c ON c.id = d.commit_id
+        LEFT JOIN flakes f ON f.id = c.flake_id
+        LEFT JOIN systems s ON (
+            s.hostname = d.derivation_target
+            OR (s.system_configuration_name IS NOT NULL AND s.system_configuration_name = d.derivation_target)
+        )
+        LEFT JOIN environments e ON e.id = COALESCE(s.environment_id, bj.environment_id)
+        LEFT JOIN builders b ON b.id = bj.builder_id
+        WHERE
+            -- Status filter: if empty, include all statuses
+            (
+                $1::text[] IS NULL
+                OR cardinality($1::text[]) = 0
+                OR bj.status = ANY($1::text[])
+            )
+            -- Commit hash filter (prefix match)
+            AND ($2::text IS NULL OR c.git_commit_hash ILIKE ($2 || '%'))
+            -- Flake name filter (partial match)
+            AND ($3::text IS NULL OR f.name ILIKE ('%' || $3 || '%'))
+            -- Config/hostname filter (partial match against hostname or config name)
+            AND (
+                $4::text IS NULL
+                OR COALESCE(s.hostname, d.derivation_target, d.derivation_name) ILIKE ('%' || $4 || '%')
+                OR COALESCE(s.system_configuration_name, '') ILIKE ('%' || $4 || '%')
+            )
+            -- Time range filters on queued_at
+            AND ($5::timestamptz IS NULL OR bj.created_at >= $5)
+            AND ($6::timestamptz IS NULL OR bj.created_at <= $6)
+        ORDER BY
+            -- In-progress first, then newest queued
+            CASE
+                WHEN bj.status = 'building' THEN 0
+                WHEN bj.status = 'queued' THEN 1
+                ELSE 2
+            END,
+            bj.created_at DESC NULLS LAST
+        LIMIT $7
+        OFFSET $8
+        "#,
+    )
+    .bind(if status_filter.is_empty() { None } else { Some(status_filter.clone()) })
+    .bind(params.commit_hash.as_deref())
+    .bind(params.flake_name.as_deref())
+    .bind(params.config_name.as_deref())
+    .bind(params.queued_after)
+    .bind(params.queued_before)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await?;
+
+    let total = rows.first().map(|r| r.12).unwrap_or(0);
+
+    let items = rows
+        .into_iter()
+        .map(
+            |(
+                job_id,
+                system_id,
+                hostname,
+                flake_name,
+                commit_hash,
+                status,
+                builder_name,
+                queued_at,
+                started_at,
+                elapsed_secs,
+                logs,
+                environment,
+                _total,
+            )| {
+                let status = match status.as_str() {
+                    "queued" => BuildStatus::Queued,
+                    "building" => BuildStatus::Building,
+                    "failed" => BuildStatus::Failed,
+                    "success" => BuildStatus::Complete,
+                    _ => BuildStatus::Idle,
+                };
+                BuildQueueItem {
+                    job_id,
+                    system_id,
+                    hostname: hostname.unwrap_or_else(|| "unknown".to_string()),
+                    flake_name: flake_name.unwrap_or_else(|| "unknown".to_string()),
+                    commit_hash: commit_hash.unwrap_or_else(|| "unknown".to_string()),
+                    commit_message: None,
+                    status,
+                    builder_name,
+                    queued_at,
+                    started_at,
+                    elapsed_secs,
+                    logs,
+                    environment,
+                }
+            },
+        )
+        .collect();
+
+    Ok(BuildQueuePageResponse {
+        total,
+        page,
+        limit,
+        items,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_queue_params_defaults() {
+        let p: BuildQueueParams = serde_json::from_str("{}").unwrap();
+        assert_eq!(p.page, 1);
+        assert_eq!(p.limit, 50);
+        assert!(p.status.is_none());
+        assert!(p.commit_hash.is_none());
+    }
+
+    #[test]
+    fn build_queue_params_clamps_limit() {
+        // The handler will clamp; verify default parse is correct
+        let p: BuildQueueParams = serde_json::from_str(r#"{"limit":999}"#).unwrap();
+        assert_eq!(p.limit, 999); // clamping happens in query fn
+    }
+
+    #[test]
+    fn build_queue_status_split() {
+        let p: BuildQueueParams =
+            serde_json::from_str(r#"{"status":"queued,building"}"#).unwrap();
+        let status_filter: Vec<String> = p
+            .status
+            .as_deref()
+            .unwrap_or("")
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        assert_eq!(status_filter, vec!["queued", "building"]);
+    }
 }

@@ -7,7 +7,7 @@
 use axum::{
     Json,
     extract::{
-        Path, State,
+        Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{HeaderMap, StatusCode},
@@ -325,6 +325,34 @@ pub async fn prioritize_build_job(
         .map_err(|_| StatusCode::NOT_FOUND)?;
 
     Ok(StatusCode::OK)
+}
+
+/// GET /api/v1/build-jobs - Paginated build queue with filtering (viewer+)
+///
+/// Query parameters (all optional):
+/// - `page` (default 1), `limit` (default 50, max 200)
+/// - `status`: comma-separated statuses to include (queued, building, success, failed)
+/// - `commit_hash`: prefix match on git commit hash
+/// - `flake_name`: partial match on flake name
+/// - `config_name`: partial match on system hostname / config name
+/// - `queued_after`, `queued_before`: ISO-8601 timestamps bounding queued_at
+pub async fn list_build_queue(
+    State(state): State<CFState>,
+    headers: HeaderMap,
+    Query(params): Query<crate::api::models::BuildQueueParams>,
+) -> Result<Json<crate::api::models::BuildQueuePageResponse>, StatusCode> {
+    let Some(_viewer) = require_viewer_or_above(&state.pool, &headers).await else {
+        return Err(StatusCode::FORBIDDEN);
+    };
+
+    let result = crate::queries::dashboard::list_build_queue_paginated(&state.pool, &params)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to list build queue: {e:#}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok(Json(result))
 }
 
 /// GET /api/v1/build-jobs/recent - Recent completed/failed builds (viewer+)

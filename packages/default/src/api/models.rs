@@ -229,6 +229,55 @@ pub struct BuildQueueItem {
     pub environment: Option<String>,
 }
 
+/// Query parameters for the paginated build queue endpoint.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BuildQueueParams {
+    /// Page number (1-indexed, default 1).
+    #[serde(default = "default_page")]
+    pub page: i64,
+    /// Items per page (default 50, max 200).
+    #[serde(default = "default_limit")]
+    pub limit: i64,
+    /// Filter by status: queued, building, success, failed (comma-separated or repeated).
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Filter by partial commit hash.
+    #[serde(default)]
+    pub commit_hash: Option<String>,
+    /// Filter by flake/repo name (partial match).
+    #[serde(default)]
+    pub flake_name: Option<String>,
+    /// Filter by system hostname or config name (partial match).
+    #[serde(default)]
+    pub config_name: Option<String>,
+    /// Filter jobs queued at or after this ISO-8601 timestamp.
+    #[serde(default)]
+    pub queued_after: Option<DateTime<Utc>>,
+    /// Filter jobs queued at or before this ISO-8601 timestamp.
+    #[serde(default)]
+    pub queued_before: Option<DateTime<Utc>>,
+}
+
+fn default_page() -> i64 {
+    1
+}
+fn default_limit() -> i64 {
+    50
+}
+
+/// Paginated response for the build queue listing endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildQueuePageResponse {
+    /// Total number of matching rows across all pages.
+    pub total: i64,
+    /// Current page (1-indexed).
+    pub page: i64,
+    /// Items per page.
+    pub limit: i64,
+    /// Items on this page.
+    pub items: Vec<BuildQueueItem>,
+}
+
 /// Summary of the evaluation queue for the evaluations view.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvalQueueSummary {

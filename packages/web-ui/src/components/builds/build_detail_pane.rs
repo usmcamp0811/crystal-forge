@@ -7,8 +7,8 @@ use crate::hooks::websocket::{use_websocket_build_stream, ConnectionState};
 use crate::theme;
 
 use super::helpers::{
-    build_status_badge_class, event_level_class, mock_artifacts, mock_events, mock_logs,
-    BuildAction, BuildItem, PendingAction,
+    build_status_badge_class, event_level_class, mock_artifacts, mock_events, BuildAction,
+    BuildItem, PendingAction,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,11 +65,19 @@ pub fn BuildDetailPane(
     let events = mock_events(build.id);
     let artifacts = mock_artifacts(build.id);
 
-    // Use WebSocket logs if available, otherwise fall back to mock
+    // Use WebSocket logs if available.
+    // For completed builds with no active WS channel, fall back to stored logs from the API.
     let logs = if let Some(ws_logs) = ws_logs {
-        filtered_logs_from_vec(&ws_logs.read(), &log_query.read())
+        let live = ws_logs.read().clone();
+        if live.is_empty() {
+            // WS connected but no frames yet — try stored logs as initial content.
+            stored_logs_filtered(&build, &log_query.read())
+        } else {
+            filtered_logs_from_vec(&live, &log_query.read())
+        }
     } else {
-        filtered_logs(build.id, &log_query.read())
+        // No WS (no job_id or completed job) — show stored logs.
+        stored_logs_filtered(&build, &log_query.read())
     };
 
     rsx! {
@@ -319,8 +327,16 @@ fn short_commit(commit: &str) -> String {
     commit.chars().take(7).collect()
 }
 
-fn filtered_logs(build_id: i32, query: &str) -> Vec<String> {
-    let lines = mock_logs(build_id);
+/// Return stored logs from the build item, optionally filtered.
+/// Used for completed/historical builds where no active WS stream exists.
+fn stored_logs_filtered(build: &BuildItem, query: &str) -> Vec<String> {
+    let lines: Vec<String> = build
+        .logs
+        .as_deref()
+        .unwrap_or("")
+        .lines()
+        .map(|l| l.to_string())
+        .collect();
     if query.trim().is_empty() {
         return lines;
     }

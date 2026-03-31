@@ -649,6 +649,29 @@ pub struct FlakeCommitSystemPath {
 // Build Queue DTOs
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Query parameters for the paginated build queue endpoint.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct BuildQueueParams {
+    pub page: Option<i64>,
+    pub limit: Option<i64>,
+    /// Comma-separated statuses: queued, building, success, failed
+    pub status: Option<String>,
+    pub commit_hash: Option<String>,
+    pub flake_name: Option<String>,
+    pub config_name: Option<String>,
+    pub queued_after: Option<DateTime<Utc>>,
+    pub queued_before: Option<DateTime<Utc>>,
+}
+
+/// Paginated response for the build queue listing endpoint.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BuildQueuePageResponse {
+    pub total: i64,
+    pub page: i64,
+    pub limit: i64,
+    pub items: Vec<BuildQueueItem>,
+}
+
 /// Summary of the build queue for the dashboard widget.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BuildQueueSummary {

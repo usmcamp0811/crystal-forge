@@ -5,8 +5,8 @@ use dioxus::prelude::*;
 
 use crate::api::{
     self,
-    client::fetch_recent_build_jobs,
-    models::{BuildStatus as ApiBuildStatus, BuilderStatus},
+    client::{fetch_build_queue_paginated, fetch_recent_build_jobs},
+    models::{BuildQueueParams, BuildStatus as ApiBuildStatus, BuilderStatus},
 };
 use crate::components::builds::{
     extract_system_name, selected_build_data, BuildAction, BuildDetailPane, BuildItem,
@@ -15,6 +15,8 @@ use crate::components::builds::{
 };
 use crate::components::layout::Card;
 use crate::theme;
+
+const PAGE_SIZE: i64 = 50;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BuildsTab {
@@ -52,12 +54,107 @@ fn format_environment(item: &BuildItem) -> String {
     item.environment.clone().unwrap_or_else(|| "-".to_string())
 }
 
+/// Map a raw `BuildQueueItem` from API into the UI `BuildItem`.
+fn map_queue_item(item: &crate::api::models::BuildQueueItem, idx: usize) -> BuildItem {
+    let queued_for = if item.status == ApiBuildStatus::Building {
+        format!("running {}s", item.elapsed_secs.unwrap_or(0))
+    } else {
+        let ago = (Utc::now() - item.queued_at).num_seconds().max(0);
+        format!("queued {}s ago", ago)
+    };
+
+    BuildItem {
+        id: (idx + 1) as i32,
+        job_id: item.job_id,
+        system_id: item.system_id,
+        hostname: item.hostname.clone(),
+        environment: item.environment.clone(),
+        flake: item.flake_name.clone(),
+        commit: item.commit_hash.clone(),
+        branch: "main".to_string(),
+        worker_id: item
+            .builder_name
+            .clone()
+            .unwrap_or_else(|| "unassigned".to_string()),
+        queued_for,
+        runtime: item.elapsed_secs.map(|secs| format!("{}s", secs)),
+        duration_secs: item.elapsed_secs,
+        completed_at: None,
+        started_by: "scheduler".to_string(),
+        logs: item.logs.clone(),
+        status: match item.status {
+            ApiBuildStatus::Queued => BuildStatus::Queued,
+            ApiBuildStatus::Building => BuildStatus::Building,
+            ApiBuildStatus::Failed => BuildStatus::Failed,
+            ApiBuildStatus::Complete => BuildStatus::Complete,
+            ApiBuildStatus::Idle => BuildStatus::Queued,
+        },
+        summary: item.commit_message.clone().unwrap_or_else(|| {
+            format!(
+                "job {}",
+                item.job_id
+                    .map(|id| id.to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            )
+        }),
+    }
+}
+
 /// Builds control center page.
 #[component]
 pub fn BuildsView() -> Element {
     let mut workers = use_signal(Vec::<WorkerItem>::new);
-    let mut builds = use_signal(Vec::<BuildItem>::new);
     let refresh_trigger = use_signal(|| 0_u64);
+
+    // --- Active queue state ---
+    let mut queue_page = use_signal(|| 1_i64);
+    let mut queue_total = use_signal(|| 0_i64);
+    let mut builds = use_signal(Vec::<BuildItem>::new);
+
+    // Filter state
+    let mut filter_status = use_signal(String::new);
+    let mut filter_commit = use_signal(String::new);
+    let mut filter_flake = use_signal(String::new);
+    let mut filter_config = use_signal(String::new);
+    // Simple time range: "today", "last7d", "" (all)
+    let mut filter_time_range = use_signal(String::new);
+
+    // Derived filter signals used to trigger resource re-fetch
+    let queue_resource = use_resource(move || async move {
+        let _ = refresh_trigger();
+        let page = queue_page();
+        let status = filter_status();
+        let commit = filter_commit();
+        let flake = filter_flake();
+        let config = filter_config();
+        let time = filter_time_range();
+
+        let (queued_after, queued_before) = match time.as_str() {
+            "today" => {
+                let start = Utc::now().date_naive().and_hms_opt(0, 0, 0)
+                    .map(|dt| dt.and_utc());
+                (start, None)
+            }
+            "last7d" => {
+                let start = Utc::now() - Duration::days(7);
+                (Some(start), None)
+            }
+            _ => (None, None),
+        };
+
+        let params = BuildQueueParams {
+            page: Some(page),
+            limit: Some(PAGE_SIZE),
+            status: if status.is_empty() { None } else { Some(status) },
+            commit_hash: if commit.is_empty() { None } else { Some(commit) },
+            flake_name: if flake.is_empty() { None } else { Some(flake) },
+            config_name: if config.is_empty() { None } else { Some(config) },
+            queued_after,
+            queued_before,
+        };
+        fetch_build_queue_paginated(&params).await
+    });
+
     let builders = use_resource(move || async move {
         let _ = refresh_trigger();
         api::client::fetch_builders().await
@@ -65,10 +162,6 @@ pub fn BuildsView() -> Element {
     let recent_builds = use_resource(move || async move {
         let _ = refresh_trigger();
         fetch_recent_build_jobs().await
-    });
-    let dashboard = use_resource(move || async move {
-        let _ = refresh_trigger();
-        api::client::fetch_dashboard().await
     });
 
     let mut build_history = use_signal(Vec::<BuildItem>::new);
@@ -95,58 +188,15 @@ pub fn BuildsView() -> Element {
     });
 
     use_effect(move || {
-        if let Some(Ok(summary)) = &*dashboard.read() {
-            if let Some(queue) = &summary.build_queue {
-                let mapped = queue
-                    .items
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, item)| {
-                        let queued_for = if item.status == ApiBuildStatus::Building {
-                            format!("running {}s", item.elapsed_secs.unwrap_or(0))
-                        } else {
-                            let ago = (Utc::now() - item.queued_at).num_seconds().max(0);
-                            format!("queued {}s ago", ago)
-                        };
-
-                        BuildItem {
-                            id: (idx + 1) as i32,
-                            job_id: item.job_id,
-                            system_id: item.system_id,
-                            hostname: item.hostname.clone(),
-                            environment: item.environment.clone(),
-                            flake: item.flake_name.clone(),
-                            commit: item.commit_hash.clone(),
-                            branch: "main".to_string(),
-                            worker_id: item
-                                .builder_name
-                                .clone()
-                                .unwrap_or_else(|| "unassigned".to_string()),
-                            queued_for,
-                            runtime: item.elapsed_secs.map(|secs| format!("{}s", secs)),
-                            duration_secs: item.elapsed_secs,
-                            completed_at: None,
-                            started_by: "scheduler".to_string(),
-                            status: match item.status {
-                                ApiBuildStatus::Queued => BuildStatus::Queued,
-                                ApiBuildStatus::Building => BuildStatus::Building,
-                                ApiBuildStatus::Failed => BuildStatus::Failed,
-                                ApiBuildStatus::Complete => BuildStatus::Complete,
-                                ApiBuildStatus::Idle => BuildStatus::Queued,
-                            },
-                            summary: item.commit_message.clone().unwrap_or_else(|| {
-                                format!(
-                                    "job {}",
-                                    item.job_id
-                                        .map(|id| id.to_string())
-                                        .unwrap_or_else(|| "unknown".to_string())
-                                )
-                            }),
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                builds.set(mapped);
-            }
+        if let Some(Ok(page_resp)) = &*queue_resource.read() {
+            let mapped = page_resp
+                .items
+                .iter()
+                .enumerate()
+                .map(|(idx, item)| map_queue_item(item, idx))
+                .collect::<Vec<_>>();
+            builds.set(mapped);
+            queue_total.set(page_resp.total);
         }
     });
 
@@ -185,6 +235,7 @@ pub fn BuildsView() -> Element {
                         duration_secs: item.elapsed_secs,
                         completed_at,
                         started_by: "scheduler".to_string(),
+                        logs: item.logs.clone(),
                         status: match item.status {
                             ApiBuildStatus::Failed => BuildStatus::Failed,
                             ApiBuildStatus::Complete => BuildStatus::Complete,
@@ -243,6 +294,11 @@ pub fn BuildsView() -> Element {
             CompletedSortOrder::OldestFirst => left_key.cmp(&right_key),
         }
     });
+
+    let total_pages = {
+        let t = queue_total();
+        if t == 0 { 1 } else { (t + PAGE_SIZE - 1) / PAGE_SIZE }
+    };
 
     rsx! {
         div {
@@ -329,6 +385,126 @@ pub fn BuildsView() -> Element {
             }
 
             if active_view() == BuildsTab::ActiveQueue {
+                // ── Filter / Search bar ──────────────────────────────────────
+                Card {
+                    title: None,
+                    children: rsx! {
+                        div {
+                            class: "flex flex-wrap items-end gap-3",
+
+                            div {
+                                class: "flex flex-col gap-1",
+                                label { class: "text-xs {theme::text::SECONDARY}", "Status" }
+                                select {
+                                    class: "px-2 py-1 rounded border border-slate-600 bg-slate-900 text-xs text-slate-200",
+                                    value: "{filter_status.read()}",
+                                    onchange: move |e| {
+                                        filter_status.set(e.value());
+                                        queue_page.set(1);
+                                    },
+                                    option { value: "", "All" }
+                                    option { value: "queued", "Queued" }
+                                    option { value: "building", "Building" }
+                                    option { value: "success", "Completed" }
+                                    option { value: "failed", "Failed" }
+                                    option { value: "queued,building", "Active (queued + building)" }
+                                }
+                            }
+
+                            div {
+                                class: "flex flex-col gap-1 flex-1 min-w-[10rem]",
+                                label { class: "text-xs {theme::text::SECONDARY}", "Commit hash" }
+                                input {
+                                    class: "px-2 py-1 rounded border border-slate-600 bg-slate-900 text-xs text-slate-200 {theme::interactive::FOCUS_RING}",
+                                    r#type: "search",
+                                    placeholder: "e.g. a1b2c3…",
+                                    value: "{filter_commit.read()}",
+                                    oninput: move |e| {
+                                        filter_commit.set(e.value());
+                                        queue_page.set(1);
+                                    },
+                                }
+                            }
+
+                            div {
+                                class: "flex flex-col gap-1 flex-1 min-w-[10rem]",
+                                label { class: "text-xs {theme::text::SECONDARY}", "Flake / repo" }
+                                input {
+                                    class: "px-2 py-1 rounded border border-slate-600 bg-slate-900 text-xs text-slate-200 {theme::interactive::FOCUS_RING}",
+                                    r#type: "search",
+                                    placeholder: "flake name…",
+                                    value: "{filter_flake.read()}",
+                                    oninput: move |e| {
+                                        filter_flake.set(e.value());
+                                        queue_page.set(1);
+                                    },
+                                }
+                            }
+
+                            div {
+                                class: "flex flex-col gap-1 flex-1 min-w-[10rem]",
+                                label { class: "text-xs {theme::text::SECONDARY}", "System / config" }
+                                input {
+                                    class: "px-2 py-1 rounded border border-slate-600 bg-slate-900 text-xs text-slate-200 {theme::interactive::FOCUS_RING}",
+                                    r#type: "search",
+                                    placeholder: "hostname or config name…",
+                                    value: "{filter_config.read()}",
+                                    oninput: move |e| {
+                                        filter_config.set(e.value());
+                                        queue_page.set(1);
+                                    },
+                                }
+                            }
+
+                            div {
+                                class: "flex flex-col gap-1",
+                                label { class: "text-xs {theme::text::SECONDARY}", "Time range" }
+                                select {
+                                    class: "px-2 py-1 rounded border border-slate-600 bg-slate-900 text-xs text-slate-200",
+                                    value: "{filter_time_range.read()}",
+                                    onchange: move |e| {
+                                        filter_time_range.set(e.value());
+                                        queue_page.set(1);
+                                    },
+                                    option { value: "", "All time" }
+                                    option { value: "today", "Today" }
+                                    option { value: "last7d", "Last 7 days" }
+                                }
+                            }
+
+                            button {
+                                class: "px-3 py-1 rounded border border-slate-600 text-xs text-slate-300 hover:bg-slate-700 transition-colors",
+                                onclick: move |_| {
+                                    filter_status.set(String::new());
+                                    filter_commit.set(String::new());
+                                    filter_flake.set(String::new());
+                                    filter_config.set(String::new());
+                                    filter_time_range.set(String::new());
+                                    queue_page.set(1);
+                                },
+                                "Clear filters"
+                            }
+                        }
+
+                        // ── Result summary ────────────────────────────────────
+                        p {
+                            class: "text-xs {theme::text::SECONDARY} mt-2",
+                            {
+                                let total = queue_total();
+                                let page = queue_page();
+                                let from = ((page - 1) * PAGE_SIZE + 1).min(total.max(1));
+                                let to = (page * PAGE_SIZE).min(total);
+                                if total == 0 {
+                                    "No matching jobs.".to_string()
+                                } else {
+                                    format!("Showing {from}–{to} of {total} job(s)")
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ── Queue + detail split ─────────────────────────────────────
                 div {
                     class: "cf-builds-split",
                     div {
@@ -350,6 +526,35 @@ pub fn BuildsView() -> Element {
                             pause_logs: pause_logs,
                             wrap_logs: wrap_logs,
                             log_query: log_query,
+                        }
+                    }
+                }
+
+                // ── Pagination controls ──────────────────────────────────────
+                if total_pages > 1 {
+                    div {
+                        class: "flex items-center justify-center gap-2 pt-2",
+                        button {
+                            class: "px-3 py-1 rounded border border-slate-600 text-xs text-slate-300 disabled:opacity-40 hover:bg-slate-700 transition-colors",
+                            disabled: queue_page() <= 1,
+                            onclick: move |_| {
+                                let p = queue_page();
+                                if p > 1 { queue_page.set(p - 1); }
+                            },
+                            "← Prev"
+                        }
+                        span {
+                            class: "text-xs {theme::text::SECONDARY}",
+                            "Page {queue_page()} of {total_pages}"
+                        }
+                        button {
+                            class: "px-3 py-1 rounded border border-slate-600 text-xs text-slate-300 disabled:opacity-40 hover:bg-slate-700 transition-colors",
+                            disabled: queue_page() >= total_pages,
+                            onclick: move |_| {
+                                let p = queue_page();
+                                if p < total_pages { queue_page.set(p + 1); }
+                            },
+                            "Next →"
                         }
                     }
                 }
