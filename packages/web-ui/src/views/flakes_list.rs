@@ -24,7 +24,7 @@ use crate::api::client::{
 };
 use crate::api::models::{
     BuildStatus as ApiBuildStatus, CreateFlakeCredentialRequest, CreateFlakeRequest,
-    FlakeRegistryItem, FlakeTimeline, UpdateFlakeRequest,
+    FlakeCommitSystemPath, FlakeRegistryItem, FlakeTimeline, UpdateFlakeRequest,
 };
 use crate::components::layout::Card;
 use crate::components::notifications::{AlertBanner, AlertSeverity};
@@ -207,6 +207,7 @@ struct FlakeHistoryCommit {
     deletions: usize,
     diff: String,
     systems: Vec<String>,
+    system_paths: Vec<FlakeCommitSystemPath>,
     total_system_count: usize,
     build_status: Option<ApiBuildStatus>,
     evaluation_status: Option<String>,
@@ -1679,35 +1680,84 @@ fn FlakeHistoryExplorer(
                                 div {
                                     class: "px-4 pb-4 space-y-2",
                                     p { class: "text-xs uppercase tracking-wide text-gray-400", "nixosConfigurations at this commit" }
-                                    if commit.systems.is_empty() {
+                                    {
+                                        let visible_configs: Vec<String> = if commit.systems.is_empty() {
+                                            commit
+                                                .system_paths
+                                                .iter()
+                                                .map(|detail| detail.config_name.clone())
+                                                .take(MAX_SYSTEMS_STORED_PER_COMMIT)
+                                                .collect()
+                                        } else {
+                                            commit.systems.clone()
+                                        };
+                                        rsx! {
+                                    if visible_configs.is_empty() {
                                         p { class: "text-sm text-gray-500", "No nixosConfigurations discovered for this commit." }
                                     } else {
                                         div {
-                                            class: "flex flex-wrap gap-2",
-                                            for (idx, hostname) in preview_systems(&commit.systems).iter().enumerate() {
+                                            class: "space-y-2",
+                                            for (idx, config_name) in preview_systems(&visible_configs).iter().enumerate() {
                                                 {
-                                                    let status = system_status.read().get(hostname).cloned();
+                                                    let status = system_status.read().get(config_name).cloned();
                                                     let chip_style = system_chip_style(status.as_ref());
                                                     let chip_class = if status == Some(SystemEvalStatus::Evaluating) {
                                                         "px-2 py-1 rounded border text-xs font-mono animate-pulse"
                                                     } else {
                                                         "px-2 py-1 rounded border text-xs font-mono"
                                                     };
+                                                    let path_detail = commit
+                                                        .system_paths
+                                                        .iter()
+                                                        .find(|path| path.config_name == *config_name || format!("{} [CF system]", path.config_name) == *config_name)
+                                                        .cloned();
                                                     rsx! {
-                                                        span {
-                                                            key: "{idx}-{hostname}",
-                                                            class: "{chip_class}",
-                                                            style: "{chip_style}",
-                                                            "{hostname}"
+                                                        div {
+                                                            key: "{idx}-{config_name}",
+                                                            class: "rounded border border-slate-700/70 bg-slate-900/40 p-2 space-y-1",
+                                                            div { class: "flex flex-wrap items-center gap-2",
+                                                                span {
+                                                                    class: "{chip_class}",
+                                                                    style: "{chip_style}",
+                                                                    "{truncate_system_label(config_name)}"
+                                                                }
+                                                                if let Some(detail) = path_detail.as_ref() {
+                                                                    if detail.is_cf_system {
+                                                                        span { class: "text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-200 border border-blue-500/40", "CF system" }
+                                                                    }
+                                                                }
+                                                            }
+                                                            if let Some(detail) = path_detail {
+                                                                p { class: "text-[11px] text-slate-300 break-all",
+                                                                    span { class: "text-slate-500", "expected path: " }
+                                                                    {detail.expected_store_path.unwrap_or_else(|| "unavailable".to_string())}
+                                                                }
+                                                                if detail.mapped_host_count > 1 {
+                                                                    p { class: "text-[11px] text-blue-200",
+                                                                        "{detail.mapped_host_count} mapped hosts; showing most recent host report."
+                                                                    }
+                                                                }
+                                                                p { class: "text-[11px] text-slate-300 break-all",
+                                                                    span { class: "text-slate-500", "current path" }
+                                                                    if let Some(hostname) = detail.cf_hostname.as_ref() {
+                                                                        span { class: "text-slate-500", " ({hostname}): " }
+                                                                    } else {
+                                                                        span { class: "text-slate-500", ": " }
+                                                                    }
+                                                                    {detail.current_store_path.unwrap_or_else(|| "not reported".to_string())}
+                                                                }
+                                                            } else {
+                                                                p { class: "text-[11px] text-slate-400", "path details unavailable" }
+                                                            }
                                                         }
                                                     }
                                                 }
                                             }
                                         }
-                                        if commit.total_system_count > commit.systems.len() {
+                                        if commit.total_system_count > visible_configs.len() {
                                             p {
                                                 class: "text-xs text-amber-300",
-                                                "Showing {commit.systems.len()} of {commit.total_system_count} configurations to keep the UI responsive."
+                                                "Showing {visible_configs.len()} of {commit.total_system_count} configurations to keep the UI responsive."
                                             }
                                         } else if commit.total_system_count > MAX_SYSTEM_CHIPS_RENDER {
                                             p {
@@ -1717,7 +1767,9 @@ fn FlakeHistoryExplorer(
                                         }
                                         p {
                                             class: "text-xs text-slate-400",
-                                            "[CF system] means this config name matches a Crystal Forge system deployed at this commit."
+                                            "Expected path comes from commit derivation data; current path is host-scoped and shown for the selected mapped CF host (most recent report when multiple hosts share the config)."
+                                        }
+                                    }
                                         }
                                     }
                                 }
@@ -3272,12 +3324,19 @@ fn build_flake_commits(timelines: &[FlakeTimeline], flake_id: i32) -> Vec<FlakeH
             let total_system_count = usize::try_from(commit.system_count)
                 .ok()
                 .unwrap_or(0)
-                .max(commit.systems.len());
+                .max(commit.systems.len())
+                .max(commit.system_paths.len());
             let systems = commit
                 .systems
                 .iter()
                 .take(MAX_SYSTEMS_STORED_PER_COMMIT)
-                .map(|name| truncate_system_label(name))
+                .cloned()
+                .collect();
+            let system_paths = commit
+                .system_paths
+                .iter()
+                .take(MAX_SYSTEMS_STORED_PER_COMMIT)
+                .cloned()
                 .collect();
             FlakeHistoryCommit {
                 id: commit.id,
@@ -3290,6 +3349,7 @@ fn build_flake_commits(timelines: &[FlakeTimeline], flake_id: i32) -> Vec<FlakeH
                 deletions: 0,
                 diff: String::new(),
                 systems,
+                system_paths,
                 total_system_count,
                 build_status: commit.build_status.clone(),
                 evaluation_status: commit.evaluation_status.clone(),
@@ -3920,6 +3980,7 @@ mod tests {
                     system_count: 1,
                     commits_behind: 0,
                     systems: vec!["alpha-host".to_string()],
+                    system_paths: vec![],
                     build_status: Some(BuildStatus::Queued),
                     evaluation_status: Some("pending".to_string()),
                     evaluation_error_message: None,
@@ -3938,6 +3999,7 @@ mod tests {
                     system_count: 1,
                     commits_behind: 0,
                     systems: vec!["beta-host".to_string()],
+                    system_paths: vec![],
                     build_status: Some(BuildStatus::Complete),
                     evaluation_status: Some("complete".to_string()),
                     evaluation_error_message: None,
@@ -3949,5 +4011,49 @@ mod tests {
         assert_eq!(commits.len(), 1);
         assert_eq!(commits[0].id, 2);
         assert_eq!(commits[0].author, "Bob");
+    }
+
+    #[test]
+    fn build_flake_commits_preserves_system_path_details() {
+        use crate::api::models::{FlakeCommit, FlakeCommitSystemPath, FlakeTimeline};
+
+        let timelines = vec![FlakeTimeline {
+            flake_id: 42,
+            flake_name: "gamma".to_string(),
+            repo_url: "https://example.com/gamma.git".to_string(),
+            commits: vec![FlakeCommit {
+                id: 9,
+                hash: "9999999999999999999999999999999999999999".to_string(),
+                message: "gamma commit".to_string(),
+                author: "Gina".to_string(),
+                committed_at: Utc::now(),
+                system_count: 1,
+                commits_behind: 0,
+                systems: vec!["gamma-host [CF system]".to_string()],
+                system_paths: vec![FlakeCommitSystemPath {
+                    config_name: "gamma-host".to_string(),
+                    is_cf_system: true,
+                    cf_hostname: Some("gamma-host".to_string()),
+                    mapped_host_count: 1,
+                    expected_store_path: Some("/nix/store/expected-gamma".to_string()),
+                    current_store_path: Some("/nix/store/current-gamma".to_string()),
+                }],
+                build_status: None,
+                evaluation_status: None,
+                evaluation_error_message: None,
+            }],
+        }];
+
+        let commits = build_flake_commits(&timelines, 42);
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].system_paths.len(), 1);
+        assert_eq!(
+            commits[0].system_paths[0].expected_store_path.as_deref(),
+            Some("/nix/store/expected-gamma")
+        );
+        assert_eq!(
+            commits[0].system_paths[0].current_store_path.as_deref(),
+            Some("/nix/store/current-gamma")
+        );
     }
 }
