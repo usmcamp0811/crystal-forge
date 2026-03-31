@@ -1,10 +1,10 @@
 ---
 id: TASK-207
 title: Hotfix systems health views pick null heartbeat rows as latest
-status: Review
+status: Done
 assignee: []
 created_date: '2026-03-21 20:25'
-updated_date: '2026-03-21 20:39'
+updated_date: '2026-03-31 01:56'
 labels:
   - backend
   - database
