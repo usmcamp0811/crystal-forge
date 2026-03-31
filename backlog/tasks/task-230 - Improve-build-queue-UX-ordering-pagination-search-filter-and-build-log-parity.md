@@ -3,9 +3,10 @@ id: TASK-230
 title: >-
   Improve build queue UX: ordering, pagination, search/filter, and build log
   parity
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-03-31 02:48'
+updated_date: '2026-03-31 02:48'
 labels:
   - builds
   - queue
@@ -104,6 +105,14 @@ Medium-High (operator workflow and queue observability behavior).
 - [ ] #6 Queue and log UI remain responsive with production-like queue sizes.
 - [ ] #7 Targeted backend/frontend tests and relevant web-ui checks pass for new behavior.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Moved Backlog -> To Do per explicit human sprint selection in chat.
+
+User-selected defaults captured: single combined task; newest-first queue order; server-side pagination; must-have filters = commit hash, flake/repo, system/config, time range; build logs require live + historical behavior.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
