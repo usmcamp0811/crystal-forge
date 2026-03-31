@@ -3,10 +3,10 @@ id: TASK-232
 title: >-
   Restore missing migration 0102 on dev to resolve startup failure against
   applied DB version
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-03-31 12:34'
-updated_date: '2026-03-31 12:35'
+updated_date: '2026-03-31 12:42'
 labels:
   - hotfix
   - database
@@ -38,9 +38,9 @@ Production/startup fails with `migration 102 was previously applied but is missi
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 `packages/default/migrations/0102_add_expected_store_path_to_derivations.sql` exists on the branch with expected content.
-- [ ] #2 `nix build .#checks.x86_64-linux.database --no-link` passes locally.
-- [ ] #3 Emergency MR to `dev` is opened with outage context and verification evidence.
+- [x] #1 `packages/default/migrations/0102_add_expected_store_path_to_derivations.sql` exists on the branch with expected content.
+- [x] #2 `nix build .#checks.x86_64-linux.database --no-link` passes locally.
+- [x] #3 Emergency MR to `dev` is opened with outage context and verification evidence.
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -49,4 +49,10 @@ Production/startup fails with `migration 102 was previously applied but is missi
 Moved Backlog -> To Do per explicit user request to repair outage.
 
 LOCK: opencode-gpt5 on reckless in /home/mcamp/code/crystal-forge/TASK-232-restore-migration-0102
+
+Emergency hotfix commit: `5b02291f` restoring `packages/default/migrations/0102_add_expected_store_path_to_derivations.sql`.
+
+MR opened: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/202
+
+Verification (non-production): `nix build .#checks.x86_64-linux.database --no-link` PASS.
 <!-- SECTION:NOTES:END -->
