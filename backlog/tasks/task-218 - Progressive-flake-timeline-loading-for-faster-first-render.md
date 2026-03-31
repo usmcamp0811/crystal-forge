@@ -1,10 +1,10 @@
 ---
 id: TASK-218
 title: Progressive flake timeline loading for faster first render
-status: Review
+status: Done
 assignee: []
 created_date: '2026-03-26 22:55'
-updated_date: '2026-03-26 22:55'
+updated_date: '2026-03-31 01:57'
 labels:
   - hotfix
   - ui
@@ -15,6 +15,7 @@ priority: high
 
 ## Description
 
+<!-- SECTION:DESCRIPTION:BEGIN -->
 ## Problem
 
 Flakes view loads all flake timelines in one request (`/api/v1/flakes/timelines`) and blocks initial display when timeline response is slow.
@@ -22,6 +23,7 @@ Flakes view loads all flake timelines in one request (`/api/v1/flakes/timelines`
 ## Goal
 
 Load only a small initial subset for immediate render, then progressively hydrate remaining flake timelines in background.
+<!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 
