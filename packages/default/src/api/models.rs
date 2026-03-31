@@ -512,9 +512,6 @@ pub struct FlakeCommit {
     /// Entries may include the suffix " [CF system]" when the configuration
     /// name matches a Crystal Forge system deployed at this commit.
     pub systems: Vec<String>,
-    /// Per-configuration path details shown in commit details.
-    #[serde(default)]
-    pub system_paths: Vec<FlakeCommitSystemPath>,
     pub build_status: Option<BuildStatus>,
     #[serde(default)]
     pub evaluation_status: Option<String>,
@@ -524,28 +521,6 @@ pub struct FlakeCommit {
     /// Cached evaluation metadata (if available)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<CommitMetadata>,
-}
-
-/// Path details for a single nixosConfiguration at a commit.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct FlakeCommitSystemPath {
-    /// Configuration name under nixosConfigurations.
-    pub config_name: String,
-    /// True when this config maps to an active Crystal Forge system.
-    #[serde(default)]
-    pub is_cf_system: bool,
-    /// Hostname of the mapped Crystal Forge system, when available.
-    #[serde(default)]
-    pub cf_hostname: Option<String>,
-    /// Number of active Crystal Forge systems mapped to this config.
-    #[serde(default)]
-    pub mapped_host_count: i64,
-    /// Store path associated with this config for the commit, when available.
-    #[serde(default)]
-    pub expected_store_path: Option<String>,
-    /// Latest agent-reported current store path for mapped system, when available.
-    #[serde(default)]
-    pub current_store_path: Option<String>,
 }
 
 /// Cached evaluation metadata for fast UI rendering

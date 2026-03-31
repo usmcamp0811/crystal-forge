@@ -616,9 +616,6 @@ pub struct FlakeCommit {
     /// Entries may include the suffix " [CF system]" when the configuration
     /// name matches a Crystal Forge system deployed at this commit.
     pub systems: Vec<String>,
-    /// Per-configuration path details for commit details UI.
-    #[serde(default)]
-    pub system_paths: Vec<FlakeCommitSystemPath>,
     /// Current build status for this commit (if any build is in progress).
     #[serde(default)]
     pub build_status: Option<BuildStatus>,
@@ -628,21 +625,6 @@ pub struct FlakeCommit {
     /// Error message if evaluation failed.
     #[serde(default)]
     pub evaluation_error_message: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct FlakeCommitSystemPath {
-    pub config_name: String,
-    #[serde(default)]
-    pub is_cf_system: bool,
-    #[serde(default)]
-    pub cf_hostname: Option<String>,
-    #[serde(default)]
-    pub mapped_host_count: i64,
-    #[serde(default)]
-    pub expected_store_path: Option<String>,
-    #[serde(default)]
-    pub current_store_path: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

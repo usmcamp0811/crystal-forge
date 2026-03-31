@@ -12,8 +12,8 @@ use tracing::{error, info, warn};
 
 use crate::api::models::{
     ApiError, CommitDiffResponse, CreateFlakeCredentialRequest, CreateFlakeRequest,
-    FlakeCommitSystemPath, FlakeCredentialSummary, FlakeRegistryItem, FlakeTimeline,
-    UpdateFlakeCredentialRequest, UpdateFlakeRequest,
+    FlakeCredentialSummary, FlakeRegistryItem, FlakeTimeline, UpdateFlakeCredentialRequest,
+    UpdateFlakeRequest,
 };
 use crate::auth::extractors::{AuthenticatedUser, RequireAdmin, RequireAuth, RequireOperator};
 use crate::config::CrystalForgeConfig;
@@ -172,14 +172,14 @@ pub async fn get_flake_timelines(
                 let hydrated_configs: HashMap<String, Vec<String>> = HashMap::new();
                 let hydrated_changed_files: HashMap<String, Vec<String>> = HashMap::new();
 
-                let commit_path_lookup = if commit_hashes.is_empty() {
+                let cf_config_matches = if commit_hashes.is_empty() {
                     HashMap::new()
                 } else {
-                    fetch_commit_config_paths(&pool, timeline.flake_id, &commit_hashes)
+                    fetch_cf_system_matches(&pool, &commit_hashes)
                         .await
                         .unwrap_or_else(|err| {
                             error!(
-                                "Failed to fetch commit config paths for {}: {:#}",
+                                "Failed to fetch CF-system commit matches for {}: {:#}",
                                 timeline.flake_name, err
                             );
                             HashMap::new()
@@ -226,20 +226,21 @@ pub async fn get_flake_timelines(
                                 );
                             }
 
-                            let marked = mark_cf_system_matches(configs, commit_path_lookup.get(&commit.hash));
+                            let marked = mark_cf_system_matches(
+                                configs,
+                                cf_config_matches.get(&commit.hash),
+                            );
                             commit.system_count = marked.len() as i64;
                             commit.systems = marked;
                         }
                     } else {
-                        let marked = mark_cf_system_matches(&commit.systems, commit_path_lookup.get(&commit.hash));
+                        let marked = mark_cf_system_matches(
+                            &commit.systems,
+                            cf_config_matches.get(&commit.hash),
+                        );
                         commit.system_count = marked.len() as i64;
                         commit.systems = marked;
                     }
-
-                    commit.system_paths = build_commit_system_paths(
-                        &commit.systems,
-                        commit_path_lookup.get(&commit.hash),
-                    );
                 }
             }
 
@@ -290,166 +291,58 @@ async fn upsert_commit_artifacts_cache(
     Ok(())
 }
 
-#[derive(Debug, Clone)]
-struct CommitConfigPathRow {
-    config_name: String,
-    cf_hostname: Option<String>,
-    mapped_host_count: i64,
-    expected_store_path: Option<String>,
-    current_store_path: Option<String>,
-}
-
-async fn fetch_commit_config_paths(
+async fn fetch_cf_system_matches(
     pool: &PgPool,
-    flake_id: i32,
     commit_hashes: &[String],
-) -> anyhow::Result<HashMap<String, HashMap<String, CommitConfigPathRow>>> {
+) -> anyhow::Result<HashMap<String, HashSet<String>>> {
     if commit_hashes.is_empty() {
         return Ok(HashMap::new());
     }
 
-    let rows = sqlx::query_as::<_, (String, String, i64, Option<String>, Option<String>, Option<String>)>(
+    let rows = sqlx::query_as::<_, (String, Option<Vec<String>>)>(
         r#"
         SELECT
-            c.git_commit_hash,
-            d.derivation_name,
-            COALESCE(mapped_hosts.mapped_host_count, 0)::bigint,
-            selected_state.hostname,
-            d.expected_store_path,
-            selected_state.store_path
-        FROM commits c
-        JOIN derivations d
-            ON d.commit_id = c.id
-           AND d.derivation_type = 'nixos'
-        LEFT JOIN LATERAL (
-            SELECT COUNT(*)::bigint AS mapped_host_count
-            FROM systems s
-            WHERE s.flake_id = c.flake_id
-              AND s.is_active = TRUE
-              AND COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname) = d.derivation_name
-        ) mapped_hosts ON TRUE
-        LEFT JOIN LATERAL (
-            SELECT
-                s.hostname,
-                latest_ss.store_path,
-                latest_ss.timestamp,
-                latest_ss.id
-            FROM systems s
-            LEFT JOIN LATERAL (
-                SELECT ss.store_path, ss.timestamp, ss.id
-                FROM system_states ss
-                WHERE ss.hostname = s.hostname
-                ORDER BY ss.timestamp DESC, ss.id DESC
-                LIMIT 1
-            ) latest_ss ON TRUE
-            WHERE s.flake_id = c.flake_id
-              AND s.is_active = TRUE
-              AND COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname) = d.derivation_name
-            ORDER BY latest_ss.timestamp DESC NULLS LAST, latest_ss.id DESC NULLS LAST, s.hostname ASC
-            LIMIT 1
-        ) selected_state ON TRUE
-        WHERE c.flake_id = $1
-          AND c.git_commit_hash = ANY($2)
-        ORDER BY c.git_commit_hash, d.derivation_name, d.id DESC
+            s.current_commit_hash,
+            ARRAY_AGG(DISTINCT s.hostname ORDER BY s.hostname) AS hostnames
+        FROM view_system_deployment_status s
+        WHERE s.current_commit_hash = ANY($1)
+        GROUP BY s.current_commit_hash
         "#,
     )
-    .bind(flake_id)
     .bind(commit_hashes)
     .fetch_all(pool)
     .await?;
 
-    let mut out: HashMap<String, HashMap<String, CommitConfigPathRow>> = HashMap::new();
-    for (hash, config_name, mapped_host_count, cf_hostname, expected_store_path, current_store_path) in rows {
-        out.entry(hash)
-            .or_default()
-            .entry(config_name.clone())
-            .or_insert(CommitConfigPathRow {
-                config_name,
-                cf_hostname,
-                mapped_host_count,
-                expected_store_path,
-                current_store_path,
-            });
+    let mut out = HashMap::new();
+    for (hash, hostnames) in rows {
+        out.insert(
+            hash,
+            hostnames
+                .unwrap_or_default()
+                .into_iter()
+                .collect::<HashSet<_>>(),
+        );
     }
 
     Ok(out)
 }
 
-fn mark_cf_system_matches(
-    configs: &[String],
-    path_rows: Option<&HashMap<String, CommitConfigPathRow>>,
-) -> Vec<String> {
-    let Some(path_rows) = path_rows else {
-        return configs
-            .iter()
-            .map(|name| strip_cf_suffix(name).to_string())
-            .collect();
+fn mark_cf_system_matches(configs: &[String], cf_matches: Option<&HashSet<String>>) -> Vec<String> {
+    let Some(cf_matches) = cf_matches else {
+        return configs.to_vec();
     };
 
     configs
         .iter()
         .map(|name| {
-            let bare_name = strip_cf_suffix(name);
-            if path_rows
-                .get(bare_name)
-                .and_then(|row| row.cf_hostname.as_ref())
-                .is_some()
-            {
+            let bare_name = name.strip_suffix(" [CF system]").unwrap_or(name);
+            if cf_matches.contains(bare_name) {
                 format!("{} [CF system]", bare_name)
             } else {
                 bare_name.to_string()
             }
         })
         .collect()
-}
-
-fn build_commit_system_paths(
-    configs: &[String],
-    path_rows: Option<&HashMap<String, CommitConfigPathRow>>,
-) -> Vec<FlakeCommitSystemPath> {
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
-
-    for config in configs {
-        let bare = strip_cf_suffix(config).to_string();
-        if !seen.insert(bare.clone()) {
-            continue;
-        }
-
-        let detail = path_rows.and_then(|rows| rows.get(&bare));
-        out.push(FlakeCommitSystemPath {
-            config_name: bare,
-            is_cf_system: detail.map(|row| row.mapped_host_count > 0).unwrap_or(false),
-            cf_hostname: detail.and_then(|row| row.cf_hostname.clone()),
-            mapped_host_count: detail.map(|row| row.mapped_host_count).unwrap_or(0),
-            expected_store_path: detail.and_then(|row| row.expected_store_path.clone()),
-            current_store_path: detail.and_then(|row| row.current_store_path.clone()),
-        });
-    }
-
-    if let Some(rows) = path_rows {
-        let mut extras: Vec<&CommitConfigPathRow> = rows
-            .values()
-            .filter(|row| !seen.contains(&row.config_name))
-            .collect();
-        extras.sort_by(|a, b| a.config_name.cmp(&b.config_name));
-        for row in extras {
-            out.push(FlakeCommitSystemPath {
-                config_name: row.config_name.clone(),
-                is_cf_system: row.mapped_host_count > 0,
-                cf_hostname: row.cf_hostname.clone(),
-                mapped_host_count: row.mapped_host_count,
-                expected_store_path: row.expected_store_path.clone(),
-                current_store_path: row.current_store_path.clone(),
-            });
-        }
-    }
-
-    out
-}
-
-fn strip_cf_suffix(name: &str) -> &str {
-    name.strip_suffix(" [CF system]").unwrap_or(name)
 }
 
 async fn resolve_timeline_author(
@@ -1979,62 +1872,6 @@ mod tests {
         assert_eq!(one, two);
         assert_eq!(one.len(), 40);
         assert!(one.chars().all(|c| c.is_ascii_hexdigit()));
-    }
-
-    #[test]
-    fn mark_cf_system_matches_appends_marker_when_config_maps_to_cf_system() {
-        let mut rows = HashMap::new();
-        rows.insert(
-            "alpha".to_string(),
-            CommitConfigPathRow {
-                config_name: "alpha".to_string(),
-                cf_hostname: Some("alpha-host".to_string()),
-                mapped_host_count: 1,
-                expected_store_path: Some("/nix/store/alpha".to_string()),
-                current_store_path: Some("/nix/store/alpha".to_string()),
-            },
-        );
-
-        let marked = mark_cf_system_matches(&["alpha".to_string(), "beta".to_string()], Some(&rows));
-        assert_eq!(marked[0], "alpha [CF system]");
-        assert_eq!(marked[1], "beta");
-    }
-
-    #[test]
-    fn build_commit_system_paths_includes_path_details_and_unavailable_states() {
-        let mut rows = HashMap::new();
-        rows.insert(
-            "alpha".to_string(),
-            CommitConfigPathRow {
-                config_name: "alpha".to_string(),
-                cf_hostname: Some("alpha-host".to_string()),
-                mapped_host_count: 2,
-                expected_store_path: Some("/nix/store/alpha".to_string()),
-                current_store_path: Some("/nix/store/current-alpha".to_string()),
-            },
-        );
-
-        let details = build_commit_system_paths(
-            &["alpha [CF system]".to_string(), "beta".to_string()],
-            Some(&rows),
-        );
-
-        assert_eq!(details.len(), 2);
-        assert_eq!(details[0].config_name, "alpha");
-        assert!(details[0].is_cf_system);
-        assert_eq!(details[0].mapped_host_count, 2);
-        assert_eq!(details[0].cf_hostname.as_deref(), Some("alpha-host"));
-        assert_eq!(details[0].expected_store_path.as_deref(), Some("/nix/store/alpha"));
-        assert_eq!(
-            details[0].current_store_path.as_deref(),
-            Some("/nix/store/current-alpha")
-        );
-
-        assert_eq!(details[1].config_name, "beta");
-        assert!(!details[1].is_cf_system);
-        assert_eq!(details[1].mapped_host_count, 0);
-        assert!(details[1].expected_store_path.is_none());
-        assert!(details[1].current_store_path.is_none());
     }
 
     // NOTE: Authorization tests for create_flake, delete_flake moved to extractor-level tests
