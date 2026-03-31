@@ -1,10 +1,10 @@
 ---
 id: TASK-226
 title: Prioritize freshly synced flake commits at top of eval queue
-status: Review
+status: Done
 assignee: []
 created_date: '2026-03-30 01:56'
-updated_date: '2026-03-30 02:36'
+updated_date: '2026-03-31 01:57'
 labels:
   - queueing
   - flakes
