@@ -4,7 +4,7 @@ title: Show expected/current config store paths in Flakes commit details
 status: Review
 assignee: []
 created_date: '2026-03-30 03:17'
-updated_date: '2026-03-31 01:16'
+updated_date: '2026-03-31 01:54'
 labels:
   - flakes
   - ui
@@ -87,4 +87,12 @@ MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/198
 Moved In Progress -> Review after implementation and verification; branch `TASK-229-commit-config-paths` pushed and MR opened.
 
 MR includes web-ui check screenshot attachment: `![13d-flakes-stress-dataset](/uploads/15af37ee011ef8ad4ac8a75abc9a909d/13d-flakes-stress-dataset.png)`.
+
+Addressed reviewer blocker: current path semantics are now host-scoped and explicit in UI (`current path (<hostname>)`), with `mapped_host_count` surfaced when multiple hosts share a configuration.
+
+Backend selection for displayed host/path changed from `systems.updated_at DESC LIMIT 1` to deterministic most-recent `system_states` report across mapped active hosts (hostname tie-break).
+
+Resolved merge conflicts after merging `origin/dev` into branch (conflicts were backlog task markdown add/add); kept `origin/dev` versions for conflicted backlog files.
+
+Follow-up commits pushed to MR-198: `94263c8e` (host-scoped fix) and `4a6d11ac` (merge conflict resolution merge commit).
 <!-- SECTION:NOTES:END -->
