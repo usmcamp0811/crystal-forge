@@ -1,9 +1,10 @@
 ---
 id: TASK-231
 title: Repair TASK-229 merge so commit-path detail changes actually land on dev
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-03-31 03:07'
+updated_date: '2026-03-31 03:08'
 labels:
   - repair
   - flakes
@@ -55,3 +56,9 @@ Land the intended TASK-229 code changes onto `dev` via a clean follow-up merge r
 ## Risk Level
 Medium (operator-facing path diagnostics can mislead if wrong values/wording are shown).
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Moved Backlog -> To Do per explicit human sprint selection in chat to repair missing TASK-229 changes on dev.
+<!-- SECTION:NOTES:END -->
