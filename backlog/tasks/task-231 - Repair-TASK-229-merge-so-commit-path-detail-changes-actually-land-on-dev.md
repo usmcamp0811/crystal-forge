@@ -1,10 +1,10 @@
 ---
 id: TASK-231
 title: Repair TASK-229 merge so commit-path detail changes actually land on dev
-status: Review
+status: To Do
 assignee: []
 created_date: '2026-03-31 03:07'
-updated_date: '2026-03-31 03:16'
+updated_date: '2026-03-31 03:08'
 labels:
   - repair
   - flakes
@@ -61,14 +61,4 @@ Medium (operator-facing path diagnostics can mislead if wrong values/wording are
 
 <!-- SECTION:NOTES:BEGIN -->
 Moved Backlog -> To Do per explicit human sprint selection in chat to repair missing TASK-229 changes on dev.
-
-LOCK: opencode-gpt5 on reckless in /home/mcamp/code/crystal-forge/TASK-231-repair-task229-merge
-
-Repair implementation completed by cherry-picking missing TASK-229 commits onto branch `TASK-231-repair-task229-merge`: `cbc3f303`, `d704ca29`, `9fc5f504`.
-
-Opened repair MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/200
-
-Verification (non-production): `nix develop -c env SQLX_OFFLINE=true cargo check --package crystal-forge` PASS; `nix develop -c env SQLX_OFFLINE=true cargo test --package crystal-forge build_commit_system_paths_includes_path_details_and_unavailable_states` PASS; `nix develop -c cargo test --package crystal-forge-ui build_flake_commits_preserves_system_path_details` PASS; `nix build .#checks.x86_64-linux.web-ui --no-link` PASS; `nix build .#checks.x86_64-linux.web-ui` PASS.
-
-MR includes web-ui check screenshot attachment: `![13d-flakes-stress-dataset](/uploads/6baee7f7279b38700ce6166271087299/13d-flakes-stress-dataset.png)`.
 <!-- SECTION:NOTES:END -->
