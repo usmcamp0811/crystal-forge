@@ -294,6 +294,7 @@ async fn upsert_commit_artifacts_cache(
 struct CommitConfigPathRow {
     config_name: String,
     cf_hostname: Option<String>,
+    mapped_host_count: i64,
     expected_store_path: Option<String>,
     current_store_path: Option<String>,
 }
@@ -307,34 +308,46 @@ async fn fetch_commit_config_paths(
         return Ok(HashMap::new());
     }
 
-    let rows = sqlx::query_as::<_, (String, String, Option<String>, Option<String>, Option<String>)>(
+    let rows = sqlx::query_as::<_, (String, String, i64, Option<String>, Option<String>, Option<String>)>(
         r#"
         SELECT
             c.git_commit_hash,
             d.derivation_name,
-            cfg.hostname,
+            COALESCE(mapped_hosts.mapped_host_count, 0)::bigint,
+            selected_state.hostname,
             d.store_path,
-            latest_state.store_path
+            selected_state.store_path
         FROM commits c
         JOIN derivations d
             ON d.commit_id = c.id
            AND d.derivation_type = 'nixos'
         LEFT JOIN LATERAL (
-            SELECT s.hostname
+            SELECT COUNT(*)::bigint AS mapped_host_count
             FROM systems s
             WHERE s.flake_id = c.flake_id
               AND s.is_active = TRUE
               AND COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname) = d.derivation_name
-            ORDER BY s.updated_at DESC
-            LIMIT 1
-        ) cfg ON TRUE
+        ) mapped_hosts ON TRUE
         LEFT JOIN LATERAL (
-            SELECT ss.store_path
-            FROM system_states ss
-            WHERE ss.hostname = cfg.hostname
-            ORDER BY ss.timestamp DESC, ss.id DESC
+            SELECT
+                s.hostname,
+                latest_ss.store_path,
+                latest_ss.timestamp,
+                latest_ss.id
+            FROM systems s
+            LEFT JOIN LATERAL (
+                SELECT ss.store_path, ss.timestamp, ss.id
+                FROM system_states ss
+                WHERE ss.hostname = s.hostname
+                ORDER BY ss.timestamp DESC, ss.id DESC
+                LIMIT 1
+            ) latest_ss ON TRUE
+            WHERE s.flake_id = c.flake_id
+              AND s.is_active = TRUE
+              AND COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname) = d.derivation_name
+            ORDER BY latest_ss.timestamp DESC NULLS LAST, latest_ss.id DESC NULLS LAST, s.hostname ASC
             LIMIT 1
-        ) latest_state ON TRUE
+        ) selected_state ON TRUE
         WHERE c.flake_id = $1
           AND c.git_commit_hash = ANY($2)
         ORDER BY c.git_commit_hash, d.derivation_name, d.id DESC
@@ -346,13 +359,14 @@ async fn fetch_commit_config_paths(
     .await?;
 
     let mut out: HashMap<String, HashMap<String, CommitConfigPathRow>> = HashMap::new();
-    for (hash, config_name, cf_hostname, expected_store_path, current_store_path) in rows {
+    for (hash, config_name, mapped_host_count, cf_hostname, expected_store_path, current_store_path) in rows {
         out.entry(hash)
             .or_default()
             .entry(config_name.clone())
             .or_insert(CommitConfigPathRow {
                 config_name,
                 cf_hostname,
+                mapped_host_count,
                 expected_store_path,
                 current_store_path,
             });
@@ -405,8 +419,9 @@ fn build_commit_system_paths(
         let detail = path_rows.and_then(|rows| rows.get(&bare));
         out.push(FlakeCommitSystemPath {
             config_name: bare,
-            is_cf_system: detail.and_then(|row| row.cf_hostname.as_ref()).is_some(),
+            is_cf_system: detail.map(|row| row.mapped_host_count > 0).unwrap_or(false),
             cf_hostname: detail.and_then(|row| row.cf_hostname.clone()),
+            mapped_host_count: detail.map(|row| row.mapped_host_count).unwrap_or(0),
             expected_store_path: detail.and_then(|row| row.expected_store_path.clone()),
             current_store_path: detail.and_then(|row| row.current_store_path.clone()),
         });
@@ -421,8 +436,9 @@ fn build_commit_system_paths(
         for row in extras {
             out.push(FlakeCommitSystemPath {
                 config_name: row.config_name.clone(),
-                is_cf_system: row.cf_hostname.is_some(),
+                is_cf_system: row.mapped_host_count > 0,
                 cf_hostname: row.cf_hostname.clone(),
+                mapped_host_count: row.mapped_host_count,
                 expected_store_path: row.expected_store_path.clone(),
                 current_store_path: row.current_store_path.clone(),
             });
@@ -1973,6 +1989,7 @@ mod tests {
             CommitConfigPathRow {
                 config_name: "alpha".to_string(),
                 cf_hostname: Some("alpha-host".to_string()),
+                mapped_host_count: 1,
                 expected_store_path: Some("/nix/store/alpha".to_string()),
                 current_store_path: Some("/nix/store/alpha".to_string()),
             },
@@ -1991,6 +2008,7 @@ mod tests {
             CommitConfigPathRow {
                 config_name: "alpha".to_string(),
                 cf_hostname: Some("alpha-host".to_string()),
+                mapped_host_count: 2,
                 expected_store_path: Some("/nix/store/alpha".to_string()),
                 current_store_path: Some("/nix/store/current-alpha".to_string()),
             },
@@ -2004,6 +2022,7 @@ mod tests {
         assert_eq!(details.len(), 2);
         assert_eq!(details[0].config_name, "alpha");
         assert!(details[0].is_cf_system);
+        assert_eq!(details[0].mapped_host_count, 2);
         assert_eq!(details[0].cf_hostname.as_deref(), Some("alpha-host"));
         assert_eq!(details[0].expected_store_path.as_deref(), Some("/nix/store/alpha"));
         assert_eq!(
@@ -2013,6 +2032,7 @@ mod tests {
 
         assert_eq!(details[1].config_name, "beta");
         assert!(!details[1].is_cf_system);
+        assert_eq!(details[1].mapped_host_count, 0);
         assert!(details[1].expected_store_path.is_none());
         assert!(details[1].current_store_path.is_none());
     }

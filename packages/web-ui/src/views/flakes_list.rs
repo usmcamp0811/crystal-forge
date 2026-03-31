@@ -1719,7 +1719,7 @@ fn FlakeHistoryExplorer(
                                                                 span {
                                                                     class: "{chip_class}",
                                                                     style: "{chip_style}",
-                                                                    "{config_name}"
+                                                                    "{truncate_system_label(config_name)}"
                                                                 }
                                                                 if let Some(detail) = path_detail.as_ref() {
                                                                     if detail.is_cf_system {
@@ -1732,8 +1732,18 @@ fn FlakeHistoryExplorer(
                                                                     span { class: "text-slate-500", "expected path: " }
                                                                     {detail.expected_store_path.unwrap_or_else(|| "unavailable".to_string())}
                                                                 }
+                                                                if detail.mapped_host_count > 1 {
+                                                                    p { class: "text-[11px] text-blue-200",
+                                                                        "{detail.mapped_host_count} mapped hosts; showing most recent host report."
+                                                                    }
+                                                                }
                                                                 p { class: "text-[11px] text-slate-300 break-all",
-                                                                    span { class: "text-slate-500", "current path: " }
+                                                                    span { class: "text-slate-500", "current path" }
+                                                                    if let Some(hostname) = detail.cf_hostname.as_ref() {
+                                                                        span { class: "text-slate-500", " ({hostname}): " }
+                                                                    } else {
+                                                                        span { class: "text-slate-500", ": " }
+                                                                    }
                                                                     {detail.current_store_path.unwrap_or_else(|| "not reported".to_string())}
                                                                 }
                                                             } else {
@@ -1757,7 +1767,7 @@ fn FlakeHistoryExplorer(
                                         }
                                         p {
                                             class: "text-xs text-slate-400",
-                                            "Expected path comes from commit derivation data; current path comes from latest agent-reported system state when a config maps to a CF system."
+                                            "Expected path comes from commit derivation data; current path is host-scoped and shown for the selected mapped CF host (most recent report when multiple hosts share the config)."
                                         }
                                     }
                                         }
@@ -3320,7 +3330,7 @@ fn build_flake_commits(timelines: &[FlakeTimeline], flake_id: i32) -> Vec<FlakeH
                 .systems
                 .iter()
                 .take(MAX_SYSTEMS_STORED_PER_COMMIT)
-                .map(|name| truncate_system_label(name))
+                .cloned()
                 .collect();
             let system_paths = commit
                 .system_paths
@@ -4024,6 +4034,7 @@ mod tests {
                     config_name: "gamma-host".to_string(),
                     is_cf_system: true,
                     cf_hostname: Some("gamma-host".to_string()),
+                    mapped_host_count: 1,
                     expected_store_path: Some("/nix/store/expected-gamma".to_string()),
                     current_store_path: Some("/nix/store/current-gamma".to_string()),
                 }],

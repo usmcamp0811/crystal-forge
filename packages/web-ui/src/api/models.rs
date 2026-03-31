@@ -638,6 +638,8 @@ pub struct FlakeCommitSystemPath {
     #[serde(default)]
     pub cf_hostname: Option<String>,
     #[serde(default)]
+    pub mapped_host_count: i64,
+    #[serde(default)]
     pub expected_store_path: Option<String>,
     #[serde(default)]
     pub current_store_path: Option<String>,

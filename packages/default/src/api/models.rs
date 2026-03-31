@@ -537,6 +537,9 @@ pub struct FlakeCommitSystemPath {
     /// Hostname of the mapped Crystal Forge system, when available.
     #[serde(default)]
     pub cf_hostname: Option<String>,
+    /// Number of active Crystal Forge systems mapped to this config.
+    #[serde(default)]
+    pub mapped_host_count: i64,
     /// Store path associated with this config for the commit, when available.
     #[serde(default)]
     pub expected_store_path: Option<String>,
