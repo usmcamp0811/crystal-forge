@@ -1,10 +1,10 @@
 ---
 id: TASK-219
 title: Guard progressive timeline fetches with generation token
-status: Review
+status: Done
 assignee: []
 created_date: '2026-03-26 23:20'
-updated_date: '2026-03-26 23:20'
+updated_date: '2026-03-31 01:57'
 labels:
   - hotfix
   - ui
@@ -15,6 +15,7 @@ priority: high
 
 ## Description
 
+<!-- SECTION:DESCRIPTION:BEGIN -->
 ## Problem
 
 Progressive flake timeline loading can race when a newer refresh starts while older batch requests are still in-flight, allowing stale responses to overwrite newer state.
@@ -22,6 +23,7 @@ Progressive flake timeline loading can race when a newer refresh starts while ol
 ## Goal
 
 Add request-generation guarding so only the latest timeline load sequence can update UI state.
+<!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 
