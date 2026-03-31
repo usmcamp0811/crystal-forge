@@ -1,10 +1,10 @@
 ---
 id: TASK-229
 title: Show expected/current config store paths in Flakes commit details
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-03-30 03:17'
-updated_date: '2026-03-30 04:02'
+updated_date: '2026-03-31 01:16'
 labels:
   - flakes
   - ui
@@ -81,4 +81,10 @@ Implementation detail: commit-details now project per-config path data with prec
 UI behavior: Flakes commit details retain config names and now render expected/current path lines per config, including explicit `unavailable` / `not reported` states when data is missing.
 
 Verification run (non-production): `nix develop -c env SQLX_OFFLINE=true cargo check --package crystal-forge` PASS; `nix develop -c env SQLX_OFFLINE=true cargo test --package crystal-forge mark_cf_system_matches_appends_marker_when_config_maps_to_cf_system` PASS; `nix develop -c env SQLX_OFFLINE=true cargo test --package crystal-forge build_commit_system_paths_includes_path_details_and_unavailable_states` PASS; `nix build .#checks.x86_64-linux.web-ui --no-link` PASS; `nix build .#checks.x86_64-linux.server --no-link` PASS.
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/198
+
+Moved In Progress -> Review after implementation and verification; branch `TASK-229-commit-config-paths` pushed and MR opened.
+
+MR includes web-ui check screenshot attachment: `![13d-flakes-stress-dataset](/uploads/15af37ee011ef8ad4ac8a75abc9a909d/13d-flakes-stress-dataset.png)`.
 <!-- SECTION:NOTES:END -->
