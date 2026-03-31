@@ -3,10 +3,10 @@ id: TASK-230
 title: >-
   Improve build queue UX: ordering, pagination, search/filter, and build log
   parity
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-03-31 02:48'
-updated_date: '2026-03-31 02:49'
+updated_date: '2026-03-31 03:15'
 labels:
   - builds
   - queue
@@ -114,6 +114,12 @@ Moved Backlog -> To Do per explicit human sprint selection in chat.
 User-selected defaults captured: single combined task; newest-first queue order; server-side pagination; must-have filters = commit hash, flake/repo, system/config, time range; build logs require live + historical behavior.
 
 LOCK: claude-sonnet-4-6 on reckless in /home/mcamp/code/crystal-forge/TASK-230-build-queue-ux
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/199
+
+Commit: b8361c7c
+
+Both nix checks pass (web-ui + server). All 3 unit tests pass. No schema changes.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
