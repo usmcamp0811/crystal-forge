@@ -1,10 +1,10 @@
 ---
 id: TASK-216
 title: Ensure history rewrite modal triggers on sync divergence
-status: Review
+status: Done
 assignee: []
 created_date: '2026-03-26 15:55'
-updated_date: '2026-03-26 15:55'
+updated_date: '2026-03-31 01:56'
 labels:
   - bug
   - flakes
@@ -15,6 +15,7 @@ priority: high
 
 ## Description
 
+<!-- SECTION:DESCRIPTION:BEGIN -->
 ## Problem
 
 In production, clicking "Sync from Source" can return "0 updated" even when the remote branch has moved and the DB tip is stale after a history rewrite. This prevents the `history_rewrite_detected` conflict from being surfaced, so the rewrite acceptance modal never appears.
@@ -27,6 +28,7 @@ Always surface a rewrite conflict when DB tip diverges from remote HEAD in per-f
 
 - Redesigning the full flakes table warning UX (tracked separately)
 - Changing audit data model beyond existing event + log behavior
+<!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 
