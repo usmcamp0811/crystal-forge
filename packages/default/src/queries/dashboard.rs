@@ -476,10 +476,18 @@ pub async fn list_build_queue_paginated(
         JOIN derivations d ON d.id = bj.derivation_id
         LEFT JOIN commits c ON c.id = d.commit_id
         LEFT JOIN flakes f ON f.id = c.flake_id
-        LEFT JOIN systems s ON (
-            s.hostname = d.derivation_target
-            OR (s.system_configuration_name IS NOT NULL AND s.system_configuration_name = d.derivation_target)
-        )
+        -- Use a LATERAL subquery to guarantee at most one system per build job.
+        -- Hostname match wins over system_configuration_name match to be deterministic.
+        LEFT JOIN LATERAL (
+            SELECT id, hostname, environment_id, system_configuration_name
+            FROM systems
+            WHERE hostname = d.derivation_target
+               OR (system_configuration_name IS NOT NULL
+                   AND system_configuration_name = d.derivation_target)
+            ORDER BY
+                CASE WHEN hostname = d.derivation_target THEN 0 ELSE 1 END
+            LIMIT 1
+        ) s ON TRUE
         LEFT JOIN environments e ON e.id = COALESCE(s.environment_id, bj.environment_id)
         LEFT JOIN builders b ON b.id = bj.builder_id
         WHERE
@@ -493,7 +501,7 @@ pub async fn list_build_queue_paginated(
             AND ($2::text IS NULL OR c.git_commit_hash ILIKE ($2 || '%'))
             -- Flake name filter (partial match)
             AND ($3::text IS NULL OR f.name ILIKE ('%' || $3 || '%'))
-            -- Config/hostname filter (partial match against hostname or config name)
+            -- Config/hostname filter (partial match on resolved display name or config name)
             AND (
                 $4::text IS NULL
                 OR COALESCE(s.hostname, d.derivation_target, d.derivation_name) ILIKE ('%' || $4 || '%')
@@ -503,7 +511,7 @@ pub async fn list_build_queue_paginated(
             AND ($5::timestamptz IS NULL OR bj.created_at >= $5)
             AND ($6::timestamptz IS NULL OR bj.created_at <= $6)
         ORDER BY
-            -- In-progress first, then newest queued
+            -- In-progress first, then newest queued/completed
             CASE
                 WHEN bj.status = 'building' THEN 0
                 WHEN bj.status = 'queued' THEN 1
