@@ -1,10 +1,10 @@
 ---
 id: TASK-197
 title: Brave browser tab crashes when starting new instance or adding flake
-status: Review
+status: Done
 assignee: []
 created_date: '2026-03-19 12:38'
-updated_date: '2026-03-28 15:14'
+updated_date: '2026-03-31 01:56'
 labels:
   - bug
   - ui
