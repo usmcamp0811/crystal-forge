@@ -430,19 +430,20 @@ pub async fn list_build_queue_paginated(
 
     // Shared type aliases for the raw row tuple.
     type BuildRow = (
-        Option<Uuid>,        // job_id
-        Option<Uuid>,        // system_id
-        Option<String>,      // hostname
-        Option<String>,      // flake_name
-        Option<String>,      // commit_hash
-        String,              // status
-        Option<String>,      // builder_name
-        DateTime<Utc>,       // queued_at
+        Option<Uuid>,          // job_id
+        Option<Uuid>,          // system_id
+        Option<String>,        // hostname
+        Option<String>,        // flake_name
+        Option<String>,        // commit_hash
+        Option<String>,        // commit_message (first line)
+        String,                // status
+        Option<String>,        // builder_name
+        DateTime<Utc>,         // queued_at
         Option<DateTime<Utc>>, // started_at
-        Option<i64>,         // elapsed_secs
-        Option<String>,      // logs
-        Option<String>,      // environment
-        i64,                 // total_count
+        Option<i64>,           // elapsed_secs
+        Option<String>,        // logs
+        Option<String>,        // environment
+        i64,                   // total_count
     );
 
     let rows = sqlx::query_as::<_, BuildRow>(
@@ -453,6 +454,9 @@ pub async fn list_build_queue_paginated(
             COALESCE(s.hostname, d.derivation_target, d.derivation_name) AS hostname,
             f.name AS flake_name,
             c.git_commit_hash AS commit_hash,
+            -- First line of commit message; empty string coalesces to NULL so the
+            -- frontend sees None rather than an empty summary.
+            NULLIF(split_part(COALESCE(c.message, ''), E'\n', 1), '') AS commit_message,
             bj.status,
             b.name AS builder_name,
             bj.created_at AS queued_at,
@@ -533,7 +537,7 @@ pub async fn list_build_queue_paginated(
     .fetch_all(pool)
     .await?;
 
-    let total = rows.first().map(|r| r.12).unwrap_or(0);
+    let total = rows.first().map(|r| r.13).unwrap_or(0);
 
     let items = rows
         .into_iter()
@@ -544,6 +548,7 @@ pub async fn list_build_queue_paginated(
                 hostname,
                 flake_name,
                 commit_hash,
+                commit_message,
                 status,
                 builder_name,
                 queued_at,
@@ -566,7 +571,7 @@ pub async fn list_build_queue_paginated(
                     hostname: hostname.unwrap_or_else(|| "unknown".to_string()),
                     flake_name: flake_name.unwrap_or_else(|| "unknown".to_string()),
                     commit_hash: commit_hash.unwrap_or_else(|| "unknown".to_string()),
-                    commit_message: None,
+                    commit_message,
                     status,
                     builder_name,
                     queued_at,

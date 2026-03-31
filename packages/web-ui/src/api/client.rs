@@ -138,48 +138,68 @@ pub async fn reorder_eval_queue(ordered_commit_ids: &[i32]) -> Result<(), ApiCli
     send_empty_with_csrf("POST", &url, Some(&request)).await
 }
 
+/// Percent-encode a query parameter value using the browser's encodeURIComponent.
+///
+/// This ensures characters like spaces, &, #, %, +, and other reserved characters
+/// are safely encoded before being interpolated into a URL query string.
+fn encode_query_value(value: &str) -> String {
+    js_sys::encode_uri_component(value).into()
+}
+
 /// Fetch build jobs with pagination and optional filtering.
+///
+/// All user-supplied filter values are percent-encoded via encodeURIComponent before
+/// being appended to the URL, so inputs containing spaces, &, #, or similar characters
+/// are transmitted correctly.
 pub async fn fetch_build_queue_paginated(
     params: &crate::api::models::BuildQueueParams,
 ) -> Result<crate::api::models::BuildQueuePageResponse, ApiClientError> {
-    let mut url = format!("{}/build-jobs", base_url());
+    let base = format!("{}/build-jobs", base_url());
     let mut parts: Vec<String> = Vec::new();
+
+    // Numeric params are safe to interpolate directly (no user-controlled text).
     if let Some(p) = params.page {
         parts.push(format!("page={}", p));
     }
     if let Some(l) = params.limit {
         parts.push(format!("limit={}", l));
     }
+
+    // String params must be percent-encoded.
     if let Some(s) = &params.status {
         if !s.is_empty() {
-            parts.push(format!("status={}", s));
+            parts.push(format!("status={}", encode_query_value(s)));
         }
     }
     if let Some(ch) = &params.commit_hash {
         if !ch.is_empty() {
-            parts.push(format!("commit_hash={}", ch));
+            parts.push(format!("commit_hash={}", encode_query_value(ch)));
         }
     }
     if let Some(fn_) = &params.flake_name {
         if !fn_.is_empty() {
-            parts.push(format!("flake_name={}", fn_));
+            parts.push(format!("flake_name={}", encode_query_value(fn_)));
         }
     }
     if let Some(cn) = &params.config_name {
         if !cn.is_empty() {
-            parts.push(format!("config_name={}", cn));
+            parts.push(format!("config_name={}", encode_query_value(cn)));
         }
     }
+    // RFC 3339 timestamps are ASCII-safe but encode them for defensive correctness
+    // (colons and plus signs in timezone offsets are not query-safe in all contexts).
     if let Some(qa) = params.queued_after {
-        parts.push(format!("queued_after={}", qa.to_rfc3339()));
+        parts.push(format!("queued_after={}", encode_query_value(&qa.to_rfc3339())));
     }
     if let Some(qb) = params.queued_before {
-        parts.push(format!("queued_before={}", qb.to_rfc3339()));
+        parts.push(format!("queued_before={}", encode_query_value(&qb.to_rfc3339())));
     }
-    if !parts.is_empty() {
-        url.push('?');
-        url.push_str(&parts.join("&"));
-    }
+
+    let url = if parts.is_empty() {
+        base
+    } else {
+        format!("{}?{}", base, parts.join("&"))
+    };
     fetch_json(&url).await
 }
 
