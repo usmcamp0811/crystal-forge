@@ -3,10 +3,10 @@ id: TASK-232
 title: >-
   Restore missing migration 0102 on dev to resolve startup failure against
   applied DB version
-status: Done
+status: In Progress
 assignee: []
 created_date: '2026-03-31 12:34'
-updated_date: '2026-04-02 00:08'
+updated_date: '2026-03-31 12:35'
 labels:
   - hotfix
   - database
@@ -49,12 +49,4 @@ Production/startup fails with `migration 102 was previously applied but is missi
 Moved Backlog -> To Do per explicit user request to repair outage.
 
 LOCK: opencode-gpt5 on reckless in /home/mcamp/code/crystal-forge/TASK-232-restore-migration-0102
-
-Emergency hotfix commit: `5b02291f` restoring `packages/default/migrations/0102_add_expected_store_path_to_derivations.sql`.
-
-MR opened: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/202
-
-Verification (non-production): `nix build .#checks.x86_64-linux.database --no-link` PASS.
-
-Backlog review sync: branch head `c0791cf9` is now contained in `origin/dev` (merged). Worktree cleanup completed (`~/code/crystal-forge/TASK-232-restore-migration-0102` removed, `git worktree prune` run).
 <!-- SECTION:NOTES:END -->
