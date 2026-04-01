@@ -149,6 +149,8 @@ pub struct BuildItem {
     pub duration_secs: Option<i64>,
     pub completed_at: Option<DateTime<Utc>>,
     pub started_by: String,
+    /// Stored build logs (available for completed/failed jobs from API).
+    pub logs: Option<String>,
     pub status: BuildStatus,
     pub summary: String,
 }
@@ -376,6 +378,7 @@ pub fn mock_builds() -> Vec<BuildItem> {
             duration_secs: Some(133),
             completed_at: None,
             started_by: "mcamp".to_string(),
+            logs: None,
             status: BuildStatus::Building,
             summary: "nix build .#nixosConfigurations.atlas-01.config.system.build.toplevel"
                 .to_string(),
@@ -395,6 +398,7 @@ pub fn mock_builds() -> Vec<BuildItem> {
             duration_secs: None,
             completed_at: None,
             started_by: "scheduler".to_string(),
+            logs: None,
             status: BuildStatus::Queued,
             summary: "waiting for free worker slot".to_string(),
         },
@@ -413,6 +417,7 @@ pub fn mock_builds() -> Vec<BuildItem> {
             duration_secs: None,
             completed_at: None,
             started_by: "scheduler".to_string(),
+            logs: None,
             status: BuildStatus::Queued,
             summary: "waiting for free worker slot".to_string(),
         },
@@ -431,6 +436,7 @@ pub fn mock_builds() -> Vec<BuildItem> {
             duration_secs: Some(262),
             completed_at: None,
             started_by: "mcamp".to_string(),
+            logs: None,
             status: BuildStatus::Failed,
             summary: "dependency graph diverged on nixpkgs input".to_string(),
         },
