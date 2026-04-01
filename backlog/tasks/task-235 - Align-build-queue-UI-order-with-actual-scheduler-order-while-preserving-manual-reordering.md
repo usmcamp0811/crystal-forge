@@ -3,10 +3,10 @@ id: TASK-235
 title: >-
   Align build queue UI order with actual scheduler order while preserving manual
   reordering
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-04-01 02:30'
-updated_date: '2026-04-01 02:30'
+updated_date: '2026-04-01 02:33'
 labels:
   - build-queue
   - scheduler
@@ -82,4 +82,6 @@ High (ordering bugs can starve jobs or mislead operators).
 
 <!-- SECTION:NOTES:BEGIN -->
 Moved Backlog -> To Do per explicit human request in chat.
+
+LOCK: opencode-gpt5 on reckless in /home/mcamp/code/crystal-forge/TASK-235-build-queue-order
 <!-- SECTION:NOTES:END -->
