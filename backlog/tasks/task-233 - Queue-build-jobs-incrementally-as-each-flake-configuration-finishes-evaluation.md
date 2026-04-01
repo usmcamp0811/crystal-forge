@@ -1,10 +1,10 @@
 ---
 id: TASK-233
 title: Queue build jobs incrementally as each flake configuration finishes evaluation
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-04-01 01:34'
-updated_date: '2026-04-01 02:12'
+updated_date: '2026-04-01 02:58'
 labels:
   - eval
   - build-queue
@@ -78,4 +78,12 @@ High (queueing semantics affect build ordering, duplicate prevention, and recove
 Moved Backlog -> To Do per explicit human request in chat.
 
 LOCK: claude-sonnet-4-6 on reckless in /home/mcamp/code/crystal-forge/TASK-233-incremental-build-queue
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/203
+
+Commit: 5f373cd8
+
+server nix check passes. 4 unit tests pass. sqlx offline cache updated.
+
+Post-eval create_build_jobs_for_commit retained as idempotent backstop. NOT EXISTS guard prevents duplicates in both paths.
 <!-- SECTION:NOTES:END -->
