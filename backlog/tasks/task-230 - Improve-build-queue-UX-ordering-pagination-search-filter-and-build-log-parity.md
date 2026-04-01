@@ -3,10 +3,10 @@ id: TASK-230
 title: >-
   Improve build queue UX: ordering, pagination, search/filter, and build log
   parity
-status: Review
+status: Done
 assignee: []
 created_date: '2026-03-31 02:48'
-updated_date: '2026-03-31 03:15'
+updated_date: '2026-04-01 02:07'
 labels:
   - builds
   - queue
@@ -120,6 +120,8 @@ MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/199
 Commit: b8361c7c
 
 Both nix checks pass (web-ui + server). All 3 unit tests pass. No schema changes.
+
+MR !199 merged into dev at 294024c4 on 2026-03-31.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
