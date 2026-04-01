@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-04-01 02:30'
-updated_date: '2026-04-01 03:17'
+updated_date: '2026-04-01 03:25'
 labels:
   - build-queue
   - scheduler
@@ -94,4 +94,10 @@ Removed client-side queue status re-sorting in `BuildQueuePane`; UI now preserve
 Ordering precedence documented for operators: `building` items are shown first for visibility, queued item order is `priority_weight DESC` then `created_at ASC`; manual Run Next/prioritize increases effective priority via persisted `priority_weight` update and is therefore reflected in both claim order and UI order.
 
 Verification executed in task worktree: `nix develop -c env SQLX_OFFLINE=true cargo check --package crystal-forge` (from packages/default), `nix develop -c cargo check --package crystal-forge-ui` (from packages/web-ui), `nix build .#checks.x86_64-linux.server --no-link`, `nix build .#checks.x86_64-linux.web-ui --no-link`.
+
+Adjusted dashboard queue SQL ordering to match active builder claim path exactly for queued jobs: `priority_weight DESC`, then commit timestamp (`commit_timestamp DESC NULLS LAST`), then `created_at ASC`.
+
+Added backend integration tests (ignored, DB-backed) in `packages/default/src/queries/builders.rs` covering: dashboard/claim default order alignment, prioritize/manual reorder behavior, and concurrent claims no-duplicate top-two selection.
+
+Attempted to execute each new DB-backed test with `nix develop -c env SQLX_OFFLINE=true cargo test --package crystal-forge <test-name> -- --ignored`; all failed in this environment with DB auth error: `pg_hba.conf rejects connection for host "::1", user "postgres", database "cf_test", no encryption`.
 <!-- SECTION:NOTES:END -->
