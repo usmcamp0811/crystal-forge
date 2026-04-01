@@ -2029,6 +2029,8 @@ const CI_FAST_STEP_NAMES = new Set([
   "04-post-register-login",
   "05-login-submit",
   "06-dashboard",
+  "15-builds",
+  "11b-builds-queue-card-focus",
   "12c-systems-modal-config-field",
   "12d-systems-api-error-no-mock-fallback",
   "13d-flakes-stress-dataset",
