@@ -528,6 +528,7 @@ async fn process_pending_commits(
                 &policies,
                 &mock_systems,
                 Some(&cf_state),
+                Some(&queue_notifier),
             )
             .await
         } else {
@@ -540,8 +541,9 @@ async fn process_pending_commits(
                 "all", // Evaluate all systems
                 &build_config,
                 &server_config,
-                &policies,       // Check deployment policies
+                &policies,
                 Some(&cf_state), // Pass CFState for WebSocket broadcasting
+                Some(&queue_notifier),
             )
             .await
         };

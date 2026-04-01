@@ -17,10 +17,12 @@ use crate::models::deployment_policies::{
     DeploymentPolicy, PolicyCheckResult, build_nix_eval_expression,
 };
 use crate::models::flakes::Flake;
+use crate::queries::build_jobs::enqueue_build_job_for_derivation;
 use crate::queries::derivations::{
     insert_derivation_with_target, mark_derivation_dry_run_complete,
 };
 use crate::flake::credentials::FlakeCredentialEnv;
+use crate::queue::QueueNotifier;
 use crate::queries::systems::list_configuration_names_for_flake;
 
 /// NixEvalJobResult with meta field
@@ -59,6 +61,7 @@ pub async fn evaluate_with_nix_eval_jobs(
     server_config: &ServerConfig,
     policies: &[DeploymentPolicy],
     cf_state: Option<&crate::handlers::agent_request::CFState>,
+    queue_notifier: Option<&QueueNotifier>,
 ) -> Result<(Vec<NixEvalJobResult>, Vec<PolicyCheckResult>)> {
     let flake_ref = build_flake_reference(repo_url, commit_hash);
     let allowed_systems = load_allowed_systems(pool, flake, target_system).await?;
@@ -351,11 +354,55 @@ pub async fn evaluate_with_nix_eval_jobs(
                                             // 1. No evaluation error
                                             // 2. Has a valid .drv path
                                             if !has_error && drv_path.is_some() {
-                                                evaluated_derivations.push((
-                                                    deriv.id,
-                                                    drv_path.clone().unwrap()
-                                                ));
+                                                let drv = drv_path.clone().unwrap();
+                                                evaluated_derivations.push((deriv.id, drv.clone()));
                                                 debug!("📋 Queued {} for DryRunComplete update", system_name);
+
+                                                // ── INCREMENTAL BUILD QUEUE ──────────────────────────
+                                                // Mark DryRunComplete and enqueue immediately so builders
+                                                // can start this config without waiting for the rest of
+                                                // the commit to finish evaluating.
+                                                match mark_derivation_dry_run_complete(pool, deriv.id, &drv).await {
+                                                    Ok(_) => {
+                                                        match enqueue_build_job_for_derivation(pool, deriv.id).await {
+                                                            Ok(true) => {
+                                                                info!(
+                                                                    "🚀 Incrementally queued build job for {} (derivation {})",
+                                                                    system_name, deriv.id
+                                                                );
+                                                                if let Some(state) = cf_state {
+                                                                    crate::handlers::api::commits::broadcast_eval_log(
+                                                                        state,
+                                                                        commit.id,
+                                                                        format!("🚀 {}: build job queued incrementally", system_name),
+                                                                    ).await;
+                                                                }
+                                                                if let Some(qn) = queue_notifier {
+                                                                    qn.notify_build_queue();
+                                                                }
+                                                            }
+                                                            Ok(false) => {
+                                                                debug!(
+                                                                    "Build job for derivation {} already existed (idempotent); skipping",
+                                                                    deriv.id
+                                                                );
+                                                            }
+                                                            Err(e) => {
+                                                                warn!(
+                                                                    "⚠️  Failed to incrementally enqueue build job for {}: {}",
+                                                                    system_name, e
+                                                                );
+                                                            }
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        warn!(
+                                                            "⚠️  Failed to mark derivation {} as DryRunComplete (incremental): {}",
+                                                            deriv.id, e
+                                                        );
+                                                    }
+                                                }
+                                                // ─────────────────────────────────────────────────────
                                             } else {
                                                 if has_error {
                                                     warn!("⚠️  {} has evaluation error, not marking complete", system_name);
@@ -514,42 +561,18 @@ pub async fn evaluate_with_nix_eval_jobs(
         );
     }
 
-    // ============================================================================
-    // CRITICAL FIX: Update successfully evaluated derivations
-    // Sets BOTH derivation_path AND status to DryRunComplete
-    // ============================================================================
-    if !evaluated_derivations.is_empty() {
-        info!(
-            "🔄 Marking {} derivations as DryRunComplete with .drv paths...",
-            evaluated_derivations.len()
-        );
-
-        for (deriv_id, drv_path) in &evaluated_derivations {
-            match mark_derivation_dry_run_complete(pool, *deriv_id, drv_path).await {
-                Ok(_) => {
-                    debug!(
-                        "✅ Marked derivation {} as DryRunComplete with path {}",
-                        deriv_id, drv_path
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        "⚠️  Failed to mark derivation {} as complete: {}",
-                        deriv_id, e
-                    );
-                }
-            }
-        }
-
-        info!(
-            "✅ {} derivations now ready for building!",
-            evaluated_derivations.len()
-        );
-        info!("   - Status: DryRunComplete (5)");
-        info!("   - Derivation paths: populated");
-        info!("   - Workers can now claim and build");
-    } else {
+    // DryRunComplete marking and incremental build job enqueuing are now done
+    // per-derivation inside the streaming loop above, so no post-loop batch is needed.
+    // The `create_build_jobs_for_commit` call in server/mod.rs remains as an idempotent
+    // backstop that handles any derivation missed by incremental enqueuing (e.g. due to
+    // a transient error), and is safe to run because of the NOT EXISTS guard.
+    if evaluated_derivations.is_empty() {
         warn!("⚠️  No derivations successfully evaluated (all had errors or missing paths)");
+    } else {
+        info!(
+            "✅ {} derivations marked DryRunComplete and incrementally queued for building",
+            evaluated_derivations.len()
+        );
     }
 
     info!("✅ Evaluated {} configurations in parallel", results.len());
@@ -691,6 +714,7 @@ pub async fn evaluate_with_mock_eval_jobs(
     _policies: &[DeploymentPolicy],
     configured_systems: &[String],
     cf_state: Option<&crate::handlers::agent_request::CFState>,
+    queue_notifier: Option<&QueueNotifier>,
 ) -> Result<(Vec<NixEvalJobResult>, Vec<PolicyCheckResult>)> {
     let systems = resolve_mock_systems(&flake.name, target_system, configured_systems)?;
     let stage_delay = mock_eval_stage_delay(systems.len());
@@ -784,6 +808,41 @@ pub async fn evaluate_with_mock_eval_jobs(
         .await?;
 
         mark_derivation_dry_run_complete(pool, derivation.id, &drv_path).await?;
+
+        // Incremental enqueue: queue build job immediately for passing mock systems.
+        if !policy_failed {
+            match enqueue_build_job_for_derivation(pool, derivation.id).await {
+                Ok(true) => {
+                    info!(
+                        "🚀 [mock] Incrementally queued build job for {} (derivation {})",
+                        system_name, derivation.id
+                    );
+                    if let Some(state) = cf_state {
+                        crate::handlers::api::commits::broadcast_eval_log(
+                            state,
+                            commit.id,
+                            format!("🚀 {}: build job queued incrementally (mock)", system_name),
+                        )
+                        .await;
+                    }
+                    if let Some(qn) = queue_notifier {
+                        qn.notify_build_queue();
+                    }
+                }
+                Ok(false) => {
+                    debug!(
+                        "[mock] Build job for derivation {} already existed; skipping",
+                        derivation.id
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        "⚠️  [mock] Failed to incrementally enqueue build job for {}: {}",
+                        system_name, e
+                    );
+                }
+            }
+        }
 
         let check = PolicyCheckResult {
             system_name: system_name.clone(),
