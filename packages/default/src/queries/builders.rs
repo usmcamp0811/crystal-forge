@@ -964,6 +964,291 @@ mod tests {
     use super::*;
     use crate::test_utils::db::test_pool;
     use base64::Engine;
+    use chrono::{Duration, Utc};
+    use sqlx::postgres::PgPoolOptions;
+
+    async fn queue_test_pool() -> PgPool {
+        PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@127.0.0.1/cf_test")
+            .expect("lazy queue test pool should construct")
+    }
+
+    async fn create_active_test_builder(pool: &PgPool, name: &str) -> Builder {
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+        let verifying_key = signing_key.verifying_key();
+        let public_key_base64 =
+            base64::engine::general_purpose::STANDARD.encode(verifying_key.to_bytes());
+
+        let request = CreateBuilderRequest {
+            name: name.to_string(),
+            public_key: Some(public_key_base64),
+            max_cpu_cores: None,
+            max_memory_mb: None,
+            max_concurrent_jobs: Some(4),
+            environment_ids: vec![],
+        };
+
+        let (builder, _private_key) = create_builder(pool, &request)
+            .await
+            .expect("Failed to create test builder");
+
+        sqlx::query("UPDATE builders SET status = 'active' WHERE id = $1")
+            .bind(builder.id)
+            .execute(pool)
+            .await
+            .expect("Failed to activate test builder");
+
+        get_builder_by_id(pool, &builder.id)
+            .await
+            .expect("Failed to fetch test builder")
+            .expect("Test builder not found")
+    }
+
+    async fn create_queued_job(
+        pool: &PgPool,
+        repo_url: &str,
+        flake_name: &str,
+        commit_hash: &str,
+        commit_timestamp: chrono::DateTime<chrono::Utc>,
+        derivation_name: &str,
+        priority_weight: f64,
+        created_at: chrono::DateTime<chrono::Utc>,
+    ) -> Uuid {
+        crate::queries::flakes::insert_flake(pool, flake_name, repo_url, "main", "all")
+            .await
+            .expect("Failed to insert flake");
+
+        crate::queries::commits::insert_commit_with_metadata(
+            pool,
+            commit_hash,
+            repo_url,
+            commit_timestamp,
+            Some("test commit"),
+            Some("test"),
+        )
+        .await
+        .expect("Failed to insert commit");
+
+        let commit = crate::queries::commits::get_commit_by_hash(pool, commit_hash)
+            .await
+            .expect("Failed to fetch commit");
+
+        let derivation = crate::queries::derivations::insert_derivation_with_target(
+            pool,
+            Some(&commit),
+            derivation_name,
+            "nixos",
+            Some("test-host"),
+            Some(true),
+        )
+        .await
+        .expect("Failed to insert derivation");
+
+        sqlx::query_scalar::<_, Uuid>(
+            r#"
+            INSERT INTO build_jobs (derivation_id, status, priority_weight, created_at)
+            VALUES ($1, 'queued', $2, $3)
+            RETURNING id
+            "#,
+        )
+        .bind(derivation.id)
+        .bind(priority_weight)
+        .bind(created_at)
+        .fetch_one(pool)
+        .await
+        .expect("Failed to insert queued build job")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_dashboard_queue_matches_next_claim_order_for_queued_items() {
+        let pool = queue_test_pool().await;
+        let now = Utc::now();
+
+        let _job_low_priority = create_queued_job(
+            &pool,
+            "https://example.com/order-a.git",
+            "order-a",
+            "a0000001",
+            now - Duration::minutes(10),
+            "order-a-system",
+            5.0,
+            now - Duration::minutes(5),
+        )
+        .await;
+
+        let expected_first = create_queued_job(
+            &pool,
+            "https://example.com/order-b.git",
+            "order-b",
+            "b0000001",
+            now,
+            "order-b-system",
+            10.0,
+            now - Duration::minutes(3),
+        )
+        .await;
+
+        let _same_priority_older_commit = create_queued_job(
+            &pool,
+            "https://example.com/order-c.git",
+            "order-c",
+            "c0000001",
+            now - Duration::minutes(30),
+            "order-c-system",
+            10.0,
+            now - Duration::minutes(1),
+        )
+        .await;
+
+        let queue = crate::queries::dashboard::fetch_build_queue(&pool, 50)
+            .await
+            .expect("Failed to fetch dashboard queue");
+        let first_in_queue = queue
+            .items
+            .iter()
+            .find_map(|item| item.job_id)
+            .expect("Expected queued jobs in dashboard queue");
+
+        assert_eq!(first_in_queue, expected_first);
+
+        let builder = create_active_test_builder(&pool, "order-match-builder").await;
+        let claimed = claim_next_job_atomic(&pool, &builder.id, builder.max_concurrent_jobs, &[])
+            .await
+            .expect("Failed to claim next job")
+            .expect("Expected a queued job to be claimed");
+
+        assert_eq!(claimed.id, first_in_queue);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_prioritize_updates_dashboard_order_and_claim_order() {
+        let pool = queue_test_pool().await;
+        let now = Utc::now();
+
+        let first = create_queued_job(
+            &pool,
+            "https://example.com/prio-a.git",
+            "prio-a",
+            "d0000001",
+            now,
+            "prio-a-system",
+            10.0,
+            now - Duration::minutes(5),
+        )
+        .await;
+
+        let second = create_queued_job(
+            &pool,
+            "https://example.com/prio-b.git",
+            "prio-b",
+            "e0000001",
+            now,
+            "prio-b-system",
+            10.0,
+            now - Duration::minutes(1),
+        )
+        .await;
+
+        let before = crate::queries::dashboard::fetch_build_queue(&pool, 50)
+            .await
+            .expect("Failed to fetch queue before prioritize");
+        let first_before = before
+            .items
+            .iter()
+            .find_map(|item| item.job_id)
+            .expect("Expected queued jobs before prioritize");
+        assert_eq!(first_before, first);
+
+        prioritize_build_job(&pool, &second)
+            .await
+            .expect("Failed to prioritize second job");
+
+        let after = crate::queries::dashboard::fetch_build_queue(&pool, 50)
+            .await
+            .expect("Failed to fetch queue after prioritize");
+        let first_after = after
+            .items
+            .iter()
+            .find_map(|item| item.job_id)
+            .expect("Expected queued jobs after prioritize");
+        assert_eq!(first_after, second);
+
+        let builder = create_active_test_builder(&pool, "prioritize-order-builder").await;
+        let claimed = claim_next_job_atomic(&pool, &builder.id, builder.max_concurrent_jobs, &[])
+            .await
+            .expect("Failed to claim after prioritize")
+            .expect("Expected a queued job after prioritize");
+        assert_eq!(claimed.id, second);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_concurrent_claims_take_top_two_without_duplicates() {
+        let pool = queue_test_pool().await;
+        let now = Utc::now();
+
+        let expected_first = create_queued_job(
+            &pool,
+            "https://example.com/conc-a.git",
+            "conc-a",
+            "f0000001",
+            now,
+            "conc-a-system",
+            30.0,
+            now - Duration::minutes(3),
+        )
+        .await;
+
+        let expected_second = create_queued_job(
+            &pool,
+            "https://example.com/conc-b.git",
+            "conc-b",
+            "f0000002",
+            now,
+            "conc-b-system",
+            20.0,
+            now - Duration::minutes(2),
+        )
+        .await;
+
+        let _remaining = create_queued_job(
+            &pool,
+            "https://example.com/conc-c.git",
+            "conc-c",
+            "f0000003",
+            now,
+            "conc-c-system",
+            10.0,
+            now - Duration::minutes(1),
+        )
+        .await;
+
+        let builder_a = create_active_test_builder(&pool, "concurrent-builder-a").await;
+        let builder_b = create_active_test_builder(&pool, "concurrent-builder-b").await;
+
+        let (claimed_a, claimed_b) = tokio::join!(
+            claim_next_job_atomic(&pool, &builder_a.id, builder_a.max_concurrent_jobs, &[]),
+            claim_next_job_atomic(&pool, &builder_b.id, builder_b.max_concurrent_jobs, &[])
+        );
+
+        let claimed_a = claimed_a
+            .expect("claim A failed")
+            .expect("claim A expected a job");
+        let claimed_b = claimed_b
+            .expect("claim B failed")
+            .expect("claim B expected a job");
+
+        assert_ne!(claimed_a.id, claimed_b.id, "Concurrent claims must not duplicate jobs");
+
+        let claimed_ids: std::collections::HashSet<Uuid> =
+            [claimed_a.id, claimed_b.id].into_iter().collect();
+        let expected_ids: std::collections::HashSet<Uuid> =
+            [expected_first, expected_second].into_iter().collect();
+
+        assert_eq!(claimed_ids, expected_ids);
+    }
 
     #[tokio::test]
     #[ignore = "requires running test database"]

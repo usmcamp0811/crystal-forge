@@ -220,17 +220,6 @@ pub fn event_level_class(level: &str) -> &'static str {
     }
 }
 
-pub fn queue_sort_rank(status: BuildStatus) -> i32 {
-    match status {
-        BuildStatus::Building | BuildStatus::Restarting => 0,
-        BuildStatus::Queued => 1,
-        BuildStatus::Stopping => 2,
-        BuildStatus::Failed => 3,
-        BuildStatus::Complete => 4,
-        BuildStatus::Canceled => 5,
-    }
-}
-
 pub fn short_commit(commit: &str) -> String {
     commit.chars().take(7).collect()
 }

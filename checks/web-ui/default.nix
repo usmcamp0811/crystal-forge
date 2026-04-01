@@ -234,6 +234,8 @@ in pkgs.testers.runNixOSTest {
       "02-registration",
       "05-login-submit",
       "06-dashboard",
+      "15-builds",
+      "11b-builds-queue-card-focus",
       "12c-systems-modal-config-field",
       "13e-flakes-add-modal-credentials",
       "13f-flakes-edit-modal-credentials",

@@ -6,8 +6,8 @@ use crate::components::layout::Card;
 use crate::theme;
 
 use super::helpers::{
-    build_status_badge_class, extract_system_name, queue_row_style, queue_sort_rank, short_commit,
-    BuildAction, BuildItem, BuildStatus,
+    build_status_badge_class, extract_system_name, queue_row_style, short_commit, BuildAction,
+    BuildItem, BuildStatus,
 };
 
 /// Build queue pane showing all queued and active builds.
@@ -19,7 +19,7 @@ pub fn BuildQueuePane(
 ) -> Element {
     let mut search = use_signal(String::new);
 
-    let mut filtered: Vec<BuildItem> = builds
+    let filtered: Vec<BuildItem> = builds
         .into_iter()
         .filter(|b| {
             let q = search.read().trim().to_lowercase();
@@ -32,8 +32,6 @@ pub fn BuildQueuePane(
             }
         })
         .collect();
-
-    filtered.sort_by_key(|b| queue_sort_rank(b.status));
 
     rsx! {
         Card {
