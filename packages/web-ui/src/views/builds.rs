@@ -111,8 +111,9 @@ pub fn BuildsView() -> Element {
     let mut queue_total = use_signal(|| 0_i64);
     let mut builds = use_signal(Vec::<BuildItem>::new);
 
-    // Filter state
-    let mut filter_status = use_signal(String::new);
+    // Filter state — Active Queue defaults to active jobs only (queued + building).
+    // Operators can widen to "All" or other statuses via the status dropdown.
+    let mut filter_status = use_signal(|| "queued,building".to_string());
     let mut filter_commit = use_signal(String::new);
     let mut filter_flake = use_signal(String::new);
     let mut filter_config = use_signal(String::new);
@@ -402,12 +403,12 @@ pub fn BuildsView() -> Element {
                                         filter_status.set(e.value());
                                         queue_page.set(1);
                                     },
-                                    option { value: "", "All" }
-                                    option { value: "queued", "Queued" }
-                                    option { value: "building", "Building" }
+                                    option { value: "queued,building", "Active (queued + building)" }
+                                    option { value: "queued", "Queued only" }
+                                    option { value: "building", "Building only" }
                                     option { value: "success", "Completed" }
                                     option { value: "failed", "Failed" }
-                                    option { value: "queued,building", "Active (queued + building)" }
+                                    option { value: "", "All statuses" }
                                 }
                             }
 
@@ -475,7 +476,8 @@ pub fn BuildsView() -> Element {
                             button {
                                 class: "px-3 py-1 rounded border border-slate-600 text-xs text-slate-300 hover:bg-slate-700 transition-colors",
                                 onclick: move |_| {
-                                    filter_status.set(String::new());
+                                    // Reset status back to active-only (the intended default for this tab).
+                                    filter_status.set("queued,building".to_string());
                                     filter_commit.set(String::new());
                                     filter_flake.set(String::new());
                                     filter_config.set(String::new());
