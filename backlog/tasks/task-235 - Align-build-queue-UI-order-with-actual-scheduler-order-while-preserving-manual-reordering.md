@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-04-01 02:30'
-updated_date: '2026-04-01 03:25'
+updated_date: '2026-04-01 03:40'
 labels:
   - build-queue
   - scheduler
@@ -100,4 +100,10 @@ Adjusted dashboard queue SQL ordering to match active builder claim path exactly
 Added backend integration tests (ignored, DB-backed) in `packages/default/src/queries/builders.rs` covering: dashboard/claim default order alignment, prioritize/manual reorder behavior, and concurrent claims no-duplicate top-two selection.
 
 Attempted to execute each new DB-backed test with `nix develop -c env SQLX_OFFLINE=true cargo test --package crystal-forge <test-name> -- --ignored`; all failed in this environment with DB auth error: `pg_hba.conf rejects connection for host "::1", user "postgres", database "cf_test", no encryption`.
+
+Updated `checks/web-ui` CI-fast profile to include Builds route captures so UI queue-order changes are evidenced by web-ui check screenshots (`15-builds`, `11b-builds-queue-card-focus`) and included as critical checks in ci_fast mode.
+
+Rebuilt web-ui check with screenshots present at `result/screenshots/15-builds.png` and `result/screenshots/11b-builds-queue-card-focus.png`.
+
+DB-backed ordering tests still blocked in this environment by local PostgreSQL pg_hba policy (`pg_hba.conf rejects connection ... no encryption`) for `postgres@cf_test`; tests are present and executable once local test DB auth is aligned.
 <!-- SECTION:NOTES:END -->
