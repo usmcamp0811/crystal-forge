@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-04-01 02:30'
-updated_date: '2026-04-01 02:33'
+updated_date: '2026-04-01 03:17'
 labels:
   - build-queue
   - scheduler
@@ -71,11 +71,11 @@ High (ordering bugs can starve jobs or mislead operators).
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 For queued jobs, UI order matches the actual next-claim order used by builders under the same state.
-- [ ] #2 Manual reorder action updates persisted order and subsequent builder claims honor that order unless preempted by documented higher-priority rules.
-- [ ] #3 Queue positions shown in UI are stable, deterministic, and derived from backend source-of-truth ordering keys.
+- [x] #1 For queued jobs, UI order matches the actual next-claim order used by builders under the same state.
+- [x] #2 Manual reorder action updates persisted order and subsequent builder claims honor that order unless preempted by documented higher-priority rules.
+- [x] #3 Queue positions shown in UI are stable, deterministic, and derived from backend source-of-truth ordering keys.
 - [ ] #4 Automated tests cover default ordering, manual reorder, and concurrent claim scenarios.
-- [ ] #5 Task notes document final ordering precedence (e.g., manual rank > priority > created_at) and operator-visible behavior.
+- [x] #5 Task notes document final ordering precedence (e.g., manual rank > priority > created_at) and operator-visible behavior.
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -84,4 +84,14 @@ High (ordering bugs can starve jobs or mislead operators).
 Moved Backlog -> To Do per explicit human request in chat.
 
 LOCK: opencode-gpt5 on reckless in /home/mcamp/code/crystal-forge/TASK-235-build-queue-order
+
+Implemented queue-order alignment so dashboard queue uses the same queued ordering keys as builder claim path: `priority_weight DESC, created_at ASC` (while still listing active `building` items first).
+
+Removed dashboard queue query per-flake queued cap/ranking from this path so UI queue reflects actual scheduler-visible order instead of a transformed subset.
+
+Removed client-side queue status re-sorting in `BuildQueuePane`; UI now preserves backend-provided ordering deterministically.
+
+Ordering precedence documented for operators: `building` items are shown first for visibility, queued item order is `priority_weight DESC` then `created_at ASC`; manual Run Next/prioritize increases effective priority via persisted `priority_weight` update and is therefore reflected in both claim order and UI order.
+
+Verification executed in task worktree: `nix develop -c env SQLX_OFFLINE=true cargo check --package crystal-forge` (from packages/default), `nix develop -c cargo check --package crystal-forge-ui` (from packages/web-ui), `nix build .#checks.x86_64-linux.server --no-link`, `nix build .#checks.x86_64-linux.web-ui --no-link`.
 <!-- SECTION:NOTES:END -->
