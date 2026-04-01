@@ -1,10 +1,9 @@
 ---
 id: TASK-234
 title: Investigate and fix live build log WebSocket streaming regression
-status: To Do
+status: Backlog
 assignee: []
 created_date: '2026-04-01 02:07'
-updated_date: '2026-04-02 00:05'
 labels:
   - bug
   - websocket
@@ -14,7 +13,6 @@ labels:
   - sprint-ready
 dependencies: []
 priority: high
-ordinal: 1000
 ---
 
 ## Description
@@ -77,9 +75,3 @@ High (observability during builds is operationally critical).
 - [ ] #4 Regression coverage exists for the root-cause failure mode found in this task.
 - [ ] #5 Task notes document root cause, fix summary, and operator verification steps (including expected network/log signals).
 <!-- AC:END -->
-
-## Implementation Notes
-
-<!-- SECTION:NOTES:BEGIN -->
-Moved Backlog -> To Do per explicit human request in chat.
-<!-- SECTION:NOTES:END -->
