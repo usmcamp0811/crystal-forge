@@ -1,9 +1,10 @@
 ---
 id: TASK-233
 title: Queue build jobs incrementally as each flake configuration finishes evaluation
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-04-01 01:34'
+updated_date: '2026-04-01 01:34'
 labels:
   - eval
   - build-queue
@@ -70,3 +71,9 @@ High (queueing semantics affect build ordering, duplicate prevention, and recove
 - [ ] #4 Incremental queueing behavior is covered by automated tests for success, failure, and idempotency scenarios.
 - [ ] #5 Task notes document whether post-eval bulk queueing remains as fallback and the exact ordering/idempotency guarantees.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Moved Backlog -> To Do per explicit human request in chat.
+<!-- SECTION:NOTES:END -->
