@@ -3,9 +3,10 @@ id: TASK-235
 title: >-
   Align build queue UI order with actual scheduler order while preserving manual
   reordering
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-04-01 02:30'
+updated_date: '2026-04-01 02:30'
 labels:
   - build-queue
   - scheduler
@@ -76,3 +77,9 @@ High (ordering bugs can starve jobs or mislead operators).
 - [ ] #4 Automated tests cover default ordering, manual reorder, and concurrent claim scenarios.
 - [ ] #5 Task notes document final ordering precedence (e.g., manual rank > priority > created_at) and operator-visible behavior.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Moved Backlog -> To Do per explicit human request in chat.
+<!-- SECTION:NOTES:END -->
