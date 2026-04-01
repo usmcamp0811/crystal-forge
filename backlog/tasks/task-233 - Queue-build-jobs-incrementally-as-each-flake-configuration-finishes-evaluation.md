@@ -1,10 +1,10 @@
 ---
 id: TASK-233
 title: Queue build jobs incrementally as each flake configuration finishes evaluation
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-04-01 01:34'
-updated_date: '2026-04-01 01:34'
+updated_date: '2026-04-01 02:12'
 labels:
   - eval
   - build-queue
@@ -76,4 +76,6 @@ High (queueing semantics affect build ordering, duplicate prevention, and recove
 
 <!-- SECTION:NOTES:BEGIN -->
 Moved Backlog -> To Do per explicit human request in chat.
+
+LOCK: claude-sonnet-4-6 on reckless in /home/mcamp/code/crystal-forge/TASK-233-incremental-build-queue
 <!-- SECTION:NOTES:END -->
