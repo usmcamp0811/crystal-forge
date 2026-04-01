@@ -349,51 +349,62 @@ pub async fn evaluate_with_nix_eval_jobs(
                                             debug!("✅ Inserted/updated {} (id={}, CF agent: {:?})",
                                                 system_name, deriv.id, cf_agent_enabled);
 
-                                            // CRITICAL: Track derivations that evaluated successfully
-                                            // Only mark as complete if:
-                                            // 1. No evaluation error
-                                            // 2. Has a valid .drv path
+                                            // Mark DryRunComplete and (if policy passed) enqueue.
+                                            // Conditions to mark DryRunComplete:
+                                            //   1. No evaluation error
+                                            //   2. Has a valid .drv path
+                                            // Additional condition to enqueue for build:
+                                            //   3. cf_agent_enabled == Some(true) (policy passed)
+                                            //      Policy-failed derivations are marked DryRunComplete
+                                            //      so their eval result is recorded, but must NOT be
+                                            //      queued for building.
                                             if !has_error && drv_path.is_some() {
                                                 let drv = drv_path.clone().unwrap();
                                                 evaluated_derivations.push((deriv.id, drv.clone()));
                                                 debug!("📋 Queued {} for DryRunComplete update", system_name);
 
-                                                // ── INCREMENTAL BUILD QUEUE ──────────────────────────
-                                                // Mark DryRunComplete and enqueue immediately so builders
-                                                // can start this config without waiting for the rest of
-                                                // the commit to finish evaluating.
                                                 match mark_derivation_dry_run_complete(pool, deriv.id, &drv).await {
                                                     Ok(_) => {
-                                                        match enqueue_build_job_for_derivation(pool, deriv.id).await {
-                                                            Ok(true) => {
-                                                                info!(
-                                                                    "🚀 Incrementally queued build job for {} (derivation {})",
-                                                                    system_name, deriv.id
-                                                                );
-                                                                if let Some(state) = cf_state {
-                                                                    crate::handlers::api::commits::broadcast_eval_log(
-                                                                        state,
-                                                                        commit.id,
-                                                                        format!("🚀 {}: build job queued incrementally", system_name),
-                                                                    ).await;
+                                                        // ── INCREMENTAL BUILD QUEUE ──────────────────────
+                                                        // Only enqueue if policy passed.
+                                                        if cf_agent_enabled == Some(true) {
+                                                            match enqueue_build_job_for_derivation(pool, deriv.id).await {
+                                                                Ok(true) => {
+                                                                    info!(
+                                                                        "🚀 Incrementally queued build job for {} (derivation {})",
+                                                                        system_name, deriv.id
+                                                                    );
+                                                                    if let Some(state) = cf_state {
+                                                                        crate::handlers::api::commits::broadcast_eval_log(
+                                                                            state,
+                                                                            commit.id,
+                                                                            format!("🚀 {}: build job queued incrementally", system_name),
+                                                                        ).await;
+                                                                    }
+                                                                    if let Some(qn) = queue_notifier {
+                                                                        qn.notify_build_queue();
+                                                                    }
                                                                 }
-                                                                if let Some(qn) = queue_notifier {
-                                                                    qn.notify_build_queue();
+                                                                Ok(false) => {
+                                                                    debug!(
+                                                                        "Build job for derivation {} already existed (idempotent); skipping",
+                                                                        deriv.id
+                                                                    );
+                                                                }
+                                                                Err(e) => {
+                                                                    warn!(
+                                                                        "⚠️  Failed to incrementally enqueue build job for {}: {}",
+                                                                        system_name, e
+                                                                    );
                                                                 }
                                                             }
-                                                            Ok(false) => {
-                                                                debug!(
-                                                                    "Build job for derivation {} already existed (idempotent); skipping",
-                                                                    deriv.id
-                                                                );
-                                                            }
-                                                            Err(e) => {
-                                                                warn!(
-                                                                    "⚠️  Failed to incrementally enqueue build job for {}: {}",
-                                                                    system_name, e
-                                                                );
-                                                            }
+                                                        } else {
+                                                            debug!(
+                                                                "Skipping build job for {} (policy failed; cf_agent_enabled={:?})",
+                                                                system_name, cf_agent_enabled
+                                                            );
                                                         }
+                                                        // ─────────────────────────────────────────────────
                                                     }
                                                     Err(e) => {
                                                         warn!(
@@ -402,7 +413,6 @@ pub async fn evaluate_with_nix_eval_jobs(
                                                         );
                                                     }
                                                 }
-                                                // ─────────────────────────────────────────────────────
                                             } else {
                                                 if has_error {
                                                     warn!("⚠️  {} has evaluation error, not marking complete", system_name);

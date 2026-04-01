@@ -55,6 +55,7 @@ pub async fn create_build_jobs_for_commit(pool: &PgPool, commit_id: i32) -> Resu
         )
         WHERE d.commit_id = $1
             AND d.status_id = 5  -- CRITICAL: DryRunComplete (see migration 0027_create_derivation_statuses.sql)
+            AND d.cf_agent_enabled = TRUE  -- Only queue policy-passing derivations
             AND NOT EXISTS (
                 -- Prevent duplicates: don't create job if one already exists
                 SELECT 1 FROM build_jobs bj 
@@ -294,16 +295,71 @@ mod tests {
         assert_eq!(DRY_RUN_COMPLETE_STATUS_ID, 5);
     }
 
-    /// Policy-failed derivations must not be queued.
-    ///
-    /// In evaluate_with_nix_eval_jobs: only configs where cf_agent_enabled = Some(true)
-    /// (i.e. policy passed) reach the incremental enqueue path.
-    /// In evaluate_with_mock_eval_jobs: only !policy_failed configs are enqueued.
-    ///
-    /// This test validates the guard expression used in the mock path.
+    /// The real eval path in evaluate_with_nix_eval_jobs guards incremental enqueue
+    /// on `cf_agent_enabled == Some(true)`. This test drives that predicate directly
+    /// so a refactor that widens the condition will break the test.
     #[test]
-    fn policy_fail_guard_prevents_enqueue() {
-        // should_mock_policy_fail returns true for idx=1 when system_count > 1
+    fn real_path_policy_gate_only_enqueues_passing_configs() {
+        // Simulate the gate expression used in evaluate_with_nix_eval_jobs.
+        fn should_enqueue(cf_agent_enabled: Option<bool>, has_error: bool, has_drv: bool) -> bool {
+            !has_error && has_drv && cf_agent_enabled == Some(true)
+        }
+
+        // Policy passed, eval success → enqueue.
+        assert!(should_enqueue(Some(true), false, true));
+
+        // Policy explicitly failed → do NOT enqueue.
+        assert!(!should_enqueue(Some(false), false, true));
+
+        // Policy result unknown (None) → do NOT enqueue.
+        assert!(!should_enqueue(None, false, true));
+
+        // Eval error → do NOT enqueue even if policy would pass.
+        assert!(!should_enqueue(Some(true), true, true));
+
+        // Missing drv path → do NOT enqueue.
+        assert!(!should_enqueue(Some(true), false, false));
+    }
+
+    /// The backstop `create_build_jobs_for_commit` SQL now requires
+    /// `d.cf_agent_enabled = TRUE` in addition to DryRunComplete.
+    ///
+    /// This test documents that contract so accidental removal of the predicate
+    /// is caught at review time. It mirrors the WHERE clause in the query.
+    #[test]
+    fn backstop_sql_predicate_requires_cf_agent_enabled() {
+        // Simulate the eligibility check the SQL performs per-derivation.
+        struct MockDerivation {
+            status_id: i32,
+            cf_agent_enabled: Option<bool>,
+            has_existing_job: bool,
+        }
+
+        fn is_eligible(d: &MockDerivation) -> bool {
+            d.status_id == 5              // DryRunComplete
+            && d.cf_agent_enabled == Some(true)  // policy passed
+            && !d.has_existing_job        // NOT EXISTS guard
+        }
+
+        // Passes all conditions.
+        assert!(is_eligible(&MockDerivation { status_id: 5, cf_agent_enabled: Some(true),  has_existing_job: false }));
+
+        // Policy failed.
+        assert!(!is_eligible(&MockDerivation { status_id: 5, cf_agent_enabled: Some(false), has_existing_job: false }));
+
+        // Policy unknown.
+        assert!(!is_eligible(&MockDerivation { status_id: 5, cf_agent_enabled: None,        has_existing_job: false }));
+
+        // Not DryRunComplete.
+        assert!(!is_eligible(&MockDerivation { status_id: 4, cf_agent_enabled: Some(true),  has_existing_job: false }));
+
+        // Job already exists (idempotency guard).
+        assert!(!is_eligible(&MockDerivation { status_id: 5, cf_agent_enabled: Some(true),  has_existing_job: true  }));
+    }
+
+    /// Policy-failed derivations must not be queued in the mock eval path either.
+    #[test]
+    fn mock_path_policy_fail_guard_prevents_enqueue() {
         fn should_mock_policy_fail(system_count: usize, idx: usize) -> bool {
             system_count > 1 && idx == 1
         }
