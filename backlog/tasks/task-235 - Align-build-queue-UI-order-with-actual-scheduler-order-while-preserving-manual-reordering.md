@@ -3,10 +3,10 @@ id: TASK-235
 title: >-
   Align build queue UI order with actual scheduler order while preserving manual
   reordering
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-04-01 02:30'
-updated_date: '2026-04-01 03:40'
+updated_date: '2026-04-01 03:42'
 labels:
   - build-queue
   - scheduler
@@ -106,4 +106,6 @@ Updated `checks/web-ui` CI-fast profile to include Builds route captures so UI q
 Rebuilt web-ui check with screenshots present at `result/screenshots/15-builds.png` and `result/screenshots/11b-builds-queue-card-focus.png`.
 
 DB-backed ordering tests still blocked in this environment by local PostgreSQL pg_hba policy (`pg_hba.conf rejects connection ... no encryption`) for `postgres@cf_test`; tests are present and executable once local test DB auth is aligned.
+
+Opened MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/204
 <!-- SECTION:NOTES:END -->
