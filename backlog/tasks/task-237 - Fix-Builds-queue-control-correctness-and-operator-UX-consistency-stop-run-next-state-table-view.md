@@ -3,9 +3,10 @@ id: TASK-237
 title: >-
   Fix Builds queue control correctness and operator UX consistency
   (stop/run-next/state/table view)
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-04-02 01:09'
+updated_date: '2026-04-02 01:10'
 labels:
   - builds
   - queue
@@ -130,6 +131,12 @@ High (operator controls and build-state correctness directly affect production o
 - [ ] #9 `web-ui` check captures Builds evidence for table mode and action states; MR includes those screenshots from check outputs.
 - [ ] #10 Task notes document stop lifecycle behavior, expected delays, and operator-facing UX decisions.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Moved Backlog -> To Do per explicit human sprint selection in chat.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
