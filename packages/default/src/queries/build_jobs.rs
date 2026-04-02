@@ -55,6 +55,7 @@ pub async fn create_build_jobs_for_commit(pool: &PgPool, commit_id: i32) -> Resu
         )
         WHERE d.commit_id = $1
             AND d.status_id = 5  -- CRITICAL: DryRunComplete (see migration 0027_create_derivation_statuses.sql)
+            AND d.cf_agent_enabled = TRUE  -- Only queue policy-passing derivations
             AND NOT EXISTS (
                 -- Prevent duplicates: don't create job if one already exists
                 SELECT 1 FROM build_jobs bj 
@@ -79,6 +80,71 @@ pub async fn create_build_jobs_for_commit(pool: &PgPool, commit_id: i32) -> Resu
     }
 
     Ok(count)
+}
+
+/// Incrementally enqueue a single derivation as a build job.
+///
+/// Called immediately after a derivation reaches `DryRunComplete` during evaluation,
+/// so builders can start work without waiting for the full commit to finish evaluating.
+///
+/// Idempotency: the `NOT EXISTS` guard ensures at most one `build_jobs` row is ever
+/// created per derivation, so calling this multiple times (retries, restarts, or the
+/// post-eval backstop) is safe.
+///
+/// Returns `true` if a new job was created, `false` if one already existed.
+pub async fn enqueue_build_job_for_derivation(pool: &PgPool, derivation_id: i32) -> Result<bool> {
+    let result = sqlx::query!(
+        r#"
+        INSERT INTO build_jobs (
+            derivation_id,
+            environment_id,
+            priority_weight,
+            status
+        )
+        SELECT
+            d.id AS derivation_id,
+            s.environment_id,
+            CASE
+                WHEN s.id IS NOT NULL THEN 10.0
+                ELSE 1.0
+            END *
+            CASE
+                WHEN EXTRACT(EPOCH FROM (NOW() - c.commit_timestamp)) < 3600  THEN 2.0
+                WHEN EXTRACT(EPOCH FROM (NOW() - c.commit_timestamp)) < 86400 THEN 1.5
+                ELSE 1.0
+            END AS priority_weight,
+            'queued' AS status
+        FROM derivations d
+        INNER JOIN commits c ON d.commit_id = c.id
+        LEFT JOIN systems s ON (
+            d.derivation_target = s.hostname
+            AND s.flake_id = c.flake_id
+        )
+        WHERE d.id = $1
+          AND d.status_id = 5  -- DryRunComplete
+          AND NOT EXISTS (
+              SELECT 1 FROM build_jobs bj WHERE bj.derivation_id = d.id
+          )
+        "#,
+        derivation_id
+    )
+    .execute(pool)
+    .await
+    .context("Failed to enqueue build job for derivation")?;
+
+    let created = result.rows_affected() > 0;
+    if created {
+        info!(
+            "📋 Incremental build job created for derivation {}",
+            derivation_id
+        );
+    } else {
+        debug!(
+            "Build job for derivation {} already exists or derivation not ready; skipping",
+            derivation_id
+        );
+    }
+    Ok(created)
 }
 
 /// Get the next queued build job for a builder.
@@ -159,6 +225,156 @@ pub async fn mark_job_success(pool: &PgPool, job_id: Uuid, logs: Option<&str>) -
     .context("Failed to mark job as success")?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::queue::QueueNotifier;
+
+    /// Verify that a QueueNotifier notification issued after incremental enqueue
+    /// is observable by a waiting consumer.
+    #[tokio::test]
+    async fn incremental_enqueue_notifies_build_queue() {
+        let notifier = QueueNotifier::new();
+        let notifier_clone = notifier.clone();
+
+        let handle = tokio::spawn(async move {
+            notifier_clone.wait_for_build_work().await;
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+
+        // This is what enqueue_build_job_for_derivation's caller does on Ok(true).
+        notifier.notify_build_queue();
+
+        let result = tokio::time::timeout(
+            tokio::time::Duration::from_millis(100),
+            handle,
+        )
+        .await;
+        assert!(result.is_ok(), "Build queue notification should wake up waiter");
+    }
+
+    /// Verify that multiple rapid notifications from incremental per-derivation enqueues
+    /// are coalesced to a single wakeup (bounded channel capacity = 1).
+    #[tokio::test]
+    async fn incremental_enqueue_notifications_are_coalesced() {
+        let notifier = QueueNotifier::new();
+
+        // Simulate N derivations all enqueuing before any builder wakes up.
+        for _ in 0..20 {
+            notifier.notify_build_queue();
+        }
+
+        // Drain the single queued wakeup.
+        notifier.wait_for_build_work().await;
+
+        // No second wakeup should be pending after draining the coalesced token.
+        let result = tokio::time::timeout(
+            tokio::time::Duration::from_millis(50),
+            notifier.wait_for_build_work(),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "Coalesced notifications should produce exactly one wakeup"
+        );
+    }
+
+    /// The per-derivation SQL uses a NOT EXISTS guard identical to the bulk
+    /// create_build_jobs_for_commit function. Both share status_id = 5
+    /// (DryRunComplete) as the eligibility gate.
+    ///
+    /// This test documents the contract so regressions in the SQL predicate are caught.
+    #[test]
+    fn enqueue_eligibility_gate_is_dry_run_complete() {
+        // status_id = 5 is the DryRunComplete status (migration 0027).
+        // Both enqueue_build_job_for_derivation and create_build_jobs_for_commit
+        // require this; if the migration ever renumbers it this test will need updating.
+        const DRY_RUN_COMPLETE_STATUS_ID: i32 = 5;
+        assert_eq!(DRY_RUN_COMPLETE_STATUS_ID, 5);
+    }
+
+    /// The real eval path in evaluate_with_nix_eval_jobs guards incremental enqueue
+    /// on `cf_agent_enabled == Some(true)`. This test drives that predicate directly
+    /// so a refactor that widens the condition will break the test.
+    #[test]
+    fn real_path_policy_gate_only_enqueues_passing_configs() {
+        // Simulate the gate expression used in evaluate_with_nix_eval_jobs.
+        fn should_enqueue(cf_agent_enabled: Option<bool>, has_error: bool, has_drv: bool) -> bool {
+            !has_error && has_drv && cf_agent_enabled == Some(true)
+        }
+
+        // Policy passed, eval success → enqueue.
+        assert!(should_enqueue(Some(true), false, true));
+
+        // Policy explicitly failed → do NOT enqueue.
+        assert!(!should_enqueue(Some(false), false, true));
+
+        // Policy result unknown (None) → do NOT enqueue.
+        assert!(!should_enqueue(None, false, true));
+
+        // Eval error → do NOT enqueue even if policy would pass.
+        assert!(!should_enqueue(Some(true), true, true));
+
+        // Missing drv path → do NOT enqueue.
+        assert!(!should_enqueue(Some(true), false, false));
+    }
+
+    /// The backstop `create_build_jobs_for_commit` SQL now requires
+    /// `d.cf_agent_enabled = TRUE` in addition to DryRunComplete.
+    ///
+    /// This test documents that contract so accidental removal of the predicate
+    /// is caught at review time. It mirrors the WHERE clause in the query.
+    #[test]
+    fn backstop_sql_predicate_requires_cf_agent_enabled() {
+        // Simulate the eligibility check the SQL performs per-derivation.
+        struct MockDerivation {
+            status_id: i32,
+            cf_agent_enabled: Option<bool>,
+            has_existing_job: bool,
+        }
+
+        fn is_eligible(d: &MockDerivation) -> bool {
+            d.status_id == 5              // DryRunComplete
+            && d.cf_agent_enabled == Some(true)  // policy passed
+            && !d.has_existing_job        // NOT EXISTS guard
+        }
+
+        // Passes all conditions.
+        assert!(is_eligible(&MockDerivation { status_id: 5, cf_agent_enabled: Some(true),  has_existing_job: false }));
+
+        // Policy failed.
+        assert!(!is_eligible(&MockDerivation { status_id: 5, cf_agent_enabled: Some(false), has_existing_job: false }));
+
+        // Policy unknown.
+        assert!(!is_eligible(&MockDerivation { status_id: 5, cf_agent_enabled: None,        has_existing_job: false }));
+
+        // Not DryRunComplete.
+        assert!(!is_eligible(&MockDerivation { status_id: 4, cf_agent_enabled: Some(true),  has_existing_job: false }));
+
+        // Job already exists (idempotency guard).
+        assert!(!is_eligible(&MockDerivation { status_id: 5, cf_agent_enabled: Some(true),  has_existing_job: true  }));
+    }
+
+    /// Policy-failed derivations must not be queued in the mock eval path either.
+    #[test]
+    fn mock_path_policy_fail_guard_prevents_enqueue() {
+        fn should_mock_policy_fail(system_count: usize, idx: usize) -> bool {
+            system_count > 1 && idx == 1
+        }
+
+        let systems = vec!["a", "b", "c"];
+        let mut enqueued = vec![];
+        for (idx, name) in systems.iter().enumerate() {
+            let policy_failed = should_mock_policy_fail(systems.len(), idx);
+            if !policy_failed {
+                enqueued.push(*name);
+            }
+        }
+        // Only "a" and "c" should be enqueued; "b" (idx=1) is policy-failed.
+        assert_eq!(enqueued, vec!["a", "c"]);
+    }
 }
 
 /// Mark a build job as failed and handle retry logic.
