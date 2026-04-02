@@ -101,6 +101,16 @@ function mockBuildsDashboardSummary() {
   };
 }
 
+function mockBuildQueuePage() {
+  const summary = mockBuildsDashboardSummary();
+  return {
+    total: summary.build_queue.items.length,
+    page: 1,
+    limit: 50,
+    items: summary.build_queue.items,
+  };
+}
+
 function mockBuilders() {
   const timestamp = nowIso();
   return [
@@ -156,11 +166,21 @@ async function routeBuildsData(page) {
     });
   });
 
-  await page.route("**/api/v1/build-jobs/recent*", async (route) => {
+  await page.route("**/api/v1/build-jobs*", async (route) => {
+    const url = route.request().url();
+    if (url.includes("/api/v1/build-jobs/recent")) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(mockRecentBuilds()),
+      });
+      return;
+    }
+
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify(mockRecentBuilds()),
+      body: JSON.stringify(mockBuildQueuePage()),
     });
   });
 }
@@ -168,7 +188,7 @@ async function routeBuildsData(page) {
 async function unrouteBuildsData(page) {
   await page.unroute("**/api/v1/dashboard/summary*");
   await page.unroute("**/api/v1/builders*");
-  await page.unroute("**/api/v1/build-jobs/recent*");
+  await page.unroute("**/api/v1/build-jobs*");
 }
 
 function mockSetupCoachProgress() {
