@@ -3,10 +3,10 @@ id: TASK-237
 title: >-
   Fix Builds queue control correctness and operator UX consistency
   (stop/run-next/state/table view)
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-04-02 01:09'
-updated_date: '2026-04-02 01:29'
+updated_date: '2026-04-02 01:37'
 labels:
   - builds
   - queue
@@ -168,6 +168,12 @@ LOCK: claude-opus-4-5 on reckless in /home/mcamp/code/crystal-forge/TASK-237-bui
 | Cancelled | - | Yes | - |
 | Complete | - | Yes | - |
 | Failed | - | Yes | - |
+
+## MR Created
+
+MR !205: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/205
+
+Awaiting CI verification and screenshots from web-ui check.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
