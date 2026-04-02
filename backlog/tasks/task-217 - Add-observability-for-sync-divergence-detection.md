@@ -1,10 +1,10 @@
 ---
 id: TASK-217
 title: Add observability for sync divergence detection
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-03-26 17:00'
-updated_date: '2026-03-26 17:00'
+updated_date: '2026-04-02 00:04'
 labels:
   - hotfix
   - logging
@@ -15,6 +15,7 @@ priority: high
 
 ## Description
 
+<!-- SECTION:DESCRIPTION:BEGIN -->
 ## Problem
 
 Production troubleshooting needs deterministic visibility into why per-flake sync returns `0 updated` instead of surfacing a rewrite conflict.
@@ -26,6 +27,7 @@ Add explicit structured logs in the incremental sync path that print:
 - remote branch head hash
 - divergence decision
 - final action (return zero updates vs emit history rewrite conflict)
+<!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 
@@ -40,3 +42,9 @@ Add explicit structured logs in the incremental sync path that print:
 ## Lock
 
 LOCK: opencode-gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-217-sync-divergence-logging
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Backlog maintenance sync: task branch head `b8afb163` is contained in `dev` (merged). Transitioning task to Review for completion finalization.
+<!-- SECTION:NOTES:END -->
