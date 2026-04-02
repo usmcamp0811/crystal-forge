@@ -6,7 +6,7 @@ title: >-
 status: Review
 assignee: []
 created_date: '2026-04-01 02:30'
-updated_date: '2026-04-01 03:42'
+updated_date: '2026-04-02 00:15'
 labels:
   - build-queue
   - scheduler
@@ -108,4 +108,6 @@ Rebuilt web-ui check with screenshots present at `result/screenshots/15-builds.p
 DB-backed ordering tests still blocked in this environment by local PostgreSQL pg_hba policy (`pg_hba.conf rejects connection ... no encryption`) for `postgres@cf_test`; tests are present and executable once local test DB auth is aligned.
 
 Opened MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/204
+
+Closed during backlog cleanup per maintainer direction (MR merged/closed). Task archived from active review queue.
 <!-- SECTION:NOTES:END -->
