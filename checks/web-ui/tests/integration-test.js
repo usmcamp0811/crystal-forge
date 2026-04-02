@@ -2282,6 +2282,11 @@ const CI_FAST_STEP_NAMES = new Set([
   "13d-flakes-stress-dataset",
   "13e-flakes-add-modal-credentials",
   "13f-flakes-edit-modal-credentials",
+  // TASK-237: builds queue controls evidence
+  "15d-builds-queue-table-view",
+  "15e-builds-cancelling-state",
+  "15f-builds-human-duration",
+  "15g-builds-action-visibility",
 ]);
 
 (async () => {
