@@ -132,7 +132,6 @@ High (operator controls and build-state correctness directly affect production o
 - [ ] #10 Task notes document stop lifecycle behavior, expected delays, and operator-facing UX decisions.
 <!-- AC:END -->
 
-<<<<<<< HEAD
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
