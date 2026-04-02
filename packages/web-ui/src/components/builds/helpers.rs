@@ -3,9 +3,9 @@
 use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
 use std::rc::Rc;
-use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
-use web_sys::{Node, window};
+use wasm_bindgen::JsCast;
+use web_sys::{window, Node};
 
 /// Extract the system name from a full flake attribute path or hostname.
 ///
@@ -51,10 +51,9 @@ pub enum BuildStatus {
     Queued,
     Building,
     Stopping,
-    Restarting,
     Failed,
     Complete,
-    Canceled,
+    Cancelled,
 }
 
 impl BuildStatus {
@@ -63,10 +62,9 @@ impl BuildStatus {
             BuildStatus::Queued => "queued",
             BuildStatus::Building => "building",
             BuildStatus::Stopping => "stopping",
-            BuildStatus::Restarting => "restarting",
             BuildStatus::Failed => "failed",
             BuildStatus::Complete => "complete",
-            BuildStatus::Canceled => "canceled",
+            BuildStatus::Cancelled => "cancelled",
         }
     }
 }
@@ -206,10 +204,9 @@ pub fn build_status_badge_class(status: BuildStatus) -> &'static str {
         BuildStatus::Queued => "cf-build-status-queued",
         BuildStatus::Building => "cf-build-status-building",
         BuildStatus::Stopping => "cf-build-status-stopping",
-        BuildStatus::Restarting => "cf-build-status-restarting",
         BuildStatus::Failed => "cf-build-status-failed",
         BuildStatus::Complete => "cf-build-status-complete",
-        BuildStatus::Canceled => "cf-build-status-canceled",
+        BuildStatus::Cancelled => "cf-build-status-canceled",
     }
 }
 
@@ -229,12 +226,11 @@ pub fn short_commit(commit: &str) -> String {
 pub fn queue_row_style(selected: bool, status: BuildStatus) -> String {
     let row_status = match status {
         BuildStatus::Building => "cf-queue-row-building",
-        BuildStatus::Restarting => "cf-queue-row-restarting",
         BuildStatus::Queued => "cf-queue-row-queued",
         BuildStatus::Stopping => "cf-queue-row-stopping",
         BuildStatus::Failed => "cf-queue-row-failed",
         BuildStatus::Complete => "cf-queue-row-complete",
-        BuildStatus::Canceled => "cf-queue-row-canceled",
+        BuildStatus::Cancelled => "cf-queue-row-canceled",
     };
     let selected_class = if selected {
         "cf-queue-row-selected"
@@ -286,18 +282,15 @@ pub fn apply_action(
                         target.status = BuildStatus::Stopping;
                     }
                     if let Some(target) = next_builds.iter_mut().find(|b| b.id == build_id) {
-                        target.status = BuildStatus::Canceled;
+                        target.status = BuildStatus::Cancelled;
                     }
                     note.set(Some(format!("Stopped build #{build_id}")));
                 }
                 BuildAction::Restart => {
                     if let Some(target) = next_builds.iter_mut().find(|b| b.id == build_id) {
-                        target.status = BuildStatus::Restarting;
+                        target.status = BuildStatus::Building;
                         target.runtime = Some("00:00".to_string());
                         target.queued_for = "restarting".to_string();
-                    }
-                    if let Some(target) = next_builds.iter_mut().find(|b| b.id == build_id) {
-                        target.status = BuildStatus::Building;
                     }
                     note.set(Some(format!("Restarted build #{build_id}")));
                 }

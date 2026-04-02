@@ -218,7 +218,7 @@ fn BuildQueueCards(
                         }
                         div {
                             class: "inline-flex items-center gap-2 flex-wrap",
-                            if matches!(build.status, BuildStatus::Building | BuildStatus::Restarting) {
+                            if matches!(build.status, BuildStatus::Building) {
                                 button {
                                     class: "text-xs text-red-400 hover:text-red-300 px-3 py-1.5 rounded hover:bg-red-500/10 transition-colors min-h-[44px]",
                                     onclick: move |evt| {
@@ -229,7 +229,7 @@ fn BuildQueueCards(
                                 }
                             }
                             // Restart only valid for terminal statuses
-                            if matches!(build.status, BuildStatus::Failed | BuildStatus::Complete | BuildStatus::Canceled) {
+                            if matches!(build.status, BuildStatus::Failed | BuildStatus::Complete | BuildStatus::Cancelled) {
                                 button {
                                     class: "text-xs px-3 py-1.5 rounded transition-colors cf-action-link min-h-[44px]",
                                     onclick: move |evt| {
@@ -347,7 +347,7 @@ fn BuildQueueTable(
                                         class: "px-2 py-2 text-right",
                                         div {
                                             class: "inline-flex items-center gap-1",
-                                            if matches!(build.status, BuildStatus::Building | BuildStatus::Restarting) {
+                                            if matches!(build.status, BuildStatus::Building) {
                                                 button {
                                                     class: "text-[10px] text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors",
                                                     onclick: move |evt| {
@@ -358,7 +358,7 @@ fn BuildQueueTable(
                                                 }
                                             }
                                             // Restart only valid for terminal statuses
-                                            if matches!(build.status, BuildStatus::Failed | BuildStatus::Complete | BuildStatus::Canceled) {
+                                            if matches!(build.status, BuildStatus::Failed | BuildStatus::Complete | BuildStatus::Cancelled) {
                                                 button {
                                                     class: "text-[10px] px-2 py-1 rounded transition-colors cf-action-link",
                                                     onclick: move |evt| {

@@ -10,7 +10,7 @@ use super::helpers::WorkerItem;
 pub fn MetricsRow(workers: Vec<WorkerItem>, builds: Vec<super::helpers::BuildItem>) -> Element {
     let building = builds
         .iter()
-        .filter(|b| matches!(b.status, BuildStatus::Building | BuildStatus::Restarting))
+        .filter(|b| matches!(b.status, BuildStatus::Building | BuildStatus::Stopping))
         .count();
     let queued = builds
         .iter()

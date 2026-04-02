@@ -109,7 +109,7 @@ fn map_queue_item(item: &crate::api::models::BuildQueueItem, idx: usize) -> Buil
             ApiBuildStatus::Cancelling => BuildStatus::Stopping,
             ApiBuildStatus::Failed => BuildStatus::Failed,
             ApiBuildStatus::Complete => BuildStatus::Complete,
-            ApiBuildStatus::Cancelled => BuildStatus::Canceled,
+            ApiBuildStatus::Cancelled => BuildStatus::Cancelled,
             ApiBuildStatus::Idle => BuildStatus::Queued,
         },
         summary: item.commit_message.clone().unwrap_or_else(|| {
@@ -265,7 +265,7 @@ pub fn BuildsView() -> Element {
                             ApiBuildStatus::Complete => BuildStatus::Complete,
                             ApiBuildStatus::Building => BuildStatus::Building,
                             ApiBuildStatus::Cancelling => BuildStatus::Stopping,
-                            ApiBuildStatus::Cancelled => BuildStatus::Canceled,
+                            ApiBuildStatus::Cancelled => BuildStatus::Cancelled,
                             ApiBuildStatus::Queued => BuildStatus::Queued,
                             ApiBuildStatus::Idle => BuildStatus::Queued,
                         },
