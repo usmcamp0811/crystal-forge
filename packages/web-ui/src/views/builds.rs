@@ -72,11 +72,16 @@ fn format_environment(item: &BuildItem) -> String {
 
 /// Map a raw `BuildQueueItem` from API into the UI `BuildItem`.
 fn map_queue_item(item: &crate::api::models::BuildQueueItem, idx: usize) -> BuildItem {
-    let queued_for = if item.status == ApiBuildStatus::Building {
-        format!("running {}s", item.elapsed_secs.unwrap_or(0))
+    let queued_for = if item.status == ApiBuildStatus::Building
+        || item.status == ApiBuildStatus::Cancelling
+    {
+        format!(
+            "running {}",
+            format_human_duration(item.elapsed_secs.unwrap_or(0))
+        )
     } else {
         let ago = (Utc::now() - item.queued_at).num_seconds().max(0);
-        format!("queued {}s ago", ago)
+        format!("queued {} ago", format_human_duration(ago))
     };
 
     BuildItem {
@@ -93,7 +98,7 @@ fn map_queue_item(item: &crate::api::models::BuildQueueItem, idx: usize) -> Buil
             .clone()
             .unwrap_or_else(|| "unassigned".to_string()),
         queued_for,
-        runtime: item.elapsed_secs.map(|secs| format!("{}s", secs)),
+        runtime: item.elapsed_secs.map(format_human_duration),
         duration_secs: item.elapsed_secs,
         completed_at: None,
         started_by: "scheduler".to_string(),
@@ -101,8 +106,10 @@ fn map_queue_item(item: &crate::api::models::BuildQueueItem, idx: usize) -> Buil
         status: match item.status {
             ApiBuildStatus::Queued => BuildStatus::Queued,
             ApiBuildStatus::Building => BuildStatus::Building,
+            ApiBuildStatus::Cancelling => BuildStatus::Stopping,
             ApiBuildStatus::Failed => BuildStatus::Failed,
             ApiBuildStatus::Complete => BuildStatus::Complete,
+            ApiBuildStatus::Cancelled => BuildStatus::Canceled,
             ApiBuildStatus::Idle => BuildStatus::Queued,
         },
         summary: item.commit_message.clone().unwrap_or_else(|| {
