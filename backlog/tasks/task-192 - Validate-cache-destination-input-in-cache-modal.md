@@ -4,7 +4,7 @@ title: Validate cache destination input in cache modal
 status: Review
 assignee: []
 created_date: '2026-03-14 16:49'
-updated_date: '2026-04-02 00:05'
+updated_date: '2026-04-02 00:15'
 labels:
   - frontend
   - validation
@@ -82,4 +82,6 @@ Opened MR `!169`: https://gitlab.com/crystal-forge/crystal-forge/-/merge_request
 Verification executed for review: `cargo check --target wasm32-unknown-unknown` passed; `cargo test --manifest-path packages/web-ui/Cargo.toml caches::tests -- --nocapture` passed (5 tests); `nix develop -c rustfmt --edition 2021 packages/web-ui/src/views/caches.rs` passed. Repo-wide `cargo fmt -- --check` for the web-ui crate still reports unrelated pre-existing formatting drift outside this task’s file; manual in-browser verification has not yet been run in this session.
 
 Backlog maintenance sync: task branch head `67c13137` is contained in `dev` (merged), but task worktree `~/code/crystal-forge/TASK-192-validate-cache-destination-input` is currently dirty (`packages/web-ui/Cargo.lock` modified). Kept task in Review until worktree cleanup is completed.
+
+Closed during backlog cleanup per maintainer direction (MR resolved/obsolete for current planning cycle). Task archived from active review queue.
 <!-- SECTION:NOTES:END -->
