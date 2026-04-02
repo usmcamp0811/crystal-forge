@@ -106,7 +106,7 @@ function mockBuildQueuePage() {
   return {
     total: summary.build_queue.items.length,
     page: 1,
-    per_page: 50,
+    limit: 50,
     items: summary.build_queue.items,
   };
 }
@@ -273,7 +273,7 @@ async function routeBuildsDataWithCancelStates(page) {
   const queuePage = {
     total: summary.build_queue.items.length,
     page: 1,
-    per_page: 50,
+    limit: 50,
     items: summary.build_queue.items,
   };
 
