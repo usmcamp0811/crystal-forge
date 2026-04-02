@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-04-02 01:09'
-updated_date: '2026-04-02 12:43'
+updated_date: '2026-04-02 12:47'
 labels:
   - builds
   - queue
@@ -207,6 +207,21 @@ The web client code comments and documentation say cancel is available to admin/
 4. Role enforcement is consistent: either admin-only everywhere or operator+ everywhere
 5. CI passes with a green pipeline
 6. End-to-end test with a real in-flight build being stopped
+
+## Gap Analysis Summary (2026-04-02)
+
+Codebase exploration after review confirmed three concrete gaps:
+
+### Gap 1 — Builder cancel detection (TASK-238)
+The `finalize_cancelled_job()` query exists but is called from nowhere. The builder job execution loop in `packages/default/src/bin/builder.rs` has no cancel-check polling. The only termination mechanism is the 2-hour timeout SIGKILL via tokio Child drop. Tracked as TASK-238.
+
+### Gap 2 — Log append gate (TASK-239)
+`append_job_logs()` handler and `append_job_logs_with_limits()` SQL both gate on `status IN ('queued', 'building')`. A cancelling job would receive 409 CONFLICT on every log attempt. Fix is a targeted gate expansion. Tracked as TASK-239.
+
+### Gap 3 — Role contract (TASK-240)
+Cancel handler uses `require_admin`. Run Next / prioritize also uses `require_admin`. UI button renders for all authenticated users. Decision (admin-only+hide-UI vs operator+) needs human input before the fix can be implemented. Tracked as TASK-240.
+
+All three tasks are in Backlog pending sprint grooming.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
