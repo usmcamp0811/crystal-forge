@@ -4,7 +4,7 @@ title: Investigate and fix live build log WebSocket streaming regression
 status: To Do
 assignee: []
 created_date: '2026-04-01 02:07'
-updated_date: '2026-04-01 02:07'
+updated_date: '2026-04-02 00:05'
 labels:
   - bug
   - websocket
@@ -14,6 +14,7 @@ labels:
   - sprint-ready
 dependencies: []
 priority: high
+ordinal: 1000
 ---
 
 ## Description
