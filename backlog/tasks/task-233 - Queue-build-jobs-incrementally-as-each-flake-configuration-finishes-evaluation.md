@@ -4,7 +4,7 @@ title: Queue build jobs incrementally as each flake configuration finishes evalu
 status: Review
 assignee: []
 created_date: '2026-04-01 01:34'
-updated_date: '2026-04-01 02:58'
+updated_date: '2026-04-02 00:15'
 labels:
   - eval
   - build-queue
@@ -86,4 +86,6 @@ Commit: 5f373cd8
 server nix check passes. 4 unit tests pass. sqlx offline cache updated.
 
 Post-eval create_build_jobs_for_commit retained as idempotent backstop. NOT EXISTS guard prevents duplicates in both paths.
+
+Closed during backlog cleanup per maintainer direction (MR merged/closed). Task archived from active review queue.
 <!-- SECTION:NOTES:END -->
