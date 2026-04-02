@@ -5,15 +5,14 @@ status: Review
 assignee:
   - Claude
 created_date: '2026-03-20'
-updated_date: '2026-04-02 00:15'
+updated_date: '2026-04-02 00:16'
 labels:
   - auth
   - rbac
   - bug
   - critical
   - frontend
-dependencies:
-  - TASK-200
+dependencies: []
 references:
   - packages/web-ui/src/state/auth.rs
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/177'
