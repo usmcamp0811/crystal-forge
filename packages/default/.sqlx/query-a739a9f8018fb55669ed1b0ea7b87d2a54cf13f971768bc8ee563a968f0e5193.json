@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO build_jobs (\n            derivation_id,\n            environment_id,\n            priority_weight,\n            status\n        )\n        SELECT\n            d.id AS derivation_id,\n            s.environment_id,\n            CASE\n                WHEN s.id IS NOT NULL THEN 10.0\n                ELSE 1.0\n            END *\n            CASE\n                WHEN EXTRACT(EPOCH FROM (NOW() - c.commit_timestamp)) < 3600  THEN 2.0\n                WHEN EXTRACT(EPOCH FROM (NOW() - c.commit_timestamp)) < 86400 THEN 1.5\n                ELSE 1.0\n            END AS priority_weight,\n            'queued' AS status\n        FROM derivations d\n        INNER JOIN commits c ON d.commit_id = c.id\n        LEFT JOIN systems s ON (\n            d.derivation_target = s.hostname\n            AND s.flake_id = c.flake_id\n        )\n        WHERE d.id = $1\n          AND d.status_id = 5  -- DryRunComplete\n          AND NOT EXISTS (\n              SELECT 1 FROM build_jobs bj WHERE bj.derivation_id = d.id\n          )\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a739a9f8018fb55669ed1b0ea7b87d2a54cf13f971768bc8ee563a968f0e5193"
+}
