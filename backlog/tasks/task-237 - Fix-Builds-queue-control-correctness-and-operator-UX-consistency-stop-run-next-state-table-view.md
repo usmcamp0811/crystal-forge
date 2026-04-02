@@ -3,10 +3,10 @@ id: TASK-237
 title: >-
   Fix Builds queue control correctness and operator UX consistency
   (stop/run-next/state/table view)
-status: Review
+status: In Progress
 assignee: []
 created_date: '2026-04-02 01:09'
-updated_date: '2026-04-02 01:37'
+updated_date: '2026-04-02 12:43'
 labels:
   - builds
   - queue
@@ -174,6 +174,39 @@ LOCK: claude-opus-4-5 on reckless in /home/mcamp/code/crystal-forge/TASK-237-bui
 MR !205: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/205
 
 Awaiting CI verification and screenshots from web-ui check.
+
+## Review Feedback (2026-04-02) — Not Merge-Ready
+
+Reviewer held MR !205. Three blockers identified:
+
+### Blocker 1: Builder-side cancel handling missing
+The MR adds `Cancelling` state and the admin cancel endpoint, but the **builder API surface has no corresponding handling**. The builder work-queue path does not:
+- Poll for `cancelling` jobs and act on them
+- Finalize `cancelling → cancelled` after builder-side cleanup
+- Call `finalize_cancelled_job` from any builder code path
+
+The DB query exists (`finalize_cancelled_job`) but nothing in the builder runtime calls it. The `building → cancelling → cancelled` flow is only half-wired.
+
+### Blocker 2: Log append rejects cancelling jobs
+The builder log-append path (`append_build_job_logs` / relevant handler) only allows `queued` and `building` statuses. A job moved to `cancelling` can no longer append shutdown/cleanup logs, breaking observability during the most relevant part of the stop sequence.
+
+### Blocker 3: Role mismatch — cancel access
+The web client code comments and documentation say cancel is available to admin/operator, but the server handler enforces admin-only. If operators are supposed to control the queue, this will fail at runtime.
+
+### What looks good
+- Queue-depth fix (eligible jobs by environment) is correct
+- Table/card toggle is a useful operator improvement
+- Human-readable duration formatting is correct
+- Restricting restart visibility to terminal states is the right UX shape
+- Cancelled/Stopping status spelling normalized
+
+### Required before merge
+1. Builder runtime detects `cancelling` jobs and sends the stop signal to the running nix build process
+2. Builder calls `finalize_cancelled_job` after cleanup to complete the lifecycle
+3. Log-append path allows appends while status is `cancelling`
+4. Role enforcement is consistent: either admin-only everywhere or operator+ everywhere
+5. CI passes with a green pipeline
+6. End-to-end test with a real in-flight build being stopped
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
