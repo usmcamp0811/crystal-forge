@@ -4,9 +4,9 @@ use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
 use std::rc::Rc;
 use uuid::Uuid;
-use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::JsCast;
-use web_sys::{window, Node};
+use wasm_bindgen::prelude::Closure;
+use web_sys::{Node, window};
 
 use crate::api::client::set_setup_wizard_agent_acknowledged;
 use crate::api::models::{
@@ -15,10 +15,10 @@ use crate::api::models::{
 use crate::components::filters::{
     DeploymentFilterDropdown, EnvironmentFilterDropdown, HealthFilterDropdown, ViewMode, ViewToggle,
 };
-use crate::components::forms::{validate_new_system, AddSystemForm, NewSystemDraft};
+use crate::components::forms::{AddSystemForm, NewSystemDraft, validate_new_system};
 use crate::components::layout::Card;
 use crate::components::modals::{
-    generate_key_pair, GeneratedKeyPair, KeyPairModal, RemoveSystemDialog, UpdatePublicKeyModal,
+    GeneratedKeyPair, KeyPairModal, RemoveSystemDialog, UpdatePublicKeyModal, generate_key_pair,
 };
 use crate::components::notifications::{AlertBanner, AlertSeverity};
 use crate::components::system::SystemCard;
@@ -29,7 +29,7 @@ use crate::state::app_state::AppState;
 use crate::state::auth;
 use crate::systems::adapter::{
     create_system_via_api, deactivate_system_via_api, fallback_flake_names, fallback_systems,
-    load_flake_names_with_fallback, load_systems_with_fallback, load_system_detail_with_fallback,
+    load_flake_names_with_fallback, load_system_detail_with_fallback, load_systems_with_fallback,
     update_system_public_key_via_api, update_system_via_api,
 };
 use crate::theme;

@@ -1773,7 +1773,7 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_cache_destination_form, CacheFormValidationInput};
+    use super::{CacheFormValidationInput, validate_cache_destination_form};
 
     fn base_input(cache_type: &str, push_to: &str) -> CacheFormValidationInput {
         CacheFormValidationInput {

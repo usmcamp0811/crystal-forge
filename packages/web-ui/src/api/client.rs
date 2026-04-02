@@ -209,6 +209,13 @@ pub async fn prioritize_build_job(job_id: &uuid::Uuid) -> Result<(), ApiClientEr
     send_empty_with_csrf("POST", &url, None::<&()>).await
 }
 
+/// Cancel a queued or building job (admin/operator).
+/// Returns the updated job with new status (cancelled or cancelling).
+pub async fn cancel_build_job(job_id: &uuid::Uuid) -> Result<(), ApiClientError> {
+    let url = format!("{}/build-jobs/{}/cancel", base_url(), job_id);
+    send_empty_with_csrf("POST", &url, None::<&()>).await
+}
+
 /// Fetch recent completed/failed build jobs.
 pub async fn fetch_recent_build_jobs() -> Result<Vec<BuildQueueItem>, ApiClientError> {
     let url = format!("{}/build-jobs/recent", base_url());
@@ -370,9 +377,7 @@ pub async fn update_flake(
 }
 
 /// Fetch credential summary for a flake.
-pub async fn fetch_flake_credentials(
-    id: i32,
-) -> Result<FlakeCredentialSummary, ApiClientError> {
+pub async fn fetch_flake_credentials(id: i32) -> Result<FlakeCredentialSummary, ApiClientError> {
     let url = format!("{}/flakes/{id}/credentials", base_url());
     fetch_json(&url).await
 }
@@ -404,7 +409,7 @@ pub async fn delete_flake_credentials(id: i32) -> Result<(), ApiClientError> {
 /// Remove a flake by id.
 pub async fn delete_flake(id: i32, hard: bool, cascade: bool) -> Result<(), ApiClientError> {
     let mut url = format!("{}/flakes/{id}", base_url());
-    
+
     let mut params = Vec::new();
     if hard {
         params.push("hard=true");
@@ -412,12 +417,12 @@ pub async fn delete_flake(id: i32, hard: bool, cascade: bool) -> Result<(), ApiC
     if cascade {
         params.push("cascade=true");
     }
-    
+
     if !params.is_empty() {
         url.push('?');
         url.push_str(&params.join("&"));
     }
-    
+
     send_empty_with_csrf::<()>("DELETE", &url, None).await
 }
 

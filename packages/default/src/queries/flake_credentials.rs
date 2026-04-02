@@ -12,16 +12,12 @@ fn decrypt_credential(mut credential: FlakeCredential) -> Result<FlakeCredential
     Ok(credential)
 }
 
-pub async fn get_flake_credential(
-    pool: &PgPool,
-    flake_id: i32,
-) -> Result<Option<FlakeCredential>> {
-    let credential = sqlx::query_as::<_, FlakeCredential>(
-        "SELECT * FROM flake_credentials WHERE flake_id = $1",
-    )
-    .bind(flake_id)
-    .fetch_optional(pool)
-    .await?;
+pub async fn get_flake_credential(pool: &PgPool, flake_id: i32) -> Result<Option<FlakeCredential>> {
+    let credential =
+        sqlx::query_as::<_, FlakeCredential>("SELECT * FROM flake_credentials WHERE flake_id = $1")
+            .bind(flake_id)
+            .fetch_optional(pool)
+            .await?;
 
     credential.map(decrypt_credential).transpose()
 }
@@ -35,7 +31,9 @@ pub async fn upsert_flake_credential(
 
     let effective_secret = resolve_secret_for_upsert(
         create.secret.as_deref(),
-        existing.as_ref().and_then(|credential| credential.secret_encrypted.as_deref()),
+        existing
+            .as_ref()
+            .and_then(|credential| credential.secret_encrypted.as_deref()),
     );
 
     let effective_create = CreateFlakeCredential {
@@ -82,7 +80,9 @@ pub async fn update_flake_credential(
         return Ok(None);
     };
 
-    update.validate_against(&current).map_err(anyhow::Error::msg)?;
+    update
+        .validate_against(&current)
+        .map_err(anyhow::Error::msg)?;
 
     let auth_type = update
         .auth_type

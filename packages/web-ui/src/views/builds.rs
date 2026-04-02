@@ -9,9 +9,9 @@ use crate::api::{
     models::{BuildQueueParams, BuildStatus as ApiBuildStatus, BuilderStatus},
 };
 use crate::components::builds::{
-    extract_system_name, selected_build_data, BuildAction, BuildDetailPane, BuildItem,
-    BuildQueuePane, BuildStatus, ConfirmActionModal, DetailTab, MetricsRow, PendingAction,
-    QueueAction, QueueActionButton, WorkerAction, WorkerItem, WorkerStatus, WorkerStrip,
+    BuildAction, BuildDetailPane, BuildItem, BuildQueuePane, BuildStatus, ConfirmActionModal,
+    DetailTab, MetricsRow, PendingAction, QueueAction, QueueActionButton, WorkerAction, WorkerItem,
+    WorkerStatus, WorkerStrip, extract_system_name, selected_build_data,
 };
 use crate::components::layout::Card;
 use crate::theme;
@@ -43,9 +43,25 @@ fn format_completed_at(item: &BuildItem) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+/// Format seconds into human-readable duration (e.g., "2m 15s", "1h 30m").
+fn format_human_duration(seconds: i64) -> String {
+    let secs = seconds.max(0);
+    let hours = secs / 3600;
+    let minutes = (secs % 3600) / 60;
+    let remaining_secs = secs % 60;
+
+    if hours > 0 {
+        format!("{}h {}m", hours, minutes)
+    } else if minutes > 0 {
+        format!("{}m {}s", minutes, remaining_secs)
+    } else {
+        format!("{}s", remaining_secs)
+    }
+}
+
 fn format_duration(item: &BuildItem) -> String {
     item.duration_secs
-        .map(|secs| format!("{}s", secs.max(0)))
+        .map(format_human_duration)
         .or_else(|| item.runtime.clone())
         .unwrap_or_else(|| "-".to_string())
 }
@@ -232,7 +248,7 @@ pub fn BuildsView() -> Element {
                             .clone()
                             .unwrap_or_else(|| "unassigned".to_string()),
                         queued_for: finished_for,
-                        runtime: item.elapsed_secs.map(|secs| format!("{}s", secs)),
+                        runtime: item.elapsed_secs.map(format_human_duration),
                         duration_secs: item.elapsed_secs,
                         completed_at,
                         started_by: "scheduler".to_string(),
@@ -241,6 +257,8 @@ pub fn BuildsView() -> Element {
                             ApiBuildStatus::Failed => BuildStatus::Failed,
                             ApiBuildStatus::Complete => BuildStatus::Complete,
                             ApiBuildStatus::Building => BuildStatus::Building,
+                            ApiBuildStatus::Cancelling => BuildStatus::Stopping,
+                            ApiBuildStatus::Cancelled => BuildStatus::Canceled,
                             ApiBuildStatus::Queued => BuildStatus::Queued,
                             ApiBuildStatus::Idle => BuildStatus::Queued,
                         },
@@ -782,7 +800,21 @@ pub fn BuildsView() -> Element {
                                                 }
                                             }
                                             BuildAction::Stop => {
-                                                action_error.set(Some("Stop build is not implemented by API yet".to_string()));
+                                                let Some(job_id) = selected.job_id else {
+                                                    action_error.set(Some("Queue item has no job id; cannot stop".to_string()));
+                                                    return;
+                                                };
+
+                                                match api::client::cancel_build_job(&job_id).await {
+                                                    Ok(_) => {
+                                                        action_error.set(None);
+                                                        last_action_note.set(Some(format!("Cancelled job {}", job_id)));
+                                                        refresh_trigger.set(refresh_trigger() + 1);
+                                                    }
+                                                    Err(e) => {
+                                                        action_error.set(Some(format!("Failed to stop: {}", e)));
+                                                    }
+                                                }
                                             }
                                         }
                                     });

@@ -256,7 +256,10 @@ pub fn DashboardView() -> Element {
         hostnames_for_deployment(&systems, &[DeploymentStatus::NeverDeployed]);
     let unknown_hosts = hostnames_for_deployment(
         &systems,
-        &[DeploymentStatus::Unknown, DeploymentStatus::NoCommitsAvailable],
+        &[
+            DeploymentStatus::Unknown,
+            DeploymentStatus::NoCommitsAvailable,
+        ],
     );
 
     // Global filter state - shared across all widgets (multi-select)
@@ -803,7 +806,7 @@ pub fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                 system_paths: vec![],
                 build_status: Some(BuildStatus::Queued),
                 evaluation_status: None,
-                    evaluation_error_message: None,
+                evaluation_error_message: None,
             }],
         },
     ]

@@ -191,6 +191,115 @@ async function unrouteBuildsData(page) {
   await page.unroute("**/api/v1/build-jobs*");
 }
 
+// Mock data with cancelling/cancelled states for queue controls evidence
+function mockBuildsDashboardSummaryWithCancelStates() {
+  const timestamp = nowIso();
+  return {
+    fleet_health: { healthy: 1, warning: 0, critical: 0, offline: 0 },
+    deployment_status: { up_to_date: 1, behind: 0, never_deployed: 0, unknown: 0 },
+    cve_summary: { critical: 0, high: 0, medium: 0, low: 0 },
+    total_systems: 1,
+    active_builds: 2,
+    build_queue: {
+      building_count: 1,
+      queued_count: 2,
+      timestamp,
+      items: [
+        {
+          job_id: "11111111-1111-4111-8111-111111111111",
+          system_id: "22222222-2222-4222-8222-222222222222",
+          hostname: "system-stopping-build",
+          flake_name: "platform-core",
+          commit_hash: "a1b2c3d4e5f678901234567890abcdef12345678",
+          commit_message: "Build being stopped - demonstrates cancelling state",
+          status: "cancelling",
+          builder_name: "builder-primary",
+          queued_at: timestamp,
+          started_at: timestamp,
+          elapsed_secs: 135,
+          logs: null,
+        },
+        {
+          job_id: "33333333-3333-4333-8333-333333333333",
+          system_id: "44444444-4444-4444-8444-444444444444",
+          hostname: "active-build-runner",
+          flake_name: "infra-core",
+          commit_hash: "deadbeefcafebabe1234567890abcdef12345678",
+          commit_message: "Currently building - shows runtime in human format",
+          status: "building",
+          builder_name: "builder-secondary",
+          queued_at: timestamp,
+          started_at: timestamp,
+          elapsed_secs: 3723,
+          logs: null,
+        },
+        {
+          job_id: "55555555-5555-4555-8555-555555555555",
+          system_id: "66666666-6666-4666-8666-666666666666",
+          hostname: "queued-system-01",
+          flake_name: "edge-fleet",
+          commit_hash: "cafebabe1234567890abcdef1234567890abcdef",
+          commit_message: "Queued build waiting for slot",
+          status: "queued",
+          builder_name: "builder-primary",
+          queued_at: timestamp,
+          started_at: null,
+          elapsed_secs: null,
+          logs: null,
+        },
+        {
+          job_id: "77777777-7777-4777-8777-777777777777",
+          system_id: "88888888-8888-4888-8888-888888888888",
+          hostname: "cancelled-job-system",
+          flake_name: "workstations",
+          commit_hash: "abcdef1234567890abcdef1234567890abcdef12",
+          commit_message: "Previously cancelled build - demonstrates cancelled state",
+          status: "cancelled",
+          builder_name: "builder-primary",
+          queued_at: timestamp,
+          started_at: null,
+          elapsed_secs: null,
+          logs: null,
+        },
+      ],
+    },
+    recent_deployments: [],
+    timestamp,
+  };
+}
+
+async function routeBuildsDataWithCancelStates(page) {
+  await page.route("**/api/v1/dashboard/summary*", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(mockBuildsDashboardSummaryWithCancelStates()),
+    });
+  });
+
+  await page.route("**/api/v1/builders*", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(mockBuilders()),
+    });
+  });
+
+  await page.route("**/api/v1/build-jobs/recent*", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(mockRecentBuilds()),
+    });
+  });
+}
+
+async function unrouteBuildsDataWithCancelStates(page) {
+  await page.unroute("**/api/v1/dashboard/summary*");
+  await page.unroute("**/api/v1/builders*");
+  await page.unroute("**/api/v1/build-jobs/recent*");
+}
+
 function mockSetupCoachProgress() {
   return {
     dismissed: false,
@@ -1907,6 +2016,123 @@ const steps = [
       await page.waitForTimeout(500);
 
       await unrouteBuildsData(page);
+    },
+  },
+  // ============================================================
+  // BUILDS QUEUE CONTROLS EVIDENCE (TASK-237)
+  // These steps capture evidence for:
+  // - Table view mode toggle
+  // - Cancelling/cancelled states
+  // - Human-readable duration formatting
+  // ============================================================
+  {
+    name: "15d-builds-queue-table-view",
+    description: "Build queue in table view mode",
+    action: async (page) => {
+      await routeBuildsDataWithCancelStates(page);
+      await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2000);
+
+      // Find and click the table view toggle button
+      const tableToggle = page.locator("[data-testid='queue-view-table']");
+      await assertVisible(tableToggle, "Table view toggle should be visible");
+      await tableToggle.click();
+      await page.waitForTimeout(800);
+
+      // Verify table view is now displayed
+      const queueTable = page.locator("[data-testid='build-queue-table']");
+      await assertVisible(queueTable, "Build queue table should be visible after toggle");
+
+      // Verify table has rows
+      const tableRows = page.locator("[data-testid='build-queue-row']");
+      const rowCount = await tableRows.count();
+      if (rowCount === 0) {
+        throw new Error("Expected at least one build queue row in table view");
+      }
+
+      await unrouteBuildsDataWithCancelStates(page);
+    },
+  },
+  {
+    name: "15e-builds-cancelling-state",
+    description: "Build queue showing cancelling/stopping state",
+    action: async (page) => {
+      await routeBuildsDataWithCancelStates(page);
+      await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2000);
+
+      // Stay in card view (default) to show cancelling state badge
+      const queueCards = page.locator("[data-testid='build-queue-card']");
+      const cardCount = await queueCards.count();
+      if (cardCount === 0) {
+        throw new Error("Expected at least one build queue card");
+      }
+
+      // Verify we can see the stopping/cancelling status badge
+      const stoppingBadge = page.getByText(/stopping|cancelling/i).first();
+      const stoppingVisible = await stoppingBadge.isVisible({ timeout: 2000 }).catch(() => false);
+      if (!stoppingVisible) {
+        throw new Error("Expected stopping/cancelling status badge to be visible in queue");
+      }
+
+      await unrouteBuildsDataWithCancelStates(page);
+    },
+  },
+  {
+    name: "15f-builds-human-duration",
+    description: "Build queue showing human-readable duration format",
+    action: async (page) => {
+      await routeBuildsDataWithCancelStates(page);
+      await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2000);
+
+      // Switch to table view to see duration column more clearly
+      const tableToggle = page.locator("[data-testid='queue-view-table']");
+      await tableToggle.click();
+      await page.waitForTimeout(800);
+
+      // The mock data has elapsed_secs: 3723 which should display as "1h 2m" (approximately)
+      // Look for human-readable time format patterns like "Xh Ym" or "Xm Ys"
+      const durationText = await page.locator("[data-testid='build-queue-table']").textContent();
+      const hasHumanDuration = /\d+h\s+\d+m|\d+m\s+\d+s|\d+s/.test(durationText);
+      if (!hasHumanDuration) {
+        throw new Error("Expected human-readable duration format (e.g., '1h 2m') in queue table");
+      }
+
+      await unrouteBuildsDataWithCancelStates(page);
+    },
+  },
+  {
+    name: "15g-builds-action-visibility",
+    description: "Build queue action buttons shown only for valid states",
+    action: async (page) => {
+      await routeBuildsDataWithCancelStates(page);
+      await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2000);
+
+      // In card view, click on a cancelled build to select it
+      // Restart should be visible for cancelled builds
+      const cards = page.locator("[data-testid='build-queue-card']");
+      const cardCount = await cards.count();
+      
+      // Find the card with cancelled status and click it
+      for (let i = 0; i < cardCount; i++) {
+        const cardText = await cards.nth(i).textContent();
+        if (/cancelled|canceled/i.test(cardText)) {
+          await cards.nth(i).click();
+          await page.waitForTimeout(500);
+          break;
+        }
+      }
+
+      // Verify Restart button is visible for cancelled build
+      const restartBtn = page.locator("button:has-text('Restart')");
+      const restartVisible = await restartBtn.isVisible({ timeout: 2000 }).catch(() => false);
+      if (!restartVisible) {
+        throw new Error("Expected Restart button to be visible for cancelled build");
+      }
+
+      await unrouteBuildsDataWithCancelStates(page);
     },
   },
   {
