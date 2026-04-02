@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-04-02 01:09'
-updated_date: '2026-04-02 01:11'
+updated_date: '2026-04-02 01:29'
 labels:
   - builds
   - queue
@@ -138,6 +138,36 @@ High (operator controls and build-state correctness directly affect production o
 Moved Backlog -> To Do per explicit human sprint selection in chat.
 
 LOCK: claude-opus-4-5 on reckless in /home/mcamp/code/crystal-forge/TASK-237-builds-queue-controls
+
+## Stop Lifecycle Behavior (AC #10)
+
+### Semantics
+- **Queued jobs**: Immediately cancelled (status transitions `Queued` -> `Cancelled`). No build process was started, so no cleanup is needed.
+- **Building jobs**: Requested to stop (status transitions `Building` -> `Cancelling`). The builder process receives the signal and should stop the underlying nix build. Once the builder confirms completion, status transitions `Cancelling` -> `Cancelled`.
+
+### Expected Delays
+- Stopping a queued job is instantaneous.
+- Stopping a building job may take time because:
+  - systemd service stop propagation
+  - nix daemon process cleanup
+  - Store path garbage collection if in progress
+  - Network operations (cache uploads, etc.)
+
+### UI Feedback
+- While a job is in `Cancelling` state, the UI shows a "stopping" badge with orange styling.
+- The Stop button is hidden for jobs already in `Cancelling` state.
+- Once cancelled, the job shows "cancelled" badge with gray styling.
+- Restart action becomes available for `Cancelled` jobs.
+
+### Action Availability Matrix
+| Status | Stop | Restart | Run Next |
+|--------|------|---------|----------|
+| Queued | - | - | Yes |
+| Building | Yes | - | - |
+| Cancelling | - | - | - |
+| Cancelled | - | Yes | - |
+| Complete | - | Yes | - |
+| Failed | - | Yes | - |
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
