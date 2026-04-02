@@ -22,7 +22,6 @@ use crate::queries::build_jobs::enqueue_build_job_for_derivation;
 use crate::queries::derivations::{
     insert_derivation_with_target, mark_derivation_dry_run_complete,
 };
-use crate::flake::credentials::FlakeCredentialEnv;
 use crate::queue::QueueNotifier;
 use crate::queries::systems::list_configuration_names_for_flake;
 
