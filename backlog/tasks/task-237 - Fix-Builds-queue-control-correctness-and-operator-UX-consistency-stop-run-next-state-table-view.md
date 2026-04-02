@@ -3,10 +3,10 @@ id: TASK-237
 title: >-
   Fix Builds queue control correctness and operator UX consistency
   (stop/run-next/state/table view)
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-04-02 01:09'
-updated_date: '2026-04-02 01:10'
+updated_date: '2026-04-02 01:11'
 labels:
   - builds
   - queue
@@ -136,6 +136,8 @@ High (operator controls and build-state correctness directly affect production o
 
 <!-- SECTION:NOTES:BEGIN -->
 Moved Backlog -> To Do per explicit human sprint selection in chat.
+
+LOCK: claude-opus-4-5 on reckless in /home/mcamp/code/crystal-forge/TASK-237-builds-queue-controls
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
