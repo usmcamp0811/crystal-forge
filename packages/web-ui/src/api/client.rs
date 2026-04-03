@@ -216,6 +216,15 @@ pub async fn cancel_build_job(job_id: &uuid::Uuid) -> Result<(), ApiClientError>
     send_empty_with_csrf("POST", &url, None::<&()>).await
 }
 
+/// Re-enqueue a cancelled or failed job (admin).
+///
+/// Resets the existing `build_jobs` row to `queued` in-place. Does not trigger
+/// a flake re-evaluation; the derivation is already known.
+pub async fn requeue_build_job(job_id: &uuid::Uuid) -> Result<(), ApiClientError> {
+    let url = format!("{}/build-jobs/{}/requeue", base_url(), job_id);
+    send_empty_with_csrf("POST", &url, None::<&()>).await
+}
+
 /// Fetch recent completed/failed build jobs.
 pub async fn fetch_recent_build_jobs() -> Result<Vec<BuildQueueItem>, ApiClientError> {
     let url = format!("{}/build-jobs/recent", base_url());

@@ -351,6 +351,83 @@ pub async fn cancel_build_job(
         })
 }
 
+/// POST /api/v1/build-jobs/:id/requeue - Requeue a cancelled/failed build job (admin-only)
+pub async fn requeue_build_job(
+    State(state): State<CFState>,
+    Path(job_id): Path<Uuid>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<BuildJob>, (StatusCode, String)> {
+    let Some(_admin_user) = require_admin(&state.pool, &headers).await else {
+        return Err((StatusCode::FORBIDDEN, "Admin access required".to_string()));
+    };
+
+    builders::requeue_cancelled_job(&state.pool, &job_id)
+        .await
+        .map(Json)
+        .map_err(|e| {
+            let message = e.to_string();
+            if message.to_lowercase().contains("not found") {
+                (StatusCode::NOT_FOUND, message)
+            } else {
+                (StatusCode::BAD_REQUEST, message)
+            }
+        })
+}
+
+/// POST /api/v1/builders/:id/jobs/:job_id/finalize-cancelled
+/// Builder-authenticated. Called after the builder has stopped the nix process.
+pub async fn finalize_cancelled_job(
+    State(state): State<CFState>,
+    Path((builder_id, job_id)): Path<(Uuid, Uuid)>,
+    headers: axum::http::HeaderMap,
+    body: Bytes,
+) -> Result<StatusCode, StatusCode> {
+    let path = format!("/api/v1/builders/{}/jobs/{}/finalize-cancelled", builder_id, job_id);
+    let verified = authenticate_builder_request(&headers, body, "POST", &path, &state.pool).await?;
+
+    if verified.builder_id != builder_id {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let job = builders::get_build_job_by_id(&state.pool, &job_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if job.builder_id != Some(builder_id) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    builders::finalize_cancelled_job(&state.pool, &job_id)
+        .await
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    cleanup_build_log_channel(&state, job_id).await;
+    Ok(StatusCode::OK)
+}
+
+/// GET /api/v1/builders/:id/jobs/:job_id/status - Poll job status (builder-authenticated)
+pub async fn get_job_status(
+    State(state): State<CFState>,
+    Path((builder_id, job_id)): Path<(Uuid, Uuid)>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let path = format!("/api/v1/builders/{}/jobs/{}/status", builder_id, job_id);
+    let verified =
+        authenticate_builder_request(&headers, Bytes::new(), "GET", &path, &state.pool).await?;
+
+    if verified.builder_id != builder_id {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let status = builders::get_build_job_status(&state.pool, &job_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    Ok(Json(serde_json::json!({ "status": status })))
+}
+
 /// GET /api/v1/build-jobs - Paginated build queue with filtering (viewer+)
 ///
 /// Query parameters (all optional):

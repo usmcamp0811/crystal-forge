@@ -3413,6 +3413,8 @@ fn build_badge_label(status: &ApiBuildStatus) -> &'static str {
     match status {
         ApiBuildStatus::Queued => "queued",
         ApiBuildStatus::Building => "running",
+        ApiBuildStatus::Cancelling => "stopping",
+        ApiBuildStatus::Cancelled => "cancelled",
         ApiBuildStatus::Failed => "failed",
         ApiBuildStatus::Complete => "complete",
         ApiBuildStatus::Idle => "idle",
@@ -3428,6 +3430,12 @@ fn build_badge_style(status: &ApiBuildStatus) -> &'static str {
         }
         ApiBuildStatus::Building => {
             "background-color: #1f3d52; border-color: #3b82f6; color: #dbeafe;"
+        }
+        ApiBuildStatus::Cancelling => {
+            "background-color: #3d2f1f; border-color: #fb923c; color: #fed7aa;"
+        }
+        ApiBuildStatus::Cancelled => {
+            "background-color: #2b303b; border-color: #6b7280; color: #9ca3af;"
         }
         ApiBuildStatus::Failed => {
             "background-color: #472726; border-color: #ef4444; color: #fee2e2;"

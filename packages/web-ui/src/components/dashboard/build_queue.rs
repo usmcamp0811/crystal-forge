@@ -117,6 +117,8 @@ pub fn BuildQueueRow(
     let status_class = match item.status {
         BuildStatus::Building => "text-cyan-400",
         BuildStatus::Queued => "text-blue-400",
+        BuildStatus::Cancelling => "text-orange-400",
+        BuildStatus::Cancelled => "text-gray-500",
         BuildStatus::Complete => "text-emerald-400",
         BuildStatus::Failed => "text-red-400",
         BuildStatus::Idle => "text-gray-400",
@@ -126,6 +128,8 @@ pub fn BuildQueueRow(
     let status_dot_color = match item.status {
         BuildStatus::Building => "#42ff65",
         BuildStatus::Queued => "#e57c00",
+        BuildStatus::Cancelling => "#fb923c",
+        BuildStatus::Cancelled => "#6b7280",
         BuildStatus::Complete => "#10b981",
         BuildStatus::Failed => "#ef4444",
         BuildStatus::Idle => "#6b7280",

@@ -2,6 +2,7 @@ use crystal_forge::builder::api_client::BuilderApiClient;
 use crystal_forge::builder::metrics::SystemMetrics;
 use crystal_forge::builder::{run_build_loop, run_cache_push_loop, run_cve_scan_loop};
 use crystal_forge::config::CrystalForgeConfig;
+use crystal_forge::derivations::build::BuildCancelledError;
 use crystal_forge::models::builders::{BuildJob, ReportMetricsRequest};
 use crystal_forge::queries::derivations::get_derivation_by_id;
 use crystal_forge::server::memory_monitor_task;
@@ -358,7 +359,11 @@ async fn execute_build_job(
         let mock_result = run_mock_build(&mut derivation, &client, job.id, &mut ws_shared).await;
         Ok(mock_result)
     } else {
-        tokio::time::timeout(build_timeout, derivation.build(&pool, &build_config)).await
+        tokio::time::timeout(
+            build_timeout,
+            derivation.build(&pool, &build_config, Some(job.id)),
+        )
+        .await
     };
 
     match build_result {
@@ -465,6 +470,27 @@ async fn execute_build_job(
             // Report success to server
             if let Err(e) = client.complete_job(job.id, &store_path).await {
                 error!("❌ Failed to report job completion: {}", e);
+            }
+        }
+
+        // Build was cancelled by an operator (server set status to 'cancelling')
+        Ok(Err(ref e)) if e.downcast_ref::<BuildCancelledError>().is_some() => {
+            info!("🛑 Job #{} cancelled by operator — finalizing", job.id);
+
+            // Append cancellation notice to build log
+            send_log_with_fallback(
+                &client,
+                job.id,
+                &mut ws_shared,
+                "[crystal-forge] Build cancelled by operator — nix process stopped\n",
+            )
+            .await;
+
+            // Call finalize-cancelled so the server sets completed_at and closes
+            // the job cleanly.  If this fails we log and move on — the job will
+            // remain in 'cancelling' until the next reconciliation.
+            if let Err(e2) = client.finalize_cancelled_job(job.id).await {
+                error!("❌ Failed to finalize cancelled job #{}: {}", job.id, e2);
             }
         }
 

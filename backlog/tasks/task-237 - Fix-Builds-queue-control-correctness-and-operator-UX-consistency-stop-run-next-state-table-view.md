@@ -3,10 +3,10 @@ id: TASK-237
 title: >-
   Fix Builds queue control correctness and operator UX consistency
   (stop/run-next/state/table view)
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-04-02 01:09'
-updated_date: '2026-04-02 01:10'
+updated_date: '2026-04-02 12:47'
 labels:
   - builds
   - queue
@@ -136,6 +136,92 @@ High (operator controls and build-state correctness directly affect production o
 
 <!-- SECTION:NOTES:BEGIN -->
 Moved Backlog -> To Do per explicit human sprint selection in chat.
+
+LOCK: claude-opus-4-5 on reckless in /home/mcamp/code/crystal-forge/TASK-237-builds-queue-controls
+
+## Stop Lifecycle Behavior (AC #10)
+
+### Semantics
+- **Queued jobs**: Immediately cancelled (status transitions `Queued` -> `Cancelled`). No build process was started, so no cleanup is needed.
+- **Building jobs**: Requested to stop (status transitions `Building` -> `Cancelling`). The builder process receives the signal and should stop the underlying nix build. Once the builder confirms completion, status transitions `Cancelling` -> `Cancelled`.
+
+### Expected Delays
+- Stopping a queued job is instantaneous.
+- Stopping a building job may take time because:
+  - systemd service stop propagation
+  - nix daemon process cleanup
+  - Store path garbage collection if in progress
+  - Network operations (cache uploads, etc.)
+
+### UI Feedback
+- While a job is in `Cancelling` state, the UI shows a "stopping" badge with orange styling.
+- The Stop button is hidden for jobs already in `Cancelling` state.
+- Once cancelled, the job shows "cancelled" badge with gray styling.
+- Restart action becomes available for `Cancelled` jobs.
+
+### Action Availability Matrix
+| Status | Stop | Restart | Run Next |
+|--------|------|---------|----------|
+| Queued | - | - | Yes |
+| Building | Yes | - | - |
+| Cancelling | - | - | - |
+| Cancelled | - | Yes | - |
+| Complete | - | Yes | - |
+| Failed | - | Yes | - |
+
+## MR Created
+
+MR !205: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/205
+
+Awaiting CI verification and screenshots from web-ui check.
+
+## Review Feedback (2026-04-02) — Not Merge-Ready
+
+Reviewer held MR !205. Three blockers identified:
+
+### Blocker 1: Builder-side cancel handling missing
+The MR adds `Cancelling` state and the admin cancel endpoint, but the **builder API surface has no corresponding handling**. The builder work-queue path does not:
+- Poll for `cancelling` jobs and act on them
+- Finalize `cancelling → cancelled` after builder-side cleanup
+- Call `finalize_cancelled_job` from any builder code path
+
+The DB query exists (`finalize_cancelled_job`) but nothing in the builder runtime calls it. The `building → cancelling → cancelled` flow is only half-wired.
+
+### Blocker 2: Log append rejects cancelling jobs
+The builder log-append path (`append_build_job_logs` / relevant handler) only allows `queued` and `building` statuses. A job moved to `cancelling` can no longer append shutdown/cleanup logs, breaking observability during the most relevant part of the stop sequence.
+
+### Blocker 3: Role mismatch — cancel access
+The web client code comments and documentation say cancel is available to admin/operator, but the server handler enforces admin-only. If operators are supposed to control the queue, this will fail at runtime.
+
+### What looks good
+- Queue-depth fix (eligible jobs by environment) is correct
+- Table/card toggle is a useful operator improvement
+- Human-readable duration formatting is correct
+- Restricting restart visibility to terminal states is the right UX shape
+- Cancelled/Stopping status spelling normalized
+
+### Required before merge
+1. Builder runtime detects `cancelling` jobs and sends the stop signal to the running nix build process
+2. Builder calls `finalize_cancelled_job` after cleanup to complete the lifecycle
+3. Log-append path allows appends while status is `cancelling`
+4. Role enforcement is consistent: either admin-only everywhere or operator+ everywhere
+5. CI passes with a green pipeline
+6. End-to-end test with a real in-flight build being stopped
+
+## Gap Analysis Summary (2026-04-02)
+
+Codebase exploration after review confirmed three concrete gaps:
+
+### Gap 1 — Builder cancel detection (TASK-238)
+The `finalize_cancelled_job()` query exists but is called from nowhere. The builder job execution loop in `packages/default/src/bin/builder.rs` has no cancel-check polling. The only termination mechanism is the 2-hour timeout SIGKILL via tokio Child drop. Tracked as TASK-238.
+
+### Gap 2 — Log append gate (TASK-239)
+`append_job_logs()` handler and `append_job_logs_with_limits()` SQL both gate on `status IN ('queued', 'building')`. A cancelling job would receive 409 CONFLICT on every log attempt. Fix is a targeted gate expansion. Tracked as TASK-239.
+
+### Gap 3 — Role contract (TASK-240)
+Cancel handler uses `require_admin`. Run Next / prioritize also uses `require_admin`. UI button renders for all authenticated users. Decision (admin-only+hide-UI vs operator+) needs human input before the fix can be implemented. Tracked as TASK-240.
+
+All three tasks are in Backlog pending sprint grooming.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

@@ -50,6 +50,7 @@ impl WorkerStatus {
 pub enum BuildStatus {
     Queued,
     Building,
+    /// Cancel requested; builder is stopping the nix process.
     Stopping,
     Failed,
     Complete,
@@ -223,6 +224,18 @@ pub fn short_commit(commit: &str) -> String {
     commit.chars().take(7).collect()
 }
 
+/// Sort rank for queue ordering: lower = displayed first.
+pub fn queue_sort_rank(status: BuildStatus) -> i32 {
+    match status {
+        BuildStatus::Building => 0,
+        BuildStatus::Stopping => 1,
+        BuildStatus::Queued => 2,
+        BuildStatus::Failed => 3,
+        BuildStatus::Complete => 4,
+        BuildStatus::Cancelled => 5,
+    }
+}
+
 pub fn queue_row_style(selected: bool, status: BuildStatus) -> String {
     let row_status = match status {
         BuildStatus::Building => "cf-queue-row-building",
@@ -278,6 +291,7 @@ pub fn apply_action(
             let mut next_builds = builds.read().clone();
             match action {
                 BuildAction::Stop => {
+                    // Optimistic UI: show Stopping immediately; server will confirm.
                     if let Some(target) = next_builds.iter_mut().find(|b| b.id == build_id) {
                         target.status = BuildStatus::Stopping;
                     }
@@ -287,6 +301,7 @@ pub fn apply_action(
                     note.set(Some(format!("Stopped build #{build_id}")));
                 }
                 BuildAction::Restart => {
+                    // Optimistic UI: show Queued immediately; server will confirm.
                     if let Some(target) = next_builds.iter_mut().find(|b| b.id == build_id) {
                         target.status = BuildStatus::Building;
                         target.runtime = Some("00:00".to_string());

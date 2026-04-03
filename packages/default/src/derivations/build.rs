@@ -12,11 +12,34 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::time::{Duration, Instant, interval};
 use tracing::{debug, error, info, warn};
+use uuid::Uuid;
+
+/// Sentinel error returned when `run_streaming_build` exits because the server
+/// marked the job as `cancelling`.  The caller in `builder.rs` checks for this
+/// variant to choose the finalize-cancelled path instead of the fail path.
+#[derive(Debug)]
+pub struct BuildCancelledError;
+
+impl std::fmt::Display for BuildCancelledError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "build cancelled by operator")
+    }
+}
+impl std::error::Error for BuildCancelledError {}
 
 impl Derivation {
-    /// Main entry point for building a derivation
-    /// Works for both NixOS and Package derivations using the derivation_path from database
-    pub async fn build(&mut self, pool: &PgPool, build_config: &BuildConfig) -> Result<String> {
+    /// Main entry point for building a derivation.
+    ///
+    /// `job_id` is the `build_jobs.id` for this run.  When provided,
+    /// `run_streaming_build` will poll the DB every ~15 s and abort the nix
+    /// child process if the server has set the job's status to `cancelling`.
+    /// In that case the returned error downcasts to [`BuildCancelledError`].
+    pub async fn build(
+        &mut self,
+        pool: &PgPool,
+        build_config: &BuildConfig,
+        job_id: Option<Uuid>,
+    ) -> Result<String> {
         // Both types use derivation_path from database (populated during dry-run phase)
         let drv_path = self.derivation_path.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
@@ -69,17 +92,19 @@ impl Derivation {
         info!("  → About to spawn command for {}", drv_path);
 
         // Try to run with systemd
-        match Self::run_streaming_build(cmd, drv_path, self.id, pool).await {
+        match Self::run_streaming_build(cmd, drv_path, self.id, pool, job_id).await {
             Ok(output_path) => {
                 info!("✅ Build succeeded: {}", output_path);
                 Ok(output_path)
             }
+            // Propagate cancellation immediately — do not fall back to direct build.
+            Err(e) if e.downcast_ref::<BuildCancelledError>().is_some() => Err(e),
             Err(e) if build_config.should_use_systemd() && Self::is_systemd_error(&e) => {
                 warn!(
                     "⚠️  Systemd scope creation failed, falling back to direct execution: {}",
                     e
                 );
-                self.build_with_direct_nix_store(pool, drv_path, build_config)
+                self.build_with_direct_nix_store(pool, drv_path, build_config, job_id)
                     .await
             }
             Err(e) => {
@@ -207,6 +232,7 @@ impl Derivation {
         drv_path: &str,
         derivation_id: i32,
         pool: &PgPool,
+        job_id: Option<Uuid>,
     ) -> Result<String> {
         let start_time = Instant::now();
         info!("  → Spawning build process for {}", drv_path);
@@ -234,10 +260,15 @@ impl Derivation {
         let mut stderr_reader = BufReader::new(stderr).lines();
 
         let mut heartbeat_interval = interval(Duration::from_secs(5));
-        let mut current_target: Option<String> = None;
+        // Cancel-check runs every 15 s — infrequent enough to not hammer the DB.
+        let mut cancel_check_interval = interval(Duration::from_secs(15));
+        // Consume the first (immediate) tick so the check doesn't fire at t=0.
+        cancel_check_interval.tick().await;
 
+        let mut current_target: Option<String> = None;
         let pool_clone = pool.clone();
         let mut last_output = Instant::now();
+        let mut cancelled = false;
 
         loop {
             tokio::select! {
@@ -247,8 +278,6 @@ impl Derivation {
                         Ok(Some(line)) => {
                             last_output = Instant::now();
                             info!("build stdout: {}", line);
-
-                            // Try to extract current build target from output
                             if line.contains("building '") || line.contains("copying path '") {
                                 current_target = Some(line.clone());
                             }
@@ -267,8 +296,6 @@ impl Derivation {
                         Ok(Some(line)) => {
                             last_output = Instant::now();
                             debug!("build stderr: {}", line);
-
-                            // Try to extract current build target from error output
                             if line.contains("building '") || line.contains("copying path '") {
                                 current_target = Some(line.clone());
                             }
@@ -280,11 +307,10 @@ impl Derivation {
                     }
                 }
 
-                // Periodic heartbeat updates to database
+                // Periodic derivation heartbeat (DB progress update)
                 _ = heartbeat_interval.tick() => {
                     let elapsed = start_time.elapsed().as_secs() as i32;
                     let last_activity = last_output.elapsed().as_secs() as i32;
-
                     if let Err(e) = Self::update_build_heartbeat(
                         &pool_clone,
                         derivation_id,
@@ -295,7 +321,35 @@ impl Derivation {
                         warn!("Failed to update build heartbeat: {}", e);
                     }
                 }
+
+                // Cancel-check: poll the job's status in build_jobs every ~15 s.
+                // If an operator has set it to 'cancelling', kill the child and break.
+                _ = cancel_check_interval.tick() => {
+                    if let Some(jid) = job_id {
+                        match crate::queries::builders::get_build_job_status(&pool_clone, &jid).await {
+                            Ok(Some(ref status)) if status == "cancelling" => {
+                                info!("🛑 Job {} marked cancelling — sending SIGTERM to build process", jid);
+                                // Send SIGTERM; if the process doesn't exit within 30 s we SIGKILL.
+                                let _ = child.start_kill(); // sends SIGKILL on tokio::process::Child
+                                // Give nix a brief window to flush output before we hard-kill.
+                                tokio::time::sleep(Duration::from_secs(2)).await;
+                                let _ = child.kill().await;
+                                cancelled = true;
+                                break;
+                            }
+                            Ok(_) => {} // still running normally
+                            Err(e) => {
+                                warn!("Cancel-check DB query failed (non-fatal): {}", e);
+                            }
+                        }
+                    }
+                }
             }
+        }
+
+        if cancelled {
+            // Don't wait for the process — we killed it.
+            return Err(anyhow::anyhow!(BuildCancelledError));
         }
 
         // Wait for the process to complete
@@ -337,6 +391,7 @@ impl Derivation {
         pool: &PgPool,
         drv_path: &str,
         build_config: &BuildConfig,
+        job_id: Option<Uuid>,
     ) -> Result<String> {
         info!(
             "🔨 Building with direct nix-store (no systemd): {}",
@@ -349,7 +404,7 @@ impl Derivation {
 
         build_config.apply_to_command(&mut cmd);
 
-        Self::run_streaming_build(cmd, drv_path, self.id, pool).await
+        Self::run_streaming_build(cmd, drv_path, self.id, pool, job_id).await
     }
 
     /// Resolve a .drv path to its output store path

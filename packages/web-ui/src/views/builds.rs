@@ -24,6 +24,13 @@ enum BuildsTab {
     Completed,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum QueueViewMode {
+    #[default]
+    Cards,
+    Table,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CompletedStatusFilter {
     All,
@@ -264,6 +271,7 @@ pub fn BuildsView() -> Element {
                         status: match item.status {
                             ApiBuildStatus::Failed => BuildStatus::Failed,
                             ApiBuildStatus::Complete => BuildStatus::Complete,
+                            ApiBuildStatus::Cancelled => BuildStatus::Cancelled,
                             ApiBuildStatus::Building => BuildStatus::Building,
                             ApiBuildStatus::Cancelling => BuildStatus::Stopping,
                             ApiBuildStatus::Cancelled => BuildStatus::Cancelled,
@@ -287,6 +295,7 @@ pub fn BuildsView() -> Element {
 
     let mut selected_build = use_signal(|| Some(1_i32));
     let mut active_view = use_signal(|| BuildsTab::ActiveQueue);
+    let mut queue_view_mode = use_signal(QueueViewMode::default);
     let mut active_tab = use_signal(|| DetailTab::Logs);
     let mut completed_status_filter = use_signal(|| CompletedStatusFilter::All);
     let mut completed_sort_order = use_signal(|| CompletedSortOrder::NewestFirst);
@@ -799,19 +808,33 @@ pub fn BuildsView() -> Element {
                                                 }
                                             }
                                             BuildAction::Restart => {
-                                                let Some(system_id) = selected.system_id else {
-                                                    action_error.set(Some("Queue item has no system id; cannot trigger build".to_string()));
-                                                    return;
-                                                };
-
-                                                match api::client::request_system_sync(&system_id).await {
-                                                    Ok(_) => {
-                                                        action_error.set(None);
-                                                        last_action_note.set(Some(format!("Triggered build sync for system {}", system_id)));
-                                                        refresh_trigger.set(refresh_trigger() + 1);
+                                                // Prefer direct requeue if we have a job_id (cancelled/failed).
+                                                // Fall back to system sync for statuses without a job_id.
+                                                if let Some(ref jid) = selected.job_id {
+                                                    match api::client::requeue_build_job(jid).await {
+                                                        Ok(_) => {
+                                                            action_error.set(None);
+                                                            last_action_note.set(Some("Build re-queued".to_string()));
+                                                            refresh_trigger.set(refresh_trigger() + 1);
+                                                        }
+                                                        Err(e) => {
+                                                            action_error.set(Some(format!("Failed to requeue: {}", e)));
+                                                        }
                                                     }
-                                                    Err(e) => {
-                                                        action_error.set(Some(format!("Failed to trigger build: {}", e)));
+                                                } else {
+                                                    let Some(system_id) = selected.system_id else {
+                                                        action_error.set(Some("Queue item has no system id; cannot trigger build".to_string()));
+                                                        return;
+                                                    };
+                                                    match api::client::request_system_sync(&system_id).await {
+                                                        Ok(_) => {
+                                                            action_error.set(None);
+                                                            last_action_note.set(Some(format!("Triggered build sync for system {}", system_id)));
+                                                            refresh_trigger.set(refresh_trigger() + 1);
+                                                        }
+                                                        Err(e) => {
+                                                            action_error.set(Some(format!("Failed to trigger build: {}", e)));
+                                                        }
                                                     }
                                                 }
                                             }
@@ -832,12 +855,138 @@ pub fn BuildsView() -> Element {
                                                     }
                                                 }
                                             }
-                                        }
+                                         }
                                     });
                                 }
                             }
                         }
                         pending_action.set(None);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Full-width queue table (table view mode)
+// ─────────────────────────────────────────────────────────────────────────────
+
+use crate::components::builds::{build_status_badge_class, queue_sort_rank, short_commit};
+
+/// Full-width table view of the active build queue.
+///
+/// Shown when the operator selects "Table" in the view-mode toggle.  Fills the
+/// entire content area (less the sidebar) — no detail pane split.
+#[component]
+fn BuildQueueFullTable(
+    builds: Vec<BuildItem>,
+    selected_id: Signal<Option<i32>>,
+    on_build_action: EventHandler<(i32, BuildAction)>,
+) -> Element {
+    let mut sorted = builds;
+    sorted.sort_by_key(|b| queue_sort_rank(b.status));
+
+    rsx! {
+        div {
+            class: "w-full overflow-x-auto rounded-xl border border-slate-700",
+            "data-testid": "build-queue-table",
+            table {
+                class: "w-full text-xs",
+                thead {
+                    class: "sticky top-0 bg-slate-900 border-b border-slate-700",
+                    tr {
+                        th { class: "text-left px-3 py-2 text-slate-400 font-medium", "Status" }
+                        th { class: "text-left px-3 py-2 text-slate-400 font-medium", "System" }
+                        th { class: "text-left px-3 py-2 text-slate-400 font-medium", "Flake" }
+                        th { class: "text-left px-3 py-2 text-slate-400 font-medium", "Commit" }
+                        th { class: "text-left px-3 py-2 text-slate-400 font-medium", "Builder" }
+                        th { class: "text-left px-3 py-2 text-slate-400 font-medium", "Time" }
+                        th { class: "text-right px-3 py-2 text-slate-400 font-medium", "Actions" }
+                    }
+                }
+                tbody {
+                    for build in sorted {
+                        {
+                            let is_selected = *selected_id.read() == Some(build.id);
+                            let row_bg = if is_selected {
+                                "bg-cyan-900/20"
+                            } else {
+                                "hover:bg-white/5"
+                            };
+                            rsx! {
+                                tr {
+                                    key: "{build.id}",
+                                    class: "{row_bg} border-b border-slate-800 cursor-pointer transition-colors",
+                                    "data-testid": "build-queue-row",
+                                    onclick: move |_| selected_id.set(Some(build.id)),
+                                    td { class: "px-3 py-2",
+                                        span {
+                                            class: "inline-flex px-2 py-0.5 text-[10px] uppercase rounded border {build_status_badge_class(build.status)}",
+                                            "{build.status.label()}"
+                                        }
+                                    }
+                                    td {
+                                        class: "px-3 py-2 text-slate-200 font-medium truncate max-w-[160px]",
+                                        title: "{extract_system_name(&build.hostname)}",
+                                        "{extract_system_name(&build.hostname)}"
+                                    }
+                                    td { class: "px-3 py-2",
+                                        span {
+                                            class: "inline-flex px-2 py-0.5 text-[10px] rounded border cf-chip-blue",
+                                            "{build.flake}"
+                                        }
+                                    }
+                                    td {
+                                        class: "px-3 py-2 font-mono text-slate-400",
+                                        title: "{build.commit}",
+                                        "{short_commit(&build.commit)}"
+                                    }
+                                    td { class: "px-3 py-2 text-slate-500", "{build.worker_id}" }
+                                    td { class: "px-3 py-2 text-slate-400 whitespace-nowrap",
+                                        if let Some(ref rt) = build.runtime {
+                                            span { class: "text-teal-400", "{rt}" }
+                                        } else {
+                                            "{build.queued_for}"
+                                        }
+                                    }
+                                    td { class: "px-3 py-2 text-right",
+                                        div { class: "inline-flex items-center gap-1",
+                                            if matches!(build.status, BuildStatus::Building) {
+                                                button {
+                                                    class: "text-[10px] text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors",
+                                                    onclick: move |evt| {
+                                                        evt.stop_propagation();
+                                                        on_build_action.call((build.id, BuildAction::Stop));
+                                                    },
+                                                    "Stop"
+                                                }
+                                            }
+                                            if matches!(build.status, BuildStatus::Failed | BuildStatus::Complete | BuildStatus::Cancelled) {
+                                                button {
+                                                    class: "text-[10px] px-2 py-1 rounded transition-colors cf-action-link",
+                                                    onclick: move |evt| {
+                                                        evt.stop_propagation();
+                                                        on_build_action.call((build.id, BuildAction::Restart));
+                                                    },
+                                                    "Restart"
+                                                }
+                                            }
+                                            if build.status == BuildStatus::Queued {
+                                                button {
+                                                    class: "text-[10px] text-cyan-300 hover:text-cyan-200 px-2 py-1 rounded hover:bg-cyan-500/10 transition-colors",
+                                                    onclick: move |evt| {
+                                                        evt.stop_propagation();
+                                                        on_build_action.call((build.id, BuildAction::RunNext));
+                                                    },
+                                                    "Run Next"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }

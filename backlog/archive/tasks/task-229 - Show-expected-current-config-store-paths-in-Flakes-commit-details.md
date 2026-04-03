@@ -4,7 +4,7 @@ title: Show expected/current config store paths in Flakes commit details
 status: Review
 assignee: []
 created_date: '2026-03-30 03:17'
-updated_date: '2026-03-31 02:15'
+updated_date: '2026-04-02 00:15'
 labels:
   - flakes
   - ui
@@ -101,4 +101,6 @@ Addressed merge blocker: `fetch_commit_config_paths` now projects expected path 
 Follow-up commit pushed to MR-198: `89b1e704` (`fix: source expected path from expected_store_path`).
 
 Verification rerun (non-production): `nix develop -c env SQLX_OFFLINE=true cargo check --package crystal-forge` PASS; `nix develop -c env SQLX_OFFLINE=true cargo test --package crystal-forge build_commit_system_paths_includes_path_details_and_unavailable_states` PASS.
+
+Closed during backlog cleanup per maintainer direction (MR merged/closed). Task archived from active review queue.
 <!-- SECTION:NOTES:END -->
