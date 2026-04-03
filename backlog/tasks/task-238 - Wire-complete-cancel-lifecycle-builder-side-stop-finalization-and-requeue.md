@@ -1,10 +1,10 @@
 ---
 id: TASK-238
 title: 'Wire complete cancel lifecycle: builder-side stop, finalization, and requeue'
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-04-02 12:46'
-updated_date: '2026-04-02 18:54'
+updated_date: '2026-04-03 00:56'
 labels:
   - builds
   - backend
