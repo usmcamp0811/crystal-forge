@@ -1,10 +1,10 @@
 ---
 id: TASK-241
 title: Hotfix build_jobs status constraint for cancelling/cancelled transitions
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-04-03 12:18'
-updated_date: '2026-04-03 12:19'
+updated_date: '2026-04-03 12:20'
 labels:
   - hotfix
   - builds
@@ -95,3 +95,9 @@ High (hotfix on deployed dev DB path), but code scope is small and isolated to s
 - `packages/default/src/handlers/api/builders.rs`
 - TASK-238 / MR !206
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: openai-gpt-5.4 on reckless in /home/mcamp/code/crystal-forge/TASK-241-build-jobs-status-hotfix
+<!-- SECTION:NOTES:END -->
