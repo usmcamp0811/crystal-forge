@@ -3,9 +3,10 @@ id: TASK-242
 title: >-
   Repair post-build flow: API cache push processing and auto-latest deployment
   signaling
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-04-03 14:26'
+updated_date: '2026-04-03 14:26'
 labels:
   - builds
   - cache
