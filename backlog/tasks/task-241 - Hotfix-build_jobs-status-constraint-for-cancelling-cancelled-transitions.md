@@ -1,10 +1,10 @@
 ---
 id: TASK-241
 title: Hotfix build_jobs status constraint for cancelling/cancelled transitions
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-04-03 12:18'
-updated_date: '2026-04-03 12:20'
+updated_date: '2026-04-03 12:35'
 labels:
   - hotfix
   - builds
@@ -100,4 +100,15 @@ High (hotfix on deployed dev DB path), but code scope is small and isolated to s
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: openai-gpt-5.4 on reckless in /home/mcamp/code/crystal-forge/TASK-241-build-jobs-status-hotfix
+
+## MR Created
+
+MR !207: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/207
+
+Verification completed:
+- `nix develop ../.. -c env SQLX_OFFLINE=true cargo check` passed
+- Dev DB migrations applied successfully
+- `cargo sqlx prepare` was run against the initialized dev DB
+
+This hotfix is schema-only and should unblock `Stop` on running builds by allowing `cancelling`/`cancelled` at the database layer.
 <!-- SECTION:NOTES:END -->
