@@ -3,10 +3,10 @@ id: TASK-242
 title: >-
   Repair post-build flow: API cache push processing and auto-latest deployment
   signaling
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-04-03 14:26'
-updated_date: '2026-04-03 14:28'
+updated_date: '2026-04-03 14:42'
 labels:
   - builds
   - cache
@@ -158,4 +158,15 @@ This touches the production post-build pipeline, but the actual code changes sho
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: openai-gpt-5.4 on reckless in /home/mcamp/code/crystal-forge/TASK-242-post-build-flow
+
+## MR Created
+
+MR !208: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/208
+
+Verification completed:
+- `nix develop ../.. -c env SQLX_OFFLINE=true cargo check`
+- `nix develop ../.. -c env SQLX_OFFLINE=true cargo test auto_latest_query_selects_system_configuration_name`
+- `nix develop ../.. -c env SQLX_OFFLINE=true cargo test cache_push_loop_only_starts_when_push_after_build_enabled`
+
+This should restore the intended path: build complete -> cache push processed -> desired_target updated -> agent sees desired_target.
 <!-- SECTION:NOTES:END -->
