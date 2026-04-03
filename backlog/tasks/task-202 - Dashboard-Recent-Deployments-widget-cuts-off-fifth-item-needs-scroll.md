@@ -1,10 +1,10 @@
 ---
 id: TASK-202
-title: Dashboard Recent Deployments widget cuts off fifth item, needs scroll
+title: 'Dashboard Recent Deployments widget cuts off fifth item, needs scroll'
 status: To Do
 assignee: []
 created_date: '2026-03-20 13:40'
-updated_date: '2026-03-20 13:40'
+updated_date: '2026-04-02 00:05'
 labels:
   - frontend
   - dashboard
@@ -15,7 +15,7 @@ dependencies: []
 references:
   - packages/web-ui/src/components/dashboard/recent_deployments.rs
 priority: high
-ordinal: 1300
+ordinal: 3000
 ---
 
 # Dashboard Recent Deployments widget cuts off fifth item, needs scroll
