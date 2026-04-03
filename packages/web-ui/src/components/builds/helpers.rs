@@ -3,9 +3,9 @@
 use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
 use std::rc::Rc;
-use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
-use web_sys::{Node, window};
+use wasm_bindgen::JsCast;
+use web_sys::{window, Node};
 
 /// Extract the system name from a full flake attribute path or hostname.
 ///
@@ -222,6 +222,18 @@ pub fn event_level_class(level: &str) -> &'static str {
 
 pub fn short_commit(commit: &str) -> String {
     commit.chars().take(7).collect()
+}
+
+/// Sort rank for queue ordering: lower = displayed first.
+pub fn queue_sort_rank(status: BuildStatus) -> i32 {
+    match status {
+        BuildStatus::Building => 0,
+        BuildStatus::Stopping => 1,
+        BuildStatus::Queued => 2,
+        BuildStatus::Failed => 3,
+        BuildStatus::Complete => 4,
+        BuildStatus::Cancelled => 5,
+    }
 }
 
 pub fn queue_row_style(selected: bool, status: BuildStatus) -> String {
