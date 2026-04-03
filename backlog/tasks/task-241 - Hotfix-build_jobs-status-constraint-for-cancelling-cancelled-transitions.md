@@ -1,9 +1,10 @@
 ---
 id: TASK-241
 title: Hotfix build_jobs status constraint for cancelling/cancelled transitions
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-04-03 12:18'
+updated_date: '2026-04-03 12:19'
 labels:
   - hotfix
   - builds
