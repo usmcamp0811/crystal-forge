@@ -3,10 +3,10 @@ id: TASK-242
 title: >-
   Repair post-build flow: API cache push processing and auto-latest deployment
   signaling
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-04-03 14:26'
-updated_date: '2026-04-03 14:26'
+updated_date: '2026-04-03 14:28'
 labels:
   - builds
   - cache
@@ -153,3 +153,9 @@ This touches the production post-build pipeline, but the actual code changes sho
 - [ ] #6 Existing relevant UI/API surfaces reflect the repaired state correctly, or the minimal required correctness fix is included.
 - [ ] #7 Targeted verification demonstrates the full path: build complete -> cache push completed -> desired_target updated -> agent sees desired_target.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: openai-gpt-5.4 on reckless in /home/mcamp/code/crystal-forge/TASK-242-post-build-flow
+<!-- SECTION:NOTES:END -->
