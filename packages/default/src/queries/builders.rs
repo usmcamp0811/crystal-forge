@@ -929,17 +929,24 @@ pub async fn cancel_build_job(pool: &PgPool, job_id: &Uuid) -> Result<BuildJob> 
         other => bail!("Cannot cancel build in status: {}", other),
     };
 
+    // Queued jobs are immediately terminal — set completed_at now.
+    // Building jobs go to cancelling (not yet terminal); completed_at is set
+    // later by finalize_cancelled_job once the builder confirms cleanup.
+    let set_completed_at = new_status == "cancelled";
+
     let updated_job = sqlx::query_as::<_, BuildJob>(
         r#"
         UPDATE build_jobs
-        SET status = $2,
-            updated_at = now()
+        SET status       = $2,
+            completed_at = CASE WHEN $3 THEN now() ELSE completed_at END,
+            updated_at   = now()
         WHERE id = $1
         RETURNING *
         "#,
     )
     .bind(job_id)
     .bind(new_status)
+    .bind(set_completed_at)
     .fetch_one(pool)
     .await
     .context("Failed to cancel build job")?;

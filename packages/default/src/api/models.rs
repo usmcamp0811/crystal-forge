@@ -81,6 +81,10 @@ pub enum BuildStatus {
     Queued,
     /// Build is currently in progress.
     Building,
+    /// Cancel requested; waiting for builder to stop the nix process.
+    Cancelling,
+    /// Build was cancelled (terminal).
+    Cancelled,
     /// Build completed successfully.
     Complete,
     /// Build failed.
