@@ -284,10 +284,6 @@ async fn main() -> anyhow::Result<()> {
             post(builders::cancel_build_job),
         )
         .route(
-            "/api/v1/build-jobs/:id/cancel",
-            post(builders::cancel_build_job),
-        )
-        .route(
             "/api/v1/build-jobs/:id/requeue",
             post(builders::requeue_build_job),
         )
