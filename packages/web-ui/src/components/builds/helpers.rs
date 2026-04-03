@@ -3,9 +3,9 @@
 use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
 use std::rc::Rc;
-use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::JsCast;
-use web_sys::{window, Node};
+use wasm_bindgen::prelude::Closure;
+use web_sys::{Node, window};
 
 /// Extract the system name from a full flake attribute path or hostname.
 ///
@@ -50,6 +50,7 @@ impl WorkerStatus {
 pub enum BuildStatus {
     Queued,
     Building,
+    /// Cancel requested; builder is stopping the nix process.
     Stopping,
     Failed,
     Complete,
@@ -278,6 +279,7 @@ pub fn apply_action(
             let mut next_builds = builds.read().clone();
             match action {
                 BuildAction::Stop => {
+                    // Optimistic UI: show Stopping immediately; server will confirm.
                     if let Some(target) = next_builds.iter_mut().find(|b| b.id == build_id) {
                         target.status = BuildStatus::Stopping;
                     }
@@ -287,6 +289,7 @@ pub fn apply_action(
                     note.set(Some(format!("Stopped build #{build_id}")));
                 }
                 BuildAction::Restart => {
+                    // Optimistic UI: show Queued immediately; server will confirm.
                     if let Some(target) = next_builds.iter_mut().find(|b| b.id == build_id) {
                         target.status = BuildStatus::Building;
                         target.runtime = Some("00:00".to_string());

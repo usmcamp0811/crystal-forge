@@ -1035,6 +1035,125 @@ pub async fn mark_job_failed_with_retry(
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Cancel / requeue lifecycle
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Return the raw status string of a build job, or `None` if the job does not
+/// exist.  Used by the builder to poll for external cancellation.
+pub async fn get_build_job_status(pool: &PgPool, job_id: &Uuid) -> Result<Option<String>> {
+    let row = sqlx::query_scalar::<_, String>(r#"SELECT status FROM build_jobs WHERE id = $1"#)
+        .bind(job_id)
+        .fetch_optional(pool)
+        .await
+        .context("Failed to fetch build job status")?;
+    Ok(row)
+}
+
+/// Cancel a build job.
+///
+/// * Queued jobs → immediately `cancelled` (with `completed_at = now()`).
+/// * Building jobs → `cancelling` (builder detects this on next heartbeat and
+///   calls `finalize_cancelled_job` once the nix process has stopped).
+///
+/// Returns the updated `BuildJob`, or an error if the transition is illegal.
+pub async fn cancel_build_job(pool: &PgPool, job_id: &Uuid) -> Result<BuildJob> {
+    let job = get_build_job_by_id(pool, job_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Build job not found"))?;
+
+    let (new_status, set_completed_at) = match job.status.as_str() {
+        "queued" => ("cancelled", true),
+        "building" => ("cancelling", false),
+        "cancelling" => bail!("Build job is already being cancelled"),
+        "cancelled" => bail!("Build job is already cancelled"),
+        "success" => bail!("Cannot cancel a completed build"),
+        "failed" => bail!("Cannot cancel a failed build"),
+        other => bail!("Cannot cancel build in status: {}", other),
+    };
+
+    let updated = sqlx::query_as::<_, BuildJob>(
+        r#"
+        UPDATE build_jobs
+        SET status       = $2,
+            completed_at = CASE WHEN $3 THEN now() ELSE completed_at END,
+            updated_at   = now()
+        WHERE id = $1
+        RETURNING *
+        "#,
+    )
+    .bind(job_id)
+    .bind(new_status)
+    .bind(set_completed_at)
+    .fetch_one(pool)
+    .await
+    .context("Failed to cancel build job")?;
+
+    Ok(updated)
+}
+
+/// Transition a job from `cancelling` → `cancelled` with a `completed_at`
+/// timestamp.  Called by the builder after it has killed the nix process and
+/// flushed any final logs.
+///
+/// Idempotent: if the job is already `cancelled` the update matches 0 rows and
+/// we return the existing row unchanged rather than an error.
+pub async fn finalize_cancelled_job(pool: &PgPool, job_id: &Uuid) -> Result<BuildJob> {
+    let job = sqlx::query_as::<_, BuildJob>(
+        r#"
+        UPDATE build_jobs
+        SET status       = 'cancelled',
+            completed_at = now(),
+            updated_at   = now()
+        WHERE id = $1
+          AND status IN ('cancelling', 'cancelled')
+        RETURNING *
+        "#,
+    )
+    .bind(job_id)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to finalize cancelled job")?
+    .ok_or_else(|| anyhow::anyhow!("Build job not found or not in a cancellable state"))?;
+
+    Ok(job)
+}
+
+/// Reset a `cancelled` (or `failed`) job back to `queued` in-place, reusing
+/// the existing `build_jobs` row.  This avoids the `NOT EXISTS` duplicate guard
+/// that would block a fresh `INSERT` for the same derivation.
+///
+/// Priority is reset to the job's original `priority_weight` (stored on the
+/// row).  `retry_count`, `builder_id`, `started_at`, and `completed_at` are
+/// all cleared so the job enters the queue as if freshly created.
+pub async fn requeue_cancelled_job(pool: &PgPool, job_id: &Uuid) -> Result<BuildJob> {
+    let updated = sqlx::query_as::<_, BuildJob>(
+        r#"
+        UPDATE build_jobs
+        SET status       = 'queued',
+            builder_id   = NULL,
+            started_at   = NULL,
+            completed_at = NULL,
+            retry_count  = 0,
+            updated_at   = now()
+        WHERE id = $1
+          AND status IN ('cancelled', 'failed')
+        RETURNING *
+        "#,
+    )
+    .bind(job_id)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to requeue build job")?
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "Build job not found or not in a requeue-eligible status (cancelled/failed)"
+        )
+    })?;
+
+    Ok(updated)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -314,6 +314,46 @@ impl BuilderApiClient {
         Ok(())
     }
 
+    /// Notify the server that a cancelling job has been fully stopped.
+    ///
+    /// Transitions the job from `cancelling` → `cancelled` with `completed_at`.
+    /// Should be called after the nix process has been killed and final logs flushed.
+    pub async fn finalize_cancelled_job(&self, job_id: uuid::Uuid) -> Result<()> {
+        let path = format!(
+            "/api/v1/builders/{}/jobs/{}/finalize-cancelled",
+            self.builder_id, job_id
+        );
+        let url = format!("{}{}", self.server_url, path);
+        let (builder_id, signature, timestamp) = self.sign_request("POST", &path, &[]);
+
+        let response = self
+            .client
+            .post(&url)
+            .header("X-Builder-ID", builder_id)
+            .header("X-Signature", signature)
+            .header("X-Timestamp", timestamp)
+            .body("")
+            .send()
+            .await
+            .context("Failed to finalize cancelled job")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown error".to_string());
+            anyhow::bail!(
+                "Finalize-cancelled failed with status {}: {}",
+                status,
+                error_text
+            );
+        }
+
+        info!("Job {} finalized as cancelled", job_id);
+        Ok(())
+    }
+
     /// Append logs to a job
     pub async fn append_logs(&self, job_id: uuid::Uuid, log_lines: &str) -> Result<()> {
         #[derive(Serialize)]
