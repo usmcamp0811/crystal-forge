@@ -107,8 +107,12 @@ pub(super) async fn build_worker(
                 let build_result = if use_mock_build {
                     tokio::time::timeout(build_timeout, run_mock_legacy_build(&derivation)).await
                 } else {
-                    tokio::time::timeout(build_timeout, derivation.build(&pool, &build_config))
-                        .await
+                    // Legacy worker path: no job_id available, cancel detection not supported here.
+                    tokio::time::timeout(
+                        build_timeout,
+                        derivation.build(&pool, &build_config, None),
+                    )
+                    .await
                 };
 
                 info!("  → Step 2: derivation.build() returned");
