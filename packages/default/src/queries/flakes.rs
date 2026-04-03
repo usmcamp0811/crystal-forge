@@ -1,4 +1,6 @@
-use crate::api::models::{BuildStatus, CommitMetadata, FlakeCommit, FlakeRegistryItem, FlakeTimeline};
+use crate::api::models::{
+    BuildStatus, CommitMetadata, FlakeCommit, FlakeRegistryItem, FlakeTimeline,
+};
 use crate::config::{FlakeConfig, WatchedFlake};
 use crate::models::flakes::Flake;
 use anyhow::Context;
@@ -623,43 +625,43 @@ pub async fn fetch_flake_timelines(
         let commits: Vec<FlakeCommit> = commits_rows
             .into_iter()
             .map(|row| {
-                    let build_status = row.build_status.as_deref().map(|status| match status {
-                        "queued" => BuildStatus::Queued,
-                        "building" => BuildStatus::Building,
-                        "failed" => BuildStatus::Failed,
-                        "complete" => BuildStatus::Complete,
-                        _ => BuildStatus::Idle,
-                    });
+                let build_status = row.build_status.as_deref().map(|status| match status {
+                    "queued" => BuildStatus::Queued,
+                    "building" => BuildStatus::Building,
+                    "failed" => BuildStatus::Failed,
+                    "complete" => BuildStatus::Complete,
+                    _ => BuildStatus::Idle,
+                });
 
-                    let metadata = if let (
-                        Some(total_systems),
-                        Some(systems_passed_policy),
-                        Some(systems_failed_policy_strict),
-                        Some(systems_failed_policy_non_strict),
-                        Some(has_nix_eval_error),
-                        Some(has_policy_failures),
-                        Some(all_systems_passed),
-                    ) = (
-                        row.total_systems,
-                        row.systems_passed_policy,
-                        row.systems_failed_policy_strict,
-                        row.systems_failed_policy_non_strict,
-                        row.has_nix_eval_error,
-                        row.has_policy_failures,
-                        row.all_systems_passed,
-                    ) {
-                        Some(CommitMetadata {
-                            total_systems,
-                            systems_passed_policy,
-                            systems_failed_policy_strict,
-                            systems_failed_policy_non_strict,
-                            has_nix_eval_error,
-                            has_policy_failures,
-                            all_systems_passed,
-                        })
-                    } else {
-                        None
-                    };
+                let metadata = if let (
+                    Some(total_systems),
+                    Some(systems_passed_policy),
+                    Some(systems_failed_policy_strict),
+                    Some(systems_failed_policy_non_strict),
+                    Some(has_nix_eval_error),
+                    Some(has_policy_failures),
+                    Some(all_systems_passed),
+                ) = (
+                    row.total_systems,
+                    row.systems_passed_policy,
+                    row.systems_failed_policy_strict,
+                    row.systems_failed_policy_non_strict,
+                    row.has_nix_eval_error,
+                    row.has_policy_failures,
+                    row.all_systems_passed,
+                ) {
+                    Some(CommitMetadata {
+                        total_systems,
+                        systems_passed_policy,
+                        systems_failed_policy_strict,
+                        systems_failed_policy_non_strict,
+                        has_nix_eval_error,
+                        has_policy_failures,
+                        all_systems_passed,
+                    })
+                } else {
+                    None
+                };
 
                     FlakeCommit {
                         id: row.id,

@@ -115,12 +115,9 @@ impl DeploymentPolicyManager {
             .collect();
 
         // Fetch per-host latest deployable targets for the latest commit
-        let per_host = get_latest_deployable_targets_for_flake_hosts(
-            &self.pool,
-            flake_id,
-            &config_names,
-        )
-        .await?;
+        let per_host =
+            get_latest_deployable_targets_for_flake_hosts(&self.pool, flake_id, &config_names)
+                .await?;
         let latest_by_host: HashMap<_, _> = per_host
             .into_iter()
             .filter_map(|h| h.store_path.map(|t| (h.hostname, t)))
@@ -145,7 +142,8 @@ impl DeploymentPolicyManager {
                 }
             }
 
-            let Some(latest_target_for_host) = latest_by_host.get(system.configuration_name()) else {
+            let Some(latest_target_for_host) = latest_by_host.get(system.configuration_name())
+            else {
                 debug!(
                     "No deployable nixos derivation on latest commit for host {} (config {})",
                     system.hostname,

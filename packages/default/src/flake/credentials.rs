@@ -170,7 +170,10 @@ impl FlakeCredentialEnv {
                         let netrc_content =
                             format!("machine {repo_host} login {username} password {secret}\n");
                         write_secret_file(&netrc_file, &netrc_content)?;
-                        info!("Prepared netrc credential for flake {}", credential.flake_id);
+                        info!(
+                            "Prepared netrc credential for flake {}",
+                            credential.flake_id
+                        );
                         netrc_path = Some(netrc_file);
                     }
                 }
@@ -215,7 +218,10 @@ fn build_ssh_command(ssh_key: &Path, known_hosts: Option<&Path>, username: &str)
     );
 
     if let Some(path) = known_hosts {
-        command.push_str(&format!(" -o UserKnownHostsFile={}", path.to_string_lossy()));
+        command.push_str(&format!(
+            " -o UserKnownHostsFile={}",
+            path.to_string_lossy()
+        ));
     }
 
     if !username.trim().is_empty() {

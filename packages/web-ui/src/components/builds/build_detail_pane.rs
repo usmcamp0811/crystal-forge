@@ -3,7 +3,7 @@
 use dioxus::prelude::*;
 
 use crate::components::layout::Card;
-use crate::hooks::websocket::{use_websocket_build_stream, ConnectionState};
+use crate::hooks::websocket::{ConnectionState, use_websocket_build_stream};
 use crate::theme;
 
 use super::helpers::{

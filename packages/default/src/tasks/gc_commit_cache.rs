@@ -27,16 +27,16 @@ pub async fn garbage_collect_commit_cache(
     )
     .execute(pool)
     .await?;
-    
+
     let deleted = result.rows_affected();
-    
+
     if deleted > 0 {
         info!(
             "🗑️  Garbage collected {} cached commit metadata entries older than {} days",
             deleted, retention_days
         );
     }
-    
+
     Ok(deleted)
 }
 

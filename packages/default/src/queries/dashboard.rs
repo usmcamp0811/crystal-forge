@@ -199,9 +199,13 @@ pub async fn fetch_build_queue(pool: &PgPool, limit: i64) -> Result<BuildQueueSu
         LEFT JOIN systems s ON s.hostname = d.derivation_target
         LEFT JOIN environments e ON e.id = s.environment_id
         LEFT JOIN builders b ON b.id = bj.builder_id
-        WHERE bj.status IN ('queued', 'building')
+        WHERE bj.status IN ('queued', 'building', 'cancelling')
         ORDER BY
-            CASE WHEN bj.status = 'building' THEN 0 ELSE 1 END,
+            CASE
+                WHEN bj.status = 'building'   THEN 0
+                WHEN bj.status = 'cancelling' THEN 1
+                ELSE 2
+            END,
             bj.priority_weight DESC,
             c.commit_timestamp DESC NULLS LAST,
             bj.created_at ASC
@@ -235,6 +239,8 @@ pub async fn fetch_build_queue(pool: &PgPool, limit: i64) -> Result<BuildQueueSu
                 let status = match status.as_str() {
                     "queued" => BuildStatus::Queued,
                     "building" => BuildStatus::Building,
+                    "cancelling" => BuildStatus::Cancelling,
+                    "cancelled" => BuildStatus::Cancelled,
                     "failed" => BuildStatus::Failed,
                     "success" => BuildStatus::Complete,
                     _ => BuildStatus::Idle,
@@ -261,7 +267,7 @@ pub async fn fetch_build_queue(pool: &PgPool, limit: i64) -> Result<BuildQueueSu
 
     let building_count = items
         .iter()
-        .filter(|item| item.status == BuildStatus::Building)
+        .filter(|item| matches!(item.status, BuildStatus::Building | BuildStatus::Cancelling))
         .count() as i64;
     let queued_count = items
         .iter()
@@ -321,7 +327,7 @@ pub async fn fetch_recent_build_history(pool: &PgPool, limit: i64) -> Result<Vec
         LEFT JOIN systems s ON s.hostname = d.derivation_target
         LEFT JOIN environments e ON e.id = s.environment_id
         LEFT JOIN builders b ON b.id = bj.builder_id
-        WHERE bj.status IN ('success', 'failed')
+        WHERE bj.status IN ('success', 'failed', 'cancelled')
         ORDER BY COALESCE(bj.completed_at, bj.updated_at, bj.created_at) DESC
         LIMIT $1
         "#,
@@ -351,7 +357,9 @@ pub async fn fetch_recent_build_history(pool: &PgPool, limit: i64) -> Result<Vec
                 let status = match status.as_str() {
                     "failed" => BuildStatus::Failed,
                     "success" => BuildStatus::Complete,
+                    "cancelled" => BuildStatus::Cancelled,
                     "building" => BuildStatus::Building,
+                    "cancelling" => BuildStatus::Cancelling,
                     "queued" => BuildStatus::Queued,
                     _ => BuildStatus::Idle,
                 };
@@ -485,11 +493,12 @@ pub async fn list_build_queue_paginated(
             AND ($5::timestamptz IS NULL OR bj.created_at >= $5)
             AND ($6::timestamptz IS NULL OR bj.created_at <= $6)
         ORDER BY
-            -- In-progress first, then newest queued/completed
+            -- In-progress first, stopping second, queued third, then terminal
             CASE
-                WHEN bj.status = 'building' THEN 0
-                WHEN bj.status = 'queued' THEN 1
-                ELSE 2
+                WHEN bj.status = 'building'   THEN 0
+                WHEN bj.status = 'cancelling' THEN 1
+                WHEN bj.status = 'queued'     THEN 2
+                ELSE 3
             END,
             bj.created_at DESC NULLS LAST
         LIMIT $7
@@ -531,6 +540,8 @@ pub async fn list_build_queue_paginated(
                 let status = match status.as_str() {
                     "queued" => BuildStatus::Queued,
                     "building" => BuildStatus::Building,
+                    "cancelling" => BuildStatus::Cancelling,
+                    "cancelled" => BuildStatus::Cancelled,
                     "failed" => BuildStatus::Failed,
                     "success" => BuildStatus::Complete,
                     _ => BuildStatus::Idle,

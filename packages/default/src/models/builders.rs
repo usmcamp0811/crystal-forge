@@ -199,8 +199,10 @@ mod tests {
 pub enum BuildJobStatus {
     Queued,
     Building,
+    Cancelling,
     Success,
     Failed,
+    Cancelled,
 }
 
 impl std::fmt::Display for BuildJobStatus {
@@ -208,8 +210,10 @@ impl std::fmt::Display for BuildJobStatus {
         match self {
             BuildJobStatus::Queued => write!(f, "queued"),
             BuildJobStatus::Building => write!(f, "building"),
+            BuildJobStatus::Cancelling => write!(f, "cancelling"),
             BuildJobStatus::Success => write!(f, "success"),
             BuildJobStatus::Failed => write!(f, "failed"),
+            BuildJobStatus::Cancelled => write!(f, "cancelled"),
         }
     }
 }

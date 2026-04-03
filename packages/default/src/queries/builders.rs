@@ -129,11 +129,20 @@ pub async fn list_builders(pool: &PgPool) -> Result<Vec<BuilderSummary>> {
             b.max_concurrent_jobs,
             b.last_heartbeat_at,
             COALESCE(COUNT(DISTINCT bea.id), 0)::int as assigned_environment_count,
-            COALESCE(COUNT(DISTINCT CASE WHEN bj.status = 'building' THEN bj.id END), 0)::int as active_jobs,
-            COALESCE(COUNT(DISTINCT CASE WHEN bj.status = 'queued' AND bj.builder_id = b.id THEN bj.id END), 0)::int as queued_jobs
+            COALESCE(COUNT(DISTINCT CASE WHEN bj.status = 'building' AND bj.builder_id = b.id THEN bj.id END), 0)::int as active_jobs,
+            -- Count queued jobs eligible for this builder (matching environments or no environment)
+            COALESCE((
+                SELECT COUNT(DISTINCT qj.id)
+                FROM build_jobs qj
+                WHERE qj.status = 'queued'
+                  AND (
+                    qj.environment_id IS NULL
+                    OR qj.environment_id IN (SELECT environment_id FROM builder_environment_assignments WHERE builder_id = b.id)
+                  )
+            ), 0)::int as queued_jobs
         FROM builders b
         LEFT JOIN builder_environment_assignments bea ON bea.builder_id = b.id
-        LEFT JOIN build_jobs bj ON bj.builder_id = b.id AND bj.status IN ('queued', 'building')
+        LEFT JOIN build_jobs bj ON bj.builder_id = b.id AND bj.status = 'building'
         GROUP BY b.id, b.name, b.status, b.max_cpu_cores, b.max_memory_mb, b.max_concurrent_jobs, b.last_heartbeat_at
         ORDER BY b.created_at DESC
         "#
@@ -898,6 +907,73 @@ pub async fn prioritize_build_job(pool: &PgPool, job_id: &Uuid) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Cancel a build job.
+/// - If queued: immediately mark as cancelled.
+/// - If building: mark as cancelling (builder will detect and stop).
+/// Returns the updated job or error if job not found/not cancellable.
+pub async fn cancel_build_job(pool: &PgPool, job_id: &Uuid) -> Result<BuildJob> {
+    // First get current state
+    let job = get_build_job_by_id(pool, job_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Build job not found"))?;
+
+    let new_status = match job.status.as_str() {
+        "queued" => "cancelled",
+        "building" => "cancelling",
+        "cancelling" => bail!("Build job is already being cancelled"),
+        "cancelled" => bail!("Build job is already cancelled"),
+        "success" => bail!("Cannot cancel a completed build"),
+        "failed" => bail!("Cannot cancel a failed build"),
+        other => bail!("Cannot cancel build in status: {}", other),
+    };
+
+    // Queued jobs are immediately terminal — set completed_at now.
+    // Building jobs go to cancelling (not yet terminal); completed_at is set
+    // later by finalize_cancelled_job once the builder confirms cleanup.
+    let set_completed_at = new_status == "cancelled";
+
+    let updated_job = sqlx::query_as::<_, BuildJob>(
+        r#"
+        UPDATE build_jobs
+        SET status       = $2,
+            completed_at = CASE WHEN $3 THEN now() ELSE completed_at END,
+            updated_at   = now()
+        WHERE id = $1
+        RETURNING *
+        "#,
+    )
+    .bind(job_id)
+    .bind(new_status)
+    .bind(set_completed_at)
+    .fetch_one(pool)
+    .await
+    .context("Failed to cancel build job")?;
+
+    Ok(updated_job)
+}
+
+/// Finalize a cancelling job as cancelled (called by builder after cleanup).
+pub async fn finalize_cancelled_job(pool: &PgPool, job_id: &Uuid) -> Result<BuildJob> {
+    let job = sqlx::query_as::<_, BuildJob>(
+        r#"
+        UPDATE build_jobs
+        SET status = 'cancelled',
+            completed_at = now(),
+            updated_at = now()
+        WHERE id = $1
+          AND status = 'cancelling'
+        RETURNING *
+        "#,
+    )
+    .bind(job_id)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to finalize cancelled job")?
+    .ok_or_else(|| anyhow::anyhow!("Cancelling build job not found"))?;
+
+    Ok(job)
 }
 
 /// Mark a job as failed with retry logic

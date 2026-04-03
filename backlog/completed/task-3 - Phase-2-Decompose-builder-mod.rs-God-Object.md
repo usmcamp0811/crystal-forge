@@ -1,11 +1,11 @@
 ---
 id: TASK-3
 title: 'Phase 2: Decompose builder/mod.rs God Object'
-status: Review
+status: Done
 assignee:
   - KimiK2.5
 created_date: '2026-02-04 20:15'
-updated_date: '2026-03-01 15:32'
+updated_date: '2026-04-02 00:05'
 labels:
   - refactoring
   - architecture
@@ -53,4 +53,6 @@ Fixed flaky test in commit 9e7f8e6: Added serial_test dependency and #[serial] a
 Commit 057cf81: Updated Cargo.lock to include serial_test dependency for Nix offline builds. This allows the vendored dependencies to include the new test dependency.
 
 Starting Phase 1: Refactoring queries/derivations.rs (2,012 lines) into focused modules: crud.rs, status.rs, build_queue.rs, cache.rs, lifecycle.rs, metadata.rs, and mod.rs.
+
+Backlog maintenance sync: implementation commits (`1771637`, `9e7f8e6`, `057cf81`) are contained in `dev`; marking task complete.
 <!-- SECTION:NOTES:END -->

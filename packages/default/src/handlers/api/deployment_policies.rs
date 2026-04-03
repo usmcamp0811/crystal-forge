@@ -60,7 +60,7 @@ fn default_limit() -> i64 {
 /// Returns the normalized expression or an error if validation fails.
 fn validate_and_normalize_nix_expression(expr: &str) -> Result<String, (StatusCode, String)> {
     let trimmed = expr.trim();
-    
+
     if trimmed.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -75,14 +75,14 @@ fn validate_and_normalize_nix_expression(expr: &str) -> Result<String, (StatusCo
         let mut result = String::new();
         let mut chars = trimmed.chars().peekable();
         let mut last_three = String::new();
-        
+
         while let Some(c) = chars.next() {
             result.push(c);
             last_three.push(c);
             if last_three.len() > 3 {
                 last_three.remove(0);
             }
-            
+
             // Check if we just wrote "config" and next char is "."
             if result.ends_with("config") && chars.peek() == Some(&'.') {
                 // Check if it's preceded by "cfg."
@@ -93,7 +93,7 @@ fn validate_and_normalize_nix_expression(expr: &str) -> Result<String, (StatusCo
                 }
             }
         }
-        
+
         tracing::warn!(
             "Auto-corrected policy expression from 'config.' to 'cfg.config.': {} -> {}",
             trimmed,
@@ -107,7 +107,10 @@ fn validate_and_normalize_nix_expression(expr: &str) -> Result<String, (StatusCo
     Ok(normalized)
 }
 
-fn validate_policy_config(policy_type: &str, config: &Value) -> Result<Value, (StatusCode, String)> {
+fn validate_policy_config(
+    policy_type: &str,
+    config: &Value,
+) -> Result<Value, (StatusCode, String)> {
     if config.is_null() {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -167,7 +170,8 @@ fn validate_policy_config(policy_type: &str, config: &Value) -> Result<Value, (S
             }
         }
         "custom_check" => {
-            let expression = obj.get("expression")
+            let expression = obj
+                .get("expression")
                 .and_then(|v| v.as_str())
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
@@ -178,7 +182,7 @@ fn validate_policy_config(policy_type: &str, config: &Value) -> Result<Value, (S
 
             // Validate and normalize the expression
             let normalized_expr = validate_and_normalize_nix_expression(expression)?;
-            
+
             // Update the config with the normalized expression
             if let Some(config_obj) = validated_config.as_object_mut() {
                 config_obj.insert("expression".to_string(), Value::String(normalized_expr));
@@ -695,7 +699,7 @@ mod tests {
             &serde_json::json!({"expression": "cfg.config.services.ssh.enable", "strict": true}),
         )
         .expect("valid custom_check config must pass");
-        
+
         // Verify expression is preserved when already correct
         assert_eq!(
             result.get("expression").and_then(|v| v.as_str()),
@@ -710,7 +714,7 @@ mod tests {
             &serde_json::json!({"expression": "config.services.ssh.enable", "strict": true}),
         )
         .expect("should auto-fix config. to cfg.config.");
-        
+
         // Verify expression was auto-corrected
         assert_eq!(
             result.get("expression").and_then(|v| v.as_str()),
@@ -729,7 +733,7 @@ mod tests {
             }),
         )
         .expect("should auto-fix complex expression");
-        
+
         assert_eq!(
             result.get("expression").and_then(|v| v.as_str()),
             Some("!cfg.config.services.openssh.settings.PasswordAuthentication"),

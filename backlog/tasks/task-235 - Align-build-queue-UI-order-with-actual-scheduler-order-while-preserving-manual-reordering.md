@@ -3,10 +3,10 @@ id: TASK-235
 title: >-
   Align build queue UI order with actual scheduler order while preserving manual
   reordering
-status: To Do
+status: Review
 assignee: []
 created_date: '2026-04-01 02:30'
-updated_date: '2026-04-01 02:30'
+updated_date: '2026-04-02 00:15'
 labels:
   - build-queue
   - scheduler
@@ -71,15 +71,43 @@ High (ordering bugs can starve jobs or mislead operators).
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 For queued jobs, UI order matches the actual next-claim order used by builders under the same state.
-- [ ] #2 Manual reorder action updates persisted order and subsequent builder claims honor that order unless preempted by documented higher-priority rules.
-- [ ] #3 Queue positions shown in UI are stable, deterministic, and derived from backend source-of-truth ordering keys.
+- [x] #1 For queued jobs, UI order matches the actual next-claim order used by builders under the same state.
+- [x] #2 Manual reorder action updates persisted order and subsequent builder claims honor that order unless preempted by documented higher-priority rules.
+- [x] #3 Queue positions shown in UI are stable, deterministic, and derived from backend source-of-truth ordering keys.
 - [ ] #4 Automated tests cover default ordering, manual reorder, and concurrent claim scenarios.
-- [ ] #5 Task notes document final ordering precedence (e.g., manual rank > priority > created_at) and operator-visible behavior.
+- [x] #5 Task notes document final ordering precedence (e.g., manual rank > priority > created_at) and operator-visible behavior.
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
 Moved Backlog -> To Do per explicit human request in chat.
+
+LOCK: opencode-gpt5 on reckless in /home/mcamp/code/crystal-forge/TASK-235-build-queue-order
+
+Implemented queue-order alignment so dashboard queue uses the same queued ordering keys as builder claim path: `priority_weight DESC, created_at ASC` (while still listing active `building` items first).
+
+Removed dashboard queue query per-flake queued cap/ranking from this path so UI queue reflects actual scheduler-visible order instead of a transformed subset.
+
+Removed client-side queue status re-sorting in `BuildQueuePane`; UI now preserves backend-provided ordering deterministically.
+
+Ordering precedence documented for operators: `building` items are shown first for visibility, queued item order is `priority_weight DESC` then `created_at ASC`; manual Run Next/prioritize increases effective priority via persisted `priority_weight` update and is therefore reflected in both claim order and UI order.
+
+Verification executed in task worktree: `nix develop -c env SQLX_OFFLINE=true cargo check --package crystal-forge` (from packages/default), `nix develop -c cargo check --package crystal-forge-ui` (from packages/web-ui), `nix build .#checks.x86_64-linux.server --no-link`, `nix build .#checks.x86_64-linux.web-ui --no-link`.
+
+Adjusted dashboard queue SQL ordering to match active builder claim path exactly for queued jobs: `priority_weight DESC`, then commit timestamp (`commit_timestamp DESC NULLS LAST`), then `created_at ASC`.
+
+Added backend integration tests (ignored, DB-backed) in `packages/default/src/queries/builders.rs` covering: dashboard/claim default order alignment, prioritize/manual reorder behavior, and concurrent claims no-duplicate top-two selection.
+
+Attempted to execute each new DB-backed test with `nix develop -c env SQLX_OFFLINE=true cargo test --package crystal-forge <test-name> -- --ignored`; all failed in this environment with DB auth error: `pg_hba.conf rejects connection for host "::1", user "postgres", database "cf_test", no encryption`.
+
+Updated `checks/web-ui` CI-fast profile to include Builds route captures so UI queue-order changes are evidenced by web-ui check screenshots (`15-builds`, `11b-builds-queue-card-focus`) and included as critical checks in ci_fast mode.
+
+Rebuilt web-ui check with screenshots present at `result/screenshots/15-builds.png` and `result/screenshots/11b-builds-queue-card-focus.png`.
+
+DB-backed ordering tests still blocked in this environment by local PostgreSQL pg_hba policy (`pg_hba.conf rejects connection ... no encryption`) for `postgres@cf_test`; tests are present and executable once local test DB auth is aligned.
+
+Opened MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/204
+
+Closed during backlog cleanup per maintainer direction (MR merged/closed). Task archived from active review queue.
 <!-- SECTION:NOTES:END -->

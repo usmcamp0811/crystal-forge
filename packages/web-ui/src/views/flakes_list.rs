@@ -8,19 +8,19 @@ use gloo_storage::{LocalStorage, Storage};
 #[cfg(target_arch = "wasm32")]
 use js_sys::Object;
 use uuid::Uuid;
-use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::JsCast;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsValue;
+use wasm_bindgen::prelude::Closure;
 #[cfg(target_arch = "wasm32")]
 use web_sys::console;
-use web_sys::{window, Node};
+use web_sys::{Node, window};
 
 use crate::api::client::{
     ApiClientError, accept_flake_history_rewrite, create_flake, delete_flake,
     delete_flake_credentials, fetch_commit_diff, fetch_flake_credentials, fetch_flake_timelines,
-    fetch_flake_timelines_for_ids, fetch_flakes, put_flake_credentials,
-    request_sync_all_flakes, request_sync_flake, update_flake,
+    fetch_flake_timelines_for_ids, fetch_flakes, put_flake_credentials, request_sync_all_flakes,
+    request_sync_flake, update_flake,
 };
 use crate::api::models::{
     BuildStatus as ApiBuildStatus, CreateFlakeCredentialRequest, CreateFlakeRequest,
@@ -1289,7 +1289,7 @@ fn FlakeHistoryExplorer(
     selected_commit_hash: Signal<Option<String>>,
     timelines: Vec<FlakeTimeline>,
 ) -> Element {
-    use crate::hooks::websocket::{use_websocket_eval_stream, SystemEvalStatus};
+    use crate::hooks::websocket::{SystemEvalStatus, use_websocket_eval_stream};
     let navigator = use_navigator();
 
     let fallback_flake_id = flakes.first().map(|flake| flake.id).unwrap_or(0);
@@ -2157,13 +2157,13 @@ fn RemoveFlakeDialog(
             div {
                 class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6 cf-modal-panel-34",
                 onclick: |evt| evt.stop_propagation(),
-                
+
                 // Header
                 h3 {
                     class: "text-lg font-semibold text-white mb-2",
                     "Delete flake {flake_name}?"
                 }
-                
+
                 // Warning message
                 if has_dependencies {
                     div {
@@ -2204,7 +2204,7 @@ fn RemoveFlakeDialog(
                 // Delete options
                 div {
                     class: "space-y-3 mb-6",
-                    
+
                     // Cascade checkbox (only if has dependencies)
                     if has_dependencies {
                         label {
@@ -2624,7 +2624,10 @@ fn start_edit_flake(
     }
 }
 
-async fn save_flake_credentials(flake_id: i32, draft: &impl FlakeCredentialDraft) -> Result<(), String> {
+async fn save_flake_credentials(
+    flake_id: i32,
+    draft: &impl FlakeCredentialDraft,
+) -> Result<(), String> {
     if draft.credential_type() == "none" {
         if !draft.has_existing_secret() {
             return Ok(());
@@ -2662,19 +2665,39 @@ trait FlakeCredentialDraft {
 }
 
 impl FlakeCredentialDraft for NewFlakeDraft {
-    fn credential_type(&self) -> &str { &self.credential_type }
-    fn credential_username(&self) -> &str { &self.credential_username }
-    fn credential_secret(&self) -> &str { &self.credential_secret }
-    fn credential_ssh_username(&self) -> &str { &self.credential_ssh_username }
-    fn has_existing_secret(&self) -> bool { false }
+    fn credential_type(&self) -> &str {
+        &self.credential_type
+    }
+    fn credential_username(&self) -> &str {
+        &self.credential_username
+    }
+    fn credential_secret(&self) -> &str {
+        &self.credential_secret
+    }
+    fn credential_ssh_username(&self) -> &str {
+        &self.credential_ssh_username
+    }
+    fn has_existing_secret(&self) -> bool {
+        false
+    }
 }
 
 impl FlakeCredentialDraft for EditFlakeDraft {
-    fn credential_type(&self) -> &str { &self.credential_type }
-    fn credential_username(&self) -> &str { &self.credential_username }
-    fn credential_secret(&self) -> &str { &self.credential_secret }
-    fn credential_ssh_username(&self) -> &str { &self.credential_ssh_username }
-    fn has_existing_secret(&self) -> bool { self.has_existing_secret }
+    fn credential_type(&self) -> &str {
+        &self.credential_type
+    }
+    fn credential_username(&self) -> &str {
+        &self.credential_username
+    }
+    fn credential_secret(&self) -> &str {
+        &self.credential_secret
+    }
+    fn credential_ssh_username(&self) -> &str {
+        &self.credential_ssh_username
+    }
+    fn has_existing_secret(&self) -> bool {
+        self.has_existing_secret
+    }
 }
 
 fn normalize_optional_value(value: &str) -> Option<String> {
@@ -2686,7 +2709,11 @@ fn normalize_optional_value(value: &str) -> Option<String> {
     }
 }
 
-fn refresh_flake_by_id(flake_id: i32, mut refreshing_flake: Signal<Option<i32>>, mut sync_note: Signal<Option<String>>) {
+fn refresh_flake_by_id(
+    flake_id: i32,
+    mut refreshing_flake: Signal<Option<i32>>,
+    mut sync_note: Signal<Option<String>>,
+) {
     use crate::api::client::refresh_flake;
 
     refreshing_flake.set(Some(flake_id));
@@ -3312,7 +3339,10 @@ fn sync_single_flake_registry(
     changed
 }
 fn build_flake_commits(timelines: &[FlakeTimeline], flake_id: i32) -> Vec<FlakeHistoryCommit> {
-    let Some(timeline) = timelines.iter().find(|timeline| timeline.flake_id == flake_id) else {
+    let Some(timeline) = timelines
+        .iter()
+        .find(|timeline| timeline.flake_id == flake_id)
+    else {
         return Vec::new();
     };
 
@@ -3386,6 +3416,8 @@ fn build_badge_label(status: &ApiBuildStatus) -> &'static str {
         ApiBuildStatus::Failed => "failed",
         ApiBuildStatus::Complete => "complete",
         ApiBuildStatus::Idle => "idle",
+        ApiBuildStatus::Cancelling => "stopping",
+        ApiBuildStatus::Cancelled => "cancelled",
     }
 }
 
@@ -3404,6 +3436,12 @@ fn build_badge_style(status: &ApiBuildStatus) -> &'static str {
             "background-color: #1f3a2f; border-color: #22c55e; color: #dcfce7;"
         }
         ApiBuildStatus::Idle => "background-color: #2b303b; border-color: #495264; color: #cbd5e1;",
+        ApiBuildStatus::Cancelling => {
+            "background-color: #3d2f1f; border-color: #fb923c; color: #fed7aa;"
+        }
+        ApiBuildStatus::Cancelled => {
+            "background-color: #2b303b; border-color: #6b7280; color: #9ca3af;"
+        }
     }
 }
 

@@ -327,6 +327,30 @@ pub async fn prioritize_build_job(
     Ok(StatusCode::OK)
 }
 
+/// POST /api/v1/build-jobs/:id/cancel - Cancel/stop a build job (admin-only)
+pub async fn cancel_build_job(
+    State(state): State<CFState>,
+    Path(job_id): Path<Uuid>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<BuildJob>, (StatusCode, String)> {
+    // Verify admin authorization
+    let Some(_admin_user) = require_admin(&state.pool, &headers).await else {
+        return Err((StatusCode::FORBIDDEN, "Admin access required".to_string()));
+    };
+
+    builders::cancel_build_job(&state.pool, &job_id)
+        .await
+        .map(Json)
+        .map_err(|e| {
+            let message = e.to_string();
+            if message.to_lowercase().contains("not found") {
+                (StatusCode::NOT_FOUND, message)
+            } else {
+                (StatusCode::BAD_REQUEST, message)
+            }
+        })
+}
+
 /// GET /api/v1/build-jobs - Paginated build queue with filtering (viewer+)
 ///
 /// Query parameters (all optional):

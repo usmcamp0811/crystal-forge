@@ -1,6 +1,6 @@
+use crate::flake::credentials::FlakeCredentialEnv;
 use crate::models::commits::Commit;
 use crate::queries::commits::increment_commit_list_attempt_count;
-use crate::flake::credentials::FlakeCredentialEnv;
 use anyhow::{Context, Result};
 use sqlx::PgPool;
 use std::path::Path;
@@ -115,8 +115,8 @@ fn build_flake_uri_with_ref(repo_url: &str, branch: &str) -> String {
     };
 
     // Check if URL already ends with .git
-    let needs_git_suffix = !base_url.ends_with(".git") 
-        && !base_url.contains('?') 
+    let needs_git_suffix = !base_url.ends_with(".git")
+        && !base_url.contains('?')
         && (base_url.starts_with("http://") || base_url.starts_with("https://"));
 
     // Build the normalized URL with .git suffix if needed
@@ -127,7 +127,11 @@ fn build_flake_uri_with_ref(repo_url: &str, branch: &str) -> String {
     };
 
     // Determine separator for ref parameter
-    let separator = if normalized_url.contains('?') { "&" } else { "?" };
+    let separator = if normalized_url.contains('?') {
+        "&"
+    } else {
+        "?"
+    };
 
     // Build final URI with git+ prefix and ref parameter
     format!("git+{}{separator}ref={}", normalized_url, branch)
@@ -170,13 +174,16 @@ pub async fn refresh_flake_cache_with_creds(
     }
 
     let output = timeout(Duration::from_secs(60), cmd.output())
-    .await
-    .context("Timeout refreshing flake cache")?
-    .context("Failed to spawn nix flake metadata command")?;
+        .await
+        .context("Timeout refreshing flake cache")?
+        .context("Failed to spawn nix flake metadata command")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        error!("❌ nix flake metadata --refresh failed for {}: {}", flake_uri, stderr);
+        error!(
+            "❌ nix flake metadata --refresh failed for {}: {}",
+            flake_uri, stderr
+        );
         anyhow::bail!("Failed to refresh flake cache: {}", stderr.trim());
     }
 

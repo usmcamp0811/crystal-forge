@@ -16,8 +16,8 @@ use chrono::{Duration, Utc};
 use uuid::Uuid;
 
 use crate::api::client::{
-    create_system, deactivate_system, fetch_flakes, fetch_system, fetch_systems, update_system,
-    update_system_public_key, ApiClientError,
+    ApiClientError, create_system, deactivate_system, fetch_flakes, fetch_system, fetch_systems,
+    update_system, update_system_public_key,
 };
 use crate::api::models::{
     CreateSystemRequest, CveSummary, DeploymentStatus, HealthStatus, PaginatedResponse,
