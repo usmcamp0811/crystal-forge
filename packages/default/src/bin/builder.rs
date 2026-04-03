@@ -128,6 +128,14 @@ async fn run_api_mode(cfg: &CrystalForgeConfig) -> anyhow::Result<()> {
         run_heartbeat_loop(heartbeat_client, heartbeat_interval).await;
     });
 
+    // Spawn cache-push loop in API mode when enabled.
+    // Successful API-mode builds already queue cache push jobs; without this
+    // worker loop nothing consumes them, so artifacts never reach the cache.
+    if should_start_cache_push_loop(&cache_config) {
+        let cache_pool = crystal_forge::config::CrystalForgeConfig::db_pool().await?;
+        tokio::spawn(run_cache_push_loop(cache_pool));
+    }
+
     // Spawn job polling loop
     let poll_client = api_client.clone();
     let poll_interval = builder_config.poll_interval;
@@ -155,6 +163,10 @@ async fn run_api_mode(cfg: &CrystalForgeConfig) -> anyhow::Result<()> {
 
     info!("Shutting down API mode builder...");
     Ok(())
+}
+
+fn should_start_cache_push_loop(cache_config: &crystal_forge::config::CacheConfig) -> bool {
+    cache_config.push_after_build
 }
 
 /// Heartbeat loop - sends metrics to server periodically
@@ -743,7 +755,9 @@ fn is_local_db_host(host: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{mock_store_path, should_mock_build_fail};
+    use super::{mock_store_path, should_mock_build_fail, should_start_cache_push_loop};
+    use crystal_forge::config::{CacheConfig, CacheType};
+    use tokio::time::Duration;
 
     #[test]
     fn mock_store_path_is_deterministic_and_sanitized() {
@@ -761,5 +775,38 @@ mod tests {
     fn mock_build_fail_pattern_is_deterministic() {
         assert!(should_mock_build_fail("myflake-control-0"));
         assert!(!should_mock_build_fail("myflake-worker-0"));
+    }
+
+    #[test]
+    fn cache_push_loop_only_starts_when_push_after_build_enabled() {
+        let mut cfg = CacheConfig {
+            cache_type: CacheType::Nix,
+            push_to: None,
+            push_after_build: false,
+            signing_key: None,
+            compression: None,
+            push_filter: None,
+            parallel_uploads: 1,
+            s3_region: None,
+            s3_profile: None,
+            s3_access_key_id: None,
+            s3_secret_access_key: None,
+            s3_session_token: None,
+            s3_endpoint_url: None,
+            attic_token: None,
+            attic_cache_name: None,
+            attic_ignore_upstream_cache_filter: true,
+            attic_jobs: 1,
+            max_retries: 1,
+            retry_delay_seconds: 1,
+            poll_interval: Duration::from_secs(30),
+            push_timeout_seconds: 30,
+            force_repush: false,
+            require_sigs: true,
+        };
+
+        assert!(!should_start_cache_push_loop(&cfg));
+        cfg.push_after_build = true;
+        assert!(should_start_cache_push_loop(&cfg));
     }
 }
