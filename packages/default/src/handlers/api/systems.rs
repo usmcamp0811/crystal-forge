@@ -12,8 +12,7 @@ use crate::api::models::{
     ApiError, AuditAction, CreateSystemRequest, CveSummary, DeploymentStatus, PipelineStage,
     SortOrder, SystemDetail, SystemHardwareInfo, SystemMutationResponse, SystemNetworkInfo,
     SystemRollbackRequest, SystemSecurityInfo, SystemSummary, SystemsListParams,
-    UpdateSystemRequest,
-    UpdateSystemPublicKeyRequest,
+    UpdateSystemPublicKeyRequest, UpdateSystemRequest,
 };
 use crate::auth::models::Role;
 use crate::handlers::api::rbac::{authenticated_user_roles, extract_request_origin};
@@ -229,7 +228,10 @@ pub async fn update_system_handler(
     if hostname.is_empty() {
         return bad_request("Hostname is required");
     }
-    if !matches!(payload.deployment_policy.as_str(), "manual" | "auto_latest" | "pinned") {
+    if !matches!(
+        payload.deployment_policy.as_str(),
+        "manual" | "auto_latest" | "pinned"
+    ) {
         return bad_request("Invalid deployment policy (must be: manual, auto_latest, or pinned)");
     }
 
@@ -245,10 +247,7 @@ pub async fn update_system_handler(
             {
                 Ok(Some(id)) => Some(id),
                 Ok(None) => {
-                    return bad_request(&format!(
-                        "Environment '{}' not found",
-                        env_name_trimmed
-                    ));
+                    return bad_request(&format!("Environment '{}' not found", env_name_trimmed));
                 }
                 Err(_) => return internal_error("Failed to lookup environment"),
             }
@@ -273,10 +272,7 @@ pub async fn update_system_handler(
             {
                 Ok(Some(id)) => Some(id),
                 Ok(None) => {
-                    return bad_request(&format!(
-                        "Flake '{}' not found",
-                        flake_name_trimmed
-                    ));
+                    return bad_request(&format!("Flake '{}' not found", flake_name_trimmed));
                 }
                 Err(_) => return internal_error("Failed to lookup flake"),
             }

@@ -117,11 +117,14 @@ pub async fn fetch_and_insert_recent_commits_with_creds(
     limit: Option<usize>,
     flake_id: i32,
 ) -> Result<Vec<String>> {
-    let creds = FlakeCredentialEnv::load(pool, flake_id).await.unwrap_or_else(|e| {
-        warn!("Failed to load credentials for flake {flake_id}: {e:#}");
-        None
-    });
-    let commits = get_commits_with_full_metadata(repo_url, branch, limit, None, creds.as_ref()).await?;
+    let creds = FlakeCredentialEnv::load(pool, flake_id)
+        .await
+        .unwrap_or_else(|e| {
+            warn!("Failed to load credentials for flake {flake_id}: {e:#}");
+            None
+        });
+    let commits =
+        get_commits_with_full_metadata(repo_url, branch, limit, None, creds.as_ref()).await?;
 
     let mut inserted = Vec::new();
     for commit_data in commits {
@@ -292,10 +295,12 @@ pub async fn sync_commits_for_flake(
     branch: &str,
     flake_id: i32,
 ) -> Result<usize> {
-    let creds = FlakeCredentialEnv::load(pool, flake_id).await.unwrap_or_else(|e| {
-        warn!("Failed to load credentials for flake {flake_id}: {e:#}");
-        None
-    });
+    let creds = FlakeCredentialEnv::load(pool, flake_id)
+        .await
+        .unwrap_or_else(|e| {
+            warn!("Failed to load credentials for flake {flake_id}: {e:#}");
+            None
+        });
     sync_commits_for_repo_inner(pool, repo_url, branch, creds.as_ref()).await
 }
 
@@ -310,12 +315,17 @@ async fn sync_commits_for_repo_inner(
             let last_commit = flake_last_commit(pool, repo_url)
                 .await
                 .with_context(|| format!("Failed to load last commit for {repo_url}"))?;
-            let inserted =
-                fetch_and_insert_commits_since_with_creds(pool, repo_url, branch, &last_commit, creds)
-                    .await
-                    .with_context(|| {
-                        format!("Failed to sync commits since last known hash for {repo_url}")
-                    })?;
+            let inserted = fetch_and_insert_commits_since_with_creds(
+                pool,
+                repo_url,
+                branch,
+                &last_commit,
+                creds,
+            )
+            .await
+            .with_context(|| {
+                format!("Failed to sync commits since last known hash for {repo_url}")
+            })?;
             Ok(inserted.len())
         }
         Ok(false) => {
@@ -358,13 +368,10 @@ pub async fn infer_default_branch_with_creds(
     let mut cmd = tokio::process::Command::new("git");
     cmd.args(["ls-remote", "--symref", &git_url, "HEAD"]);
     apply_optional_creds(&mut cmd, creds);
-    let output = timeout(
-        GIT_PROBE_TIMEOUT,
-        cmd.output(),
-    )
-    .await
-    .with_context(|| format!("Timed out probing default branch for {repo_url}"))?
-    .with_context(|| format!("Failed to probe default branch for {repo_url}"))?;
+    let output = timeout(GIT_PROBE_TIMEOUT, cmd.output())
+        .await
+        .with_context(|| format!("Timed out probing default branch for {repo_url}"))?
+        .with_context(|| format!("Failed to probe default branch for {repo_url}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -403,13 +410,10 @@ pub async fn branch_exists_with_creds(
     let mut cmd = tokio::process::Command::new("git");
     cmd.args(["ls-remote", &git_url, &refspec]);
     apply_optional_creds(&mut cmd, creds);
-    let output = timeout(
-        GIT_PROBE_TIMEOUT,
-        cmd.output(),
-    )
-    .await
-    .with_context(|| format!("Timed out probing branch {branch} for {repo_url}"))?
-    .with_context(|| format!("Failed to probe branch {branch} for {repo_url}"))?;
+    let output = timeout(GIT_PROBE_TIMEOUT, cmd.output())
+        .await
+        .with_context(|| format!("Timed out probing branch {branch} for {repo_url}"))?
+        .with_context(|| format!("Failed to probe branch {branch} for {repo_url}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -426,10 +430,7 @@ pub async fn branch_exists_with_creds(
 ///
 /// Injects netrc / SSH-key environment variables when `creds` is `Some`.
 /// This is a thin pass-through so callers don't have to match on `Option`.
-fn apply_optional_creds(
-    cmd: &mut tokio::process::Command,
-    creds: Option<&FlakeCredentialEnv>,
-) {
+fn apply_optional_creds(cmd: &mut tokio::process::Command, creds: Option<&FlakeCredentialEnv>) {
     if let Some(c) = creds {
         c.apply_to_git_command(cmd);
     }
@@ -589,7 +590,8 @@ async fn get_commits_with_timestamps(
     limit: Option<usize>,
     since_commit: Option<&str>,
 ) -> Result<Vec<(String, chrono::DateTime<chrono::Utc>)>> {
-    let commits = get_commits_with_full_metadata(repo_url, branch, limit, since_commit, None).await?;
+    let commits =
+        get_commits_with_full_metadata(repo_url, branch, limit, since_commit, None).await?;
     Ok(commits.into_iter().map(|c| (c.hash, c.timestamp)).collect())
 }
 
@@ -643,10 +645,8 @@ pub async fn fetch_and_insert_commits_since_with_creds(
 
     if commits.is_empty() {
         let remote_head_hash = remote_branch_head_hash(repo_url, branch, creds).await?;
-        let diverged = is_remote_head_diverged(
-            &since_commit.git_commit_hash,
-            remote_head_hash.as_deref(),
-        );
+        let diverged =
+            is_remote_head_diverged(&since_commit.git_commit_hash, remote_head_hash.as_deref());
 
         info!(
             repo_url = %repo_url,
@@ -731,9 +731,9 @@ async fn remote_branch_head_hash(
     apply_optional_creds(&mut cmd, creds);
 
     let output = timeout(GIT_PROBE_TIMEOUT, cmd.output())
-    .await
-    .with_context(|| format!("Timed out probing remote HEAD for {repo_url} on {branch}"))?
-    .with_context(|| format!("Failed to probe remote HEAD for {repo_url} on {branch}"))?;
+        .await
+        .with_context(|| format!("Timed out probing remote HEAD for {repo_url} on {branch}"))?
+        .with_context(|| format!("Failed to probe remote HEAD for {repo_url} on {branch}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -744,10 +744,7 @@ async fn remote_branch_head_hash(
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let line = stdout
-        .lines()
-        .find(|l| !l.trim().is_empty())
-        .map(str::trim);
+    let line = stdout.lines().find(|l| !l.trim().is_empty()).map(str::trim);
 
     let Some(line) = line else {
         return Ok(None);
@@ -1175,10 +1172,10 @@ async fn try_get_diff_for_branch(
 
 #[cfg(test)]
 mod tests {
-    use anyhow::Context;
     use super::{
         is_history_rewrite_error, is_invalid_revision_range_error, is_remote_head_diverged,
     };
+    use anyhow::Context;
 
     #[test]
     fn detects_invalid_revision_range_error() {

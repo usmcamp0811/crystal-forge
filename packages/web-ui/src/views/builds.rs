@@ -9,9 +9,9 @@ use crate::api::{
     models::{BuildQueueParams, BuildStatus as ApiBuildStatus, BuilderStatus},
 };
 use crate::components::builds::{
-    extract_system_name, selected_build_data, BuildAction, BuildDetailPane, BuildItem,
-    BuildQueuePane, BuildStatus, ConfirmActionModal, DetailTab, MetricsRow, PendingAction,
-    QueueAction, QueueActionButton, WorkerAction, WorkerItem, WorkerStatus, WorkerStrip,
+    BuildAction, BuildDetailPane, BuildItem, BuildQueuePane, BuildStatus, ConfirmActionModal,
+    DetailTab, MetricsRow, PendingAction, QueueAction, QueueActionButton, WorkerAction, WorkerItem,
+    WorkerStatus, WorkerStrip, extract_system_name, selected_build_data,
 };
 use crate::components::layout::Card;
 use crate::theme;
@@ -29,6 +29,7 @@ enum CompletedStatusFilter {
     All,
     Complete,
     Failed,
+    Cancelled,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -43,9 +44,25 @@ fn format_completed_at(item: &BuildItem) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+/// Format seconds into human-readable duration (e.g., "2m 15s", "1h 30m").
+fn format_human_duration(seconds: i64) -> String {
+    let secs = seconds.max(0);
+    let hours = secs / 3600;
+    let minutes = (secs % 3600) / 60;
+    let remaining_secs = secs % 60;
+
+    if hours > 0 {
+        format!("{}h {}m", hours, minutes)
+    } else if minutes > 0 {
+        format!("{}m {}s", minutes, remaining_secs)
+    } else {
+        format!("{}s", remaining_secs)
+    }
+}
+
 fn format_duration(item: &BuildItem) -> String {
     item.duration_secs
-        .map(|secs| format!("{}s", secs.max(0)))
+        .map(format_human_duration)
         .or_else(|| item.runtime.clone())
         .unwrap_or_else(|| "-".to_string())
 }
@@ -56,11 +73,16 @@ fn format_environment(item: &BuildItem) -> String {
 
 /// Map a raw `BuildQueueItem` from API into the UI `BuildItem`.
 fn map_queue_item(item: &crate::api::models::BuildQueueItem, idx: usize) -> BuildItem {
-    let queued_for = if item.status == ApiBuildStatus::Building {
-        format!("running {}s", item.elapsed_secs.unwrap_or(0))
+    let queued_for = if item.status == ApiBuildStatus::Building
+        || item.status == ApiBuildStatus::Cancelling
+    {
+        format!(
+            "running {}",
+            format_human_duration(item.elapsed_secs.unwrap_or(0))
+        )
     } else {
         let ago = (Utc::now() - item.queued_at).num_seconds().max(0);
-        format!("queued {}s ago", ago)
+        format!("queued {} ago", format_human_duration(ago))
     };
 
     BuildItem {
@@ -77,7 +99,7 @@ fn map_queue_item(item: &crate::api::models::BuildQueueItem, idx: usize) -> Buil
             .clone()
             .unwrap_or_else(|| "unassigned".to_string()),
         queued_for,
-        runtime: item.elapsed_secs.map(|secs| format!("{}s", secs)),
+        runtime: item.elapsed_secs.map(format_human_duration),
         duration_secs: item.elapsed_secs,
         completed_at: None,
         started_by: "scheduler".to_string(),
@@ -85,8 +107,10 @@ fn map_queue_item(item: &crate::api::models::BuildQueueItem, idx: usize) -> Buil
         status: match item.status {
             ApiBuildStatus::Queued => BuildStatus::Queued,
             ApiBuildStatus::Building => BuildStatus::Building,
+            ApiBuildStatus::Cancelling => BuildStatus::Stopping,
             ApiBuildStatus::Failed => BuildStatus::Failed,
             ApiBuildStatus::Complete => BuildStatus::Complete,
+            ApiBuildStatus::Cancelled => BuildStatus::Cancelled,
             ApiBuildStatus::Idle => BuildStatus::Queued,
         },
         summary: item.commit_message.clone().unwrap_or_else(|| {
@@ -111,9 +135,9 @@ pub fn BuildsView() -> Element {
     let mut queue_total = use_signal(|| 0_i64);
     let mut builds = use_signal(Vec::<BuildItem>::new);
 
-    // Filter state — Active Queue defaults to active jobs only (queued + building).
+    // Filter state — Active Queue defaults to active jobs only (queued + building + cancelling).
     // Operators can widen to "All" or other statuses via the status dropdown.
-    let mut filter_status = use_signal(|| "queued,building".to_string());
+    let mut filter_status = use_signal(|| "queued,building,cancelling".to_string());
     let mut filter_commit = use_signal(String::new);
     let mut filter_flake = use_signal(String::new);
     let mut filter_config = use_signal(String::new);
@@ -232,7 +256,7 @@ pub fn BuildsView() -> Element {
                             .clone()
                             .unwrap_or_else(|| "unassigned".to_string()),
                         queued_for: finished_for,
-                        runtime: item.elapsed_secs.map(|secs| format!("{}s", secs)),
+                        runtime: item.elapsed_secs.map(format_human_duration),
                         duration_secs: item.elapsed_secs,
                         completed_at,
                         started_by: "scheduler".to_string(),
@@ -241,6 +265,8 @@ pub fn BuildsView() -> Element {
                             ApiBuildStatus::Failed => BuildStatus::Failed,
                             ApiBuildStatus::Complete => BuildStatus::Complete,
                             ApiBuildStatus::Building => BuildStatus::Building,
+                            ApiBuildStatus::Cancelling => BuildStatus::Stopping,
+                            ApiBuildStatus::Cancelled => BuildStatus::Cancelled,
                             ApiBuildStatus::Queued => BuildStatus::Queued,
                             ApiBuildStatus::Idle => BuildStatus::Queued,
                         },
@@ -280,12 +306,15 @@ pub fn BuildsView() -> Element {
 
     let mut completed_rows = build_history.read().clone();
     completed_rows.retain(|item| {
-        matches!(item.status, BuildStatus::Complete | BuildStatus::Failed)
-            && match completed_status_filter() {
-                CompletedStatusFilter::All => true,
-                CompletedStatusFilter::Complete => item.status == BuildStatus::Complete,
-                CompletedStatusFilter::Failed => item.status == BuildStatus::Failed,
-            }
+        matches!(
+            item.status,
+            BuildStatus::Complete | BuildStatus::Failed | BuildStatus::Cancelled
+        ) && match completed_status_filter() {
+            CompletedStatusFilter::All => true,
+            CompletedStatusFilter::Complete => item.status == BuildStatus::Complete,
+            CompletedStatusFilter::Failed => item.status == BuildStatus::Failed,
+            CompletedStatusFilter::Cancelled => item.status == BuildStatus::Cancelled,
+        }
     });
     completed_rows.sort_by(|left, right| {
         let left_key = left.completed_at.unwrap_or_else(Utc::now);
@@ -403,11 +432,13 @@ pub fn BuildsView() -> Element {
                                         filter_status.set(e.value());
                                         queue_page.set(1);
                                     },
-                                    option { value: "queued,building", "Active (queued + building)" }
+                                    option { value: "queued,building,cancelling", "Active (queued + building + stopping)" }
                                     option { value: "queued", "Queued only" }
                                     option { value: "building", "Building only" }
+                                    option { value: "cancelling", "Stopping only" }
                                     option { value: "success", "Completed" }
                                     option { value: "failed", "Failed" }
+                                    option { value: "cancelled", "Cancelled" }
                                     option { value: "", "All statuses" }
                                 }
                             }
@@ -477,7 +508,7 @@ pub fn BuildsView() -> Element {
                                 class: "px-3 py-1 rounded border border-slate-600 text-xs text-slate-300 hover:bg-slate-700 transition-colors",
                                 onclick: move |_| {
                                     // Reset status back to active-only (the intended default for this tab).
-                                    filter_status.set("queued,building".to_string());
+                                    filter_status.set("queued,building,cancelling".to_string());
                                     filter_commit.set(String::new());
                                     filter_flake.set(String::new());
                                     filter_config.set(String::new());
@@ -573,12 +604,14 @@ pub fn BuildsView() -> Element {
                                     CompletedStatusFilter::All => "all",
                                     CompletedStatusFilter::Complete => "complete",
                                     CompletedStatusFilter::Failed => "failed",
+                                    CompletedStatusFilter::Cancelled => "cancelled",
                                 },
                                 onchange: move |event| {
                                     let value = event.value();
                                     let next = match value.as_str() {
                                         "complete" => CompletedStatusFilter::Complete,
                                         "failed" => CompletedStatusFilter::Failed,
+                                        "cancelled" => CompletedStatusFilter::Cancelled,
                                         _ => CompletedStatusFilter::All,
                                     };
                                     completed_status_filter.set(next);
@@ -586,6 +619,7 @@ pub fn BuildsView() -> Element {
                                 option { value: "all", "All" }
                                 option { value: "complete", "Complete" }
                                 option { value: "failed", "Failed" }
+                                option { value: "cancelled", "Cancelled" }
                             }
 
                             label { class: "text-xs {theme::text::SECONDARY}", "Sort" }
@@ -782,7 +816,21 @@ pub fn BuildsView() -> Element {
                                                 }
                                             }
                                             BuildAction::Stop => {
-                                                action_error.set(Some("Stop build is not implemented by API yet".to_string()));
+                                                let Some(job_id) = selected.job_id else {
+                                                    action_error.set(Some("Queue item has no job id; cannot stop".to_string()));
+                                                    return;
+                                                };
+
+                                                match api::client::cancel_build_job(&job_id).await {
+                                                    Ok(_) => {
+                                                        action_error.set(None);
+                                                        last_action_note.set(Some(format!("Cancelled job {}", job_id)));
+                                                        refresh_trigger.set(refresh_trigger() + 1);
+                                                    }
+                                                    Err(e) => {
+                                                        action_error.set(Some(format!("Failed to stop: {}", e)));
+                                                    }
+                                                }
                                             }
                                         }
                                     });

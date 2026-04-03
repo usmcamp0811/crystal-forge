@@ -12,6 +12,7 @@ const MOCK_EVAL_STAGE_COUNT: u64 = 5;
 use tracing::{debug, error, info, warn};
 
 use crate::config::{BuildConfig, ServerConfig};
+use crate::flake::credentials::FlakeCredentialEnv;
 use crate::models::commits::Commit;
 use crate::models::deployment_policies::{
     DeploymentPolicy, PolicyCheckResult, build_nix_eval_expression,
@@ -21,7 +22,6 @@ use crate::queries::build_jobs::enqueue_build_job_for_derivation;
 use crate::queries::derivations::{
     insert_derivation_with_target, mark_derivation_dry_run_complete,
 };
-use crate::flake::credentials::FlakeCredentialEnv;
 use crate::queue::QueueNotifier;
 use crate::queries::systems::list_configuration_names_for_flake;
 
@@ -67,10 +67,12 @@ pub async fn evaluate_with_nix_eval_jobs(
     let allowed_systems = load_allowed_systems(pool, flake, target_system).await?;
 
     // Load per-flake credentials (may be None for public flakes).
-    let creds = FlakeCredentialEnv::load(pool, flake.id).await.unwrap_or_else(|e| {
-        warn!("Failed to load credentials for flake {}: {e:#}", flake.id);
-        None
-    });
+    let creds = FlakeCredentialEnv::load(pool, flake.id)
+        .await
+        .unwrap_or_else(|e| {
+            warn!("Failed to load credentials for flake {}: {e:#}", flake.id);
+            None
+        });
 
     // Build ONE Nix expression that includes policy checks
     let nix_expr = build_nix_eval_expression(&flake_ref, policies);
@@ -1055,7 +1057,7 @@ pub async fn update_commit_metadata_cache(
         has_policy_failures,
         all_systems_passed,
     ) = summarize_commit_metadata(policy_checks, has_nix_eval_error);
-    
+
     sqlx::query!(
         r#"
         INSERT INTO commit_metadata_cache (
@@ -1093,12 +1095,12 @@ pub async fn update_commit_metadata_cache(
     )
     .execute(pool)
     .await?;
-    
+
     debug!(
         "💾 Updated commit metadata cache for commit {}: {}/{} systems passed",
         commit_id, systems_passed, total_systems
     );
-    
+
     Ok(())
 }
 
@@ -1116,10 +1118,7 @@ fn summarize_commit_metadata(
     let systems_failed_strict = policy_checks
         .iter()
         .filter(|c| {
-            !c.meets_requirements
-                && c.failed_policies
-                    .iter()
-                    .any(|(_, is_strict)| *is_strict)
+            !c.meets_requirements && c.failed_policies.iter().any(|(_, is_strict)| *is_strict)
         })
         .count() as i32;
 
@@ -1136,10 +1135,7 @@ fn summarize_commit_metadata(
         .filter(|c| {
             !c.meets_requirements
                 && !c.failed_policies.is_empty()
-                && !c
-                    .failed_policies
-                    .iter()
-                    .any(|(_, is_strict)| *is_strict)
+                && !c.failed_policies.iter().any(|(_, is_strict)| *is_strict)
         })
         .count() as i32;
 
@@ -1148,7 +1144,8 @@ fn summarize_commit_metadata(
 
     // If evaluation itself failed, this commit cannot be considered fully passing,
     // even when per-system checks are unavailable.
-    let all_systems_passed = !has_nix_eval_error && total_systems > 0 && systems_passed == total_systems;
+    let all_systems_passed =
+        !has_nix_eval_error && total_systems > 0 && systems_passed == total_systems;
 
     (
         total_systems,
@@ -1231,11 +1228,8 @@ mod tests {
             "hasRequiredPackages": true
         });
 
-        let result = PolicyCheckResult::from_json(
-            "test-system".to_string(),
-            &policies_json,
-            &policies,
-        );
+        let result =
+            PolicyCheckResult::from_json("test-system".to_string(), &policies_json, &policies);
 
         assert!(!result.meets_requirements);
         assert_eq!(result.failed_policies.len(), 1);
@@ -1251,11 +1245,8 @@ mod tests {
             "hasRequiredPackages": false
         });
 
-        let result_2 = PolicyCheckResult::from_json(
-            "test-system-2".to_string(),
-            &policies_json_2,
-            &policies,
-        );
+        let result_2 =
+            PolicyCheckResult::from_json("test-system-2".to_string(), &policies_json_2, &policies);
 
         assert!(!result_2.meets_requirements);
         assert_eq!(result_2.failed_policies.len(), 1);
@@ -1268,11 +1259,8 @@ mod tests {
             "hasRequiredPackages": false
         });
 
-        let result_3 = PolicyCheckResult::from_json(
-            "test-system-3".to_string(),
-            &policies_json_3,
-            &policies,
-        );
+        let result_3 =
+            PolicyCheckResult::from_json("test-system-3".to_string(), &policies_json_3, &policies);
 
         assert!(!result_3.meets_requirements);
         assert_eq!(result_3.failed_policies.len(), 2);
@@ -1295,8 +1283,15 @@ mod tests {
 
     #[test]
     fn metadata_summary_marks_eval_error_commit_as_not_all_passed() {
-        let (total, passed, strict_failed, non_strict_failed, eval_failed, has_policy_failures, all_passed) =
-            summarize_commit_metadata(&[], true);
+        let (
+            total,
+            passed,
+            strict_failed,
+            non_strict_failed,
+            eval_failed,
+            has_policy_failures,
+            all_passed,
+        ) = summarize_commit_metadata(&[], true);
         assert_eq!(total, 0);
         assert_eq!(passed, 0);
         assert_eq!(strict_failed, 0);
@@ -1320,8 +1315,15 @@ mod tests {
             failed_policies: vec![],
         }];
 
-        let (_total, _passed, strict_failed, non_strict_failed, eval_failed, has_policy_failures, all_passed) =
-            summarize_commit_metadata(&checks, false);
+        let (
+            _total,
+            _passed,
+            strict_failed,
+            non_strict_failed,
+            eval_failed,
+            has_policy_failures,
+            all_passed,
+        ) = summarize_commit_metadata(&checks, false);
 
         assert_eq!(strict_failed, 0);
         assert_eq!(non_strict_failed, 0);

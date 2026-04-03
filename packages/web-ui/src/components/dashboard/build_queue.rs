@@ -120,6 +120,8 @@ pub fn BuildQueueRow(
         BuildStatus::Complete => "text-emerald-400",
         BuildStatus::Failed => "text-red-400",
         BuildStatus::Idle => "text-gray-400",
+        BuildStatus::Cancelling => "text-orange-400",
+        BuildStatus::Cancelled => "text-gray-500",
     };
     let status_dot_color = match item.status {
         BuildStatus::Building => "#42ff65",
@@ -127,6 +129,8 @@ pub fn BuildQueueRow(
         BuildStatus::Complete => "#10b981",
         BuildStatus::Failed => "#ef4444",
         BuildStatus::Idle => "#6b7280",
+        BuildStatus::Cancelling => "#fb923c",
+        BuildStatus::Cancelled => "#6b7280",
     };
     let status_label = item.status.label();
     let short_hash = item.commit_hash.chars().take(7).collect::<String>();

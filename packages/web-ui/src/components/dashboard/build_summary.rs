@@ -120,11 +120,7 @@ fn extract_attr_name(source: &str, marker: &str) -> Option<String> {
         .collect();
     let name = raw_name.split(".config.").next().unwrap_or("").to_string();
 
-    if name.is_empty() {
-        None
-    } else {
-        Some(name)
-    }
+    if name.is_empty() { None } else { Some(name) }
 }
 
 #[cfg(test)]
@@ -172,8 +168,7 @@ mod tests {
 
     #[test]
     fn extract_nixos_configuration_name_from_attr_path() {
-        let host =
-            "git+https://gitlab.com/crystal-forge/fmf-flake?ref=main#nixosConfigurations.reckless.config.system.build.toplevel";
+        let host = "git+https://gitlab.com/crystal-forge/fmf-flake?ref=main#nixosConfigurations.reckless.config.system.build.toplevel";
         assert_eq!(extract_nixos_configuration_name(host), "reckless");
     }
 }

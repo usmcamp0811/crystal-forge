@@ -327,7 +327,9 @@ async fn run_flake_polling_loop(
         match get_all_flakes_from_db_with_ids(&pool, &flake_config).await {
             Ok((db_flakes, flake_ids)) => {
                 if !db_flakes.is_empty() {
-                    match sync_all_watched_flakes_commits_with_ids(&pool, &db_flakes, &flake_ids).await {
+                    match sync_all_watched_flakes_commits_with_ids(&pool, &db_flakes, &flake_ids)
+                        .await
+                    {
                         Ok(total_inserted) => {
                             if total_inserted > 0 {
                                 info!(

@@ -551,16 +551,20 @@ pub enum BuildStatus {
     Queued,
     /// Build is currently in progress.
     Building,
+    /// Build is being cancelled (waiting for builder to stop).
+    Cancelling,
     /// Build completed successfully.
     Complete,
     /// Build failed.
     Failed,
+    /// Build was cancelled by user.
+    Cancelled,
 }
 
 impl BuildStatus {
     /// Returns true if this status represents an active build (queued or building).
     pub fn is_active(&self) -> bool {
-        matches!(self, Self::Queued | Self::Building)
+        matches!(self, Self::Queued | Self::Building | Self::Cancelling)
     }
 
     /// Human-readable label.
@@ -569,7 +573,9 @@ impl BuildStatus {
             Self::Idle => "Idle",
             Self::Queued => "Queued",
             Self::Building => "Building",
+            Self::Cancelling => "Stopping",
             Self::Complete => "Complete",
+            Self::Cancelled => "Cancelled",
             Self::Failed => "Failed",
         }
     }
@@ -580,7 +586,9 @@ impl BuildStatus {
             Self::Idle => "text-gray-400",
             Self::Queued => "text-blue-400",
             Self::Building => "text-cyan-400",
+            Self::Cancelling => "text-amber-400",
             Self::Complete => "text-emerald-400",
+            Self::Cancelled => "text-slate-400",
             Self::Failed => "text-red-400",
         }
     }

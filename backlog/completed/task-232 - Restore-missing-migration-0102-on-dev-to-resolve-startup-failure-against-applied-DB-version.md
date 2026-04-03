@@ -3,10 +3,10 @@ id: TASK-232
 title: >-
   Restore missing migration 0102 on dev to resolve startup failure against
   applied DB version
-status: Review
+status: Done
 assignee: []
 created_date: '2026-03-31 12:34'
-updated_date: '2026-03-31 12:42'
+updated_date: '2026-04-02 00:08'
 labels:
   - hotfix
   - database
@@ -55,4 +55,6 @@ Emergency hotfix commit: `5b02291f` restoring `packages/default/migrations/0102_
 MR opened: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/202
 
 Verification (non-production): `nix build .#checks.x86_64-linux.database --no-link` PASS.
+
+Backlog review sync: branch head `c0791cf9` is now contained in `origin/dev` (merged). Worktree cleanup completed (`~/code/crystal-forge/TASK-232-restore-migration-0102` removed, `git worktree prune` run).
 <!-- SECTION:NOTES:END -->

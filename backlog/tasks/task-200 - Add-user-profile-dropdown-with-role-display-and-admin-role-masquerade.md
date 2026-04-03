@@ -5,7 +5,7 @@ status: Review
 assignee:
   - Claude
 created_date: '2026-03-20 13:40'
-updated_date: '2026-03-20'
+updated_date: '2026-04-02 00:15'
 labels:
   - frontend
   - auth
@@ -190,3 +190,9 @@ Need to verify:
 - Non-admin users don't see masquerade controls
 
 **MR**: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/177
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Closed per maintainer direction: associated MR was intentionally closed and will not be merged at this time. Task archived from active review queue.
+<!-- SECTION:NOTES:END -->

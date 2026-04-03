@@ -4,7 +4,7 @@ title: Fix builders view HTTP 403 Internal server error
 status: To Do
 assignee: []
 created_date: '2026-03-20 13:40'
-updated_date: '2026-03-20 13:40'
+updated_date: '2026-04-02 00:05'
 labels:
   - backend
   - frontend
@@ -16,7 +16,7 @@ references:
   - packages/default/src/handlers/api/builders.rs
   - packages/web-ui/src/views/builders.rs
 priority: high
-ordinal: 1500
+ordinal: 2000
 ---
 
 # Fix builders view HTTP 403 Internal server error
