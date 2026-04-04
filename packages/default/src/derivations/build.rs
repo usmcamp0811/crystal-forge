@@ -400,11 +400,13 @@ impl Derivation {
         let pool_clone = pool.clone();
         let mut last_output = Instant::now();
         let mut cancelled = false;
+        let mut stdout_done = false;
+        let mut stderr_done = false;
 
-        loop {
+        while !stdout_done || !stderr_done {
             tokio::select! {
                 // Read stdout
-                line_result = stdout_reader.next_line() => {
+                line_result = stdout_reader.next_line(), if !stdout_done => {
                     match line_result {
                         Ok(Some(line)) => {
                             last_output = Instant::now();
@@ -419,16 +421,18 @@ impl Derivation {
                                 }
                             }
                         }
-                        Ok(None) => break,
+                        Ok(None) => {
+                            stdout_done = true;
+                        }
                         Err(e) => {
                             error!("Error reading stdout: {}", e);
-                            break;
+                            stdout_done = true;
                         }
                     }
                 }
 
                 // Read stderr
-                line_result = stderr_reader.next_line() => {
+                line_result = stderr_reader.next_line(), if !stderr_done => {
                     match line_result {
                         Ok(Some(line)) => {
                             last_output = Instant::now();
@@ -443,9 +447,12 @@ impl Derivation {
                                 }
                             }
                         }
-                        Ok(None) => {},
+                        Ok(None) => {
+                            stderr_done = true;
+                        }
                         Err(e) => {
                             error!("Error reading stderr: {}", e);
+                            stderr_done = true;
                         }
                     }
                 }

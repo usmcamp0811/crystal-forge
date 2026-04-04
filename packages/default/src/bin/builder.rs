@@ -7,6 +7,7 @@ use crystal_forge::models::builders::{BuildJob, ReportMetricsRequest};
 use crystal_forge::queries::derivations::get_derivation_by_id;
 use crystal_forge::server::memory_monitor_task;
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::signal;
 use tokio::sync::mpsc;
@@ -375,6 +376,7 @@ async fn execute_build_job(
     // Set up bounded channel for log streaming with backpressure.
     // The forwarding task receives batched log content and sends it to ws/http.
     let (log_tx, mut log_rx) = mpsc::channel::<String>(LOG_CHANNEL_CAPACITY);
+    let dropped_log_batches = Arc::new(AtomicUsize::new(0));
 
     // Clone references for the forwarding task
     let fwd_client = client.clone();
@@ -401,11 +403,13 @@ async fn execute_build_job(
         // The sink is created inline so it's dropped when the build completes.
         let log_sink: LogSink = {
             let tx = log_tx;
+            let dropped_counter = dropped_log_batches.clone();
             Arc::new(move |batch: String| {
                 // Use try_send to avoid blocking the build if the channel is full.
                 // If full, the batch is dropped (acceptable for high-throughput builds).
                 if let Err(e) = tx.try_send(batch) {
                     if matches!(e, mpsc::error::TrySendError::Full(_)) {
+                        dropped_counter.fetch_add(1, Ordering::Relaxed);
                         tracing::debug!("Log channel full, dropping batch");
                     }
                 }
@@ -421,6 +425,15 @@ async fn execute_build_job(
 
     // Wait for forwarding task to drain remaining messages
     let _ = log_forward_task.await;
+
+    let dropped_count = dropped_log_batches.load(Ordering::Relaxed);
+    if dropped_count > 0 {
+        let notice = format!(
+            "[crystal-forge] warning: dropped {} buffered log batch(es) due to backpressure\n",
+            dropped_count
+        );
+        send_log_with_fallback(&client, job.id, &mut ws_shared, &notice).await;
+    }
 
     match build_result {
         // Build succeeded within timeout
