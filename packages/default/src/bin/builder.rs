@@ -17,6 +17,7 @@ use tracing_subscriber::EnvFilter;
 /// Channel capacity for log streaming. Provides backpressure when the forwarding
 /// task cannot keep up with build output.
 const LOG_CHANNEL_CAPACITY: usize = 64;
+const LOG_DRAIN_GRACE_PERIOD: std::time::Duration = std::time::Duration::from_secs(2);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -423,8 +424,29 @@ async fn execute_build_job(
         .await
     };
 
-    // Wait for forwarding task to drain remaining messages
-    let _ = log_forward_task.await;
+    // Wait for forwarding task to drain remaining messages, but do not block
+    // job completion indefinitely under heavy log pressure.
+    let mut log_forward_task = log_forward_task;
+    match tokio::time::timeout(LOG_DRAIN_GRACE_PERIOD, &mut log_forward_task).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            warn!("log forwarding task failed for job {}: {}", job.id, e);
+        }
+        Err(_) => {
+            warn!(
+                "log drain grace period exceeded for job {}, aborting forwarder",
+                job.id
+            );
+            log_forward_task.abort();
+            send_log_with_fallback(
+                &client,
+                job.id,
+                &mut ws_shared,
+                "[crystal-forge] warning: log drain timed out; tail output may be truncated\n",
+            )
+            .await;
+        }
+    }
 
     let dropped_count = dropped_log_batches.load(Ordering::Relaxed);
     if dropped_count > 0 {
