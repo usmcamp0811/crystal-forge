@@ -1,10 +1,10 @@
 ---
 id: TASK-245
 title: Stream real nix build output into Build Logs with batching/throttling
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-04-04 14:43'
-updated_date: '2026-04-04 14:46'
+updated_date: '2026-04-04 15:01'
 labels:
   - builds
   - logs
@@ -142,10 +142,10 @@ This touches build log transport for running builds, but the scope is isolated a
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 During a running build, the Build Logs panel shows real nix build stdout/stderr, not just milestone messages.
-- [ ] #2 Real build output is streamed live to the existing build log websocket/UI path and remains persisted after refresh.
-- [ ] #3 Log transport uses batching/throttling so normal builds do not generate one DB write per individual output line.
-- [ ] #4 Existing milestone log messages remain visible in the combined log stream.
+- [x] #1 During a running build, the Build Logs panel shows real nix build stdout/stderr, not just milestone messages.
+- [x] #2 Real build output is streamed live to the existing build log websocket/UI path and remains persisted after refresh.
+- [x] #3 Log transport uses batching/throttling so normal builds do not generate one DB write per individual output line.
+- [x] #4 Existing milestone log messages remain visible in the combined log stream.
 - [ ] #5 Targeted verification demonstrates a build with multiple emitted lines appearing progressively in the UI.
 <!-- AC:END -->
 
@@ -153,4 +153,14 @@ This touches build log transport for running builds, but the scope is isolated a
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: claude-agent on gray in ~/code/crystal-forge/TASK-245-stream-build-logs
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/209
+
+Implementation complete - LogBuffer with size (8KB) and time (250ms) batching thresholds
+
+Channel-based log sink decouples build output from network I/O
+
+Unit tests pass (7 tests for LogBuffer)
+
+Tier 1 verification pending: live build in UI to confirm logs stream
 <!-- SECTION:NOTES:END -->
