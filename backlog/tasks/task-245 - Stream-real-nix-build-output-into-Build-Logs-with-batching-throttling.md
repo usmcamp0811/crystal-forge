@@ -1,10 +1,10 @@
 ---
 id: TASK-245
 title: Stream real nix build output into Build Logs with batching/throttling
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-04-04 14:43'
-updated_date: '2026-04-04 14:43'
+updated_date: '2026-04-04 14:46'
 labels:
   - builds
   - logs
@@ -148,3 +148,9 @@ This touches build log transport for running builds, but the scope is isolated a
 - [ ] #4 Existing milestone log messages remain visible in the combined log stream.
 - [ ] #5 Targeted verification demonstrates a build with multiple emitted lines appearing progressively in the UI.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: claude-agent on gray in ~/code/crystal-forge/TASK-245-stream-build-logs
+<!-- SECTION:NOTES:END -->
