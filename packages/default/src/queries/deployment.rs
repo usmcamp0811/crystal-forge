@@ -2,11 +2,8 @@ use crate::models::systems::System;
 use anyhow::Result;
 use sqlx::PgPool;
 
-/// Get all systems that have deployment_policy set to 'auto_latest'
-pub async fn get_systems_with_auto_latest_policy(pool: &PgPool) -> Result<Vec<System>> {
-    let systems = sqlx::query_as::<_, System>(
-        r#"
-        SELECT 
+const AUTO_LATEST_SYSTEMS_QUERY: &str = r#"
+        SELECT
             id,
             hostname,
             environment_id,
@@ -14,18 +11,22 @@ pub async fn get_systems_with_auto_latest_policy(pool: &PgPool) -> Result<Vec<Sy
             public_key,
             flake_id,
             derivation,
+            system_configuration_name,
             created_at,
             updated_at,
             desired_target,
             deployment_policy
-        FROM systems 
-        WHERE deployment_policy = 'auto_latest' 
+        FROM systems
+        WHERE deployment_policy = 'auto_latest'
         AND is_active = true
         ORDER BY hostname
-        "#,
-    )
-    .fetch_all(pool)
-    .await?;
+        "#;
+
+/// Get all systems that have deployment_policy set to 'auto_latest'
+pub async fn get_systems_with_auto_latest_policy(pool: &PgPool) -> Result<Vec<System>> {
+    let systems = sqlx::query_as::<_, System>(AUTO_LATEST_SYSTEMS_QUERY)
+        .fetch_all(pool)
+        .await?;
 
     Ok(systems)
 }
@@ -96,4 +97,14 @@ pub async fn get_systems_by_deployment_policy(pool: &PgPool, policy: &str) -> Re
     .await?;
 
     Ok(systems)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AUTO_LATEST_SYSTEMS_QUERY;
+
+    #[test]
+    fn auto_latest_query_selects_system_configuration_name() {
+        assert!(AUTO_LATEST_SYSTEMS_QUERY.contains("system_configuration_name"));
+    }
 }
