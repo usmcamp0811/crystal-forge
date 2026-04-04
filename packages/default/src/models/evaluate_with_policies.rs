@@ -20,7 +20,7 @@ use crate::models::deployment_policies::{
 use crate::models::flakes::Flake;
 use crate::queries::build_jobs::enqueue_build_job_for_derivation;
 use crate::queries::derivations::{
-    insert_derivation_with_target, mark_derivation_dry_run_complete,
+    insert_derivation_with_target, mark_derivation_dry_run_complete, set_expected_store_path,
 };
 use crate::queue::QueueNotifier;
 use crate::queries::systems::list_configuration_names_for_flake;
@@ -43,6 +43,74 @@ pub struct NixEvalJobResult {
     /// Meta field (only present with --meta flag)
     /// Contains our policy check results in meta.policies
     pub meta: Option<serde_json::Value>,
+}
+
+fn parse_expected_store_path_from_outputs(outputs: &serde_json::Value) -> Option<String> {
+    let object = outputs.as_object()?;
+
+    if let Some(out) = object.get("out") {
+        if let Some(path) = out.as_str() {
+            if path.starts_with("/nix/store/") {
+                return Some(path.to_string());
+            }
+        }
+
+        if let Some(path) = out.get("path").and_then(|v| v.as_str()) {
+            if path.starts_with("/nix/store/") {
+                return Some(path.to_string());
+            }
+        }
+    }
+
+    object
+        .values()
+        .find_map(|value| {
+            if let Some(path) = value.as_str() {
+                if path.starts_with("/nix/store/") {
+                    return Some(path.to_string());
+                }
+            }
+
+            value
+                .get("path")
+                .and_then(|v| v.as_str())
+                .filter(|path| path.starts_with("/nix/store/"))
+                .map(|path| path.to_string())
+        })
+}
+
+async fn resolve_expected_store_path(
+    drv_path: &str,
+    outputs: Option<&serde_json::Value>,
+) -> Option<String> {
+    if let Some(outputs) = outputs {
+        if let Some(path) = parse_expected_store_path_from_outputs(outputs) {
+            return Some(path);
+        }
+    }
+
+    let output = Command::new("nix-store")
+        .args(["--query", "--outputs", drv_path])
+        .output()
+        .await
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let path = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?
+        .to_string();
+
+    if path.starts_with("/nix/store/") {
+        Some(path)
+    } else {
+        None
+    }
 }
 
 /// Evaluate a flake's nixosConfigurations with nix-eval-jobs and policy checking
@@ -189,6 +257,15 @@ pub async fn evaluate_with_nix_eval_jobs(
                                 }
                                 let has_error = result.error.is_some();
                                 let drv_path = result.drv_path.clone();
+                                let expected_store_path = if !has_error {
+                                    if let Some(drv) = drv_path.as_deref() {
+                                        resolve_expected_store_path(drv, result.outputs.as_ref()).await
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                };
 
                                 debug!("📦 Evaluated: {}, drv_path={:?}, has_error={:?}",
                                     system_name, drv_path, has_error);
@@ -367,6 +444,15 @@ pub async fn evaluate_with_nix_eval_jobs(
 
                                                 match mark_derivation_dry_run_complete(pool, deriv.id, &drv).await {
                                                     Ok(_) => {
+                                                        if let Some(expected_path) = expected_store_path.as_deref() {
+                                                            if let Err(e) = set_expected_store_path(pool, deriv.id, expected_path).await {
+                                                                warn!(
+                                                                    "⚠️  Failed to persist expected_store_path for {} (id={}): {}",
+                                                                    system_name, deriv.id, e
+                                                                );
+                                                            }
+                                                        }
+
                                                         // ── INCREMENTAL BUILD QUEUE ──────────────────────
                                                         // Only enqueue if policy passed.
                                                         if cf_agent_enabled == Some(true) {

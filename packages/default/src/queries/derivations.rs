@@ -1057,6 +1057,26 @@ pub async fn mark_derivation_dry_run_complete(
     .await
 }
 
+pub async fn set_expected_store_path(
+    pool: &PgPool,
+    derivation_id: i32,
+    expected_store_path: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE derivations
+        SET expected_store_path = $2
+        WHERE id = $1
+        "#,
+    )
+    .bind(derivation_id)
+    .bind(expected_store_path)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 pub async fn mark_derivation_build_in_progress(
     pool: &PgPool,
     derivation_id: i32,
