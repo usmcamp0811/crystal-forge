@@ -1,9 +1,10 @@
 ---
 id: TASK-245
 title: Stream real nix build output into Build Logs with batching/throttling
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-04-04 14:43'
+updated_date: '2026-04-04 14:43'
 labels:
   - builds
   - logs
