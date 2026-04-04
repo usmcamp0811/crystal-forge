@@ -2,14 +2,21 @@ use crystal_forge::builder::api_client::BuilderApiClient;
 use crystal_forge::builder::metrics::SystemMetrics;
 use crystal_forge::builder::{run_build_loop, run_cache_push_loop, run_cve_scan_loop};
 use crystal_forge::config::CrystalForgeConfig;
-use crystal_forge::derivations::build::BuildCancelledError;
+use crystal_forge::derivations::build::{BuildCancelledError, LogSink};
 use crystal_forge::models::builders::{BuildJob, ReportMetricsRequest};
 use crystal_forge::queries::derivations::get_derivation_by_id;
 use crystal_forge::server::memory_monitor_task;
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use tokio::signal;
+use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
+
+/// Channel capacity for log streaming. Provides backpressure when the forwarding
+/// task cannot keep up with build output.
+const LOG_CHANNEL_CAPACITY: usize = 64;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -366,17 +373,67 @@ async fn execute_build_job(
         None
     };
 
+    // Set up bounded channel for log streaming with backpressure.
+    // The forwarding task receives batched log content and sends it to ws/http.
+    let (log_tx, mut log_rx) = mpsc::channel::<String>(LOG_CHANNEL_CAPACITY);
+    let dropped_log_batches = Arc::new(AtomicUsize::new(0));
+
+    // Clone references for the forwarding task
+    let fwd_client = client.clone();
+    let fwd_job_id = job.id;
+    let fwd_ws = ws_shared.clone();
+
+    // Spawn log forwarding task - receives batched content from channel
+    let log_forward_task = tokio::spawn(async move {
+        let mut ws_local = fwd_ws;
+        while let Some(batch) = log_rx.recv().await {
+            send_log_with_fallback(&fwd_client, fwd_job_id, &mut ws_local, &batch).await;
+        }
+    });
+
     // Execute the build with timeout, or deterministic mock execution in dev mode.
     let build_result = if execution_mode.is_mock() {
+        // Mock path: drop log_tx immediately since mock build doesn't use it.
+        // This ensures the forwarding task can exit cleanly.
+        drop(log_tx);
         let mock_result = run_mock_build(&mut derivation, &client, job.id, &mut ws_shared).await;
         Ok(mock_result)
     } else {
+        // Real path: create log_sink that sends to channel using try_send for backpressure.
+        // The sink is created inline so it's dropped when the build completes.
+        let log_sink: LogSink = {
+            let tx = log_tx;
+            let dropped_counter = dropped_log_batches.clone();
+            Arc::new(move |batch: String| {
+                // Use try_send to avoid blocking the build if the channel is full.
+                // If full, the batch is dropped (acceptable for high-throughput builds).
+                if let Err(e) = tx.try_send(batch) {
+                    if matches!(e, mpsc::error::TrySendError::Full(_)) {
+                        dropped_counter.fetch_add(1, Ordering::Relaxed);
+                        tracing::debug!("Log channel full, dropping batch");
+                    }
+                }
+            })
+        };
+
         tokio::time::timeout(
             build_timeout,
-            derivation.build(&pool, &build_config, Some(job.id)),
+            derivation.build_with_log_sink(&pool, &build_config, Some(job.id), Some(log_sink)),
         )
         .await
     };
+
+    // Wait for forwarding task to drain remaining messages
+    let _ = log_forward_task.await;
+
+    let dropped_count = dropped_log_batches.load(Ordering::Relaxed);
+    if dropped_count > 0 {
+        let notice = format!(
+            "[crystal-forge] warning: dropped {} buffered log batch(es) due to backpressure\n",
+            dropped_count
+        );
+        send_log_with_fallback(&client, job.id, &mut ws_shared, &notice).await;
+    }
 
     match build_result {
         // Build succeeded within timeout
