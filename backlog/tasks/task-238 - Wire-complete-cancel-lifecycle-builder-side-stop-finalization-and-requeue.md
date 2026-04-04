@@ -1,10 +1,10 @@
 ---
 id: TASK-238
 title: 'Wire complete cancel lifecycle: builder-side stop, finalization, and requeue'
-status: To Do
+status: Review
 assignee: []
 created_date: '2026-04-02 12:46'
-updated_date: '2026-04-03 00:56'
+updated_date: '2026-04-03 01:43'
 labels:
   - builds
   - backend
@@ -189,3 +189,15 @@ High — touches the running build process termination path and job state machin
 - [ ] #7 Unit tests cover: graceful_kill SIGTERM→SIGKILL sequence, cancel/finalize state transitions, requeue state transition, requeue rejection for non-cancelled statuses.
 - [ ] #8 Tier 1 end-to-end test passes: cancel a live building job, verify cancellation log, verify `cancelled` state, verify requeue puts it back without flake re-eval.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: claude-sonnet-4-6 on reckless in /home/mcamp/code/crystal-forge/TASK-238-cancel-lifecycle
+
+## MR Created
+
+MR !206: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/206
+
+Awaiting CI pipeline results.
+<!-- SECTION:NOTES:END -->
