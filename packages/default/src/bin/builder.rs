@@ -296,12 +296,13 @@ async fn execute_build_job(
         Ok(deriv) => deriv,
         Err(e) => {
             error!("❌ Failed to fetch derivation {}: {}", job.derivation_id, e);
-            if let Err(e2) = client
-                .fail_job(job.id, &format!("Failed to fetch derivation: {}", e))
-                .await
-            {
-                error!("❌ Failed to report job failure: {}", e2);
-            }
+            fail_job_with_db_fallback(
+                &client,
+                &pool,
+                job.id,
+                &format!("Failed to fetch derivation: {}", e),
+            )
+            .await;
             return;
         }
     };
@@ -559,9 +560,7 @@ async fn execute_build_job(
             }
 
             // Report success to server
-            if let Err(e) = client.complete_job(job.id, &store_path).await {
-                error!("❌ Failed to report job completion: {}", e);
-            }
+            complete_job_with_db_fallback(&client, &pool, job.id, &store_path).await;
         }
 
         // Build was cancelled by an operator (server set status to 'cancelling')
@@ -580,9 +579,7 @@ async fn execute_build_job(
             // Call finalize-cancelled so the server sets completed_at and closes
             // the job cleanly.  If this fails we log and move on — the job will
             // remain in 'cancelling' until the next reconciliation.
-            if let Err(e2) = client.finalize_cancelled_job(job.id).await {
-                error!("❌ Failed to finalize cancelled job #{}: {}", job.id, e2);
-            }
+            finalize_cancelled_with_db_fallback(&client, &pool, job.id).await;
         }
 
         // Build failed within timeout
@@ -633,9 +630,7 @@ async fn execute_build_job(
             }
 
             // Report failure to server
-            if let Err(e2) = client.fail_job(job.id, &e.to_string()).await {
-                error!("❌ Failed to report job failure: {}", e2);
-            }
+            fail_job_with_db_fallback(&client, &pool, job.id, &e.to_string()).await;
         }
 
         // Build timed out
@@ -682,15 +677,82 @@ async fn execute_build_job(
             }
 
             // Report timeout failure to server
-            if let Err(e) = client.fail_job(job.id, &timeout_msg).await {
-                error!("❌ Failed to report job timeout: {}", e);
-            }
+            fail_job_with_db_fallback(&client, &pool, job.id, &timeout_msg).await;
         }
     }
 
     // Clean up metrics task if it was spawned
     if let Some(task) = metrics_task {
         task.abort();
+    }
+}
+
+async fn fail_job_with_db_fallback(
+    client: &BuilderApiClient,
+    pool: &sqlx::PgPool,
+    job_id: uuid::Uuid,
+    error_message: &str,
+) {
+    if let Err(e) = client.fail_job(job_id, error_message).await {
+        error!(
+            "❌ Failed to report job failure via API for {}: {}. Falling back to direct DB transition",
+            job_id, e
+        );
+
+        if let Err(e2) = crystal_forge::queries::builders::mark_job_failed_with_retry(
+            pool,
+            &job_id,
+            Some(error_message),
+        )
+        .await
+        {
+            error!(
+                "❌ DB fallback failed while marking job {} as failed: {}",
+                job_id, e2
+            );
+        }
+    }
+}
+
+async fn complete_job_with_db_fallback(
+    client: &BuilderApiClient,
+    pool: &sqlx::PgPool,
+    job_id: uuid::Uuid,
+    output_path: &str,
+) {
+    if let Err(e) = client.complete_job(job_id, output_path).await {
+        error!(
+            "❌ Failed to report job completion via API for {}: {}. Falling back to direct DB transition",
+            job_id, e
+        );
+
+        if let Err(e2) = crystal_forge::queries::builders::mark_job_complete(pool, &job_id).await {
+            error!(
+                "❌ DB fallback failed while marking job {} complete: {}",
+                job_id, e2
+            );
+        }
+    }
+}
+
+async fn finalize_cancelled_with_db_fallback(
+    client: &BuilderApiClient,
+    pool: &sqlx::PgPool,
+    job_id: uuid::Uuid,
+) {
+    if let Err(e) = client.finalize_cancelled_job(job_id).await {
+        error!(
+            "❌ Failed to finalize cancelled job via API for {}: {}. Falling back to direct DB transition",
+            job_id, e
+        );
+
+        if let Err(e2) = crystal_forge::queries::builders::finalize_cancelled_job(pool, &job_id).await
+        {
+            error!(
+                "❌ DB fallback failed while finalizing cancelled job {}: {}",
+                job_id, e2
+            );
+        }
     }
 }
 

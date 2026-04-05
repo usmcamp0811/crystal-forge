@@ -935,6 +935,7 @@ pub async fn mark_job_failed_with_retry(
                 priority_weight = $2,
                 builder_id = NULL,
                 started_at = NULL,
+                created_at = now(),
                 updated_at = now()
             WHERE id = $1
             RETURNING *
