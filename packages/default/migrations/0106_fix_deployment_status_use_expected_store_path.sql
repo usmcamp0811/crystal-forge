@@ -1,10 +1,11 @@
--- Fix deployment status classification when latest system_state store_path
--- cannot be mapped back to a derivation via direct store_path join.
+-- Fix deployment status classification to use expected_store_path from eval.
 --
--- Fallback behavior:
--- - up_to_date: current store path equals latest expected built nixos path for host
--- - behind: current store path matches a known built nixos path for host but is not expected
--- - unknown: current store path does not match any known built nixos path for host
+-- Use COALESCE(d.store_path, d.expected_store_path) throughout so that:
+-- 1. Pre-build: match against expected_store_path from eval
+-- 2. Post-build: match against actual store_path from build
+--
+-- This fixes systems showing as 'unknown' when they're running the correct
+-- configuration but the derivation hasn't been built yet (only evaluated).
 
 CREATE OR REPLACE VIEW public.view_system_deployment_status AS
 WITH latest_system_states AS (
@@ -27,7 +28,9 @@ system_current_derivations AS (
         c.flake_id,
         f.name AS flake_name
     FROM latest_system_states lss
-    LEFT JOIN derivations d ON lss.store_path = d.store_path
+    -- Match agent-reported store path against either the built path or the expected
+    -- path so we can track alignment before the builder has completed.
+    LEFT JOIN derivations d ON lss.store_path = COALESCE(d.store_path, d.expected_store_path)
     LEFT JOIN commits c ON d.commit_id = c.id
     LEFT JOIN flakes f ON c.flake_id = f.id
 ),
@@ -44,26 +47,28 @@ latest_flake_commits AS (
     ORDER BY s.hostname, c.commit_timestamp DESC
 ),
 latest_expected_paths AS (
+    -- Get the expected (or actual) store path for the latest commit's derivation.
+    -- Use COALESCE to prefer store_path (post-build) but fall back to expected_store_path (post-eval).
     SELECT DISTINCT ON (lfc.hostname)
         lfc.hostname,
-        d.store_path AS expected_store_path
+        COALESCE(d.store_path, d.expected_store_path) AS expected_store_path
     FROM latest_flake_commits lfc
     JOIN derivations d
       ON d.commit_id = lfc.latest_commit_id
      AND d.derivation_name = lfc.hostname
      AND d.derivation_type = 'nixos'
-     AND d.status_id = 10
-     AND d.store_path IS NOT NULL
+     -- Require at least expected_store_path to be set (eval complete)
+     AND COALESCE(d.store_path, d.expected_store_path) IS NOT NULL
     ORDER BY lfc.hostname, d.completed_at DESC NULLS LAST, d.id DESC
 ),
 known_host_paths AS (
+    -- All known store paths (expected or actual) for nixos derivations.
     SELECT DISTINCT
         d.derivation_name AS hostname,
-        d.store_path
+        COALESCE(d.store_path, d.expected_store_path) AS store_path
     FROM derivations d
     WHERE d.derivation_type = 'nixos'
-      AND d.status_id = 10
-      AND d.store_path IS NOT NULL
+      AND COALESCE(d.store_path, d.expected_store_path) IS NOT NULL
 ),
 commit_counts AS (
     SELECT
