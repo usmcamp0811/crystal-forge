@@ -46,6 +46,18 @@ pub struct NixEvalJobResult {
 }
 
 fn parse_expected_store_path_from_outputs(outputs: &serde_json::Value) -> Option<String> {
+    if let Some(path) = outputs.get("outPath").and_then(|v| v.as_str()) {
+        if path.starts_with("/nix/store/") {
+            return Some(path.to_string());
+        }
+    }
+
+    if let Some(path) = outputs.as_str() {
+        if path.starts_with("/nix/store/") {
+            return Some(path.to_string());
+        }
+    }
+
     let object = outputs.as_object()?;
 
     if let Some(out) = object.get("out") {
@@ -56,6 +68,12 @@ fn parse_expected_store_path_from_outputs(outputs: &serde_json::Value) -> Option
         }
 
         if let Some(path) = out.get("path").and_then(|v| v.as_str()) {
+            if path.starts_with("/nix/store/") {
+                return Some(path.to_string());
+            }
+        }
+
+        if let Some(path) = out.get("outPath").and_then(|v| v.as_str()) {
             if path.starts_with("/nix/store/") {
                 return Some(path.to_string());
             }
@@ -76,6 +94,13 @@ fn parse_expected_store_path_from_outputs(outputs: &serde_json::Value) -> Option
                 .and_then(|v| v.as_str())
                 .filter(|path| path.starts_with("/nix/store/"))
                 .map(|path| path.to_string())
+                .or_else(|| {
+                    value
+                        .get("outPath")
+                        .and_then(|v| v.as_str())
+                        .filter(|path| path.starts_with("/nix/store/"))
+                        .map(|path| path.to_string())
+                })
         })
 }
 
@@ -96,6 +121,12 @@ async fn resolve_expected_store_path(
         .ok()?;
 
     if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        warn!(
+            "Failed to resolve expected store path via nix-store for drv {}: {}",
+            drv_path,
+            if stderr.is_empty() { "<no stderr>" } else { &stderr }
+        );
         return None;
     }
 
@@ -451,6 +482,11 @@ pub async fn evaluate_with_nix_eval_jobs(
                                                                     system_name, deriv.id, e
                                                                 );
                                                             }
+                                                        } else {
+                                                            warn!(
+                                                                "⚠️  Could not resolve expected_store_path for {} (id={}) drv={}",
+                                                                system_name, deriv.id, drv
+                                                            );
                                                         }
 
                                                         // ── INCREMENTAL BUILD QUEUE ──────────────────────
