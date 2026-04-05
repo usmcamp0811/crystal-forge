@@ -46,74 +46,28 @@ pub struct NixEvalJobResult {
 }
 
 fn parse_expected_store_path_from_outputs(outputs: &serde_json::Value) -> Option<String> {
-    if let Some(path) = outputs.get("outPath").and_then(|v| v.as_str()) {
+    // Keep parsing intentionally strict: only use the canonical "out" output.
+    // Broad scanning can pick unrelated store paths and corrupt expected_path data.
+    if let Some(path) = outputs
+        .get("out")
+        .and_then(|out| out.get("path").or_else(|| out.get("outPath")))
+        .and_then(|v| v.as_str())
+        .or_else(|| outputs.get("out").and_then(|v| v.as_str()))
+        .or_else(|| outputs.get("outPath").and_then(|v| v.as_str()))
+    {
         if path.starts_with("/nix/store/") {
             return Some(path.to_string());
         }
     }
 
-    if let Some(path) = outputs.as_str() {
-        if path.starts_with("/nix/store/") {
-            return Some(path.to_string());
-        }
-    }
-
-    let object = outputs.as_object()?;
-
-    if let Some(out) = object.get("out") {
-        if let Some(path) = out.as_str() {
-            if path.starts_with("/nix/store/") {
-                return Some(path.to_string());
-            }
-        }
-
-        if let Some(path) = out.get("path").and_then(|v| v.as_str()) {
-            if path.starts_with("/nix/store/") {
-                return Some(path.to_string());
-            }
-        }
-
-        if let Some(path) = out.get("outPath").and_then(|v| v.as_str()) {
-            if path.starts_with("/nix/store/") {
-                return Some(path.to_string());
-            }
-        }
-    }
-
-    object
-        .values()
-        .find_map(|value| {
-            if let Some(path) = value.as_str() {
-                if path.starts_with("/nix/store/") {
-                    return Some(path.to_string());
-                }
-            }
-
-            value
-                .get("path")
-                .and_then(|v| v.as_str())
-                .filter(|path| path.starts_with("/nix/store/"))
-                .map(|path| path.to_string())
-                .or_else(|| {
-                    value
-                        .get("outPath")
-                        .and_then(|v| v.as_str())
-                        .filter(|path| path.starts_with("/nix/store/"))
-                        .map(|path| path.to_string())
-                })
-        })
+    None
 }
 
 async fn resolve_expected_store_path(
     drv_path: &str,
     outputs: Option<&serde_json::Value>,
 ) -> Option<String> {
-    if let Some(outputs) = outputs {
-        if let Some(path) = parse_expected_store_path_from_outputs(outputs) {
-            return Some(path);
-        }
-    }
-
+    // Authoritative source: ask nix-store for outputs of this exact drv.
     let output = Command::new("nix-store")
         .args(["--query", "--outputs", drv_path])
         .output()
@@ -130,7 +84,8 @@ async fn resolve_expected_store_path(
         return None;
     }
 
-    let path = String::from_utf8_lossy(&output.stdout)
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let path = stdout
         .lines()
         .next()
         .map(str::trim)
@@ -140,6 +95,21 @@ async fn resolve_expected_store_path(
     if path.starts_with("/nix/store/") {
         Some(path)
     } else {
+        if let Some(outputs) = outputs {
+            if let Some(fallback) = parse_expected_store_path_from_outputs(outputs) {
+                warn!(
+                    "nix-store returned non-store output for drv {}, using outputs JSON fallback",
+                    drv_path
+                );
+                return Some(fallback);
+            }
+        }
+
+        warn!(
+            "Could not resolve expected store path from nix-store output for drv {}: {}",
+            drv_path,
+            stdout.trim()
+        );
         None
     }
 }
