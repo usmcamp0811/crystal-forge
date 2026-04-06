@@ -75,13 +75,14 @@ pub async fn get_commit_by_id(pool: &PgPool, id: i32) -> Result<Commit> {
 }
 
 pub async fn get_commits_pending_evaluation(pool: &PgPool) -> Result<Vec<Commit>> {
+    // NOTE: We no longer check for d.commit_id IS NULL because partial evaluations
+    // (where some derivations exist but eval crashed mid-way) would get stuck.
+    // The evaluation_status = 'pending' is the authoritative check.
     let rows = sqlx::query_as::<_, Commit>(
         r#"
         SELECT c.id, c.flake_id, c.git_commit_hash, c.commit_timestamp, c.attempt_count
         FROM commits c
-        LEFT JOIN derivations d ON c.id = d.commit_id
-        WHERE d.commit_id IS NULL
-        AND c.evaluation_status = 'pending'
+        WHERE c.evaluation_status = 'pending'
         AND COALESCE(c.evaluation_attempt_count, 0) < 3
         AND (
             c.evaluation_started_at IS NULL
