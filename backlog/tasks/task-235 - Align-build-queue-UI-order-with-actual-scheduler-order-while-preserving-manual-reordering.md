@@ -3,10 +3,10 @@ id: TASK-235
 title: >-
   Align build queue UI order with actual scheduler order while preserving manual
   reordering
-status: Review
+status: Done
 assignee: []
 created_date: '2026-04-01 02:30'
-updated_date: '2026-04-02 00:15'
+updated_date: '2026-04-06 12:51'
 labels:
   - build-queue
   - scheduler
@@ -110,4 +110,6 @@ DB-backed ordering tests still blocked in this environment by local PostgreSQL p
 Opened MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/204
 
 Closed during backlog cleanup per maintainer direction (MR merged/closed). Task archived from active review queue.
+
+Status corrected to Done (was stale in Review list). Merged into dev via merge commit 992dc903.
 <!-- SECTION:NOTES:END -->
