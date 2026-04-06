@@ -136,10 +136,9 @@ async fn run_api_mode(cfg: &CrystalForgeConfig) -> anyhow::Result<()> {
         run_heartbeat_loop(heartbeat_client, heartbeat_interval).await;
     });
 
-    // Spawn cache-push loop in API mode when enabled.
-    // Successful API-mode builds already queue cache push jobs; without this
-    // worker loop nothing consumes them, so artifacts never reach the cache.
-    if should_start_cache_push_loop(&cache_config) {
+    // Spawn cache-push loop in API mode.
+    // Cache pushes run in the background while builds continue.
+    {
         let cache_pool = crystal_forge::config::CrystalForgeConfig::db_pool().await?;
         tokio::spawn(run_cache_push_loop(cache_pool));
     }
@@ -171,10 +170,6 @@ async fn run_api_mode(cfg: &CrystalForgeConfig) -> anyhow::Result<()> {
 
     info!("Shutting down API mode builder...");
     Ok(())
-}
-
-fn should_start_cache_push_loop(cache_config: &crystal_forge::config::CacheConfig) -> bool {
-    cache_config.push_after_build
 }
 
 /// Heartbeat loop - sends metrics to server periodically
@@ -296,12 +291,13 @@ async fn execute_build_job(
         Ok(deriv) => deriv,
         Err(e) => {
             error!("❌ Failed to fetch derivation {}: {}", job.derivation_id, e);
-            if let Err(e2) = client
-                .fail_job(job.id, &format!("Failed to fetch derivation: {}", e))
-                .await
-            {
-                error!("❌ Failed to report job failure: {}", e2);
-            }
+            fail_job_with_db_fallback(
+                &client,
+                &pool,
+                job.id,
+                &format!("Failed to fetch derivation: {}", e),
+            )
+            .await;
             return;
         }
     };
@@ -505,35 +501,34 @@ async fn execute_build_job(
                     let _ = client.append_logs(job.id, "✅ Derivation signed\n").await;
                 }
 
-                // Create cache push job if configured
-                if cache_config.push_after_build {
-                    let _ = client
-                        .append_logs(job.id, "📤 Queuing cache push job...\n")
-                        .await;
-                    if let Some(ref store_path) = derivation.store_path {
-                        if let Err(e) = crystal_forge::queries::cache_push::create_cache_push_job(
-                            &pool,
-                            derivation.id,
-                            store_path,
-                            cache_config.push_to.as_deref(),
-                        )
-                        .await
-                        {
-                            warn!(
-                                "⚠️ Cache queue failed for job #{}, continuing anyway: {}",
-                                job.id, e
-                            );
-                            let _ = client
-                                .append_logs(
-                                    job.id,
-                                    &format!("⚠️  Cache push queue failed: {}\n", e),
-                                )
-                                .await;
-                        } else {
-                            let _ = client
-                                .append_logs(job.id, "✅ Cache push job queued\n")
-                                .await;
-                        }
+                // Always queue a cache push job in API mode. Cache push workers run
+                // concurrently in the background so builds are not blocked.
+                let _ = client
+                    .append_logs(job.id, "📤 Queuing cache push job...\n")
+                    .await;
+                if let Some(ref store_path) = derivation.store_path {
+                    if let Err(e) = crystal_forge::queries::cache_push::create_cache_push_job(
+                        &pool,
+                        derivation.id,
+                        store_path,
+                        cache_config.push_to.as_deref(),
+                    )
+                    .await
+                    {
+                        warn!(
+                            "⚠️ Cache queue failed for job #{}, continuing anyway: {}",
+                            job.id, e
+                        );
+                        let _ = client
+                            .append_logs(
+                                job.id,
+                                &format!("⚠️  Cache push queue failed: {}\n", e),
+                            )
+                            .await;
+                    } else {
+                        let _ = client
+                            .append_logs(job.id, "✅ Cache push job queued\n")
+                            .await;
                     }
                 }
             }
@@ -559,9 +554,7 @@ async fn execute_build_job(
             }
 
             // Report success to server
-            if let Err(e) = client.complete_job(job.id, &store_path).await {
-                error!("❌ Failed to report job completion: {}", e);
-            }
+            complete_job_with_db_fallback(&client, &pool, job.id, &store_path).await;
         }
 
         // Build was cancelled by an operator (server set status to 'cancelling')
@@ -580,9 +573,7 @@ async fn execute_build_job(
             // Call finalize-cancelled so the server sets completed_at and closes
             // the job cleanly.  If this fails we log and move on — the job will
             // remain in 'cancelling' until the next reconciliation.
-            if let Err(e2) = client.finalize_cancelled_job(job.id).await {
-                error!("❌ Failed to finalize cancelled job #{}: {}", job.id, e2);
-            }
+            finalize_cancelled_with_db_fallback(&client, &pool, job.id).await;
         }
 
         // Build failed within timeout
@@ -633,9 +624,7 @@ async fn execute_build_job(
             }
 
             // Report failure to server
-            if let Err(e2) = client.fail_job(job.id, &e.to_string()).await {
-                error!("❌ Failed to report job failure: {}", e2);
-            }
+            fail_job_with_db_fallback(&client, &pool, job.id, &e.to_string()).await;
         }
 
         // Build timed out
@@ -682,15 +671,82 @@ async fn execute_build_job(
             }
 
             // Report timeout failure to server
-            if let Err(e) = client.fail_job(job.id, &timeout_msg).await {
-                error!("❌ Failed to report job timeout: {}", e);
-            }
+            fail_job_with_db_fallback(&client, &pool, job.id, &timeout_msg).await;
         }
     }
 
     // Clean up metrics task if it was spawned
     if let Some(task) = metrics_task {
         task.abort();
+    }
+}
+
+async fn fail_job_with_db_fallback(
+    client: &BuilderApiClient,
+    pool: &sqlx::PgPool,
+    job_id: uuid::Uuid,
+    error_message: &str,
+) {
+    if let Err(e) = client.fail_job(job_id, error_message).await {
+        error!(
+            "❌ Failed to report job failure via API for {}: {}. Falling back to direct DB transition",
+            job_id, e
+        );
+
+        if let Err(e2) = crystal_forge::queries::builders::mark_job_failed_with_retry(
+            pool,
+            &job_id,
+            Some(error_message),
+        )
+        .await
+        {
+            error!(
+                "❌ DB fallback failed while marking job {} as failed: {}",
+                job_id, e2
+            );
+        }
+    }
+}
+
+async fn complete_job_with_db_fallback(
+    client: &BuilderApiClient,
+    pool: &sqlx::PgPool,
+    job_id: uuid::Uuid,
+    output_path: &str,
+) {
+    if let Err(e) = client.complete_job(job_id, output_path).await {
+        error!(
+            "❌ Failed to report job completion via API for {}: {}. Falling back to direct DB transition",
+            job_id, e
+        );
+
+        if let Err(e2) = crystal_forge::queries::builders::mark_job_complete(pool, &job_id).await {
+            error!(
+                "❌ DB fallback failed while marking job {} complete: {}",
+                job_id, e2
+            );
+        }
+    }
+}
+
+async fn finalize_cancelled_with_db_fallback(
+    client: &BuilderApiClient,
+    pool: &sqlx::PgPool,
+    job_id: uuid::Uuid,
+) {
+    if let Err(e) = client.finalize_cancelled_job(job_id).await {
+        error!(
+            "❌ Failed to finalize cancelled job via API for {}: {}. Falling back to direct DB transition",
+            job_id, e
+        );
+
+        if let Err(e2) = crystal_forge::queries::builders::finalize_cancelled_job(pool, &job_id).await
+        {
+            error!(
+                "❌ DB fallback failed while finalizing cancelled job {}: {}",
+                job_id, e2
+            );
+        }
     }
 }
 
@@ -834,9 +890,7 @@ fn is_local_db_host(host: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{mock_store_path, should_mock_build_fail, should_start_cache_push_loop};
-    use crystal_forge::config::{CacheConfig, CacheType};
-    use tokio::time::Duration;
+    use super::{mock_store_path, should_mock_build_fail};
 
     #[test]
     fn mock_store_path_is_deterministic_and_sanitized() {
@@ -856,36 +910,4 @@ mod tests {
         assert!(!should_mock_build_fail("myflake-worker-0"));
     }
 
-    #[test]
-    fn cache_push_loop_only_starts_when_push_after_build_enabled() {
-        let mut cfg = CacheConfig {
-            cache_type: CacheType::Nix,
-            push_to: None,
-            push_after_build: false,
-            signing_key: None,
-            compression: None,
-            push_filter: None,
-            parallel_uploads: 1,
-            s3_region: None,
-            s3_profile: None,
-            s3_access_key_id: None,
-            s3_secret_access_key: None,
-            s3_session_token: None,
-            s3_endpoint_url: None,
-            attic_token: None,
-            attic_cache_name: None,
-            attic_ignore_upstream_cache_filter: true,
-            attic_jobs: 1,
-            max_retries: 1,
-            retry_delay_seconds: 1,
-            poll_interval: Duration::from_secs(30),
-            push_timeout_seconds: 30,
-            force_repush: false,
-            require_sigs: true,
-        };
-
-        assert!(!should_start_cache_push_loop(&cfg));
-        cfg.push_after_build = true;
-        assert!(should_start_cache_push_loop(&cfg));
-    }
 }

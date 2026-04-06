@@ -46,49 +46,28 @@ pub struct NixEvalJobResult {
 }
 
 fn parse_expected_store_path_from_outputs(outputs: &serde_json::Value) -> Option<String> {
-    let object = outputs.as_object()?;
-
-    if let Some(out) = object.get("out") {
-        if let Some(path) = out.as_str() {
-            if path.starts_with("/nix/store/") {
-                return Some(path.to_string());
-            }
-        }
-
-        if let Some(path) = out.get("path").and_then(|v| v.as_str()) {
-            if path.starts_with("/nix/store/") {
-                return Some(path.to_string());
-            }
+    // Keep parsing intentionally strict: only use the canonical "out" output.
+    // Broad scanning can pick unrelated store paths and corrupt expected_path data.
+    if let Some(path) = outputs
+        .get("out")
+        .and_then(|out| out.get("path").or_else(|| out.get("outPath")))
+        .and_then(|v| v.as_str())
+        .or_else(|| outputs.get("out").and_then(|v| v.as_str()))
+        .or_else(|| outputs.get("outPath").and_then(|v| v.as_str()))
+    {
+        if path.starts_with("/nix/store/") {
+            return Some(path.to_string());
         }
     }
 
-    object
-        .values()
-        .find_map(|value| {
-            if let Some(path) = value.as_str() {
-                if path.starts_with("/nix/store/") {
-                    return Some(path.to_string());
-                }
-            }
-
-            value
-                .get("path")
-                .and_then(|v| v.as_str())
-                .filter(|path| path.starts_with("/nix/store/"))
-                .map(|path| path.to_string())
-        })
+    None
 }
 
 async fn resolve_expected_store_path(
     drv_path: &str,
     outputs: Option<&serde_json::Value>,
 ) -> Option<String> {
-    if let Some(outputs) = outputs {
-        if let Some(path) = parse_expected_store_path_from_outputs(outputs) {
-            return Some(path);
-        }
-    }
-
+    // Authoritative source: ask nix-store for outputs of this exact drv.
     let output = Command::new("nix-store")
         .args(["--query", "--outputs", drv_path])
         .output()
@@ -96,10 +75,17 @@ async fn resolve_expected_store_path(
         .ok()?;
 
     if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        warn!(
+            "Failed to resolve expected store path via nix-store for drv {}: {}",
+            drv_path,
+            if stderr.is_empty() { "<no stderr>" } else { &stderr }
+        );
         return None;
     }
 
-    let path = String::from_utf8_lossy(&output.stdout)
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let path = stdout
         .lines()
         .next()
         .map(str::trim)
@@ -109,6 +95,21 @@ async fn resolve_expected_store_path(
     if path.starts_with("/nix/store/") {
         Some(path)
     } else {
+        if let Some(outputs) = outputs {
+            if let Some(fallback) = parse_expected_store_path_from_outputs(outputs) {
+                warn!(
+                    "nix-store returned non-store output for drv {}, using outputs JSON fallback",
+                    drv_path
+                );
+                return Some(fallback);
+            }
+        }
+
+        warn!(
+            "Could not resolve expected store path from nix-store output for drv {}: {}",
+            drv_path,
+            stdout.trim()
+        );
         None
     }
 }
@@ -451,6 +452,11 @@ pub async fn evaluate_with_nix_eval_jobs(
                                                                     system_name, deriv.id, e
                                                                 );
                                                             }
+                                                        } else {
+                                                            warn!(
+                                                                "⚠️  Could not resolve expected_store_path for {} (id={}) drv={}",
+                                                                system_name, deriv.id, drv
+                                                            );
                                                         }
 
                                                         // ── INCREMENTAL BUILD QUEUE ──────────────────────
