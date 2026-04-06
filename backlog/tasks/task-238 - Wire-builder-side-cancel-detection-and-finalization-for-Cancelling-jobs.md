@@ -1,9 +1,10 @@
 ---
 id: TASK-238
 title: Wire builder-side cancel detection and finalization for Cancelling jobs
-status: Backlog
+status: Done
 assignee: []
 created_date: '2026-04-02 12:46'
+updated_date: '2026-04-06 12:51'
 labels:
   - builds
   - backend
@@ -115,3 +116,9 @@ High — touches the running build process termination path. Must not introduce 
 
 - TASK-237 MR !205 (must be merged first, or changes can be layered on the same branch with reviewer approval)
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Status corrected to Done (was stale/incorrect). Merged into dev via merge commit 85ead4d3.
+<!-- SECTION:NOTES:END -->
