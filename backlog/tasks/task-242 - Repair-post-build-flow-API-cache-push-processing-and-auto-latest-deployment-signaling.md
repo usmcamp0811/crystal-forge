@@ -3,10 +3,10 @@ id: TASK-242
 title: >-
   Repair post-build flow: API cache push processing and auto-latest deployment
   signaling
-status: Review
+status: Done
 assignee: []
 created_date: '2026-04-03 14:26'
-updated_date: '2026-04-03 14:42'
+updated_date: '2026-04-06 12:51'
 labels:
   - builds
   - cache
@@ -169,4 +169,6 @@ Verification completed:
 - `nix develop ../.. -c env SQLX_OFFLINE=true cargo test cache_push_loop_only_starts_when_push_after_build_enabled`
 
 This should restore the intended path: build complete -> cache push processed -> desired_target updated -> agent sees desired_target.
+
+Marked Done after merge into dev (merge commit c5b62ca3). Post-build flow now proceeds through cache-push and desired-target signaling.
 <!-- SECTION:NOTES:END -->
