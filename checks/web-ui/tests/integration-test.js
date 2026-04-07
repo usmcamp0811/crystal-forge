@@ -101,6 +101,130 @@ function mockBuildsDashboardSummary() {
   };
 }
 
+function mockFleetHealthDashboardSummary() {
+  const timestamp = nowIso();
+  return {
+    fleet_health: { healthy: 7, warning: 2, critical: 3, offline: 1 },
+    deployment_status: { up_to_date: 8, behind: 3, never_deployed: 1, unknown: 1 },
+    cve_summary: { critical: 1, high: 2, medium: 3, low: 4 },
+    total_systems: 13,
+    active_builds: 0,
+    build_queue: {
+      building_count: 0,
+      queued_count: 0,
+      timestamp,
+      items: [],
+    },
+    recent_deployments: [],
+    timestamp,
+  };
+}
+
+function mockFleetHealthSystemsPage() {
+  const mk = (idx, status) => ({
+    id: `00000000-0000-4000-8000-${String(idx).padStart(12, "0")}`,
+    hostname: `fleet-health-${status}-${idx}`,
+    system_configuration_name: `fleet-health-${status}-${idx}`,
+    environment: "production",
+    flake_id: null,
+    primary_ip: null,
+    health_status: status,
+    deployment_status: "up_to_date",
+    pipeline_stage: "ready_for_build",
+    cve_counts: { critical: 0, high: 0, medium: 0, low: 0 },
+    nixos_version: "24.11",
+    last_seen: nowIso(),
+    deployment_policy: "manual",
+  });
+
+  const items = [
+    ...Array.from({ length: 7 }, (_, i) => mk(i + 1, "healthy")),
+    ...Array.from({ length: 2 }, (_, i) => mk(i + 101, "warning")),
+    ...Array.from({ length: 3 }, (_, i) => mk(i + 201, "critical")),
+    ...Array.from({ length: 1 }, (_, i) => mk(i + 301, "offline")),
+  ];
+
+  return {
+    items,
+    total: items.length,
+    page: 1,
+    per_page: 200,
+  };
+}
+
+async function routeFleetHealthWidgetData(page) {
+  await page.route("**/api/v1/dashboard/summary*", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(mockFleetHealthDashboardSummary()),
+    });
+  });
+
+  await page.route("**/api/v1/systems*", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(mockFleetHealthSystemsPage()),
+    });
+  });
+}
+
+async function unrouteFleetHealthWidgetData(page) {
+  await page.unroute("**/api/v1/dashboard/summary*");
+  await page.unroute("**/api/v1/systems*");
+}
+
+function mockRecentDeploymentsScrollSummary() {
+  const timestamp = nowIso();
+  const recent_deployments = Array.from({ length: 12 }, (_, i) => ({
+    hostname: `deployment-node-${i + 1}`,
+    commit_hash: `abcd1234ef${String(i + 1).padStart(2, "0")}abcd1234ef${String(i + 1).padStart(2, "0")}`,
+    commit_message: `Deploy update ${i + 1} for dashboard scroll coverage`,
+    deployed_at: new Date(Date.now() - i * 60_000).toISOString(),
+    status: i % 2 === 0 ? "up_to_date" : "behind",
+  }));
+
+  return {
+    fleet_health: { healthy: 5, warning: 1, critical: 0, offline: 0 },
+    deployment_status: { up_to_date: 5, behind: 1, never_deployed: 0, unknown: 0 },
+    cve_summary: { critical: 0, high: 0, medium: 0, low: 0 },
+    total_systems: 12,
+    active_builds: 0,
+    build_queue: {
+      building_count: 0,
+      queued_count: 0,
+      timestamp,
+      items: [],
+    },
+    recent_deployments,
+    timestamp,
+  };
+}
+
+async function routeRecentDeploymentsScrollData(page) {
+  await page.route("**/api/v1/dashboard/summary*", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(mockRecentDeploymentsScrollSummary()),
+    });
+  });
+
+  await page.route("**/api/v1/systems*", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ items: [], total: 0, page: 1, per_page: 200 }),
+    });
+  });
+}
+
+async function unrouteRecentDeploymentsScrollData(page) {
+  await page.unroute("**/api/v1/dashboard/summary*");
+  await page.unroute("**/api/v1/systems*");
+}
+
 function mockBuildQueuePage() {
   const summary = mockBuildsDashboardSummary();
   return {
@@ -767,6 +891,99 @@ const steps = [
         page.locator("[data-testid='onboarding-coach-panel']"),
         "Onboarding coach panel should be visible on dashboard",
       );
+    },
+  },
+  {
+    name: "06y-recent-deployments-scroll",
+    description: "Dashboard recent deployments widget scrolls when list exceeds visible height",
+    action: async (page) => {
+      await page.setViewportSize({ width: 1440, height: 520 });
+      await routeRecentDeploymentsScrollData(page);
+      await page.goto(`${baseUrl}/`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1800);
+
+      const scrollRegion = page.locator("[data-testid='recent-deployments-scroll']");
+      await assertVisible(scrollRegion, "Recent deployments scroll container should be visible");
+
+      const stats = await scrollRegion.evaluate((el) => {
+        const rows = el.querySelectorAll("a").length;
+        const overflowY = window.getComputedStyle(el).overflowY;
+
+        // Constrain height to emulate compact dashboard card layouts and
+        // verify that scroll behavior activates when content exceeds space.
+        el.style.maxHeight = "180px";
+        el.style.height = "180px";
+
+        return {
+          rows,
+          overflowY,
+          clientHeight: el.clientHeight,
+          scrollHeight: el.scrollHeight,
+        };
+      });
+
+      if (stats.rows < 10) {
+        throw new Error(`Expected at least 10 recent deployments, got ${stats.rows}`);
+      }
+      if (!(stats.overflowY === "auto" || stats.overflowY === "scroll")) {
+        throw new Error(`Expected overflow-y to allow scrolling, got overflowY=${stats.overflowY}`);
+      }
+      if (stats.scrollHeight <= stats.clientHeight) {
+        throw new Error(
+          `Expected recent deployments list to require scrolling, got clientHeight=${stats.clientHeight} scrollHeight=${stats.scrollHeight}`,
+        );
+      }
+
+      await scrollRegion.evaluate((el) => {
+        el.scrollTop = el.scrollHeight;
+      });
+      await page.waitForTimeout(250);
+
+      await unrouteRecentDeploymentsScrollData(page);
+      await page.setViewportSize({ width: 1920, height: 1080 });
+    },
+  },
+  {
+    name: "06z-fleet-health-widget-assert",
+    description: "Dashboard Fleet Health widget matches expected status counts",
+    action: async (page) => {
+      await routeFleetHealthWidgetData(page);
+      await page.goto(`${baseUrl}/`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1800);
+
+      const widget = page.locator("[data-testid='fleet-health-breakdown']");
+      await assertVisible(widget, "Fleet Health widget should be visible");
+
+      const counts = await widget.evaluate((el) => {
+        const expectedLabels = new Set(["healthy", "warning", "critical", "offline"]);
+        const rows = Array.from(el.querySelectorAll("div.flex.items-center.gap-2"));
+        const out = {};
+
+        for (const row of rows) {
+          const spans = row.querySelectorAll("span");
+          if (spans.length < 3) continue;
+
+          const label = (spans[1].textContent || "").trim().toLowerCase();
+          const count = Number((spans[2].textContent || "").trim());
+
+          if (expectedLabels.has(label) && Number.isFinite(count)) {
+            out[label] = count;
+          }
+        }
+
+        return out;
+      });
+
+      const expected = { healthy: 7, warning: 2, critical: 3, offline: 1 };
+      for (const [status, expectedCount] of Object.entries(expected)) {
+        if (counts[status] !== expectedCount) {
+          throw new Error(
+            `Fleet Health count mismatch for ${status}: expected ${expectedCount}, got ${counts[status]}`,
+          );
+        }
+      }
+
+      await unrouteFleetHealthWidgetData(page);
     },
   },
   {
@@ -2359,6 +2576,8 @@ const CI_FAST_STEP_NAMES = new Set([
   "05-login-submit",
   "06-dashboard",
   "06x-pipeline-readiness-scroll",
+  "06y-recent-deployments-scroll",
+  "06z-fleet-health-widget-assert",
   "15-builds",
   "11b-builds-queue-card-focus",
   "12c-systems-modal-config-field",
