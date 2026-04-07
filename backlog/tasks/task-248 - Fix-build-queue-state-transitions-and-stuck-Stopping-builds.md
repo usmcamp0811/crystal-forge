@@ -1,7 +1,7 @@
 ---
 id: TASK-248
 title: Fix build queue state transitions and stuck "Stopping" builds
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-04-07 23:27'
 updated_date: '2026-04-07 23:28'
