@@ -1,10 +1,10 @@
 ---
 id: TASK-202
 title: 'Dashboard Recent Deployments widget cuts off fifth item, needs scroll'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-03-20 13:40'
-updated_date: '2026-04-02 00:05'
+updated_date: '2026-04-07 02:12'
 labels:
   - frontend
   - dashboard
@@ -17,6 +17,41 @@ references:
 priority: high
 ordinal: 3000
 ---
+
+## Description
+
+<!-- SECTION:DESCRIPTION:BEGIN -->
+## Problem Statement
+The Dashboard Recent Deployments card truncates the fifth entry and does not provide a scrollable list for additional items. Operators cannot review full recent deployment history from the dashboard without navigating away.
+
+## Goal
+Make the Recent Deployments widget reliably display all available rows via an in-card scroll region while preserving the current visual layout and item ordering.
+
+## Non-Goals
+- No backend/API query changes for recent deployments.
+- No redesign of dashboard card visual style beyond overflow handling.
+- No pagination controls in this task.
+
+## Architectural Constraints
+- Keep business logic in API/service layers; this task is presentational behavior only.
+- Follow existing Dioxus component/style patterns used by dashboard widgets.
+- Reuse existing dashboard scroll container conventions where possible.
+
+## Verification Plan
+- Run targeted web-ui checks for the dashboard component build.
+- Validate in UI that 5+ deployment rows are all accessible via scroll.
+- Confirm no layout regressions on desktop and narrow viewport.
+
+## Impact Areas
+- `packages/web-ui/src/components/dashboard/recent_deployments.rs`
+- Shared dashboard CSS classes in `packages/web-ui/assets/app.css` (if needed)
+
+## Risk Level
+Low: scoped frontend overflow behavior change.
+
+## Dependencies
+None.
+<!-- SECTION:DESCRIPTION:END -->
 
 # Dashboard Recent Deployments widget cuts off fifth item, needs scroll
 
@@ -137,3 +172,18 @@ None
 - Add similar scroll fix to other dashboard widgets if needed (CVE Summary, Build Queue)
 - Add "View All" link to full Deployments page
 - Add configurable widget heights (user preference)
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 Given 5 or more recent deployments, all entries are accessible within the widget via vertical scrolling.
+- [ ] #2 The widget no longer visually clips the fifth row; content remains contained within the card bounds.
+- [ ] #3 Recent deployment ordering and status formatting remain unchanged.
+- [ ] #4 Behavior is responsive and remains usable on narrow/mobile viewport widths.
+- [ ] #5 Targeted verification for web-ui build/component checks passes for the changed files.
+<!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: opencode-gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-202-dashboard-recent-deployments-scroll
+<!-- SECTION:NOTES:END -->
