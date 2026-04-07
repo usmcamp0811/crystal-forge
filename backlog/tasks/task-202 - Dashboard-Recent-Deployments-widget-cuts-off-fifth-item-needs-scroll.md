@@ -1,10 +1,10 @@
 ---
 id: TASK-202
 title: 'Dashboard Recent Deployments widget cuts off fifth item, needs scroll'
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-03-20 13:40'
-updated_date: '2026-04-07 02:12'
+updated_date: '2026-04-07 03:07'
 labels:
   - frontend
   - dashboard
@@ -175,15 +175,25 @@ None
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Given 5 or more recent deployments, all entries are accessible within the widget via vertical scrolling.
-- [ ] #2 The widget no longer visually clips the fifth row; content remains contained within the card bounds.
-- [ ] #3 Recent deployment ordering and status formatting remain unchanged.
-- [ ] #4 Behavior is responsive and remains usable on narrow/mobile viewport widths.
-- [ ] #5 Targeted verification for web-ui build/component checks passes for the changed files.
+- [x] #1 Given 5 or more recent deployments, all entries are accessible within the widget via vertical scrolling.
+- [x] #2 The widget no longer visually clips the fifth row; content remains contained within the card bounds.
+- [x] #3 Recent deployment ordering and status formatting remain unchanged.
+- [x] #4 Behavior is responsive and remains usable on narrow/mobile viewport widths.
+- [x] #5 Targeted verification for web-ui build/component checks passes for the changed files.
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: opencode-gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-202-dashboard-recent-deployments-scroll
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/214
+
+Implemented scroll containment in `packages/web-ui/src/components/dashboard/recent_deployments.rs` by adding `min-h-0/overflow-hidden` on the widget container and explicit vertical overflow on the list region (`data-testid='recent-deployments-scroll'`).
+
+Added web-ui regression step `06y-recent-deployments-scroll` in `checks/web-ui/tests/integration-test.js` with long mocked deployment data; it asserts rows render and scroll behavior activates under constrained height.
+
+Updated `checks/web-ui/default.nix` critical test lists (ci_fast + full) to require `06y-recent-deployments-scroll`.
+
+Verification run: `nix develop -c bash -lc "cd packages/web-ui && cargo check"` (pass), `nix develop -c bash -lc "cd packages/web-ui && cargo fmt --all -- --check"` (fails due unrelated pre-existing formatting diffs), `nix develop -c bash -lc "cd packages/web-ui && rustfmt --check src/components/dashboard/recent_deployments.rs"` (pass), `node --check checks/web-ui/tests/integration-test.js` (pass), `nix build .#checks.x86_64-linux.web-ui` (pass).
 <!-- SECTION:NOTES:END -->
