@@ -1,10 +1,10 @@
 ---
 id: TASK-228
 title: Fix Fleet Health widget mismatch with Systems health statuses
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-03-30 03:04'
-updated_date: '2026-04-07 01:14'
+updated_date: '2026-04-07 02:10'
 labels:
   - dashboard
   - health
@@ -31,11 +31,11 @@ Fleet Health widget counts and severity buckets match the same health classifica
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Given at least one system is `critical` in Systems view, Fleet Health widget must show a non-zero critical count.
-- [ ] #2 Fleet Health healthy/degraded/critical totals on dashboard must match Systems view status distribution for the same environment/filter scope.
-- [ ] #3 Health rollup uses the same source-of-truth status semantics as Systems view (documented in task notes).
-- [ ] #4 Regression test coverage exists for a mixed fleet containing healthy and critical systems.
-- [ ] #5 Given one system is offline, Fleet Health widget must report offline/non-healthy accurately and must not count that system as healthy.
+- [x] #1 Given at least one system is `critical` in Systems view, Fleet Health widget must show a non-zero critical count.
+- [x] #2 Fleet Health healthy/degraded/critical totals on dashboard must match Systems view status distribution for the same environment/filter scope.
+- [x] #3 Health rollup uses the same source-of-truth status semantics as Systems view (documented in task notes).
+- [x] #4 Regression test coverage exists for a mixed fleet containing healthy and critical systems.
+- [x] #5 Given one system is offline, Fleet Health widget must report offline/non-healthy accurately and must not count that system as healthy.
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -46,4 +46,10 @@ Fleet Health widget counts and severity buckets match the same health classifica
 Promoted to To Do per maintainer instruction to begin work.
 
 LOCK: opencode-gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-228-fleet-health-widget-counts
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/213
+
+Implementation: `fetch_fleet_health` now aggregates from `view_system_list.health_status` (same source used by Systems view) and maps statuses case-insensitively into healthy/warning/critical/offline buckets.
+
+Verification run: `nix develop -c bash -lc "SQLX_OFFLINE=true cargo test --lib queries::dashboard::tests"` (pass), `nix develop -c bash -lc "SQLX_OFFLINE=true cargo check"` (pass), `nix develop -c cargo fmt --all -- --check` (fails due unrelated pre-existing formatting diffs), `nix develop -c rustfmt --edition 2024 --check src/queries/dashboard.rs` (pass for touched file).
 <!-- SECTION:NOTES:END -->
