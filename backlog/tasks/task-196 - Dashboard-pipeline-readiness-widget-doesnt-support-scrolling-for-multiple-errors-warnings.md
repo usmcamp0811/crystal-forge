@@ -3,10 +3,10 @@ id: TASK-196
 title: >-
   Dashboard pipeline readiness widget doesn't support scrolling for multiple
   errors/warnings
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-03-19 12:36'
-updated_date: '2026-04-07 02:12'
+updated_date: '2026-04-07 03:17'
 labels:
   - bug
   - ui
@@ -58,3 +58,9 @@ None.
 - [ ] #4 Dashboard layout remains stable with no clipping/overlap regressions in neighboring cards.
 - [ ] #5 Targeted web-ui verification passes for modified files.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: opencode-gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-196-pipeline-readiness-scroll
+<!-- SECTION:NOTES:END -->
