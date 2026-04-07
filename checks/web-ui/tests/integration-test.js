@@ -101,6 +101,80 @@ function mockBuildsDashboardSummary() {
   };
 }
 
+function mockFleetHealthDashboardSummary() {
+  const timestamp = nowIso();
+  return {
+    fleet_health: { healthy: 7, warning: 2, critical: 3, offline: 1 },
+    deployment_status: { up_to_date: 8, behind: 3, never_deployed: 1, unknown: 1 },
+    cve_summary: { critical: 1, high: 2, medium: 3, low: 4 },
+    total_systems: 13,
+    active_builds: 0,
+    build_queue: {
+      building_count: 0,
+      queued_count: 0,
+      timestamp,
+      items: [],
+    },
+    recent_deployments: [],
+    timestamp,
+  };
+}
+
+function mockFleetHealthSystemsPage() {
+  const mk = (idx, status) => ({
+    id: `00000000-0000-4000-8000-${String(idx).padStart(12, "0")}`,
+    hostname: `fleet-health-${status}-${idx}`,
+    system_configuration_name: `fleet-health-${status}-${idx}`,
+    environment: "production",
+    flake_id: null,
+    primary_ip: null,
+    health_status: status,
+    deployment_status: "up_to_date",
+    pipeline_stage: "ready_for_build",
+    cve_counts: { critical: 0, high: 0, medium: 0, low: 0 },
+    nixos_version: "24.11",
+    last_seen: nowIso(),
+    deployment_policy: "manual",
+  });
+
+  const items = [
+    ...Array.from({ length: 7 }, (_, i) => mk(i + 1, "healthy")),
+    ...Array.from({ length: 2 }, (_, i) => mk(i + 101, "warning")),
+    ...Array.from({ length: 3 }, (_, i) => mk(i + 201, "critical")),
+    ...Array.from({ length: 1 }, (_, i) => mk(i + 301, "offline")),
+  ];
+
+  return {
+    items,
+    total: items.length,
+    page: 1,
+    per_page: 200,
+  };
+}
+
+async function routeFleetHealthWidgetData(page) {
+  await page.route("**/api/v1/dashboard/summary*", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(mockFleetHealthDashboardSummary()),
+    });
+  });
+
+  await page.route("**/api/v1/systems*", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(mockFleetHealthSystemsPage()),
+    });
+  });
+}
+
+async function unrouteFleetHealthWidgetData(page) {
+  await page.unroute("**/api/v1/dashboard/summary*");
+  await page.unroute("**/api/v1/systems*");
+}
+
 function mockBuildQueuePage() {
   const summary = mockBuildsDashboardSummary();
   return {
@@ -749,6 +823,49 @@ const steps = [
         page.locator("[data-testid='onboarding-coach-panel']"),
         "Onboarding coach panel should be visible on dashboard",
       );
+    },
+  },
+  {
+    name: "06z-fleet-health-widget-assert",
+    description: "Dashboard Fleet Health widget matches expected status counts",
+    action: async (page) => {
+      await routeFleetHealthWidgetData(page);
+      await page.goto(`${baseUrl}/`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1800);
+
+      const widget = page.locator("[data-testid='fleet-health-breakdown']");
+      await assertVisible(widget, "Fleet Health widget should be visible");
+
+      const counts = await widget.evaluate((el) => {
+        const expectedLabels = new Set(["healthy", "warning", "critical", "offline"]);
+        const rows = Array.from(el.querySelectorAll("div.flex.items-center.gap-2"));
+        const out = {};
+
+        for (const row of rows) {
+          const spans = row.querySelectorAll("span");
+          if (spans.length < 3) continue;
+
+          const label = (spans[1].textContent || "").trim().toLowerCase();
+          const count = Number((spans[2].textContent || "").trim());
+
+          if (expectedLabels.has(label) && Number.isFinite(count)) {
+            out[label] = count;
+          }
+        }
+
+        return out;
+      });
+
+      const expected = { healthy: 7, warning: 2, critical: 3, offline: 1 };
+      for (const [status, expectedCount] of Object.entries(expected)) {
+        if (counts[status] !== expectedCount) {
+          throw new Error(
+            `Fleet Health count mismatch for ${status}: expected ${expectedCount}, got ${counts[status]}`,
+          );
+        }
+      }
+
+      await unrouteFleetHealthWidgetData(page);
     },
   },
   {
@@ -2292,6 +2409,7 @@ const CI_FAST_STEP_NAMES = new Set([
   "04-post-register-login",
   "05-login-submit",
   "06-dashboard",
+  "06z-fleet-health-widget-assert",
   "15-builds",
   "11b-builds-queue-card-focus",
   "12c-systems-modal-config-field",
