@@ -1,10 +1,10 @@
 ---
 id: TASK-228
 title: Fix Fleet Health widget mismatch with Systems health statuses
-status: Backlog
+status: In Progress
 assignee: []
 created_date: '2026-03-30 03:04'
-updated_date: '2026-04-07 00:45'
+updated_date: '2026-04-07 01:14'
 labels:
   - dashboard
   - health
@@ -42,4 +42,8 @@ Fleet Health widget counts and severity buckets match the same health classifica
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-04-06 production evidence: Systems view shows 13 healthy + 1 offline, but Fleet Health widget shows 14 healthy. Widget aggregation is overcounting healthy and ignoring offline bucket/state.
+
+Promoted to To Do per maintainer instruction to begin work.
+
+LOCK: opencode-gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-228-fleet-health-widget-counts
 <!-- SECTION:NOTES:END -->
