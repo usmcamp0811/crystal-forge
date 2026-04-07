@@ -4,6 +4,7 @@ title: Fix build queue state transitions and stuck "Stopping" builds
 status: Backlog
 assignee: []
 created_date: '2026-04-07 23:27'
+updated_date: '2026-04-07 23:28'
 labels:
   - bug
   - build-queue
@@ -51,3 +52,123 @@ Currently, builds that are stopped get stuck in a "Stopping" status with no way 
 - [ ] #6 Build state transitions are properly validated and logged
 - [ ] #7 Orphaned/stuck builds can be identified and recovered (manual or automatic cleanup)
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+## Implementation Plan
+
+1. **Database Schema Migration**
+   - Create migration to update build_status enum
+   - Add stopped_at timestamp column
+   - Add can_restart boolean (default true for terminal states)
+   - Test migration up/down
+
+2. **Backend State Machine**
+   - Define BuildStatus enum with all states
+   - Implement state transition validation logic
+   - Add transition methods: stop(), cancel(), restart()
+   - Write unit tests for state transitions
+
+3. **API Endpoints**
+   - Implement POST /api/builds/{id}/stop
+   - Implement POST /api/builds/{id}/cancel
+   - Implement POST /api/builds/{id}/restart
+   - Add authorization checks
+   - Write integration tests
+
+4. **Build Worker Updates**
+   - Add graceful shutdown handler for "Stopping" state
+   - Implement transition to "Stopped" on clean shutdown
+   - Add timeout logic (30s) for Stopping → Cancelled
+   - Test worker behavior with mock builds
+
+5. **UI Components**
+   - Update build queue list to show state-specific buttons
+   - Add "Stop" button (Building state only)
+   - Add "Force Cancel" button (Stopping state)
+   - Add "Restart" button (Stopped/Cancelled/Failed states)
+   - Update build status badge styling for new states
+
+6. **Cleanup Job**
+   - Implement background task to scan for stuck builds
+   - Auto-cancel builds in "Stopping" > timeout threshold
+   - Add admin notification for repeated stuck builds
+   - Schedule job (e.g., every 5 minutes)
+
+7. **Testing & Verification**
+   - Manual test: stop build → verify reaches "Stopped"
+   - Manual test: force cancel stuck build → verify "Cancelled"
+   - Manual test: restart stopped build → verify re-queued
+   - Run full test suite
+   - Verify database migrations apply cleanly
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+## Architecture Approach
+
+### State Machine Design
+Define explicit build states as enum:
+- `Queued` - waiting to start
+- `Building` - actively running
+- `Stopping` - stop signal sent, awaiting confirmation
+- `Stopped` - cleanly stopped (terminal)
+- `Cancelled` - forcefully terminated (terminal)
+- `Completed` - finished successfully (terminal)
+- `Failed` - build error (terminal)
+
+### Database Changes
+1. Update `build_status` enum to include all states
+2. Add `stopped_at` timestamp column
+3. Add `can_restart` boolean flag for terminal states
+4. Add state transition audit log (optional: separate table or use existing logs)
+
+### Backend API Endpoints
+- `POST /api/builds/{id}/stop` - initiate graceful stop (Building → Stopping)
+- `POST /api/builds/{id}/cancel` - force cancel (Stopping/Building → Cancelled)
+- `POST /api/builds/{id}/restart` - requeue stopped build (Stopped/Cancelled → Queued)
+- `GET /api/builds/stuck` - identify builds stuck in transitional states
+
+### State Transition Rules
+```
+Queued → Building (automatic: worker picks up)
+Building → Stopping (user action: stop button)
+Building → Cancelled (user action: force cancel)
+Stopping → Stopped (worker confirms shutdown)
+Stopping → Cancelled (timeout or force cancel)
+Building → Completed (worker: success)
+Building → Failed (worker: error)
+Stopped → Queued (user action: restart)
+Cancelled → Queued (user action: restart)
+Failed → Queued (user action: retry)
+```
+
+### UI Components to Modify
+- Build queue list: add state-specific action buttons
+- Build detail view: show state transition history
+- Add visual indicators for terminal vs transitional states
+
+### Worker/Build Runner Changes
+- Implement graceful shutdown handling for "Stopping" state
+- Add timeout for Stopping → Cancelled transition (e.g., 30 seconds)
+- Ensure worker updates state to Stopped when shutdown completes
+
+### Cleanup/Recovery
+- Background job to detect builds stuck in "Stopping" for > timeout period
+- Auto-transition to "Cancelled" or notify admin
+- Consider: startup job to recover orphaned builds from crashed workers
+<!-- SECTION:NOTES:END -->
+
+## Definition of Done
+<!-- DOD:BEGIN -->
+- [ ] #1 All database migrations applied successfully in dev environment
+- [ ] #2 Unit tests written and passing for state machine logic
+- [ ] #3 Integration tests written and passing for API endpoints
+- [ ] #4 Worker graceful shutdown tested with real build process
+- [ ] #5 UI components manually tested for all state transitions
+- [ ] #6 Code passes cargo fmt and cargo clippy checks
+- [ ] #7 SQLX metadata synced (cargo sqlx prepare)
+- [ ] #8 Documentation updated for new build states and transitions
+<!-- DOD:END -->
