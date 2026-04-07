@@ -4,6 +4,7 @@ title: Fix Fleet Health widget mismatch with Systems health statuses
 status: Backlog
 assignee: []
 created_date: '2026-03-30 03:04'
+updated_date: '2026-04-07 00:45'
 labels:
   - dashboard
   - health
@@ -34,4 +35,11 @@ Fleet Health widget counts and severity buckets match the same health classifica
 - [ ] #2 Fleet Health healthy/degraded/critical totals on dashboard must match Systems view status distribution for the same environment/filter scope.
 - [ ] #3 Health rollup uses the same source-of-truth status semantics as Systems view (documented in task notes).
 - [ ] #4 Regression test coverage exists for a mixed fleet containing healthy and critical systems.
+- [ ] #5 Given one system is offline, Fleet Health widget must report offline/non-healthy accurately and must not count that system as healthy.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-04-06 production evidence: Systems view shows 13 healthy + 1 offline, but Fleet Health widget shows 14 healthy. Widget aggregation is overcounting healthy and ignoring offline bucket/state.
+<!-- SECTION:NOTES:END -->

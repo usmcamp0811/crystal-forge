@@ -1,10 +1,10 @@
 ---
 id: TASK-241
 title: Hotfix build_jobs status constraint for cancelling/cancelled transitions
-status: Review
+status: Done
 assignee: []
 created_date: '2026-04-03 12:18'
-updated_date: '2026-04-03 12:35'
+updated_date: '2026-04-06 12:51'
 labels:
   - hotfix
   - builds
@@ -111,4 +111,6 @@ Verification completed:
 - `cargo sqlx prepare` was run against the initialized dev DB
 
 This hotfix is schema-only and should unblock `Stop` on running builds by allowing `cancelling`/`cancelled` at the database layer.
+
+Marked Done after merge into dev (merge commit 3d18935b).
 <!-- SECTION:NOTES:END -->
