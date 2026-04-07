@@ -4,7 +4,7 @@ title: Fix Fleet Health widget mismatch with Systems health statuses
 status: Review
 assignee: []
 created_date: '2026-03-30 03:04'
-updated_date: '2026-04-07 02:10'
+updated_date: '2026-04-07 02:21'
 labels:
   - dashboard
   - health
@@ -52,4 +52,10 @@ MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/213
 Implementation: `fetch_fleet_health` now aggregates from `view_system_list.health_status` (same source used by Systems view) and maps statuses case-insensitively into healthy/warning/critical/offline buckets.
 
 Verification run: `nix develop -c bash -lc "SQLX_OFFLINE=true cargo test --lib queries::dashboard::tests"` (pass), `nix develop -c bash -lc "SQLX_OFFLINE=true cargo check"` (pass), `nix develop -c cargo fmt --all -- --check` (fails due unrelated pre-existing formatting diffs), `nix develop -c rustfmt --edition 2024 --check src/queries/dashboard.rs` (pass for touched file).
+
+Follow-up per maintainer request: added `web-ui` integration assertion step `06z-fleet-health-widget-assert` in `checks/web-ui/tests/integration-test.js` to verify Fleet Health legend counts (healthy/warning/critical/offline) from mocked mixed-status dashboard data.
+
+Updated `checks/web-ui/default.nix` critical test lists to require `06z-fleet-health-widget-assert` in both ci_fast and full profiles so regressions fail the check.
+
+Verification: `node --check checks/web-ui/tests/integration-test.js` (pass), `nix build .#checks.x86_64-linux.web-ui` (pass).
 <!-- SECTION:NOTES:END -->
