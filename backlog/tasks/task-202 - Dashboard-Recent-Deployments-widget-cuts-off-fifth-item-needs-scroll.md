@@ -1,7 +1,7 @@
 ---
 id: TASK-202
 title: 'Dashboard Recent Deployments widget cuts off fifth item, needs scroll'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-03-20 13:40'
 updated_date: '2026-04-07 02:12'
@@ -181,3 +181,9 @@ None
 - [ ] #4 Behavior is responsive and remains usable on narrow/mobile viewport widths.
 - [ ] #5 Targeted verification for web-ui build/component checks passes for the changed files.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: opencode-gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-202-dashboard-recent-deployments-scroll
+<!-- SECTION:NOTES:END -->
