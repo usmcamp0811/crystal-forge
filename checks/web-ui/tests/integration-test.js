@@ -407,6 +407,24 @@ function mockConfigHealthResponse(overrides = {}) {
   return response;
 }
 
+function mockConfigHealthManyIssues(issueCount = 12) {
+  const checks = Array.from({ length: issueCount }, (_, i) => ({
+    id: `synthetic_issue_${i + 1}`,
+    passed: false,
+    message: `Synthetic pipeline readiness issue ${i + 1}: configuration validation warning for overflow coverage`,
+    action_url: i % 2 === 0 ? "/flakes" : "/environments",
+  }));
+
+  return {
+    has_flakes: true,
+    has_environments: true,
+    has_builders: true,
+    has_cache_destinations: true,
+    total_issues: checks.length,
+    checks,
+  };
+}
+
 async function routeConfigHealth(page, response) {
   await page.route("**/api/v1/admin/config-health*", async (route) => {
     await route.fulfill({
@@ -1444,6 +1462,54 @@ const steps = [
       await unrouteConfigHealth(page);
     },
   },
+  {
+    name: "06x-pipeline-readiness-scroll",
+    description: "Dashboard pipeline readiness widget supports scrolling for many issues",
+    action: async (page) => {
+      await routeConfigHealth(page, mockConfigHealthManyIssues(14));
+      await page.goto(`${baseUrl}/`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2000);
+
+      const scrollRegion = page.locator("[data-testid='pipeline-readiness-scroll']");
+      await assertVisible(scrollRegion, "Pipeline readiness scroll container should be visible");
+
+      const stats = await scrollRegion.evaluate((el) => {
+        const alertCount = el.querySelectorAll("[role='alert']").length;
+        const overflowY = window.getComputedStyle(el).overflowY;
+
+        // Constrain container height to validate bounded scroll behavior in
+        // compact card layouts.
+        el.style.maxHeight = "220px";
+        el.style.height = "220px";
+
+        return {
+          alertCount,
+          overflowY,
+          clientHeight: el.clientHeight,
+          scrollHeight: el.scrollHeight,
+        };
+      });
+
+      if (stats.alertCount < 10) {
+        throw new Error(`Expected at least 10 readiness alerts, got ${stats.alertCount}`);
+      }
+      if (!(stats.overflowY === "auto" || stats.overflowY === "scroll")) {
+        throw new Error(`Expected overflow-y to allow scrolling, got overflowY=${stats.overflowY}`);
+      }
+      if (stats.scrollHeight <= stats.clientHeight) {
+        throw new Error(
+          `Expected readiness issues to require scrolling, got clientHeight=${stats.clientHeight} scrollHeight=${stats.scrollHeight}`,
+        );
+      }
+
+      await scrollRegion.evaluate((el) => {
+        el.scrollTop = el.scrollHeight;
+      });
+      await page.waitForTimeout(250);
+
+      await unrouteConfigHealth(page);
+    },
+  },
   // ============================================================
   // RESPONSIVE SIDEBAR SCREENSHOTS
   // Each step clears localStorage first so state is deterministic.
@@ -2292,6 +2358,7 @@ const CI_FAST_STEP_NAMES = new Set([
   "04-post-register-login",
   "05-login-submit",
   "06-dashboard",
+  "06x-pipeline-readiness-scroll",
   "15-builds",
   "11b-builds-queue-card-focus",
   "12c-systems-modal-config-field",
