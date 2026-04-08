@@ -1,7 +1,7 @@
 ---
 id: TASK-249
 title: Add system editing and manual/pinned deployment with commit selection
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-04-08 01:10'
 updated_date: '2026-04-08 01:49'
@@ -96,6 +96,12 @@ Implement a complete system editing and deployment workflow that supports all de
 - [ ] #11 Success/error feedback is displayed after deployment attempt
 - [ ] #12 Screenshots of edit system UI and deployment modal are included in MR
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: claude-code on reckless in ~/code/crystal-forge/TASK-249-system-edit-deploy
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
