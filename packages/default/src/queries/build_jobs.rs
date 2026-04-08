@@ -247,12 +247,11 @@ mod tests {
         // This is what enqueue_build_job_for_derivation's caller does on Ok(true).
         notifier.notify_build_queue();
 
-        let result = tokio::time::timeout(
-            tokio::time::Duration::from_millis(100),
-            handle,
-        )
-        .await;
-        assert!(result.is_ok(), "Build queue notification should wake up waiter");
+        let result = tokio::time::timeout(tokio::time::Duration::from_millis(100), handle).await;
+        assert!(
+            result.is_ok(),
+            "Build queue notification should wake up waiter"
+        );
     }
 
     /// Verify that multiple rapid notifications from incremental per-derivation enqueues
@@ -338,23 +337,43 @@ mod tests {
         fn is_eligible(d: &MockDerivation) -> bool {
             d.status_id == 5              // DryRunComplete
             && d.cf_agent_enabled == Some(true)  // policy passed
-            && !d.has_existing_job        // NOT EXISTS guard
+            && !d.has_existing_job // NOT EXISTS guard
         }
 
         // Passes all conditions.
-        assert!(is_eligible(&MockDerivation { status_id: 5, cf_agent_enabled: Some(true),  has_existing_job: false }));
+        assert!(is_eligible(&MockDerivation {
+            status_id: 5,
+            cf_agent_enabled: Some(true),
+            has_existing_job: false
+        }));
 
         // Policy failed.
-        assert!(!is_eligible(&MockDerivation { status_id: 5, cf_agent_enabled: Some(false), has_existing_job: false }));
+        assert!(!is_eligible(&MockDerivation {
+            status_id: 5,
+            cf_agent_enabled: Some(false),
+            has_existing_job: false
+        }));
 
         // Policy unknown.
-        assert!(!is_eligible(&MockDerivation { status_id: 5, cf_agent_enabled: None,        has_existing_job: false }));
+        assert!(!is_eligible(&MockDerivation {
+            status_id: 5,
+            cf_agent_enabled: None,
+            has_existing_job: false
+        }));
 
         // Not DryRunComplete.
-        assert!(!is_eligible(&MockDerivation { status_id: 4, cf_agent_enabled: Some(true),  has_existing_job: false }));
+        assert!(!is_eligible(&MockDerivation {
+            status_id: 4,
+            cf_agent_enabled: Some(true),
+            has_existing_job: false
+        }));
 
         // Job already exists (idempotency guard).
-        assert!(!is_eligible(&MockDerivation { status_id: 5, cf_agent_enabled: Some(true),  has_existing_job: true  }));
+        assert!(!is_eligible(&MockDerivation {
+            status_id: 5,
+            cf_agent_enabled: Some(true),
+            has_existing_job: true
+        }));
     }
 
     /// Policy-failed derivations must not be queued in the mock eval path either.

@@ -6,8 +6,8 @@ use crate::components::layout::Card;
 use crate::theme;
 
 use super::helpers::{
-    build_status_badge_class, extract_system_name, queue_row_style, short_commit, BuildAction,
-    BuildItem, BuildStatus,
+    BuildAction, BuildItem, BuildStatus, build_status_badge_class, extract_system_name,
+    queue_row_style, short_commit,
 };
 
 /// View mode for the build queue display.
@@ -228,6 +228,17 @@ fn BuildQueueCards(
                                     "Stop"
                                 }
                             }
+                            // Force Cancel for stuck builds in Stopping state
+                            if matches!(build.status, BuildStatus::Stopping) {
+                                button {
+                                    class: "text-xs text-orange-400 hover:text-orange-300 px-3 py-1.5 rounded hover:bg-orange-500/10 transition-colors min-h-[44px]",
+                                    onclick: move |evt| {
+                                        evt.stop_propagation();
+                                        on_build_action.call((build.id, BuildAction::ForceCancel));
+                                    },
+                                    "Force Cancel"
+                                }
+                            }
                             // Restart only valid for terminal statuses
                             if matches!(build.status, BuildStatus::Failed | BuildStatus::Complete | BuildStatus::Cancelled) {
                                 button {
@@ -355,6 +366,17 @@ fn BuildQueueTable(
                                                         on_build_action.call((build.id, BuildAction::Stop));
                                                     },
                                                     "Stop"
+                                                }
+                                            }
+                                            // Force Cancel for stuck builds in Stopping state
+                                            if matches!(build.status, BuildStatus::Stopping) {
+                                                button {
+                                                    class: "text-[10px] text-orange-400 hover:text-orange-300 px-2 py-1 rounded hover:bg-orange-500/10 transition-colors",
+                                                    onclick: move |evt| {
+                                                        evt.stop_propagation();
+                                                        on_build_action.call((build.id, BuildAction::ForceCancel));
+                                                    },
+                                                    "Force Cancel"
                                                 }
                                             }
                                             // Restart only valid for terminal statuses
