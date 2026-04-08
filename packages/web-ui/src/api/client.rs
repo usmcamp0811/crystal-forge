@@ -231,7 +231,7 @@ pub async fn requeue_build_job(job_id: &uuid::Uuid) -> Result<(), ApiClientError
     send_empty_with_csrf("POST", &url, None::<&()>).await
 }
 
-/// Force-cancel a build job stuck in 'cancelling' state (admin/operator).
+/// Force-cancel a build job stuck in 'cancelling' state (admin-only).
 ///
 /// Unlike regular cancel, this immediately transitions to 'cancelled' without
 /// waiting for builder confirmation. Use this for stuck builds that failed to
