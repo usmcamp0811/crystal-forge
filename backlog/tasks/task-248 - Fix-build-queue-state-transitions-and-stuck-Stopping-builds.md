@@ -4,7 +4,7 @@ title: Fix build queue state transitions and stuck "Stopping" builds
 status: In Progress
 assignee: []
 created_date: '2026-04-07 23:27'
-updated_date: '2026-04-08 00:31'
+updated_date: '2026-04-08 01:35'
 labels:
   - bug
   - build-queue
@@ -44,12 +44,12 @@ Currently, builds that are stopped get stuck in a "Stopping" status with no way 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Builds can successfully transition from 'Building' to 'Stopped' or 'Cancelled' terminal state
-- [ ] #2 Builds in 'Stopping' status can be force-cancelled to reach terminal state
-- [ ] #3 Users can restart a stopped/cancelled build, moving it back to 'Queue' status
-- [ ] #4 UI provides clear actions for each build state (Stop, Restart, Clear, etc.)
-- [ ] #5 Database schema supports all required build states and transitions
-- [ ] #6 Build state transitions are properly validated and logged
+- [x] #1 Builds can successfully transition from 'Building' to 'Stopped' or 'Cancelled' terminal state
+- [x] #2 Builds in 'Stopping' status can be force-cancelled to reach terminal state
+- [x] #3 Users can restart a stopped/cancelled build, moving it back to 'Queue' status
+- [x] #4 UI provides clear actions for each build state (Stop, Restart, Clear, etc.)
+- [x] #5 Database schema supports all required build states and transitions
+- [x] #6 Build state transitions are properly validated and logged
 - [ ] #7 Orphaned/stuck builds can be identified and recovered (manual or automatic cleanup)
 <!-- AC:END -->
 
@@ -174,7 +174,7 @@ Testing pending: Need to manually verify UI flow (Stop → Stopping → Force Ca
 - [ ] #3 Integration tests written and passing for API endpoints
 - [ ] #4 Worker graceful shutdown tested with real build process
 - [ ] #5 UI components manually tested for all state transitions
-- [ ] #6 Code passes cargo fmt and cargo clippy checks
+- [x] #6 Code passes cargo fmt and cargo clippy checks
 - [ ] #7 SQLX metadata synced (cargo sqlx prepare)
 - [ ] #8 Documentation updated for new build states and transitions
 <!-- DOD:END -->
