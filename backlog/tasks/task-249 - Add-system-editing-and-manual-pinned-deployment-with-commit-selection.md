@@ -4,7 +4,7 @@ title: Add system editing and manual/pinned deployment with commit selection
 status: In Progress
 assignee: []
 created_date: '2026-04-08 01:10'
-updated_date: '2026-04-08 01:49'
+updated_date: '2026-04-08 02:07'
 labels:
   - feature
   - ui
@@ -101,6 +101,8 @@ Implement a complete system editing and deployment workflow that supports all de
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: claude-code on reckless in ~/code/crystal-forge/TASK-249-system-edit-deploy
+
+Implementation complete. Backend endpoints added for deploy and fetch commits. Frontend modals created for edit and deploy. UI integrated in systems list. Ready for manual testing.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
