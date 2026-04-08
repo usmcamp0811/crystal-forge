@@ -273,6 +273,40 @@ function mockRecentBuilds() {
   ];
 }
 
+function mockRecentBuildsWithCancelled() {
+  const timestamp = nowIso();
+  return [
+    {
+      job_id: "99999999-9999-4999-8999-999999999999",
+      system_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      hostname: "cancelled-history-system",
+      flake_name: "platform-core",
+      commit_hash: "1234567812345678123456781234567812345678",
+      commit_message: "Cancelled build in completed history for restart verification",
+      status: "cancelled",
+      builder_name: "builder-primary",
+      queued_at: timestamp,
+      started_at: timestamp,
+      elapsed_secs: 12,
+      logs: null,
+    },
+    {
+      job_id: "66666666-6666-4666-8666-666666666666",
+      system_id: "77777777-7777-4777-8777-777777777777",
+      hostname: "history-system-1",
+      flake_name: "platform-core",
+      commit_hash: "abcd1234abcd1234abcd1234abcd1234abcd1234",
+      commit_message: "Recent successful build",
+      status: "complete",
+      builder_name: "builder-primary",
+      queued_at: timestamp,
+      started_at: timestamp,
+      elapsed_secs: 15,
+      logs: null,
+    },
+  ];
+}
+
 async function routeBuildsData(page) {
   await page.route("**/api/v1/dashboard/summary*", async (route) => {
     await route.fulfill({
@@ -2436,6 +2470,69 @@ const steps = [
     },
   },
   {
+    name: "15h-builds-completed-restart-action",
+    description: "Completed tab restart action requeues cancelled build",
+    action: async (page) => {
+      await routeBuildsDataWithCancelStates(page);
+
+      // Override recent builds to include a cancelled item in Completed tab.
+      await page.route("**/api/v1/build-jobs/recent*", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(mockRecentBuildsWithCancelled()),
+        });
+      });
+
+      let requeueCalls = 0;
+      await page.route("**/api/v1/build-jobs/*/requeue", async (route) => {
+        if (route.request().method() === "POST") {
+          requeueCalls += 1;
+        }
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: "{}",
+        });
+      });
+
+      await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2000);
+
+      const completedTab = page.locator("button:has-text('Completed Builds')");
+      await assertVisible(completedTab, "Completed Builds tab should be visible");
+      await completedTab.click();
+      await page.waitForTimeout(800);
+
+      const cancelledRow = page.locator("tr", { hasText: "cancelled-history-system" });
+      await assertVisible(cancelledRow, "Cancelled build row should be visible in Completed tab");
+
+      const restartBtn = cancelledRow.locator("button:has-text('Restart')");
+      await assertVisible(restartBtn, "Restart button should be visible for cancelled completed build");
+      await restartBtn.click();
+      await page.getByRole("heading", { name: "Restart build?" }).waitFor({ timeout: 3000 });
+
+      const modalConfirm = page.locator(".cf-modal-panel-30 button:has-text('Restart')");
+      await assertVisible(modalConfirm, "Restart confirmation button should be visible in modal");
+      await modalConfirm.click();
+      await page.waitForTimeout(600);
+
+      if (requeueCalls < 1) {
+        throw new Error("Expected Restart from Completed tab to call requeue endpoint");
+      }
+
+      const missingRowError = page.getByText(/Build row #.* not found/i);
+      await assertHidden(
+        missingRowError,
+        "Restart from Completed tab should not show 'Build row not found' error",
+      );
+
+      await page.unroute("**/api/v1/build-jobs/recent*");
+      await page.unroute("**/api/v1/build-jobs/*/requeue");
+      await unrouteBuildsDataWithCancelStates(page);
+    },
+  },
+  {
     name: "16-cves",
     description: "CVE dashboard",
     action: async (page) => {
@@ -2590,6 +2687,7 @@ const CI_FAST_STEP_NAMES = new Set([
   "15e-builds-cancelling-state",
   "15f-builds-human-duration",
   "15g-builds-action-visibility",
+  "15h-builds-completed-restart-action",
 ]);
 
 (async () => {
