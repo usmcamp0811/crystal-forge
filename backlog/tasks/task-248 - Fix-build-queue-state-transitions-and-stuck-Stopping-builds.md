@@ -1,10 +1,10 @@
 ---
 id: TASK-248
 title: Fix build queue state transitions and stuck "Stopping" builds
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-04-07 23:27'
-updated_date: '2026-04-08 01:35'
+updated_date: '2026-04-08 01:43'
 labels:
   - bug
   - build-queue
@@ -167,6 +167,8 @@ Implementation complete: Added force_cancel_build_job backend function and API e
 Testing pending: Need to manually verify UI flow (Stop → Stopping → Force Cancel → Cancelled → Restart → Queued)
 
 Code complete and ready for review. All core acceptance criteria met (AC #1-6). AC #7 satisfied by manual force-cancel; optional automatic cleanup job not implemented. SQLX errors are expected without running DB - no schema changes needed (migration 0103 already has states). Ready to create MR pending manual UI verification.
+
+Merge Request created: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/216
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
