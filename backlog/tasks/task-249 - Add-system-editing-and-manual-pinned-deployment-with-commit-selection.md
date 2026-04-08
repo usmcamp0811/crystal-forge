@@ -1,9 +1,10 @@
 ---
 id: TASK-249
 title: Add system editing and manual/pinned deployment with commit selection
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-04-08 01:10'
+updated_date: '2026-04-08 01:49'
 labels:
   - feature
   - ui
