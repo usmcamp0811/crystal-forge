@@ -9,10 +9,11 @@ use std::collections::BTreeSet;
 use uuid::Uuid;
 
 use crate::api::models::{
-    ApiError, AuditAction, CreateSystemRequest, CveSummary, DeploymentStatus, PipelineStage,
-    SortOrder, SystemDetail, SystemHardwareInfo, SystemMutationResponse, SystemNetworkInfo,
-    SystemRollbackRequest, SystemSecurityInfo, SystemSummary, SystemsListParams,
-    UpdateSystemPublicKeyRequest, UpdateSystemRequest,
+    ApiError, AuditAction, CommitInfo, CreateSystemRequest, CveSummary, DeploySystemRequest,
+    DeploymentStatus, PipelineStage, SortOrder, SystemCommitsResponse, SystemDetail,
+    SystemHardwareInfo, SystemMutationResponse, SystemNetworkInfo, SystemRollbackRequest,
+    SystemSecurityInfo, SystemSummary, SystemsListParams, UpdateSystemPublicKeyRequest,
+    UpdateSystemRequest,
 };
 use crate::auth::models::Role;
 use crate::handlers::api::rbac::{authenticated_user_roles, extract_request_origin};
@@ -800,6 +801,167 @@ fn validate_target_commit(value: &str) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+pub async fn deploy_system(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(system_id): Path<Uuid>,
+    Json(payload): Json<DeploySystemRequest>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+
+    if !caller_role.can_mutate_systems() {
+        return forbidden_mutation();
+    }
+
+    let commit_sha = payload.commit_sha.trim();
+    if let Err(message) = validate_target_commit(commit_sha) {
+        return bad_request(&message);
+    }
+
+    let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+
+    let row = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+
+    if !caller_role.can_access_system_environment(row.environment_id, &environment_memberships) {
+        return not_found();
+    }
+
+    // Validate deployment policy - only manual and pinned allow manual deployments
+    if !matches!(row.deployment_policy.as_str(), "manual" | "pinned") {
+        return bad_request("Manual deployment is not allowed for auto_latest systems");
+    }
+
+    // Set the desired_target to trigger deployment
+    if update_system_desired_target(&pool, system_id, commit_sha)
+        .await
+        .is_err()
+    {
+        return internal_error("Failed to request deployment");
+    }
+
+    if record_system_mutation_audit(
+        &pool,
+        user_id,
+        AuditAction::SystemRollbackRequested, // Reusing rollback action for now
+        format!("{} ({})", row.hostname, row.id),
+        extract_request_origin(&headers),
+        serde_json::json!({ "operation": "deploy", "target_commit": commit_sha }),
+    )
+    .await
+    .is_err()
+    {
+        return internal_error("Failed to write audit event");
+    }
+
+    (
+        StatusCode::ACCEPTED,
+        Json(SystemMutationResponse {
+            status: "accepted".to_string(),
+            message: format!("Deployment requested for {} to commit {}", row.hostname, commit_sha),
+        }),
+    )
+        .into_response()
+}
+
+pub async fn get_system_commits(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(system_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return (StatusCode::FORBIDDEN, Json(ApiError {
+            error: "forbidden".to_string(),
+            message: "Authentication required".to_string(),
+            details: None,
+        })).into_response();
+    };
+
+    let Some(caller_role) = highest_role(&roles) else {
+        return (StatusCode::FORBIDDEN, Json(ApiError {
+            error: "forbidden".to_string(),
+            message: "Authentication required".to_string(),
+            details: None,
+        })).into_response();
+    };
+
+    let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError {
+            error: "internal_error".to_string(),
+            message: "Failed to load environment memberships".to_string(),
+            details: None,
+        })).into_response(),
+    };
+
+    let row = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return (StatusCode::NOT_FOUND, Json(ApiError {
+            error: "not_found".to_string(),
+            message: "System not found".to_string(),
+            details: None,
+        })).into_response(),
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError {
+            error: "internal_error".to_string(),
+            message: "Failed to load system".to_string(),
+            details: None,
+        })).into_response(),
+    };
+
+    if !caller_role.can_access_system_environment(row.environment_id, &environment_memberships) {
+        return (StatusCode::NOT_FOUND, Json(ApiError {
+            error: "not_found".to_string(),
+            message: "System not found".to_string(),
+            details: None,
+        })).into_response();
+    }
+
+    // TODO: Fetch actual commits from the flake repository
+    // For now, return mock data
+    let commits = vec![
+        CommitInfo {
+            sha: "abc123def456789012345678901234567890abcd".to_string(),
+            short_sha: "abc123d".to_string(),
+            message: "feat: add new system configuration".to_string(),
+            author: "Developer".to_string(),
+            timestamp: "2026-04-07T10:30:00Z".to_string(),
+        },
+        CommitInfo {
+            sha: "def456abc123456789012345678901234567890ab".to_string(),
+            short_sha: "def456a".to_string(),
+            message: "fix: update kernel parameters".to_string(),
+            author: "Admin".to_string(),
+            timestamp: "2026-04-06T15:20:00Z".to_string(),
+        },
+        CommitInfo {
+            sha: "789012345678901234567890abcdef123456789a".to_string(),
+            short_sha: "7890123".to_string(),
+            message: "chore: dependency updates".to_string(),
+            author: "Bot".to_string(),
+            timestamp: "2026-04-05T09:15:00Z".to_string(),
+        },
+    ];
+
+    let response = SystemCommitsResponse {
+        commits,
+        current_commit: Some("abc123def456789012345678901234567890abcd".to_string()),
+    };
+
+    (StatusCode::OK, Json(response)).into_response()
 }
 
 async fn record_system_mutation_audit(

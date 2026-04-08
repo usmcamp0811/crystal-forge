@@ -10,7 +10,8 @@ use web_sys::{Node, window};
 
 use crate::api::client::set_setup_wizard_agent_acknowledged;
 use crate::api::models::{
-    CveSummary, DeploymentStatus, HealthStatus, PipelineStage, SystemSummary, SystemsListParams,
+    CommitInfo, CveSummary, DeploymentStatus, HealthStatus, PipelineStage, SystemDetail,
+    SystemSummary, SystemsListParams,
 };
 use crate::components::filters::{
     DeploymentFilterDropdown, EnvironmentFilterDropdown, HealthFilterDropdown, ViewMode, ViewToggle,
@@ -21,16 +22,17 @@ use crate::components::modals::{
     GeneratedKeyPair, KeyPairModal, RemoveSystemDialog, UpdatePublicKeyModal, generate_key_pair,
 };
 use crate::components::notifications::{AlertBanner, AlertSeverity};
-use crate::components::system::SystemCard;
+use crate::components::system::{DeploySystemModal, EditSystemModal, SystemCard};
 use crate::components::tables::SystemsTable;
 use crate::environments::adapter::load_environment_names_with_fallback;
 use crate::routes::Route;
 use crate::state::app_state::AppState;
 use crate::state::auth;
 use crate::systems::adapter::{
-    create_system_via_api, deactivate_system_via_api, fallback_flake_names, fallback_systems,
-    load_flake_names_with_fallback, load_system_detail_with_fallback, load_systems_with_fallback,
-    update_system_public_key_via_api, update_system_via_api,
+    create_system_via_api, deactivate_system_via_api, deploy_system_via_api, fallback_flake_names,
+    fallback_systems, fetch_system_commits_via_api, load_flake_names_with_fallback,
+    load_system_detail_with_fallback, load_systems_with_fallback, update_system_public_key_via_api,
+    update_system_via_api,
 };
 use crate::theme;
 
@@ -190,6 +192,11 @@ pub fn SystemsListView() -> Element {
     let mut generated_keys = use_signal(|| None::<GeneratedKeyPair>);
     let mut update_key_error = use_signal(|| None::<String>);
     let mut onboarding_agent_reminder = use_signal(|| None::<String>);
+    
+    // New modal state for edit and deploy
+    let mut edit_modal_system = use_signal(|| None::<SystemDetail>);
+    let mut deploy_modal_system = use_signal(|| None::<(SystemDetail, Vec<crate::api::models::CommitInfo>, Option<String>)>);
+    let mut deploy_error = use_signal(|| None::<String>);
 
     let current_systems = local_systems.read().clone();
     let environments = unique_environments(&current_systems);
@@ -591,22 +598,28 @@ pub fn SystemsListView() -> Element {
                             on_remove: move |_| remove_system_by_id(local_systems, pending_remove, system.id),
                             on_update_key: move |_| update_key_for_system(local_systems, pending_update_key, system.id),
                             on_edit: move |_| {
-                                let mut draft = draft.clone();
-                                let mut add_error = add_error.clone();
-                                let mut editing_system = editing_system.clone();
+                                let mut edit_modal_system = edit_modal_system.clone();
                                 spawn(async move {
                                     let detail = load_system_detail_with_fallback(&system.id.to_string()).await;
                                     if let Some(detail) = detail.system {
-                                        draft.set(NewSystemDraft {
-                                            hostname: detail.hostname,
-                                            public_key: String::new(),
-                                            environment: detail.environment.unwrap_or_default(),
-                                            flake_name: detail.flake.map(|flake| flake.name).unwrap_or_default(),
-                                            system_configuration_name: detail.system_configuration_name.unwrap_or_default(),
-                                            deployment_policy: detail.deployment_policy,
-                                        });
-                                        add_error.set(None);
-                                        editing_system.set(Some(system.id));
+                                        edit_modal_system.set(Some(detail));
+                                    }
+                                });
+                            },
+                            on_deploy: move |_| {
+                                let mut deploy_modal_system = deploy_modal_system.clone();
+                                spawn(async move {
+                                    let detail = load_system_detail_with_fallback(&system.id.to_string()).await;
+                                    if let Some(detail) = detail.system {
+                                        match fetch_system_commits_via_api(system.id).await {
+                                            Ok(commits_response) => {
+                                                deploy_modal_system.set(Some((detail, commits_response.commits, commits_response.current_commit)));
+                                            }
+                                            Err(_) => {
+                                                // Fall back to showing modal with empty commits
+                                                deploy_modal_system.set(Some((detail, vec![], None)));
+                                            }
+                                        }
                                     }
                                 });
                             },
@@ -619,22 +632,27 @@ pub fn SystemsListView() -> Element {
                     on_remove: move |id| remove_system_by_id(local_systems, pending_remove, id),
                     on_update_key: move |id| update_key_for_system(local_systems, pending_update_key, id),
                     on_edit: move |id: uuid::Uuid| {
-                        let mut draft = draft.clone();
-                        let mut add_error = add_error.clone();
-                        let mut editing_system = editing_system.clone();
+                        let mut edit_modal_system = edit_modal_system.clone();
                         spawn(async move {
                             let detail = load_system_detail_with_fallback(&id.to_string()).await;
                             if let Some(detail) = detail.system {
-                                draft.set(NewSystemDraft {
-                                    hostname: detail.hostname,
-                                    public_key: String::new(),
-                                    environment: detail.environment.unwrap_or_default(),
-                                    flake_name: detail.flake.map(|flake| flake.name).unwrap_or_default(),
-                                    system_configuration_name: detail.system_configuration_name.unwrap_or_default(),
-                                    deployment_policy: detail.deployment_policy,
-                                });
-                                add_error.set(None);
-                                editing_system.set(Some(id));
+                                edit_modal_system.set(Some(detail));
+                            }
+                        });
+                    },
+                    on_deploy: move |id: uuid::Uuid| {
+                        let mut deploy_modal_system = deploy_modal_system.clone();
+                        spawn(async move {
+                            let detail = load_system_detail_with_fallback(&id.to_string()).await;
+                            if let Some(detail) = detail.system {
+                                match fetch_system_commits_via_api(id).await {
+                                    Ok(commits_response) => {
+                                        deploy_modal_system.set(Some((detail, commits_response.commits, commits_response.current_commit)));
+                                    }
+                                    Err(_) => {
+                                        deploy_modal_system.set(Some((detail, vec![], None)));
+                                    }
+                                }
                             }
                         });
                     },
@@ -687,6 +705,78 @@ pub fn SystemsListView() -> Element {
                                 }
                                 Err(error_message) => {
                                     update_key_error.set(Some(error_message));
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+
+            // Edit System Modal
+            if let Some(detail) = edit_modal_system.read().clone() {
+                EditSystemModal {
+                    system: detail.clone(),
+                    on_close: move |_| edit_modal_system.set(None),
+                    on_save: move |request: crate::api::models::UpdateSystemRequest| {
+                        let system_id = detail.id;
+                        spawn(async move {
+                            match update_system_via_api(
+                                system_id,
+                                request.hostname,
+                                request.system_configuration_name,
+                                request.environment,
+                                request.flake_name,
+                                request.deployment_policy,
+                            ).await {
+                                Ok(updated_detail) => {
+                                    // Update local systems list
+                                    let mut values = local_systems.read().clone();
+                                    if let Some(pos) = values.iter().position(|s| s.id == system_id) {
+                                        values[pos].hostname = updated_detail.hostname.clone();
+                                        values[pos].system_configuration_name = updated_detail.system_configuration_name.clone();
+                                        values[pos].environment = updated_detail.environment.clone();
+                                        values[pos].deployment_policy = updated_detail.deployment_policy.clone();
+                                        local_systems.set(values);
+                                    }
+                                    edit_modal_system.set(None);
+                                }
+                                Err(error_message) => {
+                                    // TODO: Show error in modal
+                                    api_notice.set(Some(error_message));
+                                    edit_modal_system.set(None);
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+
+            // Deploy System Modal
+            if let Some((detail, commits, current_commit)) = deploy_modal_system.read().clone() {
+                DeploySystemModal {
+                    system_id: detail.id.to_string(),
+                    hostname: detail.hostname.clone(),
+                    deployment_policy: detail.deployment_policy.clone(),
+                    commits: commits.clone(),
+                    current_commit: current_commit.clone(),
+                    on_close: move |_| {
+                        deploy_modal_system.set(None);
+                        deploy_error.set(None);
+                    },
+                    on_deploy: move |request: crate::api::models::DeploySystemRequest| {
+                        let system_id = detail.id;
+                        spawn(async move {
+                            match deploy_system_via_api(system_id, request.commit_sha).await {
+                                Ok(message) => {
+                                    // Success - close modal
+                                    deploy_modal_system.set(None);
+                                    deploy_error.set(None);
+                                    api_notice.set(Some(message));
+                                }
+                                Err(error_message) => {
+                                    deploy_error.set(Some(error_message.clone()));
+                                    api_notice.set(Some(error_message));
+                                    deploy_modal_system.set(None);
                                 }
                             }
                         });
