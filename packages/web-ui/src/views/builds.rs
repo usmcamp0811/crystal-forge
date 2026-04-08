@@ -683,6 +683,7 @@ pub fn BuildsView() -> Element {
                                             th { class: "py-2 pr-3", "Completion Time" }
                                             th { class: "py-2 pr-3", "Duration" }
                                             th { class: "py-2 pr-3", "Commit" }
+                                            th { class: "py-2 pr-3 text-right", "Actions" }
                                         }
                                     }
                                     tbody {
@@ -693,6 +694,8 @@ pub fn BuildsView() -> Element {
                                                     BuildStatus::Failed => "px-2 py-1 text-[10px] rounded border cf-build-status-failed",
                                                     _ => "px-2 py-1 text-[10px] rounded border cf-chip-slate",
                                                 };
+                                                let build_id = item.id;
+                                                let item_status = item.status;
                                                 rsx! {
                                                     tr { key: "completed-{item.id}", class: "border-b border-slate-800/70",
                                                         td { class: "py-2 pr-3 font-mono text-slate-200", "{extract_system_name(&item.hostname)}" }
@@ -703,6 +706,20 @@ pub fn BuildsView() -> Element {
                                                         td { class: "py-2 pr-3 text-slate-300", "{format_completed_at(item)}" }
                                                         td { class: "py-2 pr-3 text-slate-300", "{format_duration(item)}" }
                                                         td { class: "py-2 pr-3 text-slate-400 font-mono", "{item.commit.chars().take(8).collect::<String>()}" }
+                                                        td { class: "py-2 pr-3 text-right",
+                                                            if matches!(item_status, BuildStatus::Failed | BuildStatus::Cancelled) {
+                                                                button {
+                                                                    class: "text-[10px] px-2 py-1 rounded transition-colors cf-action-link",
+                                                                    onclick: move |_| {
+                                                                        pending_action.set(Some(PendingAction::Build {
+                                                                            build_id,
+                                                                            action: BuildAction::Restart,
+                                                                        }));
+                                                                    },
+                                                                    "Restart"
+                                                                }
+                                                            }
+                                                        }
                                                     }
                                                 }
                                             }
