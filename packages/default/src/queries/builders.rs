@@ -1026,6 +1026,56 @@ pub async fn cancel_build_job(pool: &PgPool, job_id: &Uuid) -> Result<BuildJob> 
     Ok(updated)
 }
 
+/// Force-cancel a build job stuck in the `cancelling` state.
+///
+/// This is a manual recovery operation for builds that:
+/// - Have been stuck in `cancelling` for an extended period
+/// - Failed to complete graceful shutdown (builder crashed/disconnected)
+/// - Need immediate termination without waiting for builder confirmation
+///
+/// Transitions:
+/// * `cancelling` → `cancelled` (sets completed_at = now())
+/// * `building` → `cancelled` (emergency force-cancel, sets completed_at = now())
+/// * Already `cancelled` → returns error (idempotent behavior not desired for force operations)
+///
+/// Returns the updated `BuildJob`, or an error if the transition is illegal.
+pub async fn force_cancel_build_job(pool: &PgPool, job_id: &Uuid) -> Result<BuildJob> {
+    let job = get_build_job_by_id(pool, job_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Build job not found"))?;
+
+    match job.status.as_str() {
+        "cancelling" | "building" => {
+            // Allow force-cancel from both building and cancelling states
+            let updated = sqlx::query_as::<_, BuildJob>(
+                r#"
+                UPDATE build_jobs
+                SET status       = 'cancelled',
+                    completed_at = now(),
+                    updated_at   = now()
+                WHERE id = $1
+                RETURNING *
+                "#,
+            )
+            .bind(job_id)
+            .fetch_one(pool)
+            .await
+            .context("Failed to force-cancel build job")?;
+
+            info!(
+                "Force-cancelled job {} from status '{}' → 'cancelled'",
+                job_id, job.status
+            );
+            Ok(updated)
+        }
+        "queued" => bail!("Cannot force-cancel a queued job; use regular cancel instead"),
+        "cancelled" => bail!("Build job is already cancelled"),
+        "success" => bail!("Cannot force-cancel a completed build"),
+        "failed" => bail!("Cannot force-cancel a failed build"),
+        other => bail!("Cannot force-cancel build in status: {}", other),
+    }
+}
+
 /// Transition a job from `cancelling` → `cancelled` with a `completed_at`
 /// timestamp.  Called by the builder after it has killed the nix process and
 /// flushed any final logs.
@@ -1369,7 +1419,10 @@ mod tests {
             .expect("claim B failed")
             .expect("claim B expected a job");
 
-        assert_ne!(claimed_a.id, claimed_b.id, "Concurrent claims must not duplicate jobs");
+        assert_ne!(
+            claimed_a.id, claimed_b.id,
+            "Concurrent claims must not duplicate jobs"
+        );
 
         let claimed_ids: std::collections::HashSet<Uuid> =
             [claimed_a.id, claimed_b.id].into_iter().collect();

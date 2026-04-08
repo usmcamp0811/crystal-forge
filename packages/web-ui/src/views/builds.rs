@@ -80,17 +80,16 @@ fn format_environment(item: &BuildItem) -> String {
 
 /// Map a raw `BuildQueueItem` from API into the UI `BuildItem`.
 fn map_queue_item(item: &crate::api::models::BuildQueueItem, idx: usize) -> BuildItem {
-    let queued_for = if item.status == ApiBuildStatus::Building
-        || item.status == ApiBuildStatus::Cancelling
-    {
-        format!(
-            "running {}",
-            format_human_duration(item.elapsed_secs.unwrap_or(0))
-        )
-    } else {
-        let ago = (Utc::now() - item.queued_at).num_seconds().max(0);
-        format!("queued {} ago", format_human_duration(ago))
-    };
+    let queued_for =
+        if item.status == ApiBuildStatus::Building || item.status == ApiBuildStatus::Cancelling {
+            format!(
+                "running {}",
+                format_human_duration(item.elapsed_secs.unwrap_or(0))
+            )
+        } else {
+            let ago = (Utc::now() - item.queued_at).num_seconds().max(0);
+            format!("queued {} ago", format_human_duration(ago))
+        };
 
     BuildItem {
         id: (idx + 1) as i32,
@@ -163,7 +162,9 @@ pub fn BuildsView() -> Element {
 
         let (queued_after, queued_before) = match time.as_str() {
             "today" => {
-                let start = Utc::now().date_naive().and_hms_opt(0, 0, 0)
+                let start = Utc::now()
+                    .date_naive()
+                    .and_hms_opt(0, 0, 0)
                     .map(|dt| dt.and_utc());
                 (start, None)
             }
@@ -177,10 +178,22 @@ pub fn BuildsView() -> Element {
         let params = BuildQueueParams {
             page: Some(page),
             limit: Some(PAGE_SIZE),
-            status: if status.is_empty() { None } else { Some(status) },
-            commit_hash: if commit.is_empty() { None } else { Some(commit) },
+            status: if status.is_empty() {
+                None
+            } else {
+                Some(status)
+            },
+            commit_hash: if commit.is_empty() {
+                None
+            } else {
+                Some(commit)
+            },
             flake_name: if flake.is_empty() { None } else { Some(flake) },
-            config_name: if config.is_empty() { None } else { Some(config) },
+            config_name: if config.is_empty() {
+                None
+            } else {
+                Some(config)
+            },
             queued_after,
             queued_before,
         };
@@ -336,7 +349,11 @@ pub fn BuildsView() -> Element {
 
     let total_pages = {
         let t = queue_total();
-        if t == 0 { 1 } else { (t + PAGE_SIZE - 1) / PAGE_SIZE }
+        if t == 0 {
+            1
+        } else {
+            (t + PAGE_SIZE - 1) / PAGE_SIZE
+        }
     };
 
     rsx! {
@@ -855,6 +872,26 @@ pub fn BuildsView() -> Element {
                                                     }
                                                 }
                                             }
+                                            BuildAction::ForceCancel => {
+                                                let Some(job_id) = selected.job_id else {
+                                                    action_error.set(Some("Queue item has no job id; cannot force cancel".to_string()));
+                                                    return;
+                                                };
+
+                                                match api::client::force_cancel_build_job(&job_id).await {
+                                                    Ok(_) => {
+                                                        action_error.set(None);
+                                                        last_action_note.set(Some(format!("Force-cancelled job {}", job_id)));
+                                                        refresh_trigger.set(refresh_trigger() + 1);
+                                                    }
+                                                    Err(e) => {
+                                                        action_error.set(Some(format!("Failed to force cancel: {}", e)));
+                                                    }
+                                                }
+                                            }
+                                            BuildAction::RunNext => {
+                                                // RunNext is handled in local state only (no server action)
+                                            }
                                          }
                                     });
                                 }
@@ -960,6 +997,16 @@ fn BuildQueueFullTable(
                                                         on_build_action.call((build.id, BuildAction::Stop));
                                                     },
                                                     "Stop"
+                                                }
+                                            }
+                                            if matches!(build.status, BuildStatus::Stopping) {
+                                                button {
+                                                    class: "text-[10px] text-orange-400 hover:text-orange-300 px-2 py-1 rounded hover:bg-orange-500/10 transition-colors",
+                                                    onclick: move |evt| {
+                                                        evt.stop_propagation();
+                                                        on_build_action.call((build.id, BuildAction::ForceCancel));
+                                                    },
+                                                    "Force Cancel"
                                                 }
                                             }
                                             if matches!(build.status, BuildStatus::Failed | BuildStatus::Complete | BuildStatus::Cancelled) {

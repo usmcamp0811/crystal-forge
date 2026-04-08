@@ -224,12 +224,18 @@ pub async fn get_flake_timelines(
                                 );
                             }
 
-                            let marked = mark_cf_system_matches(configs, commit_path_lookup.get(&commit.hash));
+                            let marked = mark_cf_system_matches(
+                                configs,
+                                commit_path_lookup.get(&commit.hash),
+                            );
                             commit.system_count = marked.len() as i64;
                             commit.systems = marked;
                         }
                     } else {
-                        let marked = mark_cf_system_matches(&commit.systems, commit_path_lookup.get(&commit.hash));
+                        let marked = mark_cf_system_matches(
+                            &commit.systems,
+                            commit_path_lookup.get(&commit.hash),
+                        );
                         commit.system_count = marked.len() as i64;
                         commit.systems = marked;
                     }
@@ -357,7 +363,15 @@ async fn fetch_commit_config_paths(
     .await?;
 
     let mut out: HashMap<String, HashMap<String, CommitConfigPathRow>> = HashMap::new();
-    for (hash, config_name, mapped_host_count, cf_hostname, expected_store_path, current_store_path) in rows {
+    for (
+        hash,
+        config_name,
+        mapped_host_count,
+        cf_hostname,
+        expected_store_path,
+        current_store_path,
+    ) in rows
+    {
         out.entry(hash)
             .or_default()
             .entry(config_name.clone())
@@ -1997,7 +2011,8 @@ mod tests {
             },
         );
 
-        let marked = mark_cf_system_matches(&["alpha".to_string(), "beta".to_string()], Some(&rows));
+        let marked =
+            mark_cf_system_matches(&["alpha".to_string(), "beta".to_string()], Some(&rows));
         assert_eq!(marked[0], "alpha [CF system]");
         assert_eq!(marked[1], "beta");
     }
@@ -2026,7 +2041,10 @@ mod tests {
         assert!(details[0].is_cf_system);
         assert_eq!(details[0].mapped_host_count, 2);
         assert_eq!(details[0].cf_hostname.as_deref(), Some("alpha-host"));
-        assert_eq!(details[0].expected_store_path.as_deref(), Some("/nix/store/alpha"));
+        assert_eq!(
+            details[0].expected_store_path.as_deref(),
+            Some("/nix/store/alpha")
+        );
         assert_eq!(
             details[0].current_store_path.as_deref(),
             Some("/nix/store/current-alpha")

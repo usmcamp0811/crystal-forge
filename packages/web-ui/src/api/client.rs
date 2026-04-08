@@ -189,10 +189,16 @@ pub async fn fetch_build_queue_paginated(
     // RFC 3339 timestamps are ASCII-safe but encode them for defensive correctness
     // (colons and plus signs in timezone offsets are not query-safe in all contexts).
     if let Some(qa) = params.queued_after {
-        parts.push(format!("queued_after={}", encode_query_value(&qa.to_rfc3339())));
+        parts.push(format!(
+            "queued_after={}",
+            encode_query_value(&qa.to_rfc3339())
+        ));
     }
     if let Some(qb) = params.queued_before {
-        parts.push(format!("queued_before={}", encode_query_value(&qb.to_rfc3339())));
+        parts.push(format!(
+            "queued_before={}",
+            encode_query_value(&qb.to_rfc3339())
+        ));
     }
 
     let url = if parts.is_empty() {
@@ -222,6 +228,16 @@ pub async fn cancel_build_job(job_id: &uuid::Uuid) -> Result<(), ApiClientError>
 /// a flake re-evaluation; the derivation is already known.
 pub async fn requeue_build_job(job_id: &uuid::Uuid) -> Result<(), ApiClientError> {
     let url = format!("{}/build-jobs/{}/requeue", base_url(), job_id);
+    send_empty_with_csrf("POST", &url, None::<&()>).await
+}
+
+/// Force-cancel a build job stuck in 'cancelling' state (admin/operator).
+///
+/// Unlike regular cancel, this immediately transitions to 'cancelled' without
+/// waiting for builder confirmation. Use this for stuck builds that failed to
+/// complete graceful shutdown.
+pub async fn force_cancel_build_job(job_id: &uuid::Uuid) -> Result<(), ApiClientError> {
+    let url = format!("{}/build-jobs/{}/force-cancel", base_url(), job_id);
     send_empty_with_csrf("POST", &url, None::<&()>).await
 }
 
