@@ -813,11 +813,14 @@ pub fn BuildsView() -> Element {
                                 }
                                 PendingAction::Build { build_id, action } => {
                                     let queue_snapshot = builds.read().clone();
+                                    let history_snapshot = build_history.read().clone();
                                     let mut action_error = action_error;
                                     let mut last_action_note = last_action_note;
                                     let mut refresh_trigger = refresh_trigger;
                                     spawn(async move {
-                                        let selected = queue_snapshot.iter().find(|b| b.id == build_id);
+                                        // Check both active queue and completed history
+                                        let selected = queue_snapshot.iter().find(|b| b.id == build_id)
+                                            .or_else(|| history_snapshot.iter().find(|b| b.id == build_id));
                                         let Some(selected) = selected else {
                                             action_error.set(Some(format!("Build row #{} not found", build_id)));
                                             return;
