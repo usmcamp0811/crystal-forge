@@ -4,7 +4,7 @@ title: Fix build queue state transitions and stuck "Stopping" builds
 status: In Progress
 assignee: []
 created_date: '2026-04-07 23:27'
-updated_date: '2026-04-08 00:23'
+updated_date: '2026-04-08 00:31'
 labels:
   - bug
   - build-queue
@@ -161,6 +161,10 @@ Failed → Queued (user action: retry)
 - Consider: startup job to recover orphaned builds from crashed workers
 
 LOCK: agent-claude on gray in ~/code/crystal-forge/TASK-248-build-queue-state-transitions
+
+Implementation complete: Added force_cancel_build_job backend function and API endpoint. Added ForceCancel UI action with orange button shown for Stopping state. Force-cancel immediately transitions to cancelled without waiting for builder confirmation. Code formatted and committed.
+
+Testing pending: Need to manually verify UI flow (Stop → Stopping → Force Cancel → Cancelled → Restart → Queued)
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
