@@ -5,7 +5,7 @@ status: Review
 assignee:
   - agent-claude
 created_date: '2026-04-07 23:27'
-updated_date: '2026-04-08 02:41'
+updated_date: '2026-04-08 02:51'
 labels:
   - bug
   - build-queue
@@ -111,15 +111,7 @@ Currently, builds that are stopped get stuck in a "Stopping" status with no way 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Addressed blocker from review: force_cancel_build_job is now atomic in SQL with WHERE status IN ('building','cancelling') and returns clear race-lost/invalid-transition errors when no row updated.
-
-Added query-layer tests for force-cancel state machine behavior: cancelling->cancelled, building->cancelled, terminal rejection, and race-safe non-overwrite of success state.
-
-Updated checks/web-ui/tests/integration-test.js with critical step 15h-builds-completed-restart-action to assert restart from Completed tab triggers POST /build-jobs/:id/requeue and does not show 'Build row not found'.
-
-Updated checks/web-ui/default.nix critical_tests (ci_fast) to include 15h-builds-completed-restart-action so regressions fail the web-ui check.
-
-Verification executed: node --check checks/web-ui/tests/integration-test.js (pass), nix build .#checks.x86_64-linux.web-ui (pass), confirmed screenshot result/screenshots/15h-builds-completed-restart-action.png generated.
+Follow-up alignment: backend force-cancel narrowed from (building|cancelling) to cancelling-only to match UI behavior and avoid semantic mismatch. CAS guard retained, so terminal states cannot be clobbered.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
