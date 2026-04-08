@@ -5,7 +5,7 @@ status: Review
 assignee:
   - agent-claude
 created_date: '2026-04-07 23:27'
-updated_date: '2026-04-08 02:51'
+updated_date: '2026-04-08 02:58'
 labels:
   - bug
   - build-queue
@@ -111,7 +111,7 @@ Currently, builds that are stopped get stuck in a "Stopping" status with no way 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Follow-up alignment: backend force-cancel narrowed from (building|cancelling) to cancelling-only to match UI behavior and avoid semantic mismatch. CAS guard retained, so terminal states cannot be clobbered.
+Resolved MR branch divergence/conflicts by rebasing TASK-248 branch onto latest origin/dev and force-pushing with lease. Rebase completed cleanly (no manual conflict edits needed) and MR head is now up to date.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
