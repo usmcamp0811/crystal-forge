@@ -1036,13 +1036,12 @@ pub async fn cancel_build_job(pool: &PgPool, job_id: &Uuid) -> Result<BuildJob> 
 ///
 /// Transitions:
 /// * `cancelling` → `cancelled` (sets completed_at = now())
-/// * `building` → `cancelled` (emergency force-cancel, sets completed_at = now())
 /// * Already `cancelled` → returns error (idempotent behavior not desired for force operations)
 ///
 /// Returns the updated `BuildJob`, or an error if the transition is illegal.
 pub async fn force_cancel_build_job(pool: &PgPool, job_id: &Uuid) -> Result<BuildJob> {
     // Atomic transition guard: only force-cancel while state is still
-    // `building` or `cancelling`.
+    // `cancelling`.
     let updated = sqlx::query_as::<_, BuildJob>(
         r#"
         UPDATE build_jobs
@@ -1050,7 +1049,7 @@ pub async fn force_cancel_build_job(pool: &PgPool, job_id: &Uuid) -> Result<Buil
             completed_at = now(),
             updated_at   = now()
         WHERE id = $1
-          AND status IN ('building', 'cancelling')
+          AND status = 'cancelling'
         RETURNING *
         "#,
     )
@@ -1068,6 +1067,9 @@ pub async fn force_cancel_build_job(pool: &PgPool, job_id: &Uuid) -> Result<Buil
     match current_status.as_deref() {
         None => bail!("Build job not found"),
         Some("queued") => bail!("Cannot force-cancel a queued job; use regular cancel instead"),
+        Some("building") => {
+            bail!("Cannot force-cancel a building job; use regular cancel to enter stopping state")
+        }
         Some("cancelled") => bail!("Build job is already cancelled"),
         Some("success") => bail!("Cannot force-cancel a completed build"),
         Some("failed") => bail!("Cannot force-cancel a failed build"),
@@ -1638,7 +1640,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires running test database"]
-    async fn test_force_cancel_transition_from_building() {
+    async fn test_force_cancel_rejects_building_status() {
         let pool = test_pool().await;
         let now = Utc::now();
 
@@ -1656,12 +1658,20 @@ mod tests {
 
         set_build_job_status(&pool, job_id, "building").await;
 
-        let updated = force_cancel_build_job(&pool, &job_id)
+        let err = force_cancel_build_job(&pool, &job_id)
             .await
-            .expect("force-cancel from building should succeed");
+            .expect_err("force-cancel should reject building status");
 
-        assert_eq!(updated.status, "cancelled");
-        assert!(updated.completed_at.is_some());
+        assert!(
+            err.to_string()
+                .contains("Cannot force-cancel a building job; use regular cancel")
+        );
+
+        let status_after = get_build_job_status(&pool, &job_id)
+            .await
+            .expect("status lookup should succeed")
+            .expect("job should exist");
+        assert_eq!(status_after, "building");
     }
 
     #[tokio::test]
