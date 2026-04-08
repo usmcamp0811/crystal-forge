@@ -4,7 +4,7 @@ title: Fix build queue state transitions and stuck "Stopping" builds
 status: Review
 assignee: []
 created_date: '2026-04-07 23:27'
-updated_date: '2026-04-08 02:04'
+updated_date: '2026-04-08 02:14'
 labels:
   - bug
   - build-queue
@@ -173,6 +173,8 @@ Merge Request created: https://gitlab.com/crystal-forge/crystal-forge/-/merge_re
 SQLX compile errors are expected without database - these are compile-time query validation checks. Our changes do not modify SQL or schema, so existing .sqlx metadata remains valid. Nix builds handle offline mode automatically. Code will compile and run correctly when DB is available or when built via nix build.
 
 Fixed UX bug: Restart button was missing from Completed tab. Cancelled/failed builds showed in read-only table with no way to requeue. Added Actions column with Restart button for Failed and Cancelled builds in Completed tab.
+
+Fixed bug: Restart action from Completed tab was failing with 'Build row not found' error. Action handler now searches both active queue and build history to find the build, allowing Restart to work from both tabs.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
