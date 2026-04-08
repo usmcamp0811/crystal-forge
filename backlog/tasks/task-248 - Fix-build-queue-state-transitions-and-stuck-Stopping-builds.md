@@ -1,10 +1,10 @@
 ---
 id: TASK-248
 title: Fix build queue state transitions and stuck "Stopping" builds
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-04-07 23:27'
-updated_date: '2026-04-07 23:28'
+updated_date: '2026-04-08 00:23'
 labels:
   - bug
   - build-queue
@@ -159,6 +159,8 @@ Failed → Queued (user action: retry)
 - Background job to detect builds stuck in "Stopping" for > timeout period
 - Auto-transition to "Cancelled" or notify admin
 - Consider: startup job to recover orphaned builds from crashed workers
+
+LOCK: agent-claude on gray in ~/code/crystal-forge/TASK-248-build-queue-state-transitions
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
