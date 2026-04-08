@@ -165,6 +165,8 @@ LOCK: agent-claude on gray in ~/code/crystal-forge/TASK-248-build-queue-state-tr
 Implementation complete: Added force_cancel_build_job backend function and API endpoint. Added ForceCancel UI action with orange button shown for Stopping state. Force-cancel immediately transitions to cancelled without waiting for builder confirmation. Code formatted and committed.
 
 Testing pending: Need to manually verify UI flow (Stop → Stopping → Force Cancel → Cancelled → Restart → Queued)
+
+Code complete and ready for review. All core acceptance criteria met (AC #1-6). AC #7 satisfied by manual force-cancel; optional automatic cleanup job not implemented. SQLX errors are expected without running DB - no schema changes needed (migration 0103 already has states). Ready to create MR pending manual UI verification.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
