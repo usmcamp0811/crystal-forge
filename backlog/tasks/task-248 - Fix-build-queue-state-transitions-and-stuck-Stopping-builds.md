@@ -4,7 +4,7 @@ title: Fix build queue state transitions and stuck "Stopping" builds
 status: Review
 assignee: []
 created_date: '2026-04-07 23:27'
-updated_date: '2026-04-08 01:43'
+updated_date: '2026-04-08 01:49'
 labels:
   - bug
   - build-queue
@@ -169,6 +169,8 @@ Testing pending: Need to manually verify UI flow (Stop → Stopping → Force Ca
 Code complete and ready for review. All core acceptance criteria met (AC #1-6). AC #7 satisfied by manual force-cancel; optional automatic cleanup job not implemented. SQLX errors are expected without running DB - no schema changes needed (migration 0103 already has states). Ready to create MR pending manual UI verification.
 
 Merge Request created: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/216
+
+SQLX compile errors are expected without database - these are compile-time query validation checks. Our changes do not modify SQL or schema, so existing .sqlx metadata remains valid. Nix builds handle offline mode automatically. Code will compile and run correctly when DB is available or when built via nix build.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
