@@ -3,15 +3,13 @@
 use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
 use std::rc::Rc;
-use uuid::Uuid;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
 use web_sys::{Node, window};
 
 use crate::api::client::set_setup_wizard_agent_acknowledged;
 use crate::api::models::{
-    CommitInfo, CveSummary, DeploymentStatus, HealthStatus, PipelineStage, SystemDetail,
-    SystemSummary, SystemsListParams,
+    DeploymentStatus, HealthStatus, SystemDetail, SystemSummary, SystemsListParams,
 };
 use crate::components::filters::{
     DeploymentFilterDropdown, EnvironmentFilterDropdown, HealthFilterDropdown, ViewMode, ViewToggle,

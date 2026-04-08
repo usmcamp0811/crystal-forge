@@ -1098,6 +1098,43 @@ mod tests {
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
+    #[tokio::test]
+    async fn deploy_system_requires_authenticated_role() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+
+        let response = deploy_system(
+            State(pool),
+            HeaderMap::new(),
+            Path(Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid")),
+            Json(DeploySystemRequest {
+                commit_sha: "a1b2c3d".to_string(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn get_system_commits_requires_authenticated_role() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+
+        let response = get_system_commits(
+            State(pool),
+            HeaderMap::new(),
+            Path(Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid")),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
     #[test]
     fn rollback_target_commit_validation_enforces_bounds_and_format() {
         assert!(validate_target_commit("").is_err());

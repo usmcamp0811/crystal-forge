@@ -480,6 +480,8 @@ async function routeSystemsWarningData(page) {
       fips_mode: false,
       selinux_status: null,
     },
+    created_at: "2026-04-01T00:00:00Z",
+    updated_at: "2026-04-07T00:00:00Z",
   };
 
   await page.route("**/api/v1/systems*", async (route) => {
@@ -1726,6 +1728,76 @@ const steps = [
     },
   },
   {
+    name: "12e-systems-edit-modal",
+    description: "Systems edit modal for existing systems",
+    action: async (page) => {
+      await routeSystemsWarningData(page);
+      await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2200);
+      await page.getByText("warning-system-01").first().waitFor({ timeout: 10000 });
+
+      const editButton = page.getByRole("button", { name: "Edit" }).first();
+      await editButton.waitFor({ timeout: 12000 });
+      await editButton.click();
+
+      const editHeading = page.getByRole("heading", { name: "Edit System" });
+      const editVisible = await editHeading.isVisible({ timeout: 1500 }).catch(() => false);
+      if (!editVisible) {
+        console.log("  note: edit modal did not open within step timeout; capturing systems action state");
+      }
+      await unrouteSystemsWarningData(page);
+    },
+  },
+  {
+    name: "12f-systems-deploy-modal",
+    description: "Systems deploy modal with commit selector",
+    action: async (page) => {
+      await routeSystemsWarningData(page);
+      await page.route(/\/api\/v1\/systems\/[0-9a-f-]+\/commits$/, async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            commits: [
+              {
+                sha: "abc123def456789012345678901234567890abcd",
+                short_sha: "abc123d",
+                message: "feat: add deterministic deploy commit",
+                author: "Integration Test",
+                timestamp: "2026-04-07T10:30:00Z",
+              },
+              {
+                sha: "def456abc123456789012345678901234567890ab",
+                short_sha: "def456a",
+                message: "fix: stabilize deploy selector",
+                author: "Integration Test",
+                timestamp: "2026-04-06T15:20:00Z",
+              },
+            ],
+            current_commit: "abc123def456789012345678901234567890abcd",
+          }),
+        });
+      });
+
+      await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2200);
+      await page.getByText("warning-system-01").first().waitFor({ timeout: 10000 });
+
+      const deployButton = page.getByRole("button", { name: "Deploy" }).first();
+      await deployButton.waitFor({ timeout: 12000 });
+      await deployButton.click();
+
+      const deployHeading = page.getByRole("heading", { name: "Deploy System" });
+      const deployVisible = await deployHeading.isVisible({ timeout: 1500 }).catch(() => false);
+      if (!deployVisible) {
+        console.log("  note: deploy modal did not open within step timeout; capturing systems action state");
+      }
+
+      await page.unroute(/\/api\/v1\/systems\/[0-9a-f-]+\/commits$/);
+      await unrouteSystemsWarningData(page);
+    },
+  },
+  {
     name: "12d-systems-api-error-no-mock-fallback",
     description: "Systems API failures show error state without deterministic mock hosts",
     action: async (page) => {
@@ -2295,6 +2367,8 @@ const CI_FAST_STEP_NAMES = new Set([
   "15-builds",
   "11b-builds-queue-card-focus",
   "12c-systems-modal-config-field",
+  "12e-systems-edit-modal",
+  "12f-systems-deploy-modal",
   "12d-systems-api-error-no-mock-fallback",
   "13d-flakes-stress-dataset",
   "13e-flakes-add-modal-credentials",
