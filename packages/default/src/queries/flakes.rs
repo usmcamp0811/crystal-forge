@@ -663,22 +663,22 @@ pub async fn fetch_flake_timelines(
                     None
                 };
 
-                    FlakeCommit {
-                        id: row.id,
-                        hash: row.git_commit_hash,
-                        message: row.message.unwrap_or_default(),
-                        author: row.author.unwrap_or_default(),
-                        committed_at: row.commit_timestamp,
-                        system_count: row.system_count,
-                        commits_behind: row.commits_behind,
-                        systems: row.systems,
-                        system_paths: Vec::new(),
-                        build_status,
-                        evaluation_status: row.evaluation_status,
-                        evaluation_error_message: row.evaluation_error_message,
-                        metadata,
-                    }
-                })
+                FlakeCommit {
+                    id: row.id,
+                    hash: row.git_commit_hash,
+                    message: row.message.unwrap_or_default(),
+                    author: row.author.unwrap_or_default(),
+                    committed_at: row.commit_timestamp,
+                    system_count: row.system_count,
+                    commits_behind: row.commits_behind,
+                    systems: row.systems,
+                    system_paths: Vec::new(),
+                    build_status,
+                    evaluation_status: row.evaluation_status,
+                    evaluation_error_message: row.evaluation_error_message,
+                    metadata,
+                }
+            })
             .collect();
 
         timelines.push(FlakeTimeline {

@@ -239,6 +239,7 @@ in pkgs.testers.runNixOSTest {
       "06z-fleet-health-widget-assert",
       "15-builds",
       "11b-builds-queue-card-focus",
+      "15h-builds-completed-restart-action",
       "12c-systems-modal-config-field",
       "13e-flakes-add-modal-credentials",
       "13f-flakes-edit-modal-credentials",
