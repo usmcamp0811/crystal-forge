@@ -65,6 +65,35 @@ async fn load_runtime_caches_for_agent(
         }
     }
 }
+
+/// Best-effort result handler for duplicate-active-system cleanup.
+///
+/// Returns deactivated hostnames when successful, or empty vector on error.
+fn handle_duplicate_active_system_cleanup_result(
+    current_hostname: &str,
+    result: anyhow::Result<Vec<String>>,
+) -> Vec<String> {
+    match result {
+        Ok(deactivated) if !deactivated.is_empty() => {
+            warn!(
+                current_hostname = %current_hostname,
+                duplicate_hostnames = ?deactivated,
+                "Auto-deactivated duplicate active systems sharing agent public key"
+            );
+            deactivated
+        }
+        Ok(_) => Vec::new(),
+        Err(e) => {
+            // Non-fatal: do not reject heartbeat if de-duplication fails.
+            warn!(
+                current_hostname = %current_hostname,
+                error = ?e,
+                "Failed to auto-deactivate duplicate active systems; continuing heartbeat processing"
+            );
+            Vec::new()
+        }
+    }
+}
 /// Handles the `/current-system` POST route.
 /// Verifies the body signature using headers, parses the payload, and
 /// stores system state info in the database.
@@ -84,30 +113,15 @@ pub async fn log(
     // deactivate the stale duplicates and keep only the authenticated hostname active.
     // This prevents renamed/re-joined hosts from leaving old active rows that skew health.
     let public_key_base64 = agent_request.system.public_key.to_base64();
-    match deactivate_duplicate_active_systems_by_public_key(
-        &pool,
+    let _ = handle_duplicate_active_system_cleanup_result(
         &agent_request.system.hostname,
-        &public_key_base64,
-    )
-    .await
-    {
-        Ok(deactivated) if !deactivated.is_empty() => {
-            warn!(
-                current_hostname = %agent_request.system.hostname,
-                duplicate_hostnames = ?deactivated,
-                "Auto-deactivated duplicate active systems sharing agent public key"
-            );
-        }
-        Ok(_) => {}
-        Err(e) => {
-            // Non-fatal: do not reject heartbeat if de-duplication fails.
-            warn!(
-                current_hostname = %agent_request.system.hostname,
-                error = ?e,
-                "Failed to auto-deactivate duplicate active systems; continuing heartbeat processing"
-            );
-        }
-    }
+        deactivate_duplicate_active_systems_by_public_key(
+            &pool,
+            &agent_request.system.hostname,
+            &public_key_base64,
+        )
+        .await,
+    );
 
     // Try to deserialize with version detection
     let (payload, version_compatible) = match deserialize_system_state_versioned(&agent_request) {
@@ -169,4 +183,32 @@ pub async fn log(
     };
 
     (status, axum::Json(response)).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn handle_duplicate_cleanup_returns_deactivated_hosts_on_success() {
+        let host = "nix-builder";
+        let deactivated = handle_duplicate_active_system_cleanup_result(
+            host,
+            Ok(vec!["base".to_string()]),
+        );
+
+        assert_eq!(deactivated, vec!["base".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn handle_duplicate_cleanup_is_non_fatal_on_error() {
+        let host = "nix-builder";
+        let deactivated =
+            handle_duplicate_active_system_cleanup_result(host, Err(anyhow::anyhow!("db unavailable")));
+
+        assert!(
+            deactivated.is_empty(),
+            "cleanup errors must be non-fatal and return empty deactivation set"
+        );
+    }
 }
