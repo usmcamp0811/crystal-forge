@@ -511,7 +511,7 @@ pub fn DashboardView() -> Element {
                             format!("{} configuration issue{} detected", h.total_issues, suffix);
                         rsx! {
                             div {
-                                class: "space-y-3 rounded-xl border border-amber-300/35 bg-gradient-to-br from-amber-950/75 via-amber-900/30 to-yellow-950/10 p-4 shadow-[inset_0_1px_0_rgba(252,211,77,0.08)]",
+                                class: "rounded-xl border border-amber-300/35 bg-gradient-to-br from-amber-950/75 via-amber-900/30 to-yellow-950/10 p-4 h-full min-h-0 flex flex-col overflow-hidden shadow-[inset_0_1px_0_rgba(252,211,77,0.08)]",
                                 style: "background: linear-gradient(180deg, rgba(120, 53, 15, 0.32), rgba(120, 53, 15, 0.12)); border-color: rgba(245, 158, 11, 0.3); box-shadow: inset 0 1px 0 rgba(253, 230, 138, 0.08);",
                                 div {
                                     class: "flex items-center gap-2",
@@ -526,13 +526,18 @@ pub fn DashboardView() -> Element {
                                         "{heading}"
                                     }
                                 }
-                                for check in h.checks.iter().filter(|c| !c.passed) {
-                                    AlertBanner {
-                                        key: "{check.id}",
-                                        severity: AlertSeverity::Warning,
-                                        message: check.message.clone(),
-                                        action_label: Some("Fix →".to_string()),
-                                        action_url: Some(check.action_url.clone()),
+                                div {
+                                    class: "mt-3 flex-1 min-h-0 overflow-y-auto space-y-2 pr-1",
+                                    style: "overflow-y: auto; overscroll-behavior: contain;",
+                                    "data-testid": "pipeline-readiness-scroll",
+                                    for check in h.checks.iter().filter(|c| !c.passed) {
+                                        AlertBanner {
+                                            key: "{check.id}",
+                                            severity: AlertSeverity::Warning,
+                                            message: check.message.clone(),
+                                            action_label: Some("Fix →".to_string()),
+                                            action_url: Some(check.action_url.clone()),
+                                        }
                                     }
                                 }
                             }

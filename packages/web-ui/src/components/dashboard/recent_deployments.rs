@@ -21,7 +21,7 @@ pub fn RecentDeploymentsList(
 
     rsx! {
         div {
-            class: "flex flex-col h-full",
+            class: "flex flex-col h-full min-h-0 overflow-hidden",
             "data-testid": "recent-deployments",
 
             // Show filter indicator if filtered
@@ -46,7 +46,9 @@ pub fn RecentDeploymentsList(
 
             // Scrollable list container - prevents overflow when widget is moved
             div {
-                class: "flex-1 min-h-0 overflow-y-auto space-y-2",
+                class: "flex-1 min-h-0 overflow-y-auto space-y-2 pr-1",
+                style: "overflow-y: auto; overscroll-behavior: contain;",
+                "data-testid": "recent-deployments-scroll",
                 for deployment in deployments {
                     RecentDeploymentRow { deployment }
                 }

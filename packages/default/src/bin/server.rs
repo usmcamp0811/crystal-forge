@@ -283,10 +283,7 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/builders/:id/metrics",
             get(builders::get_builder_metrics),
         )
-        .route(
-            "/api/v1/build-jobs",
-            get(builders::list_build_queue),
-        )
+        .route("/api/v1/build-jobs", get(builders::list_build_queue))
         .route(
             "/api/v1/build-jobs/:id/cancel",
             post(builders::cancel_build_job),
@@ -294,6 +291,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/build-jobs/:id/requeue",
             post(builders::requeue_build_job),
+        )
+        .route(
+            "/api/v1/build-jobs/:id/force-cancel",
+            post(builders::force_cancel_build_job),
         )
         .route(
             "/api/v1/build-jobs/recent",
