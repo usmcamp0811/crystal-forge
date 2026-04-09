@@ -705,6 +705,7 @@ fn parse_audit_action(value: &str) -> Option<AuditAction> {
         }
         "oidc_mapping_changed" => Some(AuditAction::OidcMappingChanged),
         "system_sync_requested" => Some(AuditAction::SystemSyncRequested),
+        "system_deploy_requested" => Some(AuditAction::SystemDeployRequested),
         "system_rollback_requested" => Some(AuditAction::SystemRollbackRequested),
         "session_invalidated" => Some(AuditAction::SessionInvalidated),
         _ => None,
@@ -890,6 +891,7 @@ fn action_to_str(action: AuditAction) -> &'static str {
         AuditAction::UserEnvironmentMembershipUpdated => "user_environment_membership_updated",
         AuditAction::OidcMappingChanged => "oidc_mapping_changed",
         AuditAction::SystemSyncRequested => "system_sync_requested",
+        AuditAction::SystemDeployRequested => "system_deploy_requested",
         AuditAction::SystemRollbackRequested => "system_rollback_requested",
         AuditAction::SessionInvalidated => "session_invalidated",
     }
@@ -1263,6 +1265,10 @@ mod tests {
             "system_sync_requested"
         );
         assert_eq!(
+            action_to_str(AuditAction::SystemDeployRequested),
+            "system_deploy_requested"
+        );
+        assert_eq!(
             action_to_str(AuditAction::SystemRollbackRequested),
             "system_rollback_requested"
         );
@@ -1353,6 +1359,10 @@ mod tests {
         assert_eq!(
             parse_audit_action("system_sync_requested"),
             Some(AuditAction::SystemSyncRequested)
+        );
+        assert_eq!(
+            parse_audit_action("system_deploy_requested"),
+            Some(AuditAction::SystemDeployRequested)
         );
         assert_eq!(
             parse_audit_action("system_rollback_requested"),

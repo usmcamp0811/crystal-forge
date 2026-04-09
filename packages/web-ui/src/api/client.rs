@@ -206,6 +206,21 @@ pub async fn request_system_sync(
     send_json_with_csrf("POST", &url, None::<&()>).await
 }
 
+pub async fn deploy_system(
+    id: &uuid::Uuid,
+    request: &crate::api::models::DeploySystemRequest,
+) -> Result<SystemMutationResponse, ApiClientError> {
+    let url = format!("{}/systems/{}/deploy", base_url(), id);
+    send_json_with_csrf("POST", &url, Some(request)).await
+}
+
+pub async fn fetch_system_commits(
+    id: &uuid::Uuid,
+) -> Result<crate::api::models::SystemCommitsResponse, ApiClientError> {
+    let url = format!("{}/systems/{}/commits", base_url(), id);
+    fetch_json(&url).await
+}
+
 /// Fetch the evaluation queue (active + completed commits).
 pub async fn fetch_eval_queue() -> Result<EvalQueueSummary, ApiClientError> {
     let url = format!(

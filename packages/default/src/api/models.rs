@@ -756,6 +756,29 @@ pub struct SystemRollbackRequest {
     pub target_commit: String,
 }
 
+/// Request payload for deploying a system with a specific commit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeploySystemRequest {
+    pub commit_sha: String,
+}
+
+/// Response containing available commits for deployment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemCommitsResponse {
+    pub commits: Vec<CommitInfo>,
+    pub current_commit: Option<String>,
+}
+
+/// Information about a commit available for deployment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitInfo {
+    pub sha: String,
+    pub short_sha: String,
+    pub message: String,
+    pub author: String,
+    pub timestamp: String,
+}
+
 /// Generic response for accepted system mutation actions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemMutationResponse {
@@ -851,6 +874,7 @@ pub enum AuditAction {
     UserEnvironmentMembershipUpdated,
     OidcMappingChanged,
     SystemSyncRequested,
+    SystemDeployRequested,
     SystemRollbackRequested,
     SessionInvalidated,
 }

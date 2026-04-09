@@ -10,10 +10,11 @@ use std::collections::BTreeSet;
 use uuid::Uuid;
 
 use crate::api::models::{
-    ApiError, AuditAction, CreateSystemRequest, CveSummary, DeploymentStatus, PipelineStage,
-    SortOrder, SystemDetail, SystemHardwareInfo, SystemMutationResponse, SystemNetworkInfo,
-    SystemRollbackRequest, SystemSecurityInfo, SystemSummary, SystemVulnerability,
-    SystemsListParams, UpdateSystemPublicKeyRequest, UpdateSystemRequest,
+    ApiError, AuditAction, CommitInfo, CreateSystemRequest, CveSummary, DeploySystemRequest,
+    DeploymentStatus, PipelineStage, SortOrder, SystemCommitsResponse, SystemDetail,
+    SystemHardwareInfo, SystemMutationResponse, SystemNetworkInfo, SystemRollbackRequest,
+    SystemSecurityInfo, SystemSummary, SystemVulnerability, SystemsListParams,
+    UpdateSystemPublicKeyRequest, UpdateSystemRequest,
 };
 use crate::auth::models::Role;
 use crate::handlers::api::rbac::{
@@ -21,8 +22,9 @@ use crate::handlers::api::rbac::{
 };
 use crate::models::auth_identity::AuthRole;
 use crate::queries::systems::{
-    SystemAccessRow, SystemDetailRow, SystemListRow, deactivate_system, find_system_access_row,
-    get_system_detail_by_id, get_user_environment_membership_ids, list_system_access_rows,
+    SystemAccessRow, SystemDetailRow, SystemListRow, commit_belongs_to_system_flake,
+    deactivate_system, find_system_access_row, get_system_detail_by_id,
+    get_user_environment_membership_ids, list_recent_commits_for_system, list_system_access_rows,
     touch_system_updated_at, update_public_key, update_system_desired_target,
     update_system_metadata,
 };
@@ -856,6 +858,7 @@ fn action_to_str(action: AuditAction) -> &'static str {
         AuditAction::UserEnvironmentMembershipUpdated => "user_environment_membership_updated",
         AuditAction::OidcMappingChanged => "oidc_mapping_changed",
         AuditAction::SystemSyncRequested => "system_sync_requested",
+        AuditAction::SystemDeployRequested => "system_deploy_requested",
         AuditAction::SystemRollbackRequested => "system_rollback_requested",
         AuditAction::SessionInvalidated => "session_invalidated",
     }
@@ -875,6 +878,177 @@ fn validate_target_commit(value: &str) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+pub async fn deploy_system(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(system_id): Path<Uuid>,
+    Json(payload): Json<DeploySystemRequest>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+
+    if !caller_role.can_mutate_systems() {
+        return forbidden_mutation();
+    }
+
+    let commit_sha = payload.commit_sha.trim();
+    if let Err(message) = validate_target_commit(commit_sha) {
+        return bad_request(&message);
+    }
+
+    let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+
+    let row = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+
+    if !caller_role.can_access_system_environment(row.environment_id, &environment_memberships) {
+        return not_found();
+    }
+
+    // Validate deployment policy - only manual and pinned allow manual deployments
+    if !matches!(row.deployment_policy.as_str(), "manual" | "pinned") {
+        return bad_request("Manual deployment is not allowed for auto_latest systems");
+    }
+
+    let belongs_to_flake = match commit_belongs_to_system_flake(&pool, system_id, commit_sha).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to validate requested commit"),
+    };
+
+    if !belongs_to_flake {
+        return bad_request("Requested commit is not available for this system");
+    }
+
+    // Set the desired_target to trigger deployment
+    if update_system_desired_target(&pool, system_id, commit_sha)
+        .await
+        .is_err()
+    {
+        return internal_error("Failed to request deployment");
+    }
+
+    if record_system_mutation_audit(
+        &pool,
+        user_id,
+        AuditAction::SystemDeployRequested,
+        format!("{} ({})", row.hostname, row.id),
+        extract_request_origin(&headers),
+        serde_json::json!({ "operation": "deploy", "target_commit": commit_sha }),
+    )
+    .await
+    .is_err()
+    {
+        return internal_error("Failed to write audit event");
+    }
+
+    (
+        StatusCode::ACCEPTED,
+        Json(SystemMutationResponse {
+            status: "accepted".to_string(),
+            message: format!("Deployment requested for {} to commit {}", row.hostname, commit_sha),
+        }),
+    )
+        .into_response()
+}
+
+pub async fn get_system_commits(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(system_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return (StatusCode::FORBIDDEN, Json(ApiError {
+            error: "forbidden".to_string(),
+            message: "Authentication required".to_string(),
+            details: None,
+        })).into_response();
+    };
+
+    let Some(caller_role) = highest_role(&roles) else {
+        return (StatusCode::FORBIDDEN, Json(ApiError {
+            error: "forbidden".to_string(),
+            message: "Authentication required".to_string(),
+            details: None,
+        })).into_response();
+    };
+
+    let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError {
+            error: "internal_error".to_string(),
+            message: "Failed to load environment memberships".to_string(),
+            details: None,
+        })).into_response(),
+    };
+
+    let row = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return (StatusCode::NOT_FOUND, Json(ApiError {
+            error: "not_found".to_string(),
+            message: "System not found".to_string(),
+            details: None,
+        })).into_response(),
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError {
+            error: "internal_error".to_string(),
+            message: "Failed to load system".to_string(),
+            details: None,
+        })).into_response(),
+    };
+
+    if !caller_role.can_access_system_environment(row.environment_id, &environment_memberships) {
+        return (StatusCode::NOT_FOUND, Json(ApiError {
+            error: "not_found".to_string(),
+            message: "System not found".to_string(),
+            details: None,
+        })).into_response();
+    }
+
+    let commits = match list_recent_commits_for_system(&pool, system_id, 50).await {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|row| {
+                let short_sha = row.sha.chars().take(7).collect::<String>();
+                CommitInfo {
+                    sha: row.sha,
+                    short_sha,
+                    message: row.message.unwrap_or_default(),
+                    author: row.author.unwrap_or_else(|| "unknown".to_string()),
+                    timestamp: row.timestamp.to_rfc3339(),
+                }
+            })
+            .collect::<Vec<_>>(),
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    error: "internal_error".to_string(),
+                    message: "Failed to load system commits".to_string(),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let response = SystemCommitsResponse {
+        commits,
+        current_commit: None,
+    };
+
+    (StatusCode::OK, Json(response)).into_response()
 }
 
 async fn record_system_mutation_audit(
@@ -1052,6 +1226,43 @@ mod tests {
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
+    #[tokio::test]
+    async fn deploy_system_requires_authenticated_role() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+
+        let response = deploy_system(
+            State(pool),
+            HeaderMap::new(),
+            Path(Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid")),
+            Json(DeploySystemRequest {
+                commit_sha: "a1b2c3d".to_string(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn get_system_commits_requires_authenticated_role() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+
+        let response = get_system_commits(
+            State(pool),
+            HeaderMap::new(),
+            Path(Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid")),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
     #[test]
     fn rollback_target_commit_validation_enforces_bounds_and_format() {
         assert!(validate_target_commit("").is_err());
@@ -1059,5 +1270,17 @@ mod tests {
         assert!(validate_target_commit("zzzzzzz").is_err());
         assert!(validate_target_commit("a1b2c3d").is_ok());
         assert!(validate_target_commit(&"a".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn action_to_str_distinguishes_deploy_and_rollback() {
+        assert_eq!(
+            action_to_str(AuditAction::SystemDeployRequested),
+            "system_deploy_requested"
+        );
+        assert_eq!(
+            action_to_str(AuditAction::SystemRollbackRequested),
+            "system_rollback_requested"
+        );
     }
 }

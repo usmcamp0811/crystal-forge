@@ -15,6 +15,7 @@ pub fn SystemCard(
     on_remove: EventHandler<()>,
     on_update_key: EventHandler<()>,
     on_edit: EventHandler<()>,
+    on_deploy: EventHandler<()>,
 ) -> Element {
     let navigator = use_navigator();
     let environment = system
@@ -95,6 +96,11 @@ pub fn SystemCard(
             // Actions footer
             div {
                 class: "px-6 py-3 bg-gray-800/50 flex items-center justify-end gap-2 border-t {theme::surface::CARD_BORDER}",
+                button {
+                    class: "text-xs text-purple-400 hover:text-purple-300 px-2 py-1 rounded hover:bg-purple-500/10 transition-colors",
+                    onclick: move |_| on_deploy.call(()),
+                    "Deploy"
+                }
                 button {
                     class: "text-xs text-emerald-400 hover:text-emerald-300 px-2 py-1 rounded hover:bg-emerald-500/10 transition-colors",
                     onclick: move |_| on_edit.call(()),

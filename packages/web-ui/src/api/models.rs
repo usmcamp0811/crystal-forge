@@ -866,6 +866,26 @@ pub struct SystemRollbackRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeploySystemRequest {
+    pub commit_sha: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemCommitsResponse {
+    pub commits: Vec<CommitInfo>,
+    pub current_commit: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CommitInfo {
+    pub sha: String,
+    pub short_sha: String,
+    pub message: String,
+    pub author: String,
+    pub timestamp: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemMutationResponse {
     pub status: String,
     pub message: String,
@@ -1093,6 +1113,7 @@ pub enum AuditAction {
     UserEnvironmentMembershipUpdated,
     OidcMappingChanged,
     SystemSyncRequested,
+    SystemDeployRequested,
     SystemRollbackRequested,
     SessionInvalidated,
 }

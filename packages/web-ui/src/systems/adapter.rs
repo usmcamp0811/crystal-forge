@@ -16,13 +16,14 @@ use chrono::{Duration, Utc};
 use uuid::Uuid;
 
 use crate::api::client::{
-    ApiClientError, create_system, deactivate_system, fetch_flakes, fetch_system, fetch_systems,
-    update_system, update_system_public_key,
+    ApiClientError, create_system, deactivate_system, deploy_system, fetch_flakes, fetch_system,
+    fetch_system_commits, fetch_systems, update_system, update_system_public_key,
 };
 use crate::api::models::{
-    CreateSystemRequest, CveSummary, DeploymentStatus, HealthStatus, PaginatedResponse,
-    PipelineStage, SystemDetail, SystemHardwareInfo, SystemNetworkInfo, SystemSecurityInfo,
-    SystemSummary, SystemsListParams, UpdateSystemPublicKeyRequest, UpdateSystemRequest,
+    CommitInfo, CreateSystemRequest, CveSummary, DeploySystemRequest, DeploymentStatus,
+    HealthStatus, PaginatedResponse, PipelineStage, SystemCommitsResponse, SystemDetail,
+    SystemHardwareInfo, SystemNetworkInfo, SystemSecurityInfo, SystemSummary, SystemsListParams,
+    UpdateSystemPublicKeyRequest, UpdateSystemRequest,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -209,6 +210,39 @@ pub async fn update_system_public_key_via_api(
 
     match update_system_public_key(&system_id, &request).await {
         Ok(response) => Ok(response.message),
+        Err(ApiClientError::Status {
+            code: 401 | 403, ..
+        }) => Err("Authentication required. Please log in.".to_string()),
+        Err(ApiClientError::Status { body, .. }) => Err(body),
+        Err(ApiClientError::Network(msg)) => Err(format!("Network error: {}", msg)),
+        Err(ApiClientError::Deserialize(msg)) => Err(format!("Invalid response: {}", msg)),
+    }
+}
+
+/// Deploy a system to a specific commit via the backend API.
+pub async fn deploy_system_via_api(
+    system_id: Uuid,
+    commit_sha: String,
+) -> Result<String, String> {
+    let request = DeploySystemRequest { commit_sha };
+
+    match deploy_system(&system_id, &request).await {
+        Ok(response) => Ok(response.message),
+        Err(ApiClientError::Status {
+            code: 401 | 403, ..
+        }) => Err("Authentication required. Please log in.".to_string()),
+        Err(ApiClientError::Status { body, .. }) => Err(body),
+        Err(ApiClientError::Network(msg)) => Err(format!("Network error: {}", msg)),
+        Err(ApiClientError::Deserialize(msg)) => Err(format!("Invalid response: {}", msg)),
+    }
+}
+
+/// Fetch available commits for a system from the backend API.
+pub async fn fetch_system_commits_via_api(
+    system_id: Uuid,
+) -> Result<SystemCommitsResponse, String> {
+    match fetch_system_commits(&system_id).await {
+        Ok(response) => Ok(response),
         Err(ApiClientError::Status {
             code: 401 | 403, ..
         }) => Err("Authentication required. Please log in.".to_string()),
