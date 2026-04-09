@@ -101,6 +101,130 @@ function mockBuildsDashboardSummary() {
   };
 }
 
+function mockFleetHealthDashboardSummary() {
+  const timestamp = nowIso();
+  return {
+    fleet_health: { healthy: 7, warning: 2, critical: 3, offline: 1 },
+    deployment_status: { up_to_date: 8, behind: 3, never_deployed: 1, unknown: 1 },
+    cve_summary: { critical: 1, high: 2, medium: 3, low: 4 },
+    total_systems: 13,
+    active_builds: 0,
+    build_queue: {
+      building_count: 0,
+      queued_count: 0,
+      timestamp,
+      items: [],
+    },
+    recent_deployments: [],
+    timestamp,
+  };
+}
+
+function mockFleetHealthSystemsPage() {
+  const mk = (idx, status) => ({
+    id: `00000000-0000-4000-8000-${String(idx).padStart(12, "0")}`,
+    hostname: `fleet-health-${status}-${idx}`,
+    system_configuration_name: `fleet-health-${status}-${idx}`,
+    environment: "production",
+    flake_id: null,
+    primary_ip: null,
+    health_status: status,
+    deployment_status: "up_to_date",
+    pipeline_stage: "ready_for_build",
+    cve_counts: { critical: 0, high: 0, medium: 0, low: 0 },
+    nixos_version: "24.11",
+    last_seen: nowIso(),
+    deployment_policy: "manual",
+  });
+
+  const items = [
+    ...Array.from({ length: 7 }, (_, i) => mk(i + 1, "healthy")),
+    ...Array.from({ length: 2 }, (_, i) => mk(i + 101, "warning")),
+    ...Array.from({ length: 3 }, (_, i) => mk(i + 201, "critical")),
+    ...Array.from({ length: 1 }, (_, i) => mk(i + 301, "offline")),
+  ];
+
+  return {
+    items,
+    total: items.length,
+    page: 1,
+    per_page: 200,
+  };
+}
+
+async function routeFleetHealthWidgetData(page) {
+  await page.route("**/api/v1/dashboard/summary*", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(mockFleetHealthDashboardSummary()),
+    });
+  });
+
+  await page.route("**/api/v1/systems*", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(mockFleetHealthSystemsPage()),
+    });
+  });
+}
+
+async function unrouteFleetHealthWidgetData(page) {
+  await page.unroute("**/api/v1/dashboard/summary*");
+  await page.unroute("**/api/v1/systems*");
+}
+
+function mockRecentDeploymentsScrollSummary() {
+  const timestamp = nowIso();
+  const recent_deployments = Array.from({ length: 12 }, (_, i) => ({
+    hostname: `deployment-node-${i + 1}`,
+    commit_hash: `abcd1234ef${String(i + 1).padStart(2, "0")}abcd1234ef${String(i + 1).padStart(2, "0")}`,
+    commit_message: `Deploy update ${i + 1} for dashboard scroll coverage`,
+    deployed_at: new Date(Date.now() - i * 60_000).toISOString(),
+    status: i % 2 === 0 ? "up_to_date" : "behind",
+  }));
+
+  return {
+    fleet_health: { healthy: 5, warning: 1, critical: 0, offline: 0 },
+    deployment_status: { up_to_date: 5, behind: 1, never_deployed: 0, unknown: 0 },
+    cve_summary: { critical: 0, high: 0, medium: 0, low: 0 },
+    total_systems: 12,
+    active_builds: 0,
+    build_queue: {
+      building_count: 0,
+      queued_count: 0,
+      timestamp,
+      items: [],
+    },
+    recent_deployments,
+    timestamp,
+  };
+}
+
+async function routeRecentDeploymentsScrollData(page) {
+  await page.route("**/api/v1/dashboard/summary*", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(mockRecentDeploymentsScrollSummary()),
+    });
+  });
+
+  await page.route("**/api/v1/systems*", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ items: [], total: 0, page: 1, per_page: 200 }),
+    });
+  });
+}
+
+async function unrouteRecentDeploymentsScrollData(page) {
+  await page.unroute("**/api/v1/dashboard/summary*");
+  await page.unroute("**/api/v1/systems*");
+}
+
 function mockBuildQueuePage() {
   const summary = mockBuildsDashboardSummary();
   return {
@@ -132,6 +256,40 @@ function mockBuilders() {
 function mockRecentBuilds() {
   const timestamp = nowIso();
   return [
+    {
+      job_id: "66666666-6666-4666-8666-666666666666",
+      system_id: "77777777-7777-4777-8777-777777777777",
+      hostname: "history-system-1",
+      flake_name: "platform-core",
+      commit_hash: "abcd1234abcd1234abcd1234abcd1234abcd1234",
+      commit_message: "Recent successful build",
+      status: "complete",
+      builder_name: "builder-primary",
+      queued_at: timestamp,
+      started_at: timestamp,
+      elapsed_secs: 15,
+      logs: null,
+    },
+  ];
+}
+
+function mockRecentBuildsWithCancelled() {
+  const timestamp = nowIso();
+  return [
+    {
+      job_id: "99999999-9999-4999-8999-999999999999",
+      system_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      hostname: "cancelled-history-system",
+      flake_name: "platform-core",
+      commit_hash: "1234567812345678123456781234567812345678",
+      commit_message: "Cancelled build in completed history for restart verification",
+      status: "cancelled",
+      builder_name: "builder-primary",
+      queued_at: timestamp,
+      started_at: timestamp,
+      elapsed_secs: 12,
+      logs: null,
+    },
     {
       job_id: "66666666-6666-4666-8666-666666666666",
       system_id: "77777777-7777-4777-8777-777777777777",
@@ -405,6 +563,24 @@ function mockConfigHealthResponse(overrides = {}) {
 
   response.total_issues = response.checks.filter((check) => !check.passed).length;
   return response;
+}
+
+function mockConfigHealthManyIssues(issueCount = 12) {
+  const checks = Array.from({ length: issueCount }, (_, i) => ({
+    id: `synthetic_issue_${i + 1}`,
+    passed: false,
+    message: `Synthetic pipeline readiness issue ${i + 1}: configuration validation warning for overflow coverage`,
+    action_url: i % 2 === 0 ? "/flakes" : "/environments",
+  }));
+
+  return {
+    has_flakes: true,
+    has_environments: true,
+    has_builders: true,
+    has_cache_destinations: true,
+    total_issues: checks.length,
+    checks,
+  };
 }
 
 async function routeConfigHealth(page, response) {
@@ -749,6 +925,99 @@ const steps = [
         page.locator("[data-testid='onboarding-coach-panel']"),
         "Onboarding coach panel should be visible on dashboard",
       );
+    },
+  },
+  {
+    name: "06y-recent-deployments-scroll",
+    description: "Dashboard recent deployments widget scrolls when list exceeds visible height",
+    action: async (page) => {
+      await page.setViewportSize({ width: 1440, height: 520 });
+      await routeRecentDeploymentsScrollData(page);
+      await page.goto(`${baseUrl}/`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1800);
+
+      const scrollRegion = page.locator("[data-testid='recent-deployments-scroll']");
+      await assertVisible(scrollRegion, "Recent deployments scroll container should be visible");
+
+      const stats = await scrollRegion.evaluate((el) => {
+        const rows = el.querySelectorAll("a").length;
+        const overflowY = window.getComputedStyle(el).overflowY;
+
+        // Constrain height to emulate compact dashboard card layouts and
+        // verify that scroll behavior activates when content exceeds space.
+        el.style.maxHeight = "180px";
+        el.style.height = "180px";
+
+        return {
+          rows,
+          overflowY,
+          clientHeight: el.clientHeight,
+          scrollHeight: el.scrollHeight,
+        };
+      });
+
+      if (stats.rows < 10) {
+        throw new Error(`Expected at least 10 recent deployments, got ${stats.rows}`);
+      }
+      if (!(stats.overflowY === "auto" || stats.overflowY === "scroll")) {
+        throw new Error(`Expected overflow-y to allow scrolling, got overflowY=${stats.overflowY}`);
+      }
+      if (stats.scrollHeight <= stats.clientHeight) {
+        throw new Error(
+          `Expected recent deployments list to require scrolling, got clientHeight=${stats.clientHeight} scrollHeight=${stats.scrollHeight}`,
+        );
+      }
+
+      await scrollRegion.evaluate((el) => {
+        el.scrollTop = el.scrollHeight;
+      });
+      await page.waitForTimeout(250);
+
+      await unrouteRecentDeploymentsScrollData(page);
+      await page.setViewportSize({ width: 1920, height: 1080 });
+    },
+  },
+  {
+    name: "06z-fleet-health-widget-assert",
+    description: "Dashboard Fleet Health widget matches expected status counts",
+    action: async (page) => {
+      await routeFleetHealthWidgetData(page);
+      await page.goto(`${baseUrl}/`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1800);
+
+      const widget = page.locator("[data-testid='fleet-health-breakdown']");
+      await assertVisible(widget, "Fleet Health widget should be visible");
+
+      const counts = await widget.evaluate((el) => {
+        const expectedLabels = new Set(["healthy", "warning", "critical", "offline"]);
+        const rows = Array.from(el.querySelectorAll("div.flex.items-center.gap-2"));
+        const out = {};
+
+        for (const row of rows) {
+          const spans = row.querySelectorAll("span");
+          if (spans.length < 3) continue;
+
+          const label = (spans[1].textContent || "").trim().toLowerCase();
+          const count = Number((spans[2].textContent || "").trim());
+
+          if (expectedLabels.has(label) && Number.isFinite(count)) {
+            out[label] = count;
+          }
+        }
+
+        return out;
+      });
+
+      const expected = { healthy: 7, warning: 2, critical: 3, offline: 1 };
+      for (const [status, expectedCount] of Object.entries(expected)) {
+        if (counts[status] !== expectedCount) {
+          throw new Error(
+            `Fleet Health count mismatch for ${status}: expected ${expectedCount}, got ${counts[status]}`,
+          );
+        }
+      }
+
+      await unrouteFleetHealthWidgetData(page);
     },
   },
   {
@@ -1441,6 +1710,54 @@ const steps = [
       await page.getByText("Pipeline Readiness").first().waitFor({ timeout: 5000 });
       await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
       await page.waitForTimeout(500);
+      await unrouteConfigHealth(page);
+    },
+  },
+  {
+    name: "06x-pipeline-readiness-scroll",
+    description: "Dashboard pipeline readiness widget supports scrolling for many issues",
+    action: async (page) => {
+      await routeConfigHealth(page, mockConfigHealthManyIssues(14));
+      await page.goto(`${baseUrl}/`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2000);
+
+      const scrollRegion = page.locator("[data-testid='pipeline-readiness-scroll']");
+      await assertVisible(scrollRegion, "Pipeline readiness scroll container should be visible");
+
+      const stats = await scrollRegion.evaluate((el) => {
+        const alertCount = el.querySelectorAll("[role='alert']").length;
+        const overflowY = window.getComputedStyle(el).overflowY;
+
+        // Constrain container height to validate bounded scroll behavior in
+        // compact card layouts.
+        el.style.maxHeight = "220px";
+        el.style.height = "220px";
+
+        return {
+          alertCount,
+          overflowY,
+          clientHeight: el.clientHeight,
+          scrollHeight: el.scrollHeight,
+        };
+      });
+
+      if (stats.alertCount < 10) {
+        throw new Error(`Expected at least 10 readiness alerts, got ${stats.alertCount}`);
+      }
+      if (!(stats.overflowY === "auto" || stats.overflowY === "scroll")) {
+        throw new Error(`Expected overflow-y to allow scrolling, got overflowY=${stats.overflowY}`);
+      }
+      if (stats.scrollHeight <= stats.clientHeight) {
+        throw new Error(
+          `Expected readiness issues to require scrolling, got clientHeight=${stats.clientHeight} scrollHeight=${stats.scrollHeight}`,
+        );
+      }
+
+      await scrollRegion.evaluate((el) => {
+        el.scrollTop = el.scrollHeight;
+      });
+      await page.waitForTimeout(250);
+
       await unrouteConfigHealth(page);
     },
   },
@@ -2153,6 +2470,69 @@ const steps = [
     },
   },
   {
+    name: "15h-builds-completed-restart-action",
+    description: "Completed tab restart action requeues cancelled build",
+    action: async (page) => {
+      await routeBuildsDataWithCancelStates(page);
+
+      // Override recent builds to include a cancelled item in Completed tab.
+      await page.route("**/api/v1/build-jobs/recent*", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(mockRecentBuildsWithCancelled()),
+        });
+      });
+
+      let requeueCalls = 0;
+      await page.route("**/api/v1/build-jobs/*/requeue", async (route) => {
+        if (route.request().method() === "POST") {
+          requeueCalls += 1;
+        }
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: "{}",
+        });
+      });
+
+      await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2000);
+
+      const completedTab = page.locator("button:has-text('Completed Builds')");
+      await assertVisible(completedTab, "Completed Builds tab should be visible");
+      await completedTab.click();
+      await page.waitForTimeout(800);
+
+      const cancelledRow = page.locator("tr", { hasText: "cancelled-history-system" });
+      await assertVisible(cancelledRow, "Cancelled build row should be visible in Completed tab");
+
+      const restartBtn = cancelledRow.locator("button:has-text('Restart')");
+      await assertVisible(restartBtn, "Restart button should be visible for cancelled completed build");
+      await restartBtn.click();
+      await page.getByRole("heading", { name: "Restart build?" }).waitFor({ timeout: 3000 });
+
+      const modalConfirm = page.locator(".cf-modal-panel-30 button:has-text('Restart')");
+      await assertVisible(modalConfirm, "Restart confirmation button should be visible in modal");
+      await modalConfirm.click();
+      await page.waitForTimeout(600);
+
+      if (requeueCalls < 1) {
+        throw new Error("Expected Restart from Completed tab to call requeue endpoint");
+      }
+
+      const missingRowError = page.getByText(/Build row #.* not found/i);
+      await assertHidden(
+        missingRowError,
+        "Restart from Completed tab should not show 'Build row not found' error",
+      );
+
+      await page.unroute("**/api/v1/build-jobs/recent*");
+      await page.unroute("**/api/v1/build-jobs/*/requeue");
+      await unrouteBuildsDataWithCancelStates(page);
+    },
+  },
+  {
     name: "16-cves",
     description: "CVE dashboard",
     action: async (page) => {
@@ -2292,6 +2672,9 @@ const CI_FAST_STEP_NAMES = new Set([
   "04-post-register-login",
   "05-login-submit",
   "06-dashboard",
+  "06x-pipeline-readiness-scroll",
+  "06y-recent-deployments-scroll",
+  "06z-fleet-health-widget-assert",
   "15-builds",
   "11b-builds-queue-card-focus",
   "12c-systems-modal-config-field",
@@ -2304,6 +2687,7 @@ const CI_FAST_STEP_NAMES = new Set([
   "15e-builds-cancelling-state",
   "15f-builds-human-duration",
   "15g-builds-action-visibility",
+  "15h-builds-completed-restart-action",
 ]);
 
 (async () => {

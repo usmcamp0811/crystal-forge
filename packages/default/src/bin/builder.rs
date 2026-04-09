@@ -7,8 +7,8 @@ use crystal_forge::models::builders::{BuildJob, ReportMetricsRequest};
 use crystal_forge::queries::derivations::get_derivation_by_id;
 use crystal_forge::server::memory_monitor_task;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::signal;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
@@ -530,10 +530,7 @@ async fn execute_build_job(
                             job.id, e
                         );
                         let _ = client
-                            .append_logs(
-                                job.id,
-                                &format!("⚠️  Cache push queue failed: {}\n", e),
-                            )
+                            .append_logs(job.id, &format!("⚠️  Cache push queue failed: {}\n", e))
                             .await;
                     } else {
                         let _ = client
@@ -750,7 +747,8 @@ async fn finalize_cancelled_with_db_fallback(
             job_id, e
         );
 
-        if let Err(e2) = crystal_forge::queries::builders::finalize_cancelled_job(pool, &job_id).await
+        if let Err(e2) =
+            crystal_forge::queries::builders::finalize_cancelled_job(pool, &job_id).await
         {
             error!(
                 "❌ DB fallback failed while finalizing cancelled job {}: {}",
@@ -919,5 +917,4 @@ mod tests {
         assert!(should_mock_build_fail("myflake-control-0"));
         assert!(!should_mock_build_fail("myflake-worker-0"));
     }
-
 }

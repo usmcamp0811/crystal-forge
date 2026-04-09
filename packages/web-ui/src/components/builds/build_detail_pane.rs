@@ -3,12 +3,12 @@
 use dioxus::prelude::*;
 
 use crate::components::layout::Card;
-use crate::hooks::websocket::{use_websocket_build_stream, ConnectionState};
+use crate::hooks::websocket::{ConnectionState, use_websocket_build_stream};
 use crate::theme;
 
 use super::helpers::{
-    build_status_badge_class, event_level_class, mock_artifacts, mock_events, BuildAction,
-    BuildItem, PendingAction,
+    BuildAction, BuildItem, PendingAction, build_status_badge_class, event_level_class,
+    mock_artifacts, mock_events,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -473,6 +473,16 @@ fn action_prompt(action: &PendingAction) -> (&'static str, String, &'static str)
                 "Build #{build_id} will send stop to the active systemd unit and mark canceled."
             ),
             "Stop",
+        ),
+        PendingAction::Build {
+            build_id,
+            action: BuildAction::ForceCancel,
+        } => (
+            "Force cancel build?",
+            format!(
+                "Build #{build_id} will be immediately marked as cancelled without waiting for builder confirmation. Use this for stuck builds."
+            ),
+            "Force Cancel",
         ),
         PendingAction::Build {
             build_id,

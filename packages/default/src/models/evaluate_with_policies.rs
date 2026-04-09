@@ -22,8 +22,8 @@ use crate::queries::build_jobs::enqueue_build_job_for_derivation;
 use crate::queries::derivations::{
     insert_derivation_with_target, mark_derivation_dry_run_complete, set_expected_store_path,
 };
-use crate::queue::QueueNotifier;
 use crate::queries::systems::list_configuration_names_for_flake;
+use crate::queue::QueueNotifier;
 
 /// NixEvalJobResult with meta field
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,7 +79,11 @@ async fn resolve_expected_store_path(
         warn!(
             "Failed to resolve expected store path via nix-store for drv {}: {}",
             drv_path,
-            if stderr.is_empty() { "<no stderr>" } else { &stderr }
+            if stderr.is_empty() {
+                "<no stderr>"
+            } else {
+                &stderr
+            }
         );
         return None;
     }
