@@ -197,14 +197,16 @@ pub async fn cve_dashboard_vulnerabilities(
             v.package_version AS installed_version,
             v.fixed_version,
             v.completed_at AS first_seen,
-            CASE WHEN v.fixed_version IS NULL THEN 'open' ELSE 'fixed' END AS status
+            -- 'fix_available' means a patched upstream version is known; it does NOT
+            -- mean the system has been updated. 'open' means no upstream fix yet.
+            CASE WHEN v.fixed_version IS NULL THEN 'open' ELSE 'fix_available' END AS status
         FROM view_system_vulnerabilities v
         JOIN systems s ON s.hostname = v.hostname
         LEFT JOIN environments e ON e.id = s.environment_id
         WHERE ($1::text IS NULL OR lower(v.severity) = $1)
           AND (
             $2::text IS NULL
-            OR (CASE WHEN v.fixed_version IS NULL THEN 'open' ELSE 'fixed' END) = $2
+            OR (CASE WHEN v.fixed_version IS NULL THEN 'open' ELSE 'fix_available' END) = $2
           )
           AND ($3::text IS NULL OR v.hostname ILIKE ('%' || $3 || '%'))
           AND ($4::text IS NULL OR COALESCE(e.name, '') ILIKE ('%' || $4 || '%'))
@@ -329,8 +331,12 @@ fn normalize_status_filter(value: Option<&str>) -> Result<Option<String>, &'stat
         return Ok(None);
     }
     match raw.as_str() {
-        "open" | "fixed" => Ok(Some(raw)),
-        _ => Err("Invalid status filter"),
+        // 'open'          — no upstream fix exists yet
+        // 'fix_available' — an upstream patched version is known; system may still be affected
+        // Note: 'ignored' is not supported; use the whitelist mechanism in package_vulnerabilities
+        //       (whitelisted rows are excluded by view_system_vulnerabilities already).
+        "open" | "fix_available" => Ok(Some(raw)),
+        _ => Err("Invalid status filter: expected 'open' or 'fix_available'"),
     }
 }
 
@@ -555,7 +561,12 @@ mod tests {
     #[test]
     fn normalize_status_filter_accepts_expected_values() {
         assert_eq!(normalize_status_filter(Some("open")).unwrap(), Some("open".to_string()));
+        assert_eq!(normalize_status_filter(Some("fix_available")).unwrap(), Some("fix_available".to_string()));
         assert_eq!(normalize_status_filter(Some("all")).unwrap(), None);
+        // 'fixed' is not a valid status — having a fixed_version upstream does not mean
+        // the system has been patched. Use 'fix_available' instead.
+        assert!(normalize_status_filter(Some("fixed")).is_err());
+        // 'ignored' has no schema support; whitelisted rows are excluded by the view.
         assert!(normalize_status_filter(Some("ignored")).is_err());
     }
 }

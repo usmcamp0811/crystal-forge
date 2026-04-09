@@ -230,7 +230,9 @@ pub async fn get_system_cves(
             v.fixed_version,
             v.completed_at AS first_seen,
             c.published_date::timestamptz AS published_at,
-            CASE WHEN v.fixed_version IS NULL THEN 'open' ELSE 'fixed' END AS status
+            -- 'fix_available' = upstream patched version exists; does NOT mean system is patched.
+            -- 'open' = no upstream fix known yet.
+            CASE WHEN v.fixed_version IS NULL THEN 'open' ELSE 'fix_available' END AS status
         FROM view_system_vulnerabilities v
         JOIN systems s ON s.hostname = v.hostname
         LEFT JOIN cves c ON c.id = v.cve_id

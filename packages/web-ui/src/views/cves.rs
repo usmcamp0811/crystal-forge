@@ -224,14 +224,14 @@ pub fn CvesView() -> Element {
                                 onclick: move |_| status_filter.set(None),
                             }
                             FilterButton {
-                                label: "Open",
+                                label: "Open (no fix)",
                                 active: active_status.as_deref() == Some("open"),
                                 onclick: move |_| status_filter.set(Some("open".to_string())),
                             }
                             FilterButton {
-                                label: "Fixed",
-                                active: active_status.as_deref() == Some("fixed"),
-                                onclick: move |_| status_filter.set(Some("fixed".to_string())),
+                                label: "Fix available",
+                                active: active_status.as_deref() == Some("fix_available"),
+                                onclick: move |_| status_filter.set(Some("fix_available".to_string())),
                             }
                         }
                         {drilldown}
@@ -319,7 +319,7 @@ fn render_vulnerability_table(items: &[CveDashboardVulnerability]) -> Element {
                         th { class: "py-2 pr-3", "Severity" }
                         th { class: "py-2 pr-3", "Package" }
                         th { class: "py-2 pr-3", "System" }
-                        th { class: "py-2 pr-3", "Status" }
+                        th { class: "py-2 pr-3", "Fix" }
                         th { class: "py-2 pr-3", "First Seen" }
                     }
                 }
@@ -328,7 +328,11 @@ fn render_vulnerability_table(items: &[CveDashboardVulnerability]) -> Element {
                         tr { class: "border-b border-white/5",
                             td { class: "py-2 pr-3 font-medium {theme::text::PRIMARY}", "{item.cve_id}" }
                             td { class: "py-2 pr-3", "{item.severity.label()}" }
-                            td { class: "py-2 pr-3", "{item.package_name}" }
+                            td { class: "py-2 pr-3",
+                                span { title: "installed: {item.installed_version}",
+                                    "{item.package_name} {item.installed_version}"
+                                }
+                            }
                             td { class: "py-2 pr-3",
                                 Link {
                                     to: Route::SystemDetailView { id: item.system_id.to_string() },
@@ -336,7 +340,7 @@ fn render_vulnerability_table(items: &[CveDashboardVulnerability]) -> Element {
                                     "{item.hostname}"
                                 }
                             }
-                            td { class: "py-2 pr-3", "{item.status}" }
+                            td { class: "py-2 pr-3", "{format_fix_status(&item.status, item.fixed_version.as_deref())}" }
                             td { class: "py-2 pr-3", "{format_first_seen(item)}" }
                         }
                     }
@@ -350,6 +354,24 @@ fn format_first_seen(item: &CveDashboardVulnerability) -> String {
     item.first_seen
         .map(|value| value.format("%Y-%m-%d").to_string())
         .unwrap_or_else(|| "n/a".to_string())
+}
+
+/// Renders a human-readable fix status label.
+///
+/// `status` is one of `'open'` or `'fix_available'` as returned by the API.
+/// A non-null `fixed_version` means an upstream patched version exists; it does
+/// NOT imply the affected system has been updated.
+fn format_fix_status(status: &str, fixed_version: Option<&str>) -> String {
+    match status {
+        "fix_available" => {
+            if let Some(ver) = fixed_version {
+                format!("Fix in {ver}")
+            } else {
+                "Fix available".to_string()
+            }
+        }
+        _ => "No fix yet".to_string(),
+    }
 }
 
 fn render_top_systems_table(items: &[CveDashboardTopSystem]) -> Element {
