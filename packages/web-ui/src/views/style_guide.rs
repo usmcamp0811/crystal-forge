@@ -402,7 +402,7 @@ pub fn StyleGuideView() -> Element {
                                     system: systems[0].clone(),
                                     on_remove: move |_| {},
                                     on_update_key: move |_| {},
-                                    on_edit: move |_| {}
+                                    on_edit: move |_| {}, on_deploy: move |_| {}
                                 }
                             }
                             StateTile { label: "warning + behind",
@@ -410,7 +410,7 @@ pub fn StyleGuideView() -> Element {
                                     system: systems[1].clone(),
                                     on_remove: move |_| {},
                                     on_update_key: move |_| {},
-                                    on_edit: move |_| {}
+                                    on_edit: move |_| {}, on_deploy: move |_| {}
                                 }
                             }
                             StateTile { label: "critical + never deployed",
@@ -418,7 +418,7 @@ pub fn StyleGuideView() -> Element {
                                     system: systems[2].clone(),
                                     on_remove: move |_| {},
                                     on_update_key: move |_| {},
-                                    on_edit: move |_| {}
+                                    on_edit: move |_| {}, on_deploy: move |_| {}
                                 }
                             }
                             StateTile { label: "offline + unknown",
@@ -426,7 +426,7 @@ pub fn StyleGuideView() -> Element {
                                     system: systems[3].clone(),
                                     on_remove: move |_| {},
                                     on_update_key: move |_| {},
-                                    on_edit: move |_| {}
+                                    on_edit: move |_| {}, on_deploy: move |_| {}
                                 }
                             }
                             StateTile { label: "overflow (long hostname)",
@@ -434,7 +434,7 @@ pub fn StyleGuideView() -> Element {
                                     system: systems[4].clone(),
                                     on_remove: move |_| {},
                                     on_update_key: move |_| {},
-                                    on_edit: move |_| {}
+                                    on_edit: move |_| {}, on_deploy: move |_| {}
                                 }
                             }
                             StateTile { label: "building state",
@@ -442,7 +442,7 @@ pub fn StyleGuideView() -> Element {
                                     system: systems[5].clone(),
                                     on_remove: move |_| {},
                                     on_update_key: move |_| {},
-                                    on_edit: move |_| {}
+                                    on_edit: move |_| {}, on_deploy: move |_| {}
                                 }
                             }
                         }
@@ -461,7 +461,7 @@ pub fn StyleGuideView() -> Element {
                                         system: systems[0].clone(),
                                         on_remove: move |_| {},
                                         on_update_key: move |_| {},
-                                        on_edit: move |_| {}
+                                        on_edit: move |_| {}, on_deploy: move |_| {}
                                     }
                                 }
                             }
@@ -478,13 +478,13 @@ pub fn StyleGuideView() -> Element {
                                         system: systems[0].clone(),
                                         on_remove: move |_| {},
                                         on_update_key: move |_| {},
-                                        on_edit: move |_| {}
+                                        on_edit: move |_| {}, on_deploy: move |_| {}
                                     }
                                     SystemCard {
                                         system: systems[1].clone(),
                                         on_remove: move |_| {},
                                         on_update_key: move |_| {},
-                                        on_edit: move |_| {}
+                                        on_edit: move |_| {}, on_deploy: move |_| {}
                                     }
                                 }
                             }
@@ -501,19 +501,19 @@ pub fn StyleGuideView() -> Element {
                                         system: systems[0].clone(),
                                         on_remove: move |_| {},
                                         on_update_key: move |_| {},
-                                        on_edit: move |_| {}
+                                        on_edit: move |_| {}, on_deploy: move |_| {}
                                     }
                                     SystemCard {
                                         system: systems[1].clone(),
                                         on_remove: move |_| {},
                                         on_update_key: move |_| {},
-                                        on_edit: move |_| {}
+                                        on_edit: move |_| {}, on_deploy: move |_| {}
                                     }
                                     SystemCard {
                                         system: systems[2].clone(),
                                         on_remove: move |_| {},
                                         on_update_key: move |_| {},
-                                        on_edit: move |_| {}
+                                        on_edit: move |_| {}, on_deploy: move |_| {}
                                     }
                                 }
                             }

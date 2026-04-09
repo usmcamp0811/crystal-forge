@@ -241,6 +241,8 @@ in pkgs.testers.runNixOSTest {
       "11b-builds-queue-card-focus",
       "15h-builds-completed-restart-action",
       "12c-systems-modal-config-field",
+      "12e-systems-edit-modal",
+      "12f-systems-deploy-modal",
       "13e-flakes-add-modal-credentials",
       "13f-flakes-edit-modal-credentials",
     ] if test_profile == "ci_fast" else [
@@ -271,6 +273,8 @@ in pkgs.testers.runNixOSTest {
       "06g-onboarding-coach-minimized",
       "06h-onboarding-coach-all-configured",
       "12c-systems-modal-config-field",
+      "12e-systems-edit-modal",
+      "12f-systems-deploy-modal",
       "13e-flakes-add-modal-credentials",
       "13f-flakes-edit-modal-credentials",
       "07-sidebar-desktop-expanded",

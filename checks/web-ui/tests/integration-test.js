@@ -34,8 +34,8 @@ const VIEWPORTS = {
   mobile: { width: 375, height: 812 },
 };
 
-async function assertVisible(locator, message) {
-  const visible = await locator.isVisible({ timeout: 5000 }).catch(() => false);
+async function assertVisible(locator, message, timeoutMs = 5000) {
+  const visible = await locator.isVisible({ timeout: timeoutMs }).catch(() => false);
   if (!visible) {
     throw new Error(message);
   }
@@ -627,6 +627,9 @@ async function routeSystemsWarningData(page) {
     deployment_status: "never_deployed",
     pipeline_stage: "ready_for_build",
     nixos_version: "24.11",
+    kernel: null,
+    agent_version: null,
+    current_store_path: null,
     last_seen: null,
     cve_counts: { critical: 0, high: 0, medium: 1, low: 2 },
     flake: {
@@ -656,15 +659,27 @@ async function routeSystemsWarningData(page) {
       fips_mode: false,
       selinux_status: null,
     },
+    created_at: "2026-04-01T00:00:00Z",
+    updated_at: "2026-04-07T00:00:00Z",
   };
 
-  await page.route("**/api/v1/systems*", async (route) => {
+  await page.route("**/api/v1/systems**", async (route) => {
     const url = route.request().url();
-    if (url.includes("/api/v1/systems/00000000-0000-0000-0000-0000000000a1")) {
+    const pathname = new URL(url).pathname;
+    if (/^\/api\/v1\/systems\/[0-9a-f-]+$/.test(pathname)) {
+      const requestedId = pathname.split("/").pop() || detail.id;
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify(detail),
+        body: JSON.stringify({ ...detail, id: requestedId }),
+      });
+      return;
+    }
+    if (pathname !== "/api/v1/systems") {
+      await route.fulfill({
+        status: 404,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "not_found", path: pathname }),
       });
       return;
     }
@@ -677,11 +692,11 @@ async function routeSystemsWarningData(page) {
 }
 
 async function unrouteSystemsWarningData(page) {
-  await page.unroute("**/api/v1/systems*");
+  await page.unroute("**/api/v1/systems**");
 }
 
 async function routeSystemsApiFailure(page) {
-  await page.route("**/api/v1/systems*", async (route) => {
+  await page.route("**/api/v1/systems**", async (route) => {
     await route.fulfill({
       status: 500,
       contentType: "application/json",
@@ -694,7 +709,7 @@ async function routeSystemsApiFailure(page) {
 }
 
 async function unrouteSystemsApiFailure(page) {
-  await page.unroute("**/api/v1/systems*");
+  await page.unroute("**/api/v1/systems**");
 }
 
 async function routeEnvironmentWarningData(page) {
@@ -2043,6 +2058,125 @@ const steps = [
     },
   },
   {
+    name: "12e-systems-edit-modal",
+    description: "Systems edit modal for existing systems",
+    action: async (page) => {
+      await routeSystemsWarningData(page);
+      await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2200);
+      const systemRow = page.locator("tr").filter({ hasText: "warning-system-01" }).first();
+      await assertVisible(systemRow, "Expected warning-system-01 row to be visible", 15000);
+      const editButton = systemRow.getByRole("button", { name: "Edit" }).first();
+      await assertVisible(editButton, "Expected Edit action button to be visible");
+
+      const detailResponsePromise = page
+        .waitForResponse(
+          (response) =>
+            response.request().method() === "GET" &&
+            response.url().includes("/api/v1/systems/00000000-0000-0000-0000-0000000000a1"),
+          { timeout: 15000 },
+        )
+        .catch(() => null);
+      await editButton.click();
+      const detailResponse = await detailResponsePromise;
+      if (!detailResponse || !detailResponse.ok()) {
+        throw new Error("Expected system detail request to succeed before opening Edit modal");
+      }
+
+      const editModal = page.getByText("Update system configuration and deployment settings").first();
+      await assertVisible(editModal, "Expected Edit System modal to be visible", 15000);
+      await assertVisible(
+        page.getByRole("button", { name: "Save Changes" }).first(),
+        "Expected Edit System modal controls to be visible",
+        15000,
+      );
+      await unrouteSystemsWarningData(page);
+    },
+  },
+  {
+    name: "12f-systems-deploy-modal",
+    description: "Systems deploy modal with commit selector",
+    action: async (page) => {
+      await routeSystemsWarningData(page);
+      await page.route(/\/api\/v1\/systems\/[0-9a-f-]+\/commits$/, async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            commits: [
+              {
+                sha: "abc123def456789012345678901234567890abcd",
+                short_sha: "abc123d",
+                message: "feat: add deterministic deploy commit",
+                author: "Integration Test",
+                timestamp: "2026-04-07T10:30:00Z",
+              },
+              {
+                sha: "def456abc123456789012345678901234567890ab",
+                short_sha: "def456a",
+                message: "fix: stabilize deploy selector",
+                author: "Integration Test",
+                timestamp: "2026-04-06T15:20:00Z",
+              },
+            ],
+            current_commit: "abc123def456789012345678901234567890abcd",
+          }),
+        });
+      });
+
+      await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2200);
+      const systemRow = page.locator("tr").filter({ hasText: "warning-system-01" }).first();
+      await assertVisible(systemRow, "Expected warning-system-01 row to be visible", 15000);
+      const deployButton = systemRow.getByRole("button", { name: "Deploy" }).first();
+      await assertVisible(deployButton, "Expected Deploy action button to be visible");
+
+      const detailResponsePromise = page
+        .waitForResponse(
+          (response) =>
+            response.request().method() === "GET" &&
+            response.url().includes("/api/v1/systems/00000000-0000-0000-0000-0000000000a1"),
+          { timeout: 15000 },
+        )
+        .catch(() => null);
+
+      const commitsResponsePromise = page
+        .waitForResponse(
+          (response) =>
+            response.request().method() === "GET" &&
+            /\/api\/v1\/systems\/[0-9a-f-]+\/commits$/.test(new URL(response.url()).pathname),
+          { timeout: 15000 },
+        )
+        .catch(() => null);
+
+      await deployButton.click();
+      const detailResponse = await detailResponsePromise;
+      const commitsResponse = await commitsResponsePromise;
+      if (!detailResponse || !detailResponse.ok()) {
+        throw new Error("Expected system detail request to succeed before opening Deploy modal");
+      }
+      if (!commitsResponse || !commitsResponse.ok()) {
+        throw new Error("Expected commits request to succeed before rendering Deploy modal");
+      }
+
+      const deployModal = page.getByText("Select Commit to Deploy").first();
+      await assertVisible(deployModal, "Expected Deploy System modal to be visible", 15000);
+      await assertVisible(
+        page.getByText("abc123d").first(),
+        "Expected at least one mocked commit option in Deploy System modal",
+        15000,
+      );
+      await assertVisible(
+        page.getByRole("button", { name: "Deploy" }).first(),
+        "Expected Deploy action in Deploy System modal",
+        15000,
+      );
+
+      await page.unroute(/\/api\/v1\/systems\/[0-9a-f-]+\/commits$/);
+      await unrouteSystemsWarningData(page);
+    },
+  },
+  {
     name: "12d-systems-api-error-no-mock-fallback",
     description: "Systems API failures show error state without deterministic mock hosts",
     action: async (page) => {
@@ -2678,6 +2812,8 @@ const CI_FAST_STEP_NAMES = new Set([
   "15-builds",
   "11b-builds-queue-card-focus",
   "12c-systems-modal-config-field",
+  "12e-systems-edit-modal",
+  "12f-systems-deploy-modal",
   "12d-systems-api-error-no-mock-fallback",
   "13d-flakes-stress-dataset",
   "13e-flakes-add-modal-credentials",
