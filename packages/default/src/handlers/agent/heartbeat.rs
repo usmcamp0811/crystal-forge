@@ -4,7 +4,9 @@ use crate::handlers::agent_request::{
 use crate::models::agent_heartbeats::AgentHeartbeat;
 use crate::models::cache_destination::CacheDestination;
 use crate::queries::cache_destinations::{get_caches_for_environment, get_global_caches};
-use crate::queries::systems::get_desired_target_by_hostname;
+use crate::queries::systems::{
+    deactivate_duplicate_active_systems_by_public_key, get_desired_target_by_hostname,
+};
 use crate::queries::{agent_heartbeat::insert_agent_heartbeat, system_states::insert_system_state};
 use axum::response::Response;
 use axum::{
@@ -16,7 +18,7 @@ use axum::{
 use serde::Deserialize;
 use serde::Serialize;
 use sqlx::PgPool;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 #[derive(Serialize, Deserialize)]
 pub struct RuntimeCacheConfig {
@@ -77,6 +79,35 @@ pub async fn log(
         Ok(req) => req,
         Err(status) => return status.into_response(),
     };
+
+    // Hotfix: if the same public key appears on multiple active hostnames,
+    // deactivate the stale duplicates and keep only the authenticated hostname active.
+    // This prevents renamed/re-joined hosts from leaving old active rows that skew health.
+    let public_key_base64 = agent_request.system.public_key.to_base64();
+    match deactivate_duplicate_active_systems_by_public_key(
+        &pool,
+        &agent_request.system.hostname,
+        &public_key_base64,
+    )
+    .await
+    {
+        Ok(deactivated) if !deactivated.is_empty() => {
+            warn!(
+                current_hostname = %agent_request.system.hostname,
+                duplicate_hostnames = ?deactivated,
+                "Auto-deactivated duplicate active systems sharing agent public key"
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            // Non-fatal: do not reject heartbeat if de-duplication fails.
+            warn!(
+                current_hostname = %agent_request.system.hostname,
+                error = ?e,
+                "Failed to auto-deactivate duplicate active systems; continuing heartbeat processing"
+            );
+        }
+    }
 
     // Try to deserialize with version detection
     let (payload, version_compatible) = match deserialize_system_state_versioned(&agent_request) {
