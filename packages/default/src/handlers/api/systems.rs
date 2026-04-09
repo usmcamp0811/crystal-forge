@@ -19,8 +19,9 @@ use crate::auth::models::Role;
 use crate::handlers::api::rbac::{authenticated_user_roles, extract_request_origin};
 use crate::models::auth_identity::AuthRole;
 use crate::queries::systems::{
-    SystemAccessRow, SystemDetailRow, SystemListRow, deactivate_system, find_system_access_row,
-    get_system_detail_by_id, get_user_environment_membership_ids, list_system_access_rows,
+    SystemAccessRow, SystemDetailRow, SystemListRow, commit_belongs_to_system_flake,
+    deactivate_system, find_system_access_row, get_system_detail_by_id,
+    get_user_environment_membership_ids, list_recent_commits_for_system, list_system_access_rows,
     touch_system_updated_at, update_public_key, update_system_desired_target,
     update_system_metadata,
 };
@@ -782,6 +783,7 @@ fn action_to_str(action: AuditAction) -> &'static str {
         AuditAction::UserEnvironmentMembershipUpdated => "user_environment_membership_updated",
         AuditAction::OidcMappingChanged => "oidc_mapping_changed",
         AuditAction::SystemSyncRequested => "system_sync_requested",
+        AuditAction::SystemDeployRequested => "system_deploy_requested",
         AuditAction::SystemRollbackRequested => "system_rollback_requested",
         AuditAction::SessionInvalidated => "session_invalidated",
     }
@@ -846,6 +848,15 @@ pub async fn deploy_system(
         return bad_request("Manual deployment is not allowed for auto_latest systems");
     }
 
+    let belongs_to_flake = match commit_belongs_to_system_flake(&pool, system_id, commit_sha).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to validate requested commit"),
+    };
+
+    if !belongs_to_flake {
+        return bad_request("Requested commit is not available for this system");
+    }
+
     // Set the desired_target to trigger deployment
     if update_system_desired_target(&pool, system_id, commit_sha)
         .await
@@ -857,7 +868,7 @@ pub async fn deploy_system(
     if record_system_mutation_audit(
         &pool,
         user_id,
-        AuditAction::SystemRollbackRequested, // Reusing rollback action for now
+        AuditAction::SystemDeployRequested,
         format!("{} ({})", row.hostname, row.id),
         extract_request_origin(&headers),
         serde_json::json!({ "operation": "deploy", "target_commit": commit_sha }),
@@ -930,35 +941,36 @@ pub async fn get_system_commits(
         })).into_response();
     }
 
-    // TODO: Fetch actual commits from the flake repository
-    // For now, return mock data
-    let commits = vec![
-        CommitInfo {
-            sha: "abc123def456789012345678901234567890abcd".to_string(),
-            short_sha: "abc123d".to_string(),
-            message: "feat: add new system configuration".to_string(),
-            author: "Developer".to_string(),
-            timestamp: "2026-04-07T10:30:00Z".to_string(),
-        },
-        CommitInfo {
-            sha: "def456abc123456789012345678901234567890ab".to_string(),
-            short_sha: "def456a".to_string(),
-            message: "fix: update kernel parameters".to_string(),
-            author: "Admin".to_string(),
-            timestamp: "2026-04-06T15:20:00Z".to_string(),
-        },
-        CommitInfo {
-            sha: "789012345678901234567890abcdef123456789a".to_string(),
-            short_sha: "7890123".to_string(),
-            message: "chore: dependency updates".to_string(),
-            author: "Bot".to_string(),
-            timestamp: "2026-04-05T09:15:00Z".to_string(),
-        },
-    ];
+    let commits = match list_recent_commits_for_system(&pool, system_id, 50).await {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|row| {
+                let short_sha = row.sha.chars().take(7).collect::<String>();
+                CommitInfo {
+                    sha: row.sha,
+                    short_sha,
+                    message: row.message.unwrap_or_default(),
+                    author: row.author.unwrap_or_else(|| "unknown".to_string()),
+                    timestamp: row.timestamp.to_rfc3339(),
+                }
+            })
+            .collect::<Vec<_>>(),
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    error: "internal_error".to_string(),
+                    message: "Failed to load system commits".to_string(),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
+    };
 
     let response = SystemCommitsResponse {
         commits,
-        current_commit: Some("abc123def456789012345678901234567890abcd".to_string()),
+        current_commit: None,
     };
 
     (StatusCode::OK, Json(response)).into_response()
@@ -1142,5 +1154,17 @@ mod tests {
         assert!(validate_target_commit("zzzzzzz").is_err());
         assert!(validate_target_commit("a1b2c3d").is_ok());
         assert!(validate_target_commit(&"a".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn action_to_str_distinguishes_deploy_and_rollback() {
+        assert_eq!(
+            action_to_str(AuditAction::SystemDeployRequested),
+            "system_deploy_requested"
+        );
+        assert_eq!(
+            action_to_str(AuditAction::SystemRollbackRequested),
+            "system_rollback_requested"
+        );
     }
 }

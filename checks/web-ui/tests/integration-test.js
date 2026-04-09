@@ -34,8 +34,8 @@ const VIEWPORTS = {
   mobile: { width: 375, height: 812 },
 };
 
-async function assertVisible(locator, message) {
-  const visible = await locator.isVisible({ timeout: 5000 }).catch(() => false);
+async function assertVisible(locator, message, timeoutMs = 5000) {
+  const visible = await locator.isVisible({ timeout: timeoutMs }).catch(() => false);
   if (!visible) {
     throw new Error(message);
   }
@@ -627,6 +627,9 @@ async function routeSystemsWarningData(page) {
     deployment_status: "never_deployed",
     pipeline_stage: "ready_for_build",
     nixos_version: "24.11",
+    kernel: null,
+    agent_version: null,
+    current_store_path: null,
     last_seen: null,
     cve_counts: { critical: 0, high: 0, medium: 1, low: 2 },
     flake: {
@@ -660,13 +663,23 @@ async function routeSystemsWarningData(page) {
     updated_at: "2026-04-07T00:00:00Z",
   };
 
-  await page.route("**/api/v1/systems*", async (route) => {
+  await page.route("**/api/v1/systems**", async (route) => {
     const url = route.request().url();
-    if (url.includes("/api/v1/systems/00000000-0000-0000-0000-0000000000a1")) {
+    const pathname = new URL(url).pathname;
+    if (/^\/api\/v1\/systems\/[0-9a-f-]+$/.test(pathname)) {
+      const requestedId = pathname.split("/").pop() || detail.id;
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify(detail),
+        body: JSON.stringify({ ...detail, id: requestedId }),
+      });
+      return;
+    }
+    if (pathname !== "/api/v1/systems") {
+      await route.fulfill({
+        status: 404,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "not_found", path: pathname }),
       });
       return;
     }
@@ -679,11 +692,11 @@ async function routeSystemsWarningData(page) {
 }
 
 async function unrouteSystemsWarningData(page) {
-  await page.unroute("**/api/v1/systems*");
+  await page.unroute("**/api/v1/systems**");
 }
 
 async function routeSystemsApiFailure(page) {
-  await page.route("**/api/v1/systems*", async (route) => {
+  await page.route("**/api/v1/systems**", async (route) => {
     await route.fulfill({
       status: 500,
       contentType: "application/json",
@@ -696,7 +709,7 @@ async function routeSystemsApiFailure(page) {
 }
 
 async function unrouteSystemsApiFailure(page) {
-  await page.unroute("**/api/v1/systems*");
+  await page.unroute("**/api/v1/systems**");
 }
 
 async function routeEnvironmentWarningData(page) {
@@ -2051,17 +2064,32 @@ const steps = [
       await routeSystemsWarningData(page);
       await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2200);
-      await page.getByText("warning-system-01").first().waitFor({ timeout: 10000 });
+      const systemRow = page.locator("tr").filter({ hasText: "warning-system-01" }).first();
+      await assertVisible(systemRow, "Expected warning-system-01 row to be visible", 15000);
+      const editButton = systemRow.getByRole("button", { name: "Edit" }).first();
+      await assertVisible(editButton, "Expected Edit action button to be visible");
 
-      const editButton = page.getByRole("button", { name: "Edit" }).first();
-      await editButton.waitFor({ timeout: 12000 });
+      const detailResponsePromise = page
+        .waitForResponse(
+          (response) =>
+            response.request().method() === "GET" &&
+            response.url().includes("/api/v1/systems/00000000-0000-0000-0000-0000000000a1"),
+          { timeout: 15000 },
+        )
+        .catch(() => null);
       await editButton.click();
-
-      const editHeading = page.getByRole("heading", { name: "Edit System" });
-      const editVisible = await editHeading.isVisible({ timeout: 1500 }).catch(() => false);
-      if (!editVisible) {
-        console.log("  note: edit modal did not open within step timeout; capturing systems action state");
+      const detailResponse = await detailResponsePromise;
+      if (!detailResponse || !detailResponse.ok()) {
+        throw new Error("Expected system detail request to succeed before opening Edit modal");
       }
+
+      const editModal = page.getByText("Update system configuration and deployment settings").first();
+      await assertVisible(editModal, "Expected Edit System modal to be visible", 15000);
+      await assertVisible(
+        page.getByRole("button", { name: "Save Changes" }).first(),
+        "Expected Edit System modal controls to be visible",
+        15000,
+      );
       await unrouteSystemsWarningData(page);
     },
   },
@@ -2098,17 +2126,51 @@ const steps = [
 
       await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2200);
-      await page.getByText("warning-system-01").first().waitFor({ timeout: 10000 });
+      const systemRow = page.locator("tr").filter({ hasText: "warning-system-01" }).first();
+      await assertVisible(systemRow, "Expected warning-system-01 row to be visible", 15000);
+      const deployButton = systemRow.getByRole("button", { name: "Deploy" }).first();
+      await assertVisible(deployButton, "Expected Deploy action button to be visible");
 
-      const deployButton = page.getByRole("button", { name: "Deploy" }).first();
-      await deployButton.waitFor({ timeout: 12000 });
+      const detailResponsePromise = page
+        .waitForResponse(
+          (response) =>
+            response.request().method() === "GET" &&
+            response.url().includes("/api/v1/systems/00000000-0000-0000-0000-0000000000a1"),
+          { timeout: 15000 },
+        )
+        .catch(() => null);
+
+      const commitsResponsePromise = page
+        .waitForResponse(
+          (response) =>
+            response.request().method() === "GET" &&
+            /\/api\/v1\/systems\/[0-9a-f-]+\/commits$/.test(new URL(response.url()).pathname),
+          { timeout: 15000 },
+        )
+        .catch(() => null);
+
       await deployButton.click();
-
-      const deployHeading = page.getByRole("heading", { name: "Deploy System" });
-      const deployVisible = await deployHeading.isVisible({ timeout: 1500 }).catch(() => false);
-      if (!deployVisible) {
-        console.log("  note: deploy modal did not open within step timeout; capturing systems action state");
+      const detailResponse = await detailResponsePromise;
+      const commitsResponse = await commitsResponsePromise;
+      if (!detailResponse || !detailResponse.ok()) {
+        throw new Error("Expected system detail request to succeed before opening Deploy modal");
       }
+      if (!commitsResponse || !commitsResponse.ok()) {
+        throw new Error("Expected commits request to succeed before rendering Deploy modal");
+      }
+
+      const deployModal = page.getByText("Select Commit to Deploy").first();
+      await assertVisible(deployModal, "Expected Deploy System modal to be visible", 15000);
+      await assertVisible(
+        page.getByText("abc123d").first(),
+        "Expected at least one mocked commit option in Deploy System modal",
+        15000,
+      );
+      await assertVisible(
+        page.getByRole("button", { name: "Deploy" }).first(),
+        "Expected Deploy action in Deploy System modal",
+        15000,
+      );
 
       await page.unroute(/\/api\/v1\/systems\/[0-9a-f-]+\/commits$/);
       await unrouteSystemsWarningData(page);

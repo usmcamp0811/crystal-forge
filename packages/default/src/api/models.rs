@@ -806,6 +806,7 @@ pub enum AuditAction {
     UserEnvironmentMembershipUpdated,
     OidcMappingChanged,
     SystemSyncRequested,
+    SystemDeployRequested,
     SystemRollbackRequested,
     SessionInvalidated,
 }

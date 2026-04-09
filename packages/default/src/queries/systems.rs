@@ -5,6 +5,14 @@ use sqlx::PgPool;
 use std::collections::BTreeSet;
 use uuid::Uuid;
 
+#[derive(Debug, sqlx::FromRow)]
+pub struct SystemCommitRow {
+    pub sha: String,
+    pub message: Option<String>,
+    pub author: Option<String>,
+    pub timestamp: DateTime<Utc>,
+}
+
 pub async fn update_hostname(pool: &PgPool, system: &System, new_hostname: &str) -> Result<()> {
     sqlx::query("UPDATE systems SET hostname = $1, updated_at = NOW() WHERE id = $2")
         .bind(new_hostname)
@@ -234,6 +242,51 @@ pub async fn deactivate_system(pool: &PgPool, system_id: Uuid) -> Result<()> {
         .execute(pool)
         .await?;
     Ok(())
+}
+
+pub async fn list_recent_commits_for_system(
+    pool: &PgPool,
+    system_id: Uuid,
+    limit: i64,
+) -> Result<Vec<SystemCommitRow>> {
+    let rows = sqlx::query_as::<_, SystemCommitRow>(
+        "SELECT c.git_commit_hash AS sha,
+                c.message,
+                c.author,
+                c.commit_timestamp AS timestamp
+         FROM systems s
+         JOIN commits c ON c.flake_id = s.flake_id
+         WHERE s.id = $1
+         ORDER BY c.commit_timestamp DESC
+         LIMIT $2",
+    )
+    .bind(system_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+pub async fn commit_belongs_to_system_flake(
+    pool: &PgPool,
+    system_id: Uuid,
+    commit_sha: &str,
+) -> Result<bool> {
+    let exists = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+             SELECT 1
+             FROM systems s
+             JOIN commits c ON c.flake_id = s.flake_id
+             WHERE s.id = $1
+               AND LOWER(c.git_commit_hash) = LOWER($2)
+         )",
+    )
+    .bind(system_id)
+    .bind(commit_sha)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(exists)
 }
 
 pub async fn get_user_environment_membership_ids(
