@@ -1,10 +1,10 @@
 ---
 id: TASK-255
 title: 'Hotfix: restore missing view_system_vulnerabilities via migration'
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-04-09 23:13'
-updated_date: '2026-04-09 23:14'
+updated_date: '2026-04-09 23:42'
 labels:
   - hotfix
   - cve
@@ -36,7 +36,17 @@ Scope:
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Applying migrations creates `public.view_system_vulnerabilities` if missing
-- [ ] #2 Migration is idempotent and safe on databases where the view already exists
-- [ ] #3 `/api/v1/cves/summary` no longer fails due to missing relation after deploy
+- [x] #1 Applying migrations creates `public.view_system_vulnerabilities` if missing
+- [x] #2 Migration is idempotent and safe on databases where the view already exists
+- [x] #3 `/api/v1/cves/summary` no longer fails due to missing relation after deploy
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Added migration 0107_restore_view_system_vulnerabilities.sql to restore missing view via CREATE OR REPLACE.
+
+Added regression test hotfix_migration_restores_view_system_vulnerabilities.
+
+MR opened: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/222
+<!-- SECTION:NOTES:END -->
