@@ -64,6 +64,85 @@ pub async fn fetch_dashboard() -> Result<DashboardSummary, ApiClientError> {
     fetch_json(&url).await
 }
 
+/// Fetch admin-only CVE dashboard summary.
+pub async fn fetch_cve_dashboard_summary() -> Result<CveDashboardSummary, ApiClientError> {
+    let url = format!("{}/cves/summary", base_url());
+    fetch_json(&url).await
+}
+
+/// Fetch admin-only top-affected systems for CVE dashboard visualization.
+pub async fn fetch_cve_top_systems() -> Result<Vec<CveDashboardTopSystem>, ApiClientError> {
+    let url = format!("{}/cves/top-systems", base_url());
+    fetch_json(&url).await
+}
+
+/// Fetch admin-only CVE scan freshness/coverage per system.
+pub async fn fetch_cve_scan_freshness() -> Result<Vec<CveScanFreshnessRow>, ApiClientError> {
+    let url = format!("{}/cves/scan-freshness", base_url());
+    fetch_json(&url).await
+}
+
+/// Fetch admin-only CVE dashboard drill-down vulnerabilities with filters.
+pub async fn fetch_cve_dashboard_vulnerabilities(
+    params: &CveDashboardVulnerabilityParams,
+) -> Result<Vec<CveDashboardVulnerability>, ApiClientError> {
+    let mut parts: Vec<String> = Vec::new();
+
+    if let Some(severity) = &params.severity {
+        if !severity.is_empty() {
+            parts.push(format!("severity={}", encode_query_value(severity)));
+        }
+    }
+
+    if let Some(status) = &params.status {
+        if !status.is_empty() {
+            parts.push(format!("status={}", encode_query_value(status)));
+        }
+    }
+
+    if let Some(limit) = params.limit {
+        parts.push(format!("limit={limit}"));
+    }
+
+    if let Some(system) = &params.system {
+        if !system.is_empty() {
+            parts.push(format!("system={}", encode_query_value(system)));
+        }
+    }
+
+    if let Some(environment) = &params.environment {
+        if !environment.is_empty() {
+            parts.push(format!("environment={}", encode_query_value(environment)));
+        }
+    }
+
+    if let Some(package) = &params.package {
+        if !package.is_empty() {
+            parts.push(format!("package={}", encode_query_value(package)));
+        }
+    }
+
+    if let Some(date_from) = &params.date_from {
+        if !date_from.is_empty() {
+            parts.push(format!("date_from={}", encode_query_value(date_from)));
+        }
+    }
+
+    if let Some(date_to) = &params.date_to {
+        if !date_to.is_empty() {
+            parts.push(format!("date_to={}", encode_query_value(date_to)));
+        }
+    }
+
+    let mut url = format!("{}/cves/vulnerabilities", base_url());
+    if !parts.is_empty() {
+        url.push('?');
+        url.push_str(&parts.join("&"));
+    }
+
+    fetch_json(&url).await
+}
+
 /// Fetch a paginated list of systems.
 pub async fn fetch_systems(
     params: &SystemsListParams,
@@ -80,6 +159,14 @@ pub async fn fetch_systems(
 /// Fetch a single system's detail.
 pub async fn fetch_system(id: &uuid::Uuid) -> Result<SystemDetail, ApiClientError> {
     let url = format!("{}/systems/{}", base_url(), id);
+    fetch_json(&url).await
+}
+
+/// Fetch CVE vulnerabilities for a single system.
+pub async fn fetch_system_cves(
+    id: &uuid::Uuid,
+) -> Result<Vec<SystemVulnerability>, ApiClientError> {
+    let url = format!("{}/systems/{}/cves", base_url(), id);
     fetch_json(&url).await
 }
 

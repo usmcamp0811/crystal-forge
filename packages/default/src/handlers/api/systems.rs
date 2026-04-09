@@ -5,6 +5,7 @@ use axum::{
     response::IntoResponse,
 };
 use sqlx::PgPool;
+use sqlx::Row;
 use std::collections::BTreeSet;
 use uuid::Uuid;
 
@@ -12,11 +13,13 @@ use crate::api::models::{
     ApiError, AuditAction, CommitInfo, CreateSystemRequest, CveSummary, DeploySystemRequest,
     DeploymentStatus, PipelineStage, SortOrder, SystemCommitsResponse, SystemDetail,
     SystemHardwareInfo, SystemMutationResponse, SystemNetworkInfo, SystemRollbackRequest,
-    SystemSecurityInfo, SystemSummary, SystemsListParams, UpdateSystemPublicKeyRequest,
-    UpdateSystemRequest,
+    SystemSecurityInfo, SystemSummary, SystemVulnerability, SystemsListParams,
+    UpdateSystemPublicKeyRequest, UpdateSystemRequest,
 };
 use crate::auth::models::Role;
-use crate::handlers::api::rbac::{authenticated_user_roles, extract_request_origin};
+use crate::handlers::api::rbac::{
+    authenticated_user_roles, extract_request_origin, require_viewer_or_above,
+};
 use crate::models::auth_identity::AuthRole;
 use crate::queries::systems::{
     SystemAccessRow, SystemDetailRow, SystemListRow, commit_belongs_to_system_flake,
@@ -206,6 +209,78 @@ pub async fn get_system(
     let detail = detail_row_to_api_model(row);
 
     (StatusCode::OK, Json(detail)).into_response()
+}
+
+pub async fn get_system_cves(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(system_id): Path<Uuid>,
+) -> impl IntoResponse {
+    if require_viewer_or_above(&pool, &headers).await.is_none() {
+        return forbidden();
+    }
+
+    let rows = match sqlx::query(
+        r#"
+        SELECT
+            v.cve_id,
+            lower(v.severity) AS severity,
+            v.cvss_v3_score::double precision AS cvss_score,
+            COALESCE(v.description, '') AS description,
+            v.package_name,
+            v.package_version AS installed_version,
+            v.fixed_version,
+            v.completed_at AS first_seen,
+            c.published_date::timestamptz AS published_at,
+            -- 'fix_available' = upstream patched version exists; does NOT mean system is patched.
+            -- 'open' = no upstream fix known yet.
+            CASE WHEN v.fixed_version IS NULL THEN 'open' ELSE 'fix_available' END AS status
+        FROM view_system_vulnerabilities v
+        JOIN systems s ON s.hostname = v.hostname
+        LEFT JOIN cves c ON c.id = v.cve_id
+        WHERE s.id = $1
+        ORDER BY v.cvss_v3_score DESC NULLS LAST, v.cve_id ASC
+        "#,
+    )
+    .bind(system_id)
+    .fetch_all(&pool)
+    .await
+    {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load system CVEs"),
+    };
+
+    let vulnerabilities = rows
+        .into_iter()
+        .map(|row| {
+            let severity_raw: String = row.get("severity");
+            let severity = parse_cve_severity(&severity_raw);
+
+            SystemVulnerability {
+                cve_id: row.get("cve_id"),
+                severity,
+                cvss_score: row.get("cvss_score"),
+                description: row.get("description"),
+                package_name: row.get("package_name"),
+                installed_version: row.get("installed_version"),
+                fixed_version: row.get("fixed_version"),
+                first_seen: row.get("first_seen"),
+                published_at: row.get("published_at"),
+                status: row.get("status"),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    (StatusCode::OK, Json(vulnerabilities)).into_response()
+}
+
+fn parse_cve_severity(value: &str) -> crate::api::models::CveSeverity {
+    match value {
+        "critical" => crate::api::models::CveSeverity::Critical,
+        "high" => crate::api::models::CveSeverity::High,
+        "medium" => crate::api::models::CveSeverity::Medium,
+        _ => crate::api::models::CveSeverity::Low,
+    }
 }
 
 pub async fn update_system_handler(
@@ -1071,6 +1146,47 @@ mod tests {
         .into_response();
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn get_system_cves_requires_authenticated_role() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+
+        let response = get_system_cves(
+            State(pool),
+            HeaderMap::new(),
+            Path(Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid")),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn parse_cve_severity_maps_expected_values() {
+        assert_eq!(
+            parse_cve_severity("critical"),
+            crate::api::models::CveSeverity::Critical
+        );
+        assert_eq!(
+            parse_cve_severity("high"),
+            crate::api::models::CveSeverity::High
+        );
+        assert_eq!(
+            parse_cve_severity("medium"),
+            crate::api::models::CveSeverity::Medium
+        );
+        assert_eq!(
+            parse_cve_severity("low"),
+            crate::api::models::CveSeverity::Low
+        );
+        assert_eq!(
+            parse_cve_severity("unknown"),
+            crate::api::models::CveSeverity::Low
+        );
     }
 
     #[tokio::test]

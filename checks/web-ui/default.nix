@@ -245,6 +245,9 @@ in pkgs.testers.runNixOSTest {
       "12f-systems-deploy-modal",
       "13e-flakes-add-modal-credentials",
       "13f-flakes-edit-modal-credentials",
+      # TASK-17: CVE dashboard evidence
+      "16-cves",
+      "16b-cves-severity-filter",
     ] if test_profile == "ci_fast" else [
       "01-login-page",
       "02-registration",
