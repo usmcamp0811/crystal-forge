@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - gpt-5.3-codex
 created_date: '2026-04-08 01:10'
-updated_date: '2026-04-09 00:22'
+updated_date: '2026-04-09 00:24'
 labels:
   - feature
   - ui
@@ -100,11 +100,13 @@ Implement a complete system editing and deployment workflow that supports all de
 - [ ] #12 Screenshots of edit system UI and deployment modal are included in MR
 <!-- AC:END -->
 
-## Implementation Notes
+## Implementation Plan
 
-<!-- SECTION:NOTES:BEGIN -->
-LOCK: gpt-5.3-codex on reckless in ~/code/crystal-forge/TASK-249-system-edit-deploy (takeover approved by user for MR217 blocker fix).
-<!-- SECTION:NOTES:END -->
+<!-- SECTION:PLAN:BEGIN -->
+1) In checks/web-ui/tests/integration-test.js, strengthen 12e to assert the Edit System modal container is visible (scoped by modal heading) instead of only waiting for text globally.
+2) Strengthen 12f to assert Deploy System modal container visibility and require commit selector content (at least one mocked commit option) inside the modal.
+3) Keep change limited to these two steps and run nix build .#checks.x86_64-linux.web-ui for verification.
+<!-- SECTION:PLAN:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
