@@ -15,8 +15,11 @@ use crate::api::models::{
 
 /// Query `view_fleet_health_status` for system counts by health category.
 pub async fn fetch_fleet_health(pool: &PgPool) -> Result<FleetHealthSummary> {
+    // Source of truth must match Systems view health semantics exactly.
+    // `view_system_list.health_status` already powers systems listing and uses
+    // lowercase values: healthy|warning|critical|offline.
     let rows = sqlx::query_as::<_, (String, i64)>(
-        "SELECT health_status, count FROM view_fleet_health_status",
+        "SELECT health_status, COUNT(*)::BIGINT AS count FROM view_system_list GROUP BY health_status",
     )
     .fetch_all(pool)
     .await?;
@@ -29,16 +32,20 @@ pub async fn fetch_fleet_health(pool: &PgPool) -> Result<FleetHealthSummary> {
     };
 
     for (status, count) in rows {
-        match status.as_str() {
-            "Healthy" => summary.healthy = count,
-            "Warning" => summary.warning = count,
-            "Critical" => summary.critical = count,
-            "Offline" => summary.offline = count,
-            _ => {} // Ignore unexpected values
-        }
+        apply_health_count(&mut summary, &status, count);
     }
 
     Ok(summary)
+}
+
+fn apply_health_count(summary: &mut FleetHealthSummary, status: &str, count: i64) {
+    match status.to_ascii_lowercase().as_str() {
+        "healthy" => summary.healthy = count,
+        "warning" => summary.warning = count,
+        "critical" => summary.critical = count,
+        "offline" => summary.offline = count,
+        _ => {}
+    }
 }
 
 /// Query `view_deployment_status` for system counts by deployment category.
@@ -578,6 +585,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn apply_health_count_handles_lowercase_statuses() {
+        let mut summary = FleetHealthSummary {
+            healthy: 0,
+            warning: 0,
+            critical: 0,
+            offline: 0,
+        };
+
+        apply_health_count(&mut summary, "healthy", 13);
+        apply_health_count(&mut summary, "warning", 0);
+        apply_health_count(&mut summary, "critical", 1);
+        apply_health_count(&mut summary, "offline", 1);
+
+        assert_eq!(summary.healthy, 13);
+        assert_eq!(summary.critical, 1);
+        assert_eq!(summary.offline, 1);
+    }
+
+    #[test]
+    fn apply_health_count_is_case_insensitive() {
+        let mut summary = FleetHealthSummary {
+            healthy: 0,
+            warning: 0,
+            critical: 0,
+            offline: 0,
+        };
+
+        apply_health_count(&mut summary, "Healthy", 10);
+        apply_health_count(&mut summary, "OFFLINE", 2);
+
+        assert_eq!(summary.healthy, 10);
+        assert_eq!(summary.offline, 2);
+    }
+
+    #[test]
     fn build_queue_params_defaults() {
         let p: BuildQueueParams = serde_json::from_str("{}").unwrap();
         assert_eq!(p.page, 1);
@@ -595,8 +637,7 @@ mod tests {
 
     #[test]
     fn build_queue_status_split() {
-        let p: BuildQueueParams =
-            serde_json::from_str(r#"{"status":"queued,building"}"#).unwrap();
+        let p: BuildQueueParams = serde_json::from_str(r#"{"status":"queued,building"}"#).unwrap();
         let status_filter: Vec<String> = p
             .status
             .as_deref()

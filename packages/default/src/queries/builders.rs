@@ -5,6 +5,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
 use sqlx::PgPool;
+use tracing::info;
 use uuid::Uuid;
 
 use crate::models::builders::{
@@ -1026,6 +1027,59 @@ pub async fn cancel_build_job(pool: &PgPool, job_id: &Uuid) -> Result<BuildJob> 
     Ok(updated)
 }
 
+/// Force-cancel a build job stuck in the `cancelling` state.
+///
+/// This is a manual recovery operation for builds that:
+/// - Have been stuck in `cancelling` for an extended period
+/// - Failed to complete graceful shutdown (builder crashed/disconnected)
+/// - Need immediate termination without waiting for builder confirmation
+///
+/// Transitions:
+/// * `cancelling` → `cancelled` (sets completed_at = now())
+/// * Already `cancelled` → returns error (idempotent behavior not desired for force operations)
+///
+/// Returns the updated `BuildJob`, or an error if the transition is illegal.
+pub async fn force_cancel_build_job(pool: &PgPool, job_id: &Uuid) -> Result<BuildJob> {
+    // Atomic transition guard: only force-cancel while state is still
+    // `cancelling`.
+    let updated = sqlx::query_as::<_, BuildJob>(
+        r#"
+        UPDATE build_jobs
+        SET status       = 'cancelled',
+            completed_at = now(),
+            updated_at   = now()
+        WHERE id = $1
+          AND status = 'cancelling'
+        RETURNING *
+        "#,
+    )
+    .bind(job_id)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to force-cancel build job")?;
+
+    if let Some(updated) = updated {
+        info!("Force-cancelled job {} → 'cancelled'", job_id);
+        return Ok(updated);
+    }
+
+    let current_status = get_build_job_status(pool, job_id).await?;
+    match current_status.as_deref() {
+        None => bail!("Build job not found"),
+        Some("queued") => bail!("Cannot force-cancel a queued job; use regular cancel instead"),
+        Some("building") => {
+            bail!("Cannot force-cancel a building job; use regular cancel to enter stopping state")
+        }
+        Some("cancelled") => bail!("Build job is already cancelled"),
+        Some("success") => bail!("Cannot force-cancel a completed build"),
+        Some("failed") => bail!("Cannot force-cancel a failed build"),
+        Some(status) => bail!(
+            "Build is no longer force-cancellable (current status: {})",
+            status
+        ),
+    }
+}
+
 /// Transition a job from `cancelling` → `cancelled` with a `completed_at`
 /// timestamp.  Called by the builder after it has killed the nix process and
 /// flushed any final logs.
@@ -1186,6 +1240,24 @@ mod tests {
         .fetch_one(pool)
         .await
         .expect("Failed to insert queued build job")
+    }
+
+    async fn set_build_job_status(pool: &PgPool, job_id: Uuid, status: &str) {
+        sqlx::query(
+            r#"
+            UPDATE build_jobs
+            SET status = $2,
+                updated_at = now(),
+                started_at = CASE WHEN $2 IN ('building', 'cancelling') THEN COALESCE(started_at, now()) ELSE started_at END,
+                completed_at = CASE WHEN $2 IN ('success', 'failed', 'cancelled') THEN now() ELSE NULL END
+            WHERE id = $1
+            "#,
+        )
+        .bind(job_id)
+        .bind(status)
+        .execute(pool)
+        .await
+        .expect("Failed to update test job status");
     }
 
     #[tokio::test]
@@ -1369,7 +1441,10 @@ mod tests {
             .expect("claim B failed")
             .expect("claim B expected a job");
 
-        assert_ne!(claimed_a.id, claimed_b.id, "Concurrent claims must not duplicate jobs");
+        assert_ne!(
+            claimed_a.id, claimed_b.id,
+            "Concurrent claims must not duplicate jobs"
+        );
 
         let claimed_ids: std::collections::HashSet<Uuid> =
             [claimed_a.id, claimed_b.id].into_iter().collect();
@@ -1533,5 +1608,135 @@ mod tests {
                 .to_string()
                 .contains("Public key cannot be empty")
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_force_cancel_transition_from_cancelling() {
+        let pool = test_pool().await;
+        let now = Utc::now();
+
+        let job_id = create_queued_job(
+            &pool,
+            "https://example.com/force-cancel-cancelling.git",
+            "force-cancel-cancelling",
+            "fcancelcancelling000000000000000000000001",
+            now,
+            "drv-force-cancel-cancelling",
+            1.0,
+            now,
+        )
+        .await;
+
+        set_build_job_status(&pool, job_id, "cancelling").await;
+
+        let updated = force_cancel_build_job(&pool, &job_id)
+            .await
+            .expect("force-cancel from cancelling should succeed");
+
+        assert_eq!(updated.status, "cancelled");
+        assert!(updated.completed_at.is_some());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_force_cancel_rejects_building_status() {
+        let pool = test_pool().await;
+        let now = Utc::now();
+
+        let job_id = create_queued_job(
+            &pool,
+            "https://example.com/force-cancel-building.git",
+            "force-cancel-building",
+            "fcancelbuilding000000000000000000000001",
+            now,
+            "drv-force-cancel-building",
+            1.0,
+            now,
+        )
+        .await;
+
+        set_build_job_status(&pool, job_id, "building").await;
+
+        let err = force_cancel_build_job(&pool, &job_id)
+            .await
+            .expect_err("force-cancel should reject building status");
+
+        assert!(
+            err.to_string()
+                .contains("Cannot force-cancel a building job; use regular cancel")
+        );
+
+        let status_after = get_build_job_status(&pool, &job_id)
+            .await
+            .expect("status lookup should succeed")
+            .expect("job should exist");
+        assert_eq!(status_after, "building");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_force_cancel_rejects_terminal_status() {
+        let pool = test_pool().await;
+        let now = Utc::now();
+
+        let job_id = create_queued_job(
+            &pool,
+            "https://example.com/force-cancel-terminal.git",
+            "force-cancel-terminal",
+            "fcancelterminal000000000000000000000001",
+            now,
+            "drv-force-cancel-terminal",
+            1.0,
+            now,
+        )
+        .await;
+
+        set_build_job_status(&pool, job_id, "failed").await;
+
+        let err = force_cancel_build_job(&pool, &job_id)
+            .await
+            .expect_err("force-cancel should fail for terminal status");
+
+        assert!(
+            err.to_string()
+                .contains("Cannot force-cancel a failed build")
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_force_cancel_race_safe_does_not_overwrite_terminal_status() {
+        let pool = test_pool().await;
+        let now = Utc::now();
+
+        let job_id = create_queued_job(
+            &pool,
+            "https://example.com/force-cancel-race-safe.git",
+            "force-cancel-race-safe",
+            "fcancelracesafe000000000000000000000001",
+            now,
+            "drv-force-cancel-race-safe",
+            1.0,
+            now,
+        )
+        .await;
+
+        // Simulate another worker finishing the job before force-cancel applies.
+        set_build_job_status(&pool, job_id, "success").await;
+
+        let err = force_cancel_build_job(&pool, &job_id)
+            .await
+            .expect_err("force-cancel should fail when job is no longer cancellable");
+        assert!(
+            err.to_string()
+                .contains("Cannot force-cancel a completed build")
+        );
+
+        let final_status = get_build_job_status(&pool, &job_id)
+            .await
+            .expect("status lookup should succeed")
+            .expect("job should still exist");
+        assert_eq!(final_status, "success");
     }
 }

@@ -3,9 +3,9 @@
 use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
 use std::rc::Rc;
-use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::JsCast;
-use web_sys::{window, Node};
+use wasm_bindgen::prelude::Closure;
+use web_sys::{Node, window};
 
 /// Extract the system name from a full flake attribute path or hostname.
 ///
@@ -110,6 +110,7 @@ impl WorkerAction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BuildAction {
     Stop,
+    ForceCancel,
     Restart,
     RunNext,
 }
@@ -299,6 +300,13 @@ pub fn apply_action(
                         target.status = BuildStatus::Cancelled;
                     }
                     note.set(Some(format!("Stopped build #{build_id}")));
+                }
+                BuildAction::ForceCancel => {
+                    // Optimistic UI: show Cancelled immediately; server will confirm.
+                    if let Some(target) = next_builds.iter_mut().find(|b| b.id == build_id) {
+                        target.status = BuildStatus::Cancelled;
+                    }
+                    note.set(Some(format!("Force-cancelled build #{build_id}")));
                 }
                 BuildAction::Restart => {
                     // Optimistic UI: show Queued immediately; server will confirm.

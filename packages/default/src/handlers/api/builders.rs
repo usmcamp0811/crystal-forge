@@ -374,6 +374,33 @@ pub async fn requeue_build_job(
         })
 }
 
+/// POST /api/v1/build-jobs/:id/force-cancel - Force-cancel a stuck build job (admin-only)
+///
+/// Use this when a build is stuck in 'cancelling' state and needs immediate termination.
+/// Unlike regular cancel, this immediately transitions to 'cancelled' without waiting
+/// for builder confirmation.
+pub async fn force_cancel_build_job(
+    State(state): State<CFState>,
+    Path(job_id): Path<Uuid>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<BuildJob>, (StatusCode, String)> {
+    let Some(_admin_user) = require_admin(&state.pool, &headers).await else {
+        return Err((StatusCode::FORBIDDEN, "Admin access required".to_string()));
+    };
+
+    builders::force_cancel_build_job(&state.pool, &job_id)
+        .await
+        .map(Json)
+        .map_err(|e| {
+            let message = e.to_string();
+            if message.to_lowercase().contains("not found") {
+                (StatusCode::NOT_FOUND, message)
+            } else {
+                (StatusCode::BAD_REQUEST, message)
+            }
+        })
+}
+
 /// POST /api/v1/builders/:id/jobs/:job_id/finalize-cancelled
 /// Builder-authenticated. Called after the builder has stopped the nix process.
 pub async fn finalize_cancelled_job(
@@ -382,7 +409,10 @@ pub async fn finalize_cancelled_job(
     headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> Result<StatusCode, StatusCode> {
-    let path = format!("/api/v1/builders/{}/jobs/{}/finalize-cancelled", builder_id, job_id);
+    let path = format!(
+        "/api/v1/builders/{}/jobs/{}/finalize-cancelled",
+        builder_id, job_id
+    );
     let verified = authenticate_builder_request(&headers, body, "POST", &path, &state.pool).await?;
 
     if verified.builder_id != builder_id {

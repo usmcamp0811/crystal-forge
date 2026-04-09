@@ -318,6 +318,16 @@ pub async fn requeue_build_job(job_id: &uuid::Uuid) -> Result<(), ApiClientError
     send_empty_with_csrf("POST", &url, None::<&()>).await
 }
 
+/// Force-cancel a build job stuck in 'cancelling' state (admin-only).
+///
+/// Unlike regular cancel, this immediately transitions to 'cancelled' without
+/// waiting for builder confirmation. Use this for stuck builds that failed to
+/// complete graceful shutdown.
+pub async fn force_cancel_build_job(job_id: &uuid::Uuid) -> Result<(), ApiClientError> {
+    let url = format!("{}/build-jobs/{}/force-cancel", base_url(), job_id);
+    send_empty_with_csrf("POST", &url, None::<&()>).await
+}
+
 /// Fetch recent completed/failed build jobs.
 pub async fn fetch_recent_build_jobs() -> Result<Vec<BuildQueueItem>, ApiClientError> {
     let url = format!("{}/build-jobs/recent", base_url());

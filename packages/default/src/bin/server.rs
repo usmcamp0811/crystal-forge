@@ -302,6 +302,10 @@ async fn main() -> anyhow::Result<()> {
             post(builders::requeue_build_job),
         )
         .route(
+            "/api/v1/build-jobs/:id/force-cancel",
+            post(builders::force_cancel_build_job),
+        )
+        .route(
             "/api/v1/build-jobs/recent",
             get(builders::list_recent_build_jobs),
         )
