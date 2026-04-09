@@ -5,6 +5,15 @@ use sqlx::PgPool;
 use std::collections::BTreeSet;
 use uuid::Uuid;
 
+const DEACTIVATE_DUPLICATE_ACTIVE_SYSTEMS_SQL: &str =
+    "UPDATE systems
+     SET is_active = FALSE,
+         updated_at = NOW()
+     WHERE is_active = TRUE
+       AND hostname <> $1
+       AND public_key = $2
+     RETURNING hostname";
+
 #[derive(Debug, sqlx::FromRow)]
 pub struct SystemCommitRow {
     pub sha: String,
@@ -242,6 +251,27 @@ pub async fn deactivate_system(pool: &PgPool, system_id: Uuid) -> Result<()> {
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// Deactivate any *other* active systems that share the same public key.
+///
+/// This is a safety hotfix for hostname-renamed/re-joined agents where the same
+/// agent keypair ends up attached to multiple active system rows, which can
+/// cause stale duplicate hosts to remain critical/offline in health views.
+///
+/// Returns the list of hostnames that were deactivated.
+pub async fn deactivate_duplicate_active_systems_by_public_key(
+    pool: &PgPool,
+    current_hostname: &str,
+    public_key_base64: &str,
+) -> Result<Vec<String>> {
+    let deactivated_hostnames = sqlx::query_scalar::<_, String>(DEACTIVATE_DUPLICATE_ACTIVE_SYSTEMS_SQL)
+    .bind(current_hostname)
+    .bind(public_key_base64)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(deactivated_hostnames)
 }
 
 pub async fn list_recent_commits_for_system(
@@ -616,6 +646,8 @@ pub async fn get_flake_id_by_name(pool: &PgPool, name: &str) -> Result<Option<i3
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn hotfix_migration_updates_system_list_view_heartbeat_ordering() {
         let migration = include_str!(
@@ -642,6 +674,22 @@ mod tests {
                     .count()
                     >= 2,
             "hotfix migration must update system detail view to prefer non-null heartbeat rows"
+        );
+    }
+
+    #[test]
+    fn duplicate_public_key_hotfix_query_has_safe_predicates() {
+        assert!(
+            DEACTIVATE_DUPLICATE_ACTIVE_SYSTEMS_SQL.contains("is_active = TRUE"),
+            "must only affect currently active rows"
+        );
+        assert!(
+            DEACTIVATE_DUPLICATE_ACTIVE_SYSTEMS_SQL.contains("hostname <> $1"),
+            "must never deactivate the currently authenticated hostname"
+        );
+        assert!(
+            DEACTIVATE_DUPLICATE_ACTIVE_SYSTEMS_SQL.contains("public_key = $2"),
+            "must only match rows sharing the same public key"
         );
     }
 }
