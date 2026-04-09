@@ -1,9 +1,10 @@
 ---
 id: TASK-255
 title: 'Hotfix: restore missing view_system_vulnerabilities via migration'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-04-09 23:13'
+updated_date: '2026-04-09 23:14'
 labels:
   - hotfix
   - cve
