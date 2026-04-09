@@ -6,7 +6,7 @@ title: >-
 status: Review
 assignee: []
 created_date: '2026-04-09 16:31'
-updated_date: '2026-04-09 16:52'
+updated_date: '2026-04-09 17:05'
 labels:
   - hotfix
   - agent
@@ -45,12 +45,9 @@ Scope:
 - [x] #4 No behavior change for non-duplicate cases
 <!-- AC:END -->
 
-## Implementation Notes
+## Notes
 
-<!-- SECTION:NOTES:BEGIN -->
-Implemented duplicate-key deactivation in heartbeat flow: on authenticated heartbeat, deactivates other active `systems` rows sharing the same `public_key` but different hostname.
-
-Added query helper `deactivate_duplicate_active_systems_by_public_key` and warning logs listing deactivated aliases.
-
-MR opened: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/221
-<!-- SECTION:NOTES:END -->
+- Added `deactivate_duplicate_active_systems_by_public_key(...)` in `queries/systems.rs`.
+- Hooked duplicate-key cleanup into `handlers/agent/heartbeat.rs` after successful authentication.
+- Added handler-level tests for non-fatal cleanup behavior and successful deactivation propagation.
+- MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/221
