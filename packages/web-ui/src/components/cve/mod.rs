@@ -223,6 +223,12 @@ pub fn VulnerabilityRow(vuln: SystemVulnerability) -> Element {
                                 "Fixed in: {fixed}"
                             }
                         }
+                        if let Some(ref status) = vuln.status {
+                            span { "Status: {status}" }
+                        }
+                        if let Some(first_seen) = vuln.first_seen {
+                            span { "First seen: {first_seen.format(\"%Y-%m-%d\")}" }
+                        }
                     }
                 }
 

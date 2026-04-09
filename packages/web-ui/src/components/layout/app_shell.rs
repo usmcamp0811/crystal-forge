@@ -46,7 +46,8 @@ fn ui_check_mock_auth_context() -> AuthContext {
 }
 
 fn should_show_admin_denied(route: &Route, auth_context: &Option<AuthContext>) -> bool {
-    matches!(route, Route::AdminView { .. }) && !auth::is_admin(auth_context)
+    matches!(route, Route::AdminView { .. } | Route::CvesView { .. })
+        && !auth::is_admin(auth_context)
 }
 
 /// Top-level application layout wrapping all views.
@@ -267,7 +268,7 @@ pub fn AppShell() -> Element {
                             section {
                                 class: "max-w-3xl mx-auto rounded-xl border border-amber-500/40 bg-amber-900/20 p-6 space-y-2",
                                 h2 { class: "text-xl font-semibold text-amber-100", "Access Denied" }
-                                p { class: "text-sm text-amber-200/90", "Server Management requires an administrator role." }
+                                p { class: "text-sm text-amber-200/90", "This page requires an administrator role." }
                             }
                         } else {
                             Outlet::<Route> {}
@@ -319,6 +320,29 @@ mod tests {
     #[test]
     fn admin_route_allowed_for_admin() {
         let route = Route::AdminView {};
+        assert!(!should_show_admin_denied(
+            &route,
+            &auth_context(true, vec![Role::Admin])
+        ));
+    }
+
+    #[test]
+    fn cve_route_denied_for_non_admin() {
+        let route = Route::CvesView {};
+        assert!(should_show_admin_denied(
+            &route,
+            &auth_context(true, vec![Role::Operator])
+        ));
+        assert!(should_show_admin_denied(
+            &route,
+            &auth_context(true, vec![Role::Viewer])
+        ));
+        assert!(should_show_admin_denied(&route, &None));
+    }
+
+    #[test]
+    fn cve_route_allowed_for_admin() {
+        let route = Route::CvesView {};
         assert!(!should_show_admin_denied(
             &route,
             &auth_context(true, vec![Role::Admin])

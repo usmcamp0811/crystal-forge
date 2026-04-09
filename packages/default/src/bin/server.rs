@@ -167,6 +167,22 @@ async fn main() -> anyhow::Result<()> {
             get(dashboard::dashboard_summary),
         )
         .route(
+            "/api/v1/cves/summary",
+            get(dashboard::cve_dashboard_summary),
+        )
+        .route(
+            "/api/v1/cves/vulnerabilities",
+            get(dashboard::cve_dashboard_vulnerabilities),
+        )
+        .route(
+            "/api/v1/cves/top-systems",
+            get(dashboard::cve_dashboard_top_systems),
+        )
+        .route(
+            "/api/v1/cves/scan-freshness",
+            get(dashboard::cve_scan_freshness),
+        )
+        .route(
             "/api/v1/systems",
             get(systems::list_systems).post(systems::create_system),
         )
@@ -174,6 +190,7 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/systems/:id",
             get(systems::get_system).patch(systems::update_system_handler),
         )
+        .route("/api/v1/systems/:id/cves", get(systems::get_system_cves))
         .route("/api/v1/systems/:id/sync", post(systems::sync_system))
         .route(
             "/api/v1/systems/:id/rollback",
@@ -275,10 +292,7 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/builders/:id/metrics",
             get(builders::get_builder_metrics),
         )
-        .route(
-            "/api/v1/build-jobs",
-            get(builders::list_build_queue),
-        )
+        .route("/api/v1/build-jobs", get(builders::list_build_queue))
         .route(
             "/api/v1/build-jobs/:id/cancel",
             post(builders::cancel_build_job),

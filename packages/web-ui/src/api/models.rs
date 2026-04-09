@@ -256,6 +256,68 @@ impl CveSummary {
     }
 }
 
+/// Admin-only CVE dashboard fleet summary payload.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CveDashboardSummary {
+    pub total_open: i64,
+    pub severity: CveSummary,
+    pub affected_systems: i64,
+    pub new_cves_last_7_days: i64,
+    pub oldest_cve_age_days: Option<i64>,
+}
+
+/// Filters for CVE dashboard drill-down requests.
+#[derive(Debug, Clone, Default)]
+pub struct CveDashboardVulnerabilityParams {
+    pub severity: Option<String>,
+    pub status: Option<String>,
+    pub system: Option<String>,
+    pub environment: Option<String>,
+    pub package: Option<String>,
+    pub date_from: Option<String>,
+    pub date_to: Option<String>,
+    pub limit: Option<i64>,
+}
+
+/// A CVE row for dashboard drill-down views.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CveDashboardVulnerability {
+    pub system_id: Uuid,
+    pub hostname: String,
+    pub cve_id: String,
+    pub severity: CveSeverity,
+    pub cvss_score: Option<f64>,
+    pub package_name: String,
+    pub installed_version: String,
+    pub fixed_version: Option<String>,
+    pub first_seen: Option<DateTime<Utc>>,
+    pub status: String,
+}
+
+/// Top-affected system row for CVE dashboard visualization.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CveDashboardTopSystem {
+    pub system_id: Uuid,
+    pub hostname: String,
+    pub total_cves: i64,
+    pub critical_cves: i64,
+    pub high_cves: i64,
+    pub medium_cves: i64,
+    pub low_cves: i64,
+    pub days_since_scan: Option<i64>,
+    pub last_cve_scan: Option<DateTime<Utc>>,
+}
+
+/// Scan freshness/coverage per system.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CveScanFreshnessRow {
+    pub system_id: Uuid,
+    pub hostname: String,
+    pub days_since_scan: Option<i64>,
+    pub last_cve_scan: Option<DateTime<Utc>>,
+    pub total_cves: i64,
+}
+
 /// A single recent deployment event.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RecentDeployment {
@@ -927,8 +989,15 @@ pub struct SystemVulnerability {
     pub installed_version: String,
     /// Fixed version (if known).
     pub fixed_version: Option<String>,
+    /// First observed in fleet scans.
+    #[serde(default)]
+    pub first_seen: Option<DateTime<Utc>>,
     /// When this CVE was published.
+    #[serde(default)]
     pub published_at: Option<DateTime<Utc>>,
+    /// Current status (open/fixed/ignored).
+    #[serde(default)]
+    pub status: Option<String>,
 }
 
 impl CveSeverity {
