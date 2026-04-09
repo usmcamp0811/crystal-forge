@@ -4,7 +4,7 @@ title: 'Hotfix: restore missing view_system_vulnerabilities via migration'
 status: Review
 assignee: []
 created_date: '2026-04-09 23:13'
-updated_date: '2026-04-09 23:42'
+updated_date: '2026-04-09 23:52'
 labels:
   - hotfix
   - cve
@@ -44,9 +44,9 @@ Scope:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Added migration 0107_restore_view_system_vulnerabilities.sql to restore missing view via CREATE OR REPLACE.
+Resolved merge conflicts in MR !222 by merging origin/dev into TASK-255 branch and keeping both the migration regression test and duplicate-system hotfix query predicate test in packages/default/src/queries/systems.rs.
 
-Added regression test hotfix_migration_restores_view_system_vulnerabilities.
+Verification rerun in nix develop environment after merge resolution: `cargo test hotfix_migration_restores_view_system_vulnerabilities` (pass) and `cargo test handle_duplicate_cleanup` (pass).
 
-MR opened: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/222
+Pushed merge-resolution commit: ec4a79b6.
 <!-- SECTION:NOTES:END -->
