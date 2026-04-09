@@ -3,9 +3,10 @@ id: TASK-254
 title: >-
   Hotfix agent heartbeat to auto-deactivate duplicate active systems sharing
   same public key
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-04-09 16:31'
+updated_date: '2026-04-09 16:31'
 labels:
   - hotfix
   - agent
