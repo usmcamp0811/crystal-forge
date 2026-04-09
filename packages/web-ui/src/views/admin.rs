@@ -1089,6 +1089,7 @@ fn format_action(event: &AuditEvent) -> &'static str {
         }
         crate::api::models::AuditAction::OidcMappingChanged => "OIDC mapping change",
         crate::api::models::AuditAction::SystemSyncRequested => "System sync requested",
+        crate::api::models::AuditAction::SystemDeployRequested => "System deploy requested",
         crate::api::models::AuditAction::SystemRollbackRequested => "System rollback requested",
         crate::api::models::AuditAction::SessionInvalidated => "Session invalidated",
     }

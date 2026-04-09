@@ -34,6 +34,8 @@ pub fn SystemsTable(
     on_update_key: EventHandler<Uuid>,
     /// Called when user clicks edit on a system
     on_edit: EventHandler<Uuid>,
+    /// Called when user clicks deploy on a system
+    on_deploy: EventHandler<Uuid>,
 ) -> Element {
     let navigator = use_navigator();
     let mut sort_column = use_signal(|| None::<SystemsSortColumn>);
@@ -196,6 +198,14 @@ pub fn SystemsTable(
                                     class: "{theme::spacing::TABLE_CELL} text-right",
                                     div {
                                         class: "flex gap-2 justify-end",
+                                        button {
+                                            class: "text-xs text-purple-400 hover:text-purple-300 px-2 py-1 rounded hover:bg-purple-500/10 transition-colors",
+                                            onclick: move |evt| {
+                                                evt.stop_propagation();
+                                                on_deploy.call(system.id);
+                                            },
+                                            "Deploy"
+                                        }
                                         button {
                                             class: "text-xs text-emerald-400 hover:text-emerald-300 px-2 py-1 rounded hover:bg-emerald-500/10 transition-colors",
                                             onclick: move |evt| {

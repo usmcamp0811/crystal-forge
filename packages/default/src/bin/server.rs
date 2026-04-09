@@ -188,6 +188,14 @@ async fn main() -> anyhow::Result<()> {
             post(systems::deactivate_system_handler),
         )
         .route(
+            "/api/v1/systems/:id/deploy",
+            post(systems::deploy_system),
+        )
+        .route(
+            "/api/v1/systems/:id/commits",
+            get(systems::get_system_commits),
+        )
+        .route(
             "/api/v1/environments",
             get(environments::list_environments).post(environments::create_environment),
         )
