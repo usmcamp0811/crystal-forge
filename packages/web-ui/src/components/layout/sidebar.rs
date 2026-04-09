@@ -260,20 +260,22 @@ pub fn SidebarNav() -> Element {
 
                 // ── Compliance ────────────────────────────────────────────
                 NavSection { collapsed: is_collapsed, label: "Compliance" }
-                NavLink {
-                    collapsed: is_collapsed,
-                    to: Route::CvesView {},
-                    label: "CVEs",
-                    icon: rsx!(
-                        svg {
-                            class: "w-4 h-4",
-                            fill: "none",
-                            stroke: "currentColor",
-                            stroke_width: "1.75",
-                            view_box: "0 0 24 24",
-                            path { d: "M12 3l7 3v6c0 5-3 7.5-7 9-4-1.5-7-4-7-9V6l7-3z" }
-                        }
-                    )
+                if show_admin {
+                    NavLink {
+                        collapsed: is_collapsed,
+                        to: Route::CvesView {},
+                        label: "CVEs",
+                        icon: rsx!(
+                            svg {
+                                class: "w-4 h-4",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "1.75",
+                                view_box: "0 0 24 24",
+                                path { d: "M12 3l7 3v6c0 5-3 7.5-7 9-4-1.5-7-4-7-9V6l7-3z" }
+                            }
+                        )
+                    }
                 }
                 NavLink {
                     collapsed: is_collapsed,
@@ -562,20 +564,22 @@ pub fn MobileDrawer() -> Element {
                 }
 
                 NavSection { collapsed: false, label: "Compliance" }
-                NavLink {
-                    collapsed: false,
-                    to: Route::CvesView {},
-                    label: "CVEs",
-                    icon: rsx!(
-                        svg {
-                            class: "w-4 h-4",
-                            fill: "none",
-                            stroke: "currentColor",
-                            stroke_width: "1.75",
-                            view_box: "0 0 24 24",
-                            path { d: "M12 3l7 3v6c0 5-3 7.5-7 9-4-1.5-7-4-7-9V6l7-3z" }
-                        }
-                    )
+                if show_admin {
+                    NavLink {
+                        collapsed: false,
+                        to: Route::CvesView {},
+                        label: "CVEs",
+                        icon: rsx!(
+                            svg {
+                                class: "w-4 h-4",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "1.75",
+                                view_box: "0 0 24 24",
+                                path { d: "M12 3l7 3v6c0 5-3 7.5-7 9-4-1.5-7-4-7-9V6l7-3z" }
+                            }
+                        )
+                    }
                 }
                 NavLink {
                     collapsed: false,

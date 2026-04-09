@@ -15,7 +15,7 @@ use uuid::Uuid;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::{JsCast, JsValue};
 
-use crate::api::client::{request_system_rollback, request_system_sync};
+use crate::api::client::{fetch_system_cves, request_system_rollback, request_system_sync};
 use crate::api::models::{
     BuildStatus, CveSeverity, CveSummary, DeploymentLogEntry, DeploymentStatus, LogLevel,
     PipelineStage, SystemCommitHistory, SystemDetail, SystemHardwareInfo, SystemNetworkInfo,
@@ -126,9 +126,24 @@ pub fn SystemDetailView(id: String) -> Element {
     let mut toast_message: Signal<Option<(String, bool)>> = use_signal(|| None); // (message, is_success)
 
     // System data state — use_resource keyed on id prevents repeated fetches.
+    let id_for_detail = id.clone();
     let detail_resource = use_resource(move || {
-        let id = id.clone();
+        let id = id_for_detail.clone();
         async move { load_system_detail_with_fallback(&id).await }
+    });
+
+    let id_for_vulns = id.clone();
+    let vulnerabilities_resource = use_resource(move || {
+        let id = id_for_vulns.clone();
+        async move {
+            let Ok(system_id) = Uuid::parse_str(&id) else {
+                return mock_vulnerabilities();
+            };
+
+            fetch_system_cves(&system_id)
+                .await
+                .unwrap_or_else(|_| mock_vulnerabilities())
+        }
     });
 
     // Derive state from resource result
@@ -174,7 +189,10 @@ pub fn SystemDetailView(id: String) -> Element {
     }
 
     let commit_history = mock_commit_history_for_system(&system);
-    let vulnerabilities = mock_vulnerabilities();
+    let vulnerabilities = match &*vulnerabilities_resource.read_unchecked() {
+        Some(value) => value.clone(),
+        None => mock_vulnerabilities(),
+    };
     let deployment_logs = mock_deployment_logs();
 
     let auth_context = app_state.read().auth.clone();
@@ -1921,7 +1939,9 @@ fn mock_vulnerabilities() -> Vec<SystemVulnerability> {
             package_name: "openssl".to_string(),
             installed_version: "3.0.12".to_string(),
             fixed_version: Some("3.0.13".to_string()),
+            first_seen: Some(Utc::now() - Duration::days(20)),
             published_at: Some(Utc::now() - Duration::days(30)),
+            status: Some("open".to_string()),
         },
         SystemVulnerability {
             cve_id: "CVE-2024-5678".to_string(),
@@ -1931,7 +1951,9 @@ fn mock_vulnerabilities() -> Vec<SystemVulnerability> {
             package_name: "curl".to_string(),
             installed_version: "8.4.0".to_string(),
             fixed_version: Some("8.5.0".to_string()),
+            first_seen: Some(Utc::now() - Duration::days(10)),
             published_at: Some(Utc::now() - Duration::days(14)),
+            status: Some("open".to_string()),
         },
         SystemVulnerability {
             cve_id: "CVE-2024-9012".to_string(),
@@ -1941,7 +1963,9 @@ fn mock_vulnerabilities() -> Vec<SystemVulnerability> {
             package_name: "sudo".to_string(),
             installed_version: "1.9.14".to_string(),
             fixed_version: None,
+            first_seen: Some(Utc::now() - Duration::days(5)),
             published_at: Some(Utc::now() - Duration::days(7)),
+            status: Some("open".to_string()),
         },
         SystemVulnerability {
             cve_id: "CVE-2024-3456".to_string(),
@@ -1951,7 +1975,9 @@ fn mock_vulnerabilities() -> Vec<SystemVulnerability> {
             package_name: "nginx".to_string(),
             installed_version: "1.24.0".to_string(),
             fixed_version: Some("1.25.0".to_string()),
+            first_seen: Some(Utc::now() - Duration::days(30)),
             published_at: Some(Utc::now() - Duration::days(45)),
+            status: Some("fixed".to_string()),
         },
         SystemVulnerability {
             cve_id: "CVE-2024-7890".to_string(),
@@ -1961,7 +1987,9 @@ fn mock_vulnerabilities() -> Vec<SystemVulnerability> {
             package_name: "bash".to_string(),
             installed_version: "5.2".to_string(),
             fixed_version: None,
+            first_seen: Some(Utc::now() - Duration::days(40)),
             published_at: Some(Utc::now() - Duration::days(60)),
+            status: Some("open".to_string()),
         },
     ]
 }

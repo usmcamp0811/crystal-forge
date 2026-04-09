@@ -171,6 +171,74 @@ impl CveSummary {
     }
 }
 
+/// Admin-only CVE dashboard fleet summary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CveDashboardSummary {
+    pub total_open: i64,
+    pub severity: CveSummary,
+    pub affected_systems: i64,
+    pub new_cves_last_7_days: i64,
+    pub oldest_cve_age_days: Option<i64>,
+}
+
+/// Top-affected system entry for the CVE dashboard visualization.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CveDashboardTopSystem {
+    pub system_id: Uuid,
+    pub hostname: String,
+    pub total_cves: i64,
+    pub critical_cves: i64,
+    pub high_cves: i64,
+    pub medium_cves: i64,
+    pub low_cves: i64,
+    /// Days since the last CVE scan (None if never scanned).
+    pub days_since_scan: Option<i64>,
+    /// Timestamp of the last completed scan.
+    pub last_cve_scan: Option<DateTime<Utc>>,
+}
+
+/// Scan freshness/coverage row per system.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CveScanFreshnessRow {
+    pub system_id: Uuid,
+    pub hostname: String,
+    /// Days since last scan, or None if never scanned.
+    pub days_since_scan: Option<i64>,
+    pub last_cve_scan: Option<DateTime<Utc>>,
+    /// Total CVEs found in the last scan.
+    pub total_cves: i64,
+}
+
+/// A single CVE row for dashboard drill-down views.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CveDashboardVulnerability {
+    pub system_id: Uuid,
+    pub hostname: String,
+    pub cve_id: String,
+    pub severity: CveSeverity,
+    pub cvss_score: Option<f64>,
+    pub package_name: String,
+    pub installed_version: String,
+    pub fixed_version: Option<String>,
+    pub first_seen: Option<DateTime<Utc>>,
+    pub status: String,
+}
+
+/// CVE entry for a specific system drill-down.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemVulnerability {
+    pub cve_id: String,
+    pub severity: CveSeverity,
+    pub cvss_score: Option<f64>,
+    pub description: String,
+    pub package_name: String,
+    pub installed_version: String,
+    pub fixed_version: Option<String>,
+    pub first_seen: Option<DateTime<Utc>>,
+    pub published_at: Option<DateTime<Utc>>,
+    pub status: String,
+}
+
 /// A single recent deployment event for the dashboard timeline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecentDeployment {

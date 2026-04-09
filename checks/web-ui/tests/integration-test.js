@@ -2668,10 +2668,218 @@ const steps = [
   },
   {
     name: "16-cves",
-    description: "CVE dashboard",
+    description: "CVE dashboard - fleet overview",
     action: async (page) => {
+      // Mock the CVE API endpoints so the test doesn't require real scan data.
+      await page.route("**/api/v1/cves/summary*", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            total_open: 42,
+            severity: { critical: 5, high: 12, medium: 18, low: 7 },
+            affected_systems: 8,
+            new_cves_last_7_days: 3,
+            oldest_cve_age_days: 730,
+          }),
+        });
+      });
+      await page.route("**/api/v1/cves/top-systems*", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify([
+            {
+              system_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+              hostname: "prod-server-01",
+              total_cves: 15,
+              critical_cves: 3,
+              high_cves: 5,
+              medium_cves: 4,
+              low_cves: 3,
+              days_since_scan: 2,
+              last_cve_scan: new Date().toISOString(),
+            },
+          ]),
+        });
+      });
+      await page.route("**/api/v1/cves/scan-freshness*", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify([
+            {
+              system_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+              hostname: "prod-server-01",
+              days_since_scan: 2,
+              last_cve_scan: new Date().toISOString(),
+              total_cves: 15,
+            },
+          ]),
+        });
+      });
+      await page.route("**/api/v1/cves/vulnerabilities*", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify([
+            {
+              system_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+              hostname: "prod-server-01",
+              cve_id: "CVE-2024-1234",
+              severity: "critical",
+              cvss_score: 9.8,
+              package_name: "openssl",
+              installed_version: "3.0.1",
+              fixed_version: "3.0.2",
+              first_seen: new Date().toISOString(),
+              status: "open",
+            },
+          ]),
+        });
+      });
+
       await page.goto(`${baseUrl}/cves`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
+
+      // Assert the page heading is present.
+      const heading = page.locator("main h1:has-text('CVE Dashboard')");
+      await assertVisible(heading, "Expected CVE Dashboard heading");
+
+      // Assert summary stat cards are rendered.
+      const totalCard = page.locator("main").getByText("Total Open CVEs");
+      await assertVisible(totalCard, "Expected 'Total Open CVEs' stat card");
+
+      // Assert severity breakdown section.
+      const criticalCard = page.locator("main").getByText("Critical").first();
+      await assertVisible(criticalCard, "Expected severity breakdown visible");
+
+      // Assert the drill-down section is rendered.
+      const drillDownSection = page.locator("[data-testid='cve-drill-down']");
+      await assertVisible(drillDownSection, "Expected CVE drill-down section");
+
+      // Assert top-systems section.
+      const topSystems = page.locator("[data-testid='cve-top-systems']");
+      await assertVisible(topSystems, "Expected top-affected systems section");
+
+      // Assert scan freshness section.
+      const freshness = page.locator("[data-testid='cve-scan-freshness']");
+      await assertVisible(freshness, "Expected scan freshness section");
+
+      // Unroute after test.
+      await page.unroute("**/api/v1/cves/summary*");
+      await page.unroute("**/api/v1/cves/top-systems*");
+      await page.unroute("**/api/v1/cves/scan-freshness*");
+      await page.unroute("**/api/v1/cves/vulnerabilities*");
+    },
+  },
+  {
+    name: "16b-cves-severity-filter",
+    description: "CVE dashboard - severity filter re-issues request with ?severity=critical",
+    action: async (page) => {
+      await page.route("**/api/v1/cves/summary*", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            total_open: 17,
+            severity: { critical: 5, high: 12, medium: 0, low: 0 },
+            affected_systems: 4,
+            new_cves_last_7_days: 1,
+            oldest_cve_age_days: 90,
+          }),
+        });
+      });
+      await page.route("**/api/v1/cves/top-systems*", async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+      });
+      await page.route("**/api/v1/cves/scan-freshness*", async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+      });
+
+      // Collect all URLs that hit the vulnerabilities endpoint so we can assert
+      // the severity filter is sent as a query param after chip click.
+      const vulnerabilityUrls = [];
+      await page.route("**/api/v1/cves/vulnerabilities*", async (route) => {
+        vulnerabilityUrls.push(route.request().url());
+        // First (unfiltered) call returns empty; filtered call returns a critical row.
+        const url = route.request().url();
+        if (url.includes("severity=critical")) {
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify([
+              {
+                system_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                hostname: "prod-server-01",
+                cve_id: "CVE-2024-9999",
+                severity: "critical",
+                cvss_score: 9.8,
+                package_name: "openssl",
+                installed_version: "3.0.1",
+                fixed_version: "3.0.2",
+                first_seen: new Date().toISOString(),
+                status: "fix_available",
+              },
+            ]),
+          });
+        } else {
+          await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+        }
+      });
+
+      await page.goto(`${baseUrl}/cves`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1500);
+
+      // Wait for the initial unfiltered vulnerabilities request to settle.
+      const initialCount = vulnerabilityUrls.length;
+
+      // Click the Critical severity filter button.
+      const criticalBtn = page.locator("button:has-text('Critical')").first();
+      await criticalBtn.waitFor({ timeout: 5000 });
+      await criticalBtn.click();
+
+      // Wait for a new vulnerabilities request that includes severity=critical.
+      await page.waitForResponse(
+        (resp) =>
+          resp.url().includes("/api/v1/cves/vulnerabilities") &&
+          resp.url().includes("severity=critical"),
+        { timeout: 8000 },
+      );
+
+      // Assert a new request was fired after the click (filter is reactive).
+      if (vulnerabilityUrls.length <= initialCount) {
+        throw new Error(
+          "Expected a new vulnerabilities request after clicking Critical chip, but none was observed",
+        );
+      }
+
+      // Assert the most recent request URL contains severity=critical.
+      const lastUrl = vulnerabilityUrls[vulnerabilityUrls.length - 1];
+      if (!lastUrl.includes("severity=critical")) {
+        throw new Error(
+          `Expected vulnerabilities request to include severity=critical, got: ${lastUrl}`,
+        );
+      }
+
+      // Assert the Critical chip now has the active/highlighted style.
+      // The active chip gets class bg-violet-600/20 per FilterButton component.
+      const activeCriticalBtn = page.locator(
+        "button:has-text('Critical').bg-violet-600\\/20",
+      );
+      await assertVisible(
+        activeCriticalBtn,
+        "Expected Critical filter chip to have active style after click",
+      );
+
+      // Assert the filtered result row (CVE-2024-9999) rendered in the drill-down table.
+      const filteredRow = page.locator("td:has-text('CVE-2024-9999')");
+      await assertVisible(filteredRow, "Expected filtered CVE row CVE-2024-9999 to appear after severity filter");
+
+      await page.unroute("**/api/v1/cves/summary*");
+      await page.unroute("**/api/v1/cves/top-systems*");
+      await page.unroute("**/api/v1/cves/scan-freshness*");
+      await page.unroute("**/api/v1/cves/vulnerabilities*");
     },
   },
   {
@@ -2824,6 +3032,9 @@ const CI_FAST_STEP_NAMES = new Set([
   "15f-builds-human-duration",
   "15g-builds-action-visibility",
   "15h-builds-completed-restart-action",
+  // TASK-17: CVE dashboard evidence
+  "16-cves",
+  "16b-cves-severity-filter",
 ]);
 
 (async () => {

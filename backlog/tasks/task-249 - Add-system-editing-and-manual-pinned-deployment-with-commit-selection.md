@@ -1,11 +1,10 @@
 ---
 id: TASK-249
 title: Add system editing and manual/pinned deployment with commit selection
-status: In Progress
-assignee:
-  - gpt-5.3-codex
+status: Review
+assignee: []
 created_date: '2026-04-08 01:10'
-updated_date: '2026-04-09 00:24'
+updated_date: '2026-04-08 03:48'
 labels:
   - feature
   - ui
@@ -86,27 +85,29 @@ Implement a complete system editing and deployment workflow that supports all de
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 User can open an edit dialog/page for an existing system
-- [ ] #2 User can modify system name, description, deployment strategy, and configuration fields
-- [ ] #3 System updates are validated and persisted to the database
-- [ ] #4 User can trigger a deployment for a system with manual or pinned strategy
-- [ ] #5 Deployment modal shows commit/revision selector for manual and pinned systems
-- [ ] #6 Deployment modal displays current deployed revision and available revisions
-- [ ] #7 Auto-deployed systems either disable manual deploy or show read-only deployment status
-- [ ] #8 Deployment request is sent to the backend with selected commit
-- [ ] #9 Backend validates deployment request against system deployment strategy
-- [ ] #10 UI shows loading state during deployment submission
-- [ ] #11 Success/error feedback is displayed after deployment attempt
-- [ ] #12 Screenshots of edit system UI and deployment modal are included in MR
+- [x] #1 User can open an edit dialog/page for an existing system
+- [x] #2 User can modify system name, description, deployment strategy, and configuration fields
+- [x] #3 System updates are validated and persisted to the database
+- [x] #4 User can trigger a deployment for a system with manual or pinned strategy
+- [x] #5 Deployment modal shows commit/revision selector for manual and pinned systems
+- [x] #6 Deployment modal displays current deployed revision and available revisions
+- [x] #7 Auto-deployed systems either disable manual deploy or show read-only deployment status
+- [x] #8 Deployment request is sent to the backend with selected commit
+- [x] #9 Backend validates deployment request against system deployment strategy
+- [x] #10 UI shows loading state during deployment submission
+- [x] #11 Success/error feedback is displayed after deployment attempt
+- [x] #12 Screenshots of edit system UI and deployment modal are included in MR
 <!-- AC:END -->
 
-## Implementation Plan
+## Implementation Notes
 
-<!-- SECTION:PLAN:BEGIN -->
-1) In checks/web-ui/tests/integration-test.js, strengthen 12e to assert the Edit System modal container is visible (scoped by modal heading) instead of only waiting for text globally.
-2) Strengthen 12f to assert Deploy System modal container visibility and require commit selector content (at least one mocked commit option) inside the modal.
-3) Keep change limited to these two steps and run nix build .#checks.x86_64-linux.web-ui for verification.
-<!-- SECTION:PLAN:END -->
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: claude-code on reckless in ~/code/crystal-forge/TASK-249-system-edit-deploy
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/217
+
+Verification: nix build .#checks.x86_64-linux.web-ui; nix develop -c cargo check (packages/web-ui); SQLX_OFFLINE=true targeted cargo tests for deploy_system_requires_authenticated_role and get_system_commits_requires_authenticated_role.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

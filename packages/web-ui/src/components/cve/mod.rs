@@ -220,8 +220,22 @@ pub fn VulnerabilityRow(vuln: SystemVulnerability) -> Element {
                         if let Some(ref fixed) = vuln.fixed_version {
                             span {
                                 class: "text-emerald-400",
-                                "Fixed in: {fixed}"
+                                // fixed_version = upstream patched version exists, not that this system is patched
+                                "Fix available in: {fixed}"
                             }
+                        }
+                        if let Some(ref status) = vuln.status {
+                            // 'open' = no upstream fix; 'fix_available' = patch exists upstream
+                            span {
+                                match status.as_str() {
+                                    "fix_available" => "Fix available upstream",
+                                    "open" => "No fix yet",
+                                    other => other,
+                                }
+                            }
+                        }
+                        if let Some(first_seen) = vuln.first_seen {
+                            span { "First seen: {first_seen.format(\"%Y-%m-%d\")}" }
                         }
                     }
                 }
