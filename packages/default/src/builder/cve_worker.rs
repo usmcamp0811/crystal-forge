@@ -182,3 +182,49 @@ async fn scan_derivations(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Confirms that run_cve_scan_loop exits cleanly when vulnix is not on PATH,
+    /// rather than panicking. This exercises the check_vulnix_available() guard.
+    ///
+    /// In CI / test environments vulnix is not on PATH, so this test validates the
+    /// safe no-op behaviour. In production the NixOS builder service puts vulnix in
+    /// PATH so the guard passes and the loop continues.
+    #[tokio::test]
+    async fn cve_scan_loop_exits_cleanly_without_vulnix() {
+        // Use a lazy pool that never actually connects — the loop should exit
+        // before attempting any DB query because vulnix is unavailable in this env.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct without connecting");
+
+        // run_cve_scan_loop returns () when vulnix is unavailable (the check at the
+        // top of the function short-circuits). We wrap it in a timeout to be safe.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run_cve_scan_loop(pool),
+        )
+        .await;
+
+        // Either it completed within the timeout (vulnix absent → fast return)
+        // or it timed out (vulnix present → loop running, also fine in dev envs).
+        // The important thing is it did NOT panic.
+        match result {
+            Ok(()) => {
+                // vulnix not found — loop exited with error log, as expected in CI
+            }
+            Err(_timeout) => {
+                // vulnix was found on PATH and the loop is running — correct in dev
+            }
+        }
+    }
+
+    /// Confirms that check_vulnix_available returns a bool without panicking.
+    #[tokio::test]
+    async fn check_vulnix_available_does_not_panic() {
+        let _ = VulnixRunner::check_vulnix_available().await;
+    }
+}

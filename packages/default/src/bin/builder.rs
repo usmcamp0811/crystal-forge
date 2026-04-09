@@ -143,6 +143,16 @@ async fn run_api_mode(cfg: &CrystalForgeConfig) -> anyhow::Result<()> {
         tokio::spawn(run_cache_push_loop(cache_pool));
     }
 
+    // Spawn CVE scan loop in API mode.
+    // Scans completed derivations with vulnix on a configurable poll interval.
+    // run_cve_scan_loop exits early with a logged error if vulnix is not on PATH,
+    // which is safe — the builder continues operating normally.
+    {
+        let cve_pool = crystal_forge::config::CrystalForgeConfig::db_pool().await?;
+        tokio::spawn(run_cve_scan_loop(cve_pool));
+        info!("🔍 CVE scan loop started");
+    }
+
     // Spawn job polling loop
     let poll_client = api_client.clone();
     let poll_interval = builder_config.poll_interval;
