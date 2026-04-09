@@ -3,10 +3,10 @@ id: TASK-254
 title: >-
   Hotfix agent heartbeat to auto-deactivate duplicate active systems sharing
   same public key
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-04-09 16:31'
-updated_date: '2026-04-09 16:31'
+updated_date: '2026-04-09 16:52'
 labels:
   - hotfix
   - agent
@@ -39,8 +39,18 @@ Scope:
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 When an authenticated heartbeat arrives for hostname H with public key K, any other active system rows with public key K and hostname != H are set inactive
-- [ ] #2 Current hostname H remains active and heartbeat processing continues normally
-- [ ] #3 Server logs include which duplicate hostnames were auto-deactivated
-- [ ] #4 No behavior change for non-duplicate cases
+- [x] #1 When an authenticated heartbeat arrives for hostname H with public key K, any other active system rows with public key K and hostname != H are set inactive
+- [x] #2 Current hostname H remains active and heartbeat processing continues normally
+- [x] #3 Server logs include which duplicate hostnames were auto-deactivated
+- [x] #4 No behavior change for non-duplicate cases
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Implemented duplicate-key deactivation in heartbeat flow: on authenticated heartbeat, deactivates other active `systems` rows sharing the same `public_key` but different hostname.
+
+Added query helper `deactivate_duplicate_active_systems_by_public_key` and warning logs listing deactivated aliases.
+
+MR opened: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/221
+<!-- SECTION:NOTES:END -->
