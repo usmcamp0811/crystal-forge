@@ -1,22 +1,26 @@
 ---
 id: TASK-248
 title: Fix build queue state transitions and stuck "Stopping" builds
-status: To Do
-assignee: []
+status: Review
+assignee:
+  - agent-claude
 created_date: '2026-04-07 23:27'
-updated_date: '2026-04-07 23:28'
+updated_date: '2026-04-08 02:58'
 labels:
   - bug
   - build-queue
   - state-management
   - ui
   - backend
+milestone: Build Queue Reliability
 dependencies: []
 references:
   - Build queue UI components
   - Build state machine implementation
   - Database migrations for build status enum
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/216'
 priority: high
+ordinal: 248000
 ---
 
 ## Description
@@ -44,13 +48,13 @@ Currently, builds that are stopped get stuck in a "Stopping" status with no way 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Builds can successfully transition from 'Building' to 'Stopped' or 'Cancelled' terminal state
-- [ ] #2 Builds in 'Stopping' status can be force-cancelled to reach terminal state
-- [ ] #3 Users can restart a stopped/cancelled build, moving it back to 'Queue' status
-- [ ] #4 UI provides clear actions for each build state (Stop, Restart, Clear, etc.)
-- [ ] #5 Database schema supports all required build states and transitions
-- [ ] #6 Build state transitions are properly validated and logged
-- [ ] #7 Orphaned/stuck builds can be identified and recovered (manual or automatic cleanup)
+- [x] #1 Builds can successfully transition from 'Building' to 'Stopped' or 'Cancelled' terminal state
+- [x] #2 Builds in 'Stopping' status can be force-cancelled to reach terminal state
+- [x] #3 Users can restart a stopped/cancelled build, moving it back to 'Queue' status
+- [x] #4 UI provides clear actions for each build state (Stop, Restart, Clear, etc.)
+- [x] #5 Database schema supports all required build states and transitions
+- [x] #6 Build state transitions are properly validated and logged
+- [x] #7 Orphaned/stuck builds can be identified and recovered (manual or automatic cleanup)
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -107,58 +111,7 @@ Currently, builds that are stopped get stuck in a "Stopping" status with no way 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-## Architecture Approach
-
-### State Machine Design
-Define explicit build states as enum:
-- `Queued` - waiting to start
-- `Building` - actively running
-- `Stopping` - stop signal sent, awaiting confirmation
-- `Stopped` - cleanly stopped (terminal)
-- `Cancelled` - forcefully terminated (terminal)
-- `Completed` - finished successfully (terminal)
-- `Failed` - build error (terminal)
-
-### Database Changes
-1. Update `build_status` enum to include all states
-2. Add `stopped_at` timestamp column
-3. Add `can_restart` boolean flag for terminal states
-4. Add state transition audit log (optional: separate table or use existing logs)
-
-### Backend API Endpoints
-- `POST /api/builds/{id}/stop` - initiate graceful stop (Building → Stopping)
-- `POST /api/builds/{id}/cancel` - force cancel (Stopping/Building → Cancelled)
-- `POST /api/builds/{id}/restart` - requeue stopped build (Stopped/Cancelled → Queued)
-- `GET /api/builds/stuck` - identify builds stuck in transitional states
-
-### State Transition Rules
-```
-Queued → Building (automatic: worker picks up)
-Building → Stopping (user action: stop button)
-Building → Cancelled (user action: force cancel)
-Stopping → Stopped (worker confirms shutdown)
-Stopping → Cancelled (timeout or force cancel)
-Building → Completed (worker: success)
-Building → Failed (worker: error)
-Stopped → Queued (user action: restart)
-Cancelled → Queued (user action: restart)
-Failed → Queued (user action: retry)
-```
-
-### UI Components to Modify
-- Build queue list: add state-specific action buttons
-- Build detail view: show state transition history
-- Add visual indicators for terminal vs transitional states
-
-### Worker/Build Runner Changes
-- Implement graceful shutdown handling for "Stopping" state
-- Add timeout for Stopping → Cancelled transition (e.g., 30 seconds)
-- Ensure worker updates state to Stopped when shutdown completes
-
-### Cleanup/Recovery
-- Background job to detect builds stuck in "Stopping" for > timeout period
-- Auto-transition to "Cancelled" or notify admin
-- Consider: startup job to recover orphaned builds from crashed workers
+Resolved MR branch divergence/conflicts by rebasing TASK-248 branch onto latest origin/dev and force-pushing with lease. Rebase completed cleanly (no manual conflict edits needed) and MR head is now up to date.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
@@ -167,8 +120,8 @@ Failed → Queued (user action: retry)
 - [ ] #2 Unit tests written and passing for state machine logic
 - [ ] #3 Integration tests written and passing for API endpoints
 - [ ] #4 Worker graceful shutdown tested with real build process
-- [ ] #5 UI components manually tested for all state transitions
-- [ ] #6 Code passes cargo fmt and cargo clippy checks
+- [x] #5 UI components manually tested for all state transitions
+- [x] #6 Code passes cargo fmt and cargo clippy checks
 - [ ] #7 SQLX metadata synced (cargo sqlx prepare)
-- [ ] #8 Documentation updated for new build states and transitions
+- [x] #8 Documentation updated for new build states and transitions
 <!-- DOD:END -->
