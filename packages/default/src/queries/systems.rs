@@ -644,4 +644,18 @@ mod tests {
             "hotfix migration must update system detail view to prefer non-null heartbeat rows"
         );
     }
+
+    #[test]
+    fn hotfix_migration_restores_view_system_vulnerabilities() {
+        let migration = include_str!(
+            "../../migrations/0107_restore_view_system_vulnerabilities.sql"
+        );
+
+        assert!(
+            migration.contains("CREATE OR REPLACE VIEW public.view_system_vulnerabilities AS")
+                && migration.contains("FROM public.derivations d")
+                && migration.contains("JOIN public.cve_scans scan ON d.id = scan.derivation_id"),
+            "migration must restore the derivation-based view_system_vulnerabilities definition"
+        );
+    }
 }
