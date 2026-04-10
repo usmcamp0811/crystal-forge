@@ -3,9 +3,10 @@ id: TASK-256
 title: >-
   Emergency: restore migration 0107 in source to match applied production
   migration set
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-04-10 01:07'
+updated_date: '2026-04-10 01:07'
 labels:
   - hotfix
   - database
@@ -62,3 +63,9 @@ None.
 - [ ] #3 Targeted migration-related tests pass in nix develop
 - [ ] #4 MR is opened with verification results
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Moved to To Do per explicit human request for immediate emergency execution.
+<!-- SECTION:NOTES:END -->
