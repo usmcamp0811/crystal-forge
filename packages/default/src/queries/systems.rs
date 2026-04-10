@@ -678,6 +678,29 @@ mod tests {
     }
 
     #[test]
+    fn hotfix_migration_restores_view_system_vulnerabilities() {
+        let migration = include_str!(
+            "../../migrations/0107_restore_view_system_vulnerabilities.sql"
+        );
+
+        assert!(
+            migration.contains("CREATE OR REPLACE VIEW public.view_system_vulnerabilities AS")
+                && migration.contains("FROM public.derivations d")
+                && migration.contains("JOIN public.cve_scans scan ON d.id = scan.derivation_id")
+                && migration.contains("JOIN public.derivation_statuses ds ON d.status_id = ds.id")
+                && migration.contains("pkg_d.derivation_name AS package_name")
+                && migration.contains("pkg_d.pname AS package_pname")
+                && migration.contains("pkg_d.version AS package_version")
+                && migration.contains("ds.name = ANY (ARRAY['build-complete'::text, 'complete'::text])")
+                && !migration.contains("pkg_d.package_name")
+                && !migration.contains("pkg_d.package_pname")
+                && !migration.contains("pkg_d.package_version")
+                && !migration.contains("d.status ="),
+            "migration must restore the derivation-based view_system_vulnerabilities definition"
+        );
+    }
+
+    #[test]
     fn duplicate_public_key_hotfix_query_has_safe_predicates() {
         assert!(
             DEACTIVATE_DUPLICATE_ACTIVE_SYSTEMS_SQL.contains("is_active = TRUE"),
