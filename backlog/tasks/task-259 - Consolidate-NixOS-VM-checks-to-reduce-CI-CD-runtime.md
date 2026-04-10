@@ -1,9 +1,10 @@
 ---
 id: TASK-259
 title: Consolidate NixOS VM checks to reduce CI/CD runtime
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-04-10 03:12'
+updated_date: '2026-04-10 03:13'
 labels:
   - ci-cd
   - nix
@@ -134,4 +135,11 @@ Result must be ≤ 5.
 
 None
 <!-- SECTION:DESCRIPTION:END -->
+
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: claude-sonnet-4-6 on crystal-forge in ~/code/crystal-forge/TASK-259-consolidate-vm-checks
+<!-- SECTION:NOTES:END -->
