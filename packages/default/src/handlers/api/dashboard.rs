@@ -17,6 +17,42 @@ use sqlx::PgPool;
 use sqlx::Row;
 use tracing::error;
 
+const CVE_DASHBOARD_SUMMARY_SQL: &str = r#"
+        WITH severity_totals AS (
+            SELECT
+                COALESCE(SUM(critical_cves), 0) AS critical,
+                COALESCE(SUM(high_cves), 0) AS high,
+                COALESCE(SUM(medium_cves), 0) AS medium,
+                COALESCE(SUM(low_cves), 0) AS low,
+                COUNT(*) FILTER (WHERE total_cves > 0) AS affected_systems
+            FROM view_systems_cve_summary
+        ),
+        new_cves AS (
+            SELECT COUNT(DISTINCT v.cve_id) AS count
+            FROM view_system_vulnerabilities v
+            LEFT JOIN cves c ON c.id = v.cve_id
+            WHERE c.published_date >= (CURRENT_DATE - INTERVAL '7 days')
+        ),
+        oldest_cve AS (
+            SELECT
+                (CURRENT_DATE - MIN(c.published_date::date))::BIGINT AS age_days
+            FROM view_system_vulnerabilities v
+            LEFT JOIN cves c ON c.id = v.cve_id
+            WHERE c.published_date IS NOT NULL
+        )
+        SELECT
+            s.critical,
+            s.high,
+            s.medium,
+            s.low,
+            s.affected_systems,
+            n.count,
+            o.age_days
+        FROM severity_totals s
+        CROSS JOIN new_cves n
+        CROSS JOIN oldest_cve o
+        "#;
+
 use crate::api::models::ApiError;
 use crate::api::models::CveDashboardVulnerability;
 use crate::api::models::CveDashboardSummary;
@@ -73,41 +109,7 @@ pub async fn cve_dashboard_summary(
     }
 
     let row = match sqlx::query_as::<_, (i64, i64, i64, i64, i64, i64, Option<i64>)>(
-        r#"
-        WITH severity_totals AS (
-            SELECT
-                COALESCE(SUM(critical_cves), 0) AS critical,
-                COALESCE(SUM(high_cves), 0) AS high,
-                COALESCE(SUM(medium_cves), 0) AS medium,
-                COALESCE(SUM(low_cves), 0) AS low,
-                COUNT(*) FILTER (WHERE total_cves > 0) AS affected_systems
-            FROM view_systems_cve_summary
-        ),
-        new_cves AS (
-            SELECT COUNT(DISTINCT v.cve_id) AS count
-            FROM view_system_vulnerabilities v
-            LEFT JOIN cves c ON c.id = v.cve_id
-            WHERE c.published_date >= (CURRENT_DATE - INTERVAL '7 days')
-        ),
-        oldest_cve AS (
-            SELECT
-                DATE_PART('day', CURRENT_DATE - MIN(c.published_date))::BIGINT AS age_days
-            FROM view_system_vulnerabilities v
-            LEFT JOIN cves c ON c.id = v.cve_id
-            WHERE c.published_date IS NOT NULL
-        )
-        SELECT
-            s.critical,
-            s.high,
-            s.medium,
-            s.low,
-            s.affected_systems,
-            n.count,
-            o.age_days
-        FROM severity_totals s
-        CROSS JOIN new_cves n
-        CROSS JOIN oldest_cve o
-        "#,
+        CVE_DASHBOARD_SUMMARY_SQL,
     )
     .fetch_one(&pool)
     .await
@@ -568,5 +570,16 @@ mod tests {
         assert!(normalize_status_filter(Some("fixed")).is_err());
         // 'ignored' has no schema support; whitelisted rows are excluded by the view.
         assert!(normalize_status_filter(Some("ignored")).is_err());
+    }
+
+    #[test]
+    fn cve_summary_query_uses_integer_day_age_expression() {
+        assert!(
+            CVE_DASHBOARD_SUMMARY_SQL
+                .contains("(CURRENT_DATE - MIN(c.published_date::date))::BIGINT AS age_days")
+                && !CVE_DASHBOARD_SUMMARY_SQL
+                    .contains("DATE_PART('day', CURRENT_DATE - MIN(c.published_date))::BIGINT AS age_days"),
+            "summary SQL must compute age days without DATE_PART on integer subtraction"
+        );
     }
 }
