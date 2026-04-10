@@ -686,7 +686,13 @@ mod tests {
         assert!(
             migration.contains("CREATE OR REPLACE VIEW public.view_system_vulnerabilities AS")
                 && migration.contains("FROM public.derivations d")
-                && migration.contains("JOIN public.cve_scans scan ON d.id = scan.derivation_id"),
+                && migration.contains("JOIN public.cve_scans scan ON d.id = scan.derivation_id")
+                && migration.contains("pkg_d.derivation_name AS package_name")
+                && migration.contains("pkg_d.pname AS package_pname")
+                && migration.contains("pkg_d.version AS package_version")
+                && !migration.contains("pkg_d.package_name")
+                && !migration.contains("pkg_d.package_pname")
+                && !migration.contains("pkg_d.package_version"),
             "migration must restore the derivation-based view_system_vulnerabilities definition"
         );
     }

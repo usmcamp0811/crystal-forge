@@ -9,9 +9,9 @@
 CREATE OR REPLACE VIEW public.view_system_vulnerabilities AS
 SELECT
     d.derivation_name AS hostname,
-    pkg_d.package_name,
-    pkg_d.package_pname AS package_pname,
-    pkg_d.package_version AS package_version,
+    pkg_d.derivation_name AS package_name,
+    pkg_d.pname AS package_pname,
+    pkg_d.version AS package_version,
     pkg_d.derivation_path,
     c.id AS cve_id,
     c.cvss_v3_score,
