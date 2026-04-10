@@ -4,7 +4,7 @@ title: 'Hotfix: restore missing view_system_vulnerabilities via migration'
 status: Review
 assignee: []
 created_date: '2026-04-09 23:13'
-updated_date: '2026-04-09 23:52'
+updated_date: '2026-04-10 00:35'
 labels:
   - hotfix
   - cve
@@ -44,9 +44,13 @@ Scope:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Resolved merge conflicts in MR !222 by merging origin/dev into TASK-255 branch and keeping both the migration regression test and duplicate-system hotfix query predicate test in packages/default/src/queries/systems.rs.
+After CI rerun, builder/dashboard checks still failed in migration 107 due to removed schema columns (`pkg_d.package_name` then `d.status`).
 
-Verification rerun in nix develop environment after merge resolution: `cargo test hotfix_migration_restores_view_system_vulnerabilities` (pass) and `cargo test handle_duplicate_cleanup` (pass).
+Updated migration 0107 to current derivations schema and status model: package fields now sourced from `pkg_d.derivation_name/pname/version`, and nixos status filter now joins `derivation_statuses` via `d.status_id = ds.id` with `ds.name IN ('build-complete','complete')`.
 
-Pushed merge-resolution commit: ec4a79b6.
+Hardened migration regression test to assert modern column/filter usage and prevent reintroduction of removed `package_*`/`d.status` references.
+
+Verification (offline): `SQLX_OFFLINE=true nix develop -c cargo test hotfix_migration_restores_view_system_vulnerabilities` and `SQLX_OFFLINE=true nix develop -c cargo test handle_duplicate_cleanup` both passed.
+
+Pushed follow-up commits: df7cbee4 and 216b5155. New head pipeline started: https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2442813720
 <!-- SECTION:NOTES:END -->
