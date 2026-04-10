@@ -234,12 +234,9 @@ flake-check:
     matrix:
       - CHECK_NAME:
           - attic_cache
-          - builder
-          - dashboard
-          - database
+          - integration
           - oidc-auth
           - s3_cache
-          - server
           - web-ui
   before_script:
     # Create .netrc using CI job token (more secure)
