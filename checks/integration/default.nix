@@ -61,6 +61,9 @@ in pkgs.testers.runNixOSTest {
         "Z /var/lib/crystal-forge/.cache/nix - crystal-forge crystal-forge -"
       ];
 
+      # local-database = true (below) and dashboards.enable = true both contribute
+      # to services.postgresql.initialScript via the crystal-forge module.
+      # Do not set initialScript here to avoid conflicting definitions.
       services.postgresql = {
         enable = true;
         settings."listen_addresses" = lib.mkForce "*";
@@ -71,11 +74,6 @@ in pkgs.testers.runNixOSTest {
           "host    all   all ::1/128      trust"
           "host    all   all 10.0.2.2/32  trust"
         ];
-        initialScript = pkgs.writeText "init-crystal-forge.sql" ''
-          CREATE USER crystal_forge LOGIN;
-          CREATE DATABASE crystal_forge OWNER crystal_forge;
-          GRANT ALL PRIVILEGES ON DATABASE crystal_forge TO crystal_forge;
-        '';
       };
 
       environment.systemPackages = with pkgs; [
