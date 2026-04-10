@@ -27,6 +27,7 @@ SELECT
     commits.git_commit_hash,
     flakes.name AS flake_name
 FROM public.derivations d
+JOIN public.derivation_statuses ds ON d.status_id = ds.id
 JOIN public.commits ON d.commit_id = commits.id
 JOIN public.flakes ON commits.flake_id = flakes.id
 JOIN public.cve_scans scan ON d.id = scan.derivation_id
@@ -35,7 +36,7 @@ JOIN public.derivations pkg_d ON sp.derivation_id = pkg_d.id
 JOIN public.package_vulnerabilities pv ON pkg_d.id = pv.derivation_id
 JOIN public.cves c ON (pv.cve_id)::text = (c.id)::text
 WHERE d.derivation_type = 'nixos'
-  AND d.status = ANY (ARRAY['build-complete'::text, 'complete'::text])
+  AND ds.name = ANY (ARRAY['build-complete'::text, 'complete'::text])
   AND pkg_d.derivation_type = 'package'
   AND scan.completed_at IS NOT NULL
   AND NOT pv.is_whitelisted
