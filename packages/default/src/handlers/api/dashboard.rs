@@ -17,6 +17,31 @@ use sqlx::PgPool;
 use sqlx::Row;
 use tracing::error;
 
+const CVE_DASHBOARD_SUMMARY_SQL: &str = r#"
+        SELECT
+            -- severity totals: SUM/COUNT aggregate always returns one row
+            COALESCE(SUM(critical_cves), 0)::BIGINT                            AS critical,
+            COALESCE(SUM(high_cves), 0)::BIGINT                                AS high,
+            COALESCE(SUM(medium_cves), 0)::BIGINT                              AS medium,
+            COALESCE(SUM(low_cves), 0)::BIGINT                                 AS low,
+            COUNT(*) FILTER (WHERE total_cves > 0)::BIGINT                     AS affected_systems,
+            -- new CVEs in last 7 days: scalar subquery always returns one row (NULL if none)
+            COALESCE((
+                SELECT COUNT(DISTINCT v.cve_id)
+                FROM view_system_vulnerabilities v
+                JOIN cves c ON c.id = v.cve_id
+                WHERE c.published_date >= (CURRENT_DATE - INTERVAL '7 days')
+            ), 0)::BIGINT                                                       AS new_cves,
+            -- oldest CVE age: scalar subquery always returns one row (NULL if no data)
+            (
+                SELECT (CURRENT_DATE - MIN(c.published_date::date))::BIGINT
+                FROM view_system_vulnerabilities v
+                JOIN cves c ON c.id = v.cve_id
+                WHERE c.published_date IS NOT NULL
+            )                                                                   AS oldest_age_days
+        FROM view_systems_cve_summary
+        "#;
+
 use crate::api::models::ApiError;
 use crate::api::models::CveDashboardVulnerability;
 use crate::api::models::CveDashboardSummary;
@@ -73,30 +98,7 @@ pub async fn cve_dashboard_summary(
     }
 
     let row = match sqlx::query_as::<_, (i64, i64, i64, i64, i64, i64, Option<i64>)>(
-        r#"
-        SELECT
-            -- severity totals: SUM/COUNT aggregate always returns one row
-            COALESCE(SUM(critical_cves), 0)::BIGINT                            AS critical,
-            COALESCE(SUM(high_cves), 0)::BIGINT                                AS high,
-            COALESCE(SUM(medium_cves), 0)::BIGINT                              AS medium,
-            COALESCE(SUM(low_cves), 0)::BIGINT                                 AS low,
-            COUNT(*) FILTER (WHERE total_cves > 0)::BIGINT                     AS affected_systems,
-            -- new CVEs in last 7 days: scalar subquery always returns one row (NULL if none)
-            COALESCE((
-                SELECT COUNT(DISTINCT v.cve_id)
-                FROM view_system_vulnerabilities v
-                JOIN cves c ON c.id = v.cve_id
-                WHERE c.published_date >= (CURRENT_DATE - INTERVAL '7 days')
-            ), 0)::BIGINT                                                       AS new_cves,
-            -- oldest CVE age: scalar subquery always returns one row (NULL if no data)
-            (
-                SELECT DATE_PART('day', CURRENT_DATE - MIN(c.published_date))::BIGINT
-                FROM view_system_vulnerabilities v
-                JOIN cves c ON c.id = v.cve_id
-                WHERE c.published_date IS NOT NULL
-            )                                                                   AS oldest_age_days
-        FROM view_systems_cve_summary
-        "#,
+        CVE_DASHBOARD_SUMMARY_SQL,
     )
     .fetch_one(&pool)
     .await
@@ -557,6 +559,17 @@ mod tests {
         assert!(normalize_status_filter(Some("fixed")).is_err());
         // 'ignored' has no schema support; whitelisted rows are excluded by the view.
         assert!(normalize_status_filter(Some("ignored")).is_err());
+    }
+
+    #[test]
+    fn cve_summary_query_uses_integer_day_age_expression() {
+        assert!(
+            CVE_DASHBOARD_SUMMARY_SQL
+                .contains("(CURRENT_DATE - MIN(c.published_date::date))::BIGINT")
+                && !CVE_DASHBOARD_SUMMARY_SQL
+                    .contains("DATE_PART('day', CURRENT_DATE - MIN(c.published_date))::BIGINT"),
+            "summary SQL must compute age days without DATE_PART on integer subtraction"
+        );
     }
 
     /// Regression test: cve_dashboard_summary must not 500 when no CVE scan data exists.
