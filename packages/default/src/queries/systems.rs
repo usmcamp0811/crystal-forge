@@ -644,4 +644,25 @@ mod tests {
             "hotfix migration must update system detail view to prefer non-null heartbeat rows"
         );
     }
+
+    #[test]
+    fn hotfix_migration_restores_nonzero_cve_counts_in_system_views() {
+        let migration =
+            include_str!("../../migrations/0108_fix_system_views_cve_counts.sql");
+
+        assert!(
+            migration.contains("CREATE OR REPLACE VIEW public.view_system_list AS")
+                && migration.contains("CREATE OR REPLACE VIEW public.view_system_detail AS")
+                && migration.contains("FROM view_system_vulnerabilities")
+                && migration.contains("COALESCE(cc.critical_cve_count, 0)::integer AS critical_cve_count")
+                && migration.contains("COALESCE(cc.high_cve_count, 0)::integer AS high_cve_count")
+                && migration.contains("COALESCE(cc.medium_cve_count, 0)::integer AS medium_cve_count")
+                && migration.contains("COALESCE(cc.low_cve_count, 0)::integer AS low_cve_count")
+                && !migration.contains("0::integer AS critical_cve_count")
+                && !migration.contains("0::integer AS high_cve_count")
+                && !migration.contains("0::integer AS medium_cve_count")
+                && !migration.contains("0::integer AS low_cve_count"),
+            "migration must derive system CVE counts from view_system_vulnerabilities, not hardcode zeros"
+        );
+    }
 }
