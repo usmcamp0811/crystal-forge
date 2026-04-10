@@ -3,10 +3,10 @@ id: TASK-256
 title: >-
   Emergency: restore migration 0107 in source to match applied production
   migration set
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-04-10 01:07'
-updated_date: '2026-04-10 01:07'
+updated_date: '2026-04-10 01:08'
 labels:
   - hotfix
   - database
@@ -67,5 +67,5 @@ None.
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Moved to To Do per explicit human request for immediate emergency execution.
+LOCK: gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-256-restore-migration-0107
 <!-- SECTION:NOTES:END -->
