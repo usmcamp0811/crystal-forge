@@ -4,7 +4,7 @@ title: Investigate and fix live build log WebSocket streaming regression
 status: To Do
 assignee: []
 created_date: '2026-04-01 02:07'
-updated_date: '2026-04-02 00:05'
+updated_date: '2026-04-10 02:38'
 labels:
   - bug
   - websocket
@@ -12,6 +12,7 @@ labels:
   - backend
   - ui
   - sprint-ready
+milestone: m-12
 dependencies: []
 priority: high
 ordinal: 1000
@@ -81,5 +82,5 @@ High (observability during builds is operationally critical).
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Moved Backlog -> To Do per explicit human request in chat.
+Marked for closure by maintainer confirmation: live build log WebSocket streaming is currently working in production and this task is no longer needed as a standalone work item.
 <!-- SECTION:NOTES:END -->

@@ -2837,15 +2837,17 @@ const steps = [
       // Click the Critical severity filter button.
       const criticalBtn = page.locator("button:has-text('Critical')").first();
       await criticalBtn.waitFor({ timeout: 5000 });
-      await criticalBtn.click();
-
-      // Wait for a new vulnerabilities request that includes severity=critical.
-      await page.waitForResponse(
+      // Register response wait before clicking to avoid race conditions when the
+      // filtered request resolves very quickly in CI.
+      const filteredResponsePromise = page.waitForResponse(
         (resp) =>
           resp.url().includes("/api/v1/cves/vulnerabilities") &&
           resp.url().includes("severity=critical"),
         { timeout: 8000 },
       );
+
+      await criticalBtn.click();
+      await filteredResponsePromise;
 
       // Assert a new request was fired after the click (filter is reactive).
       if (vulnerabilityUrls.length <= initialCount) {
