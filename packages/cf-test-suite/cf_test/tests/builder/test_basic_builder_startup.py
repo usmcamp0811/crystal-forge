@@ -26,19 +26,22 @@ def test_commit_hash():
 @pytest.fixture(scope="session")
 def builder_test_data(cf_client, test_commit_hash):
     """Set up minimal test data for builder testing"""
-    # Insert test flake
+    # Insert test flake (idempotent - handles existing flake)
     flake_result = cf_client.execute_sql(
         """INSERT INTO flakes (name, repo_url)
            VALUES ('test-flake', 'http://gitserver/crystal-forge')
+           ON CONFLICT (repo_url) DO UPDATE SET name = EXCLUDED.name
            RETURNING id"""
     )
     flake_id = flake_result[0]["id"]
 
-    # Insert test commit
+    # Insert test commit (idempotent - handles existing commit)
     commit_hash = test_commit_hash or "test-commit-123"
     commit_result = cf_client.execute_sql(
         """INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp)
            VALUES (%s, %s, NOW())
+           ON CONFLICT (flake_id, git_commit_hash) DO UPDATE 
+           SET commit_timestamp = EXCLUDED.commit_timestamp
            RETURNING id""",
         (flake_id, commit_hash),
     )
