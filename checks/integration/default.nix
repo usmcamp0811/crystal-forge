@@ -123,12 +123,9 @@ in pkgs.testers.runNixOSTest {
           host = "0.0.0.0";
         };
 
-        # Builder is enabled so the service exists; it is stopped at test startup
-        # and only restarted for the builder test phase to prevent interference.
-        build = {
-          enable = true;
-          offline = false;
-        };
+        # Builder is disabled in integration check to prevent race conditions
+        # with server state transition tests. Builder has its own separate check.
+        build.enable = false;
 
         cache = {
           push_after_build = false;
@@ -181,8 +178,9 @@ in pkgs.testers.runNixOSTest {
     };
   };
 
-  # 30 minutes: database (120s) + dashboard (150s) + server (600s) + builder (300s) + overhead
-  globalTimeout = 1800;
+  # 20 minutes: database (120s) + dashboard (150s) + server (600s) + overhead
+  # Builder tests run in separate check to avoid state transition race conditions
+  globalTimeout = 1200;
 
   extraPythonPackages = p: [
     p.pytest
@@ -292,11 +290,10 @@ in pkgs.testers.runNixOSTest {
     })
 
     import cf_test
-    # Expose both keys: "server" (server/database/dashboard tests) and
-    # "cfServer" (builder tests use this key).
+    # Integration check covers server, database, and dashboard tests only.
+    # Builder tests run in separate check to avoid interference.
     cf_test._driver_machines = {
       "server": server,
-      "cfServer": server,
       "gitserver": gitserver,
     }
 
@@ -337,18 +334,6 @@ in pkgs.testers.runNixOSTest {
     if exit_code != 0:
       raise SystemExit(exit_code)
 
-    # --- Phase 4: Builder tests ---
-    print("=== Phase 4: Builder tests ===")
-    # Builder is already running; no need to start it explicitly.
-    server.wait_for_unit("crystal-forge-builder.service")
-
-    exit_code = pytest.main([
-      "-vvvv", "--tb=short", "-x", "-s",
-      "-m", "builder", "--pyargs", "cf_test",
-    ])
-    if exit_code != 0:
-      raise SystemExit(exit_code)
-
-    print("All integration tests passed.")
+    print("All integration tests (database, dashboard, server) passed.")
   '';
 }
