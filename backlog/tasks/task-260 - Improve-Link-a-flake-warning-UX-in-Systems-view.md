@@ -4,7 +4,7 @@ title: Improve "Link a flake" warning UX in Systems view
 status: In Progress
 assignee: []
 created_date: '2026-04-11 00:00'
-updated_date: '2026-04-11 00:02'
+updated_date: '2026-04-11 00:17'
 labels:
   - ux
   - systems-view
@@ -74,5 +74,15 @@ Dependencies:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-LOCK: gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-260-link-flake-warning-ux
+Implemented on branch `TASK-260-link-flake-warning-ux` (commit `c3601572`).
+
+Systems warning now includes affected hostnames and explicit remediation instructions; action link now keeps user in Systems context (`/systems`) as `Review affected systems`.
+
+Updated local Systems state update path after Edit save to refresh `flake_id` so warning can clear without hard refresh.
+
+Extended web-ui integration checks: strengthened `12b-systems-config-warning`, added `12g-systems-warning-clears-after-link`, and included both in ci_fast profile step list.
+
+Verification: `nix develop -c cargo check` (packages/web-ui) passed; `nix develop -c cargo test --no-run` (packages/web-ui) passed.
+
+Verification: `nix build .#checks.x86_64-linux.web-ui -L --show-trace` currently fails due critical step `12f-systems-deploy-modal` not showing deploy modal in one run; `12b` and new `12g` were both OK in same run. Existing unrelated failures `15e/15g` also present but non-critical per test harness summary.
 <!-- SECTION:NOTES:END -->
