@@ -224,170 +224,168 @@ in pkgs.testers.runNixOSTest {
   ];
 
   testScript = ''
-        import json
-        import os
-        import pytest
+    import json
+    import os
+    import pytest
 
-        os.environ["NIXOS_TEST_DRIVER"] = "1"
+    os.environ["NIXOS_TEST_DRIVER"] = "1"
 
-        start_all()
+    start_all()
 
-        # === Infrastructure Warmup ===
-        print("=== Infrastructure Warmup ===")
-        machine.wait_for_unit("postgresql.service")
-        machine.wait_for_unit("crystal-forge-server.service")
-        machine.wait_for_unit("crystal-forge-builder.service")
-        machine.wait_for_open_port(${toString CF_TEST_SERVER_PORT})
-        machine.wait_for_open_port(5432)
+    # === Infrastructure Warmup ===
+    print("=== Infrastructure Warmup ===")
+    machine.wait_for_unit("postgresql.service")
+    machine.wait_for_unit("crystal-forge-server.service")
+    machine.wait_for_unit("crystal-forge-builder.service")
+    machine.wait_for_open_port(${toString CF_TEST_SERVER_PORT})
+    machine.wait_for_open_port(5432)
 
-        from cf_test.vm_helpers import wait_for_git_server_ready
-        wait_for_git_server_ready(gitserver, timeout=120)
+    from cf_test.vm_helpers import wait_for_git_server_ready
+    wait_for_git_server_ready(gitserver, timeout=120)
 
-        atticCache.wait_for_unit("atticd.service")
-        atticCache.wait_for_open_port(8080)
+    atticCache.wait_for_unit("atticd.service")
+    atticCache.wait_for_open_port(8080)
 
-        s3Cache.wait_for_unit("minio.service")
-        s3Cache.wait_for_open_port(9000)
+    s3Cache.wait_for_unit("minio.service")
+    s3Cache.wait_for_open_port(9000)
 
+    # Set up test environment variables
+    main_head = "${
+      lib.strings.trim
+      (builtins.readFile (lib.crystal-forge.testFlake + "/MAIN_HEAD"))
+    }"
 
+    os.environ.update({
+      "CF_TEST_GIT_SERVER_URL": "http://gitserver/crystal-forge",
+      "CF_TEST_REAL_REPO_URL": "http://gitserver/crystal-forge",
+      "CF_TEST_REAL_COMMIT_HASH": main_head,
+      "CF_TEST_DB_HOST": "127.0.0.1",
+      "CF_TEST_DB_PORT": "5433",
+      "CF_TEST_DB_USER": "postgres",
+      "CF_TEST_DB_PASSWORD": "",
+      "CF_TEST_SERVER_HOST": "127.0.0.1",
+      "CF_TEST_SERVER_PORT": "${toString CF_TEST_SERVER_PORT}",
+      "CF_TEST_DRV": "${derivation-paths}",
+      "CF_TEST_FLAKE_NAME": "test-flake",
+    })
 
-        # Set up test environment variables
-        main_head = "${
-          lib.strings.trim
-          (builtins.readFile (lib.crystal-forge.testFlake + "/MAIN_HEAD"))
-        }"
+    machine.forward_port(5433, 5432)
+    machine.forward_port(${toString CF_TEST_SERVER_PORT}, ${
+      toString CF_TEST_SERVER_PORT
+    })
 
-        os.environ.update({
-          "CF_TEST_GIT_SERVER_URL": "http://gitserver/crystal-forge",
-          "CF_TEST_REAL_REPO_URL": "http://gitserver/crystal-forge",
-          "CF_TEST_REAL_COMMIT_HASH": main_head,
-          "CF_TEST_DB_HOST": "127.0.0.1",
-          "CF_TEST_DB_PORT": "5433",
-          "CF_TEST_DB_USER": "postgres",
-          "CF_TEST_DB_PASSWORD": "",
-          "CF_TEST_SERVER_HOST": "127.0.0.1",
-          "CF_TEST_SERVER_PORT": "${toString CF_TEST_SERVER_PORT}",
-          "CF_TEST_DRV": "${derivation-paths}",
-          "CF_TEST_FLAKE_NAME": "test-flake",
-        })
-
-        machine.forward_port(5433, 5432)
-        machine.forward_port(${toString CF_TEST_SERVER_PORT}, ${
-          toString CF_TEST_SERVER_PORT
-        })
-
-        import cf_test
-        cf_test._driver_machines = {
-          "machine": machine,
-          "cfServer": machine,
+    import cf_test
+    cf_test._driver_machines = {
+      "machine": machine,
+      "cfServer": machine,
       "gitserver": gitserver,
       "atticCache": atticCache,
       "s3Cache": s3Cache,
     }
 
-        # === Phase 1: Attic Cache Tests ===
-        print("=== Phase 1: Attic Cache Tests ===")
-        exit_code = pytest.main([
-          "-vvvv", "--tb=short", "-x", "-s",
-          "-m", "attic_cache", "--pyargs", "cf_test",
-        ])
-        if exit_code != 0:
-          raise SystemExit(exit_code)
+    # === Phase 1: Attic Cache Tests ===
+    print("=== Phase 1: Attic Cache Tests ===")
+    exit_code = pytest.main([
+      "-vvvv", "--tb=short", "-x", "-s",
+      "-m", "attic_cache", "--pyargs", "cf_test",
+    ])
+    if exit_code != 0:
+      raise SystemExit(exit_code)
 
-        # === Phase 2: S3 Cache Tests ===
-        print("=== Phase 2: S3 Cache Tests ===")
-        exit_code = pytest.main([
-          "-vvvv", "--tb=short", "-x", "-s",
-          "-m", "s3cache", "--pyargs", "cf_test",
-        ])
-        if exit_code != 0:
-          raise SystemExit(exit_code)
+    # === Phase 2: S3 Cache Tests ===
+    print("=== Phase 2: S3 Cache Tests ===")
+    exit_code = pytest.main([
+      "-vvvv", "--tb=short", "-x", "-s",
+      "-m", "s3cache", "--pyargs", "cf_test",
+    ])
+    if exit_code != 0:
+      raise SystemExit(exit_code)
 
-        # === Phase 3: Builder Tests ===
-        print("=== Phase 3: Builder Tests ===")
-        exit_code = pytest.main([
-          "-vvvv", "--tb=short", "-x", "-s",
-          "-m", "builder", "--pyargs", "cf_test",
-        ])
-        if exit_code != 0:
-          raise SystemExit(exit_code)
+    # === Phase 3: Builder Tests ===
+    print("=== Phase 3: Builder Tests ===")
+    exit_code = pytest.main([
+      "-vvvv", "--tb=short", "-x", "-s",
+      "-m", "builder", "--pyargs", "cf_test",
+    ])
+    if exit_code != 0:
+      raise SystemExit(exit_code)
 
     # === Phase 4: Web UI Tests (Playwright) ===
     print("=== Phase 4: Web UI Tests (Playwright) ===")
-        
-        # Verify server is responding
-        machine.succeed("curl -sf http://127.0.0.1:${
+
+    # Verify server is responding
+    machine.succeed("curl -sf http://127.0.0.1:${
+      toString CF_TEST_SERVER_PORT
+    }/status | jq .")
+    print("Server is up and responding")
+
+    # Create output directories
+    machine.succeed("mkdir -p /tmp/screenshots")
+    machine.succeed("mkdir -p /tmp/web-ui-tests")
+
+    # Copy test files into VM
+    machine.succeed("cp -r ${testDir}/* /tmp/web-ui-tests/")
+
+    test_profile = "ci_fast"
+
+    # Run the integration test script
+    machine.succeed(
+        f"nohup env CF_UI_TEST_PROFILE={test_profile} ${pkgs.nodejs}/bin/node /tmp/web-ui-tests/integration-test.js http://127.0.0.1:${
           toString CF_TEST_SERVER_PORT
-        }/status | jq .")
-        print("Server is up and responding")
+        } /tmp/screenshots > /tmp/web-ui-tests/integration.log 2>&1 </dev/null &"
+    )
+    machine.wait_until_succeeds("test -f /tmp/screenshots/results.json", timeout=1800)
+    output = machine.succeed("cat /tmp/web-ui-tests/integration.log")
+    print(output)
 
-        # Create output directories
-        machine.succeed("mkdir -p /tmp/screenshots")
-        machine.succeed("mkdir -p /tmp/web-ui-tests")
+    # Read results
+    results_json = machine.succeed("cat /tmp/screenshots/results.json")
+    results = json.loads(results_json)
 
-        # Copy test files into VM
-        machine.succeed("cp -r ${testDir}/* /tmp/web-ui-tests/")
+    # Copy screenshots out
+    for r in results:
+        if r.get("ok"):
+            machine.copy_from_vm(f"/tmp/screenshots/{r['name']}.png", "screenshots")
 
-        test_profile = "ci_fast"
+    ok_count = sum(1 for r in results if r.get("ok"))
 
-        # Run the integration test script
-        machine.succeed(
-            f"nohup env CF_UI_TEST_PROFILE={test_profile} ${pkgs.nodejs}/bin/node /tmp/web-ui-tests/integration-test.js http://127.0.0.1:${
-              toString CF_TEST_SERVER_PORT
-            } /tmp/screenshots > /tmp/web-ui-tests/integration.log 2>&1 </dev/null &"
-        )
-        machine.wait_until_succeeds("test -f /tmp/screenshots/results.json", timeout=1800)
-        output = machine.succeed("cat /tmp/web-ui-tests/integration.log")
-        print(output)
+    print("\n=== Summary ===")
+    print(f"  Screenshots: {ok_count}/{len(results)} captured")
 
-        # Read results
-        results_json = machine.succeed("cat /tmp/screenshots/results.json")
-        results = json.loads(results_json)
+    for r in results:
+        status = "OK" if r.get("ok") else "FAIL"
+        error = r.get("error", "")
+        if error:
+            print(f"  [{status}] {r['name']} - {error}")
+        else:
+            print(f"  [{status}] {r['name']}")
 
-        # Copy screenshots out
-        for r in results:
-            if r.get("ok"):
-                machine.copy_from_vm(f"/tmp/screenshots/{r['name']}.png", "screenshots")
+    if ok_count == 0:
+        raise Exception("All screenshots failed")
 
-        ok_count = sum(1 for r in results if r.get("ok"))
-
-        print("\n=== Summary ===")
-        print(f"  Screenshots: {ok_count}/{len(results)} captured")
-
-        for r in results:
-            status = "OK" if r.get("ok") else "FAIL"
-            error = r.get("error", "")
-            if error:
-                print(f"  [{status}] {r['name']} - {error}")
-            else:
-                print(f"  [{status}] {r['name']}")
-
-        if ok_count == 0:
-            raise Exception("All screenshots failed")
-
-        # Fail if critical tests failed
-        critical_tests = [
-          "01-login-page",
-          "02-registration",
-          "05-login-submit",
-          "06-dashboard",
-          "06x-pipeline-readiness-scroll",
-          "06y-recent-deployments-scroll",
-          "06z-fleet-health-widget-assert",
-          "15-builds",
-          "11b-builds-queue-card-focus",
-          "15h-builds-completed-restart-action",
-          "12c-systems-modal-config-field",
-          "12e-systems-edit-modal",
-          "12f-systems-deploy-modal",
-          "13e-flakes-add-modal-credentials",
-          "13f-flakes-edit-modal-credentials",
-          "16-cves",
-          "16b-cves-severity-filter",
-        ]
-        failed_critical = [r['name'] for r in results if r['name'] in critical_tests and not r.get('ok')]
-        if failed_critical:
-            raise Exception(f"Critical web UI checks failed: {failed_critical}")
+    # Fail if critical tests failed
+    critical_tests = [
+      "01-login-page",
+      "02-registration",
+      "05-login-submit",
+      "06-dashboard",
+      "06x-pipeline-readiness-scroll",
+      "06y-recent-deployments-scroll",
+      "06z-fleet-health-widget-assert",
+      "15-builds",
+      "11b-builds-queue-card-focus",
+      "15h-builds-completed-restart-action",
+      "12c-systems-modal-config-field",
+      "12e-systems-edit-modal",
+      "12f-systems-deploy-modal",
+      "13e-flakes-add-modal-credentials",
+      "13f-flakes-edit-modal-credentials",
+      "16-cves",
+      "16b-cves-severity-filter",
+    ]
+    failed_critical = [r['name'] for r in results if r['name'] in critical_tests and not r.get('ok')]
+    if failed_critical:
+        raise Exception(f"Critical web UI checks failed: {failed_critical}")
 
     print("\n=== All Mega Integration Tests Passed ===")
     print("Completed: Cache (Attic+S3), Builder, Web UI")
