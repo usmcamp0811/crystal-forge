@@ -4,7 +4,7 @@ title: Consolidate NixOS VM checks to reduce CI/CD runtime
 status: Review
 assignee: []
 created_date: '2026-04-10 03:12'
-updated_date: '2026-04-11 03:12'
+updated_date: '2026-04-11 03:21'
 labels:
   - ci-cd
   - nix
@@ -181,4 +181,12 @@ The test configuration in integration check matches the old server check exactly
 3. A test that needs a longer wait/retry
 
 Recommendation: This is not related to the consolidation work itself (same test, same config, just different check name). Suggest addressing in a follow-up task or investigating if this also fails on dev branch.
+
+Fixes pushed:
+- web-ui: Fixed Python IndentationError in testScript (commit f73d7816)
+- CI: Removed old check names from matrix (commit e952bd02)
+
+Remaining issue:
+- integration: test_flake_initialization_commits failing (1 commit initialized vs expected 5)
+  This appears to be a timing/race condition in server initialization, not related to consolidation.
 <!-- SECTION:NOTES:END -->
