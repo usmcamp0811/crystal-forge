@@ -31,7 +31,7 @@ use crate::queries::systems::{
     update_system_metadata,
 };
 use crate::queries::cve_scans::{get_scan_by_id, resolve_system_cve_scan_target};
-use crate::services::cve_scans::trigger_immediate_cve_scan;
+use crate::services::cve_scans::{trigger_immediate_cve_scan, CveScanError};
 use crate::services::systems::SystemsListContext;
 
 pub async fn list_systems(
@@ -389,7 +389,10 @@ pub async fn trigger_system_cve_scan(
 
     let scan_id = match trigger_immediate_cve_scan(pool.clone(), target.derivation_id).await {
         Ok(value) => value,
-        Err(err) => return internal_error(&format!("Failed to queue CVE scan: {err}")),
+        Err(CveScanError::VulnixUnavailable) => return scan_ineligible_response(),
+        Err(CveScanError::Internal(err)) => {
+            return internal_error(&format!("Failed to queue CVE scan: {err}"))
+        }
     };
 
     if record_system_mutation_audit(
@@ -1057,6 +1060,21 @@ fn internal_error(message: &str) -> axum::response::Response {
         .into_response()
 }
 
+/// 409 response returned when a CVE scan prerequisite (e.g. vulnix) is not satisfied.
+/// Centralised here so systems and flakes handlers share the same error code and message.
+pub(crate) fn scan_ineligible_response() -> axum::response::Response {
+    (
+        StatusCode::CONFLICT,
+        Json(ApiError {
+            error: "scan_ineligible".to_string(),
+            message: "vulnix is not available on this node; immediate scan cannot start"
+                .to_string(),
+            details: None,
+        }),
+    )
+        .into_response()
+}
+
 fn action_to_str(action: AuditAction) -> &'static str {
     match action {
         AuditAction::UserCreated => "user_created",
@@ -1548,5 +1566,24 @@ mod tests {
             action_to_str(AuditAction::CveScanRequested),
             "cve_scan_requested"
         );
+    }
+
+    // ── CVE trigger ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn scan_ineligible_response_returns_409_with_correct_error_code() {
+        let response = scan_ineligible_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn cve_scan_error_vulnix_unavailable_display_is_stable() {
+        use crate::services::cve_scans::CveScanError;
+        let msg = CveScanError::VulnixUnavailable.to_string();
+        assert!(
+            msg.contains("vulnix"),
+            "display must mention vulnix: {msg}"
+        );
+        assert!(matches!(CveScanError::VulnixUnavailable, CveScanError::VulnixUnavailable));
     }
 }
