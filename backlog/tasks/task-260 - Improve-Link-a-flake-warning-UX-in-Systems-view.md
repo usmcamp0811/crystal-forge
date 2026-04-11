@@ -1,9 +1,10 @@
 ---
 id: TASK-260
 title: Improve "Link a flake" warning UX in Systems view
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-04-11 00:00'
+updated_date: '2026-04-11 00:02'
 labels:
   - ux
   - systems-view
@@ -14,16 +15,64 @@ dependencies: []
 references:
   - packages/web-ui/src/views
   - packages/default/src/handlers/api/systems.rs
-priority: medium
-ordinal: 9200
+  - checks/web-ui/tests/integration-test.js
+priority: high
+ordinal: 860
 ---
 
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Problem:
-In Systems view, the warning "1 system is not linked to a flake and won't be included in evaluations" links to the Flakes view, but does not clearly show which flake/system actions are needed. Users land on Flakes without enough context and it is not obvious how to resolve the warning.
+Problem Statement:
+In Systems view, users see the warning: "1 system is not linked to a flake and won't be included in evaluations." The current "Link a flake" action navigates to the Flakes page without enough context about which system(s) are affected or what exact action clears the warning. This makes remediation non-obvious.
 
-Desired outcome:
-Make the warning actionable by showing affected system(s) and clear next steps to resolve. The workflow should make it obvious how to link a flake to the impacted system(s) so the warning can be cleared.
+Goal:
+Make the warning actionable in-place by clearly identifying impacted system(s) and guiding users to the exact remediation flow so they can link a flake and clear the warning.
+
+Non-Goals:
+- No backend data model changes for systems/flakes relationships.
+- No redesign of the full Systems page layout.
+- No new flake creation workflow.
+
+Scope:
+- Improve Systems-view warning content and action UX for unlinked systems.
+- Show impacted system identifiers in the warning context.
+- Provide a direct remediation path (or explicit guided steps) that makes the warning dismiss condition obvious.
+
+Verification Plan:
+- Update/extend web-ui integration checks to assert warning content includes impacted system context.
+- Verify action path from warning leads to a resolvable linking flow.
+- Run focused web-ui check(s) and relevant targeted tests in nix devshell.
+
+Architectural Constraints:
+- Keep business logic in backend/query/API layer; UI renders server-provided data and guidance.
+- Follow existing web-ui component patterns and accessibility conventions.
+- Keep scope tightly limited to unlinked-system warning UX.
+
+Impact Areas:
+- `packages/web-ui/src/views/systems*`
+- `packages/web-ui/src/components/*` (if warning component reused)
+- `checks/web-ui/tests/integration-test.js`
+- Potentially related systems API warning payload mapping (no contract break unless explicitly updated)
+
+Risk Level:
+Medium (UX correctness and operator workflow; low data risk).
+
+Dependencies:
+- None.
 <!-- SECTION:DESCRIPTION:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 Systems warning for unlinked flakes identifies affected system(s) (hostname and count at minimum).
+- [ ] #2 Warning action provides an explicit remediation path to link a flake for the affected system(s).
+- [ ] #3 After linking a flake to an affected system, warning no longer appears for that system on refresh.
+- [ ] #4 UI copy clearly explains why the warning appears and what action resolves it.
+- [ ] #5 Web-ui integration check(s) cover warning context and remediation-path behavior.
+<!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Promoted to To Do by explicit user request for immediate execution.
+<!-- SECTION:NOTES:END -->
