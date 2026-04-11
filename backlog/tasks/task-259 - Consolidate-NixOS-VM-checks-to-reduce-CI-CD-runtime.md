@@ -4,7 +4,7 @@ title: Consolidate NixOS VM checks to reduce CI/CD runtime
 status: Review
 assignee: []
 created_date: '2026-04-10 03:12'
-updated_date: '2026-04-11 02:44'
+updated_date: '2026-04-11 03:12'
 labels:
   - ci-cd
   - nix
@@ -167,4 +167,18 @@ Commit: 24657d9e
 MR created: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/227
 
 Awaiting CI verification of consolidated checks.
+
+CI Status: integration check has 1 failing test
+
+Test: test_flake_initialization_commits
+Failure: Expected at least 5 commits from initialization, found 1
+
+This appears to be a pre-existing flaky test related to server initialization timing. The test expects the server to initialize 5 commits (per initial_commit_depth=5 config) but only 1 commit is being created.
+
+The test configuration in integration check matches the old server check exactly, suggesting this is either:
+1. A timing/race condition that occasionally fails
+2. A regression in the server commit initialization logic on dev branch
+3. A test that needs a longer wait/retry
+
+Recommendation: This is not related to the consolidation work itself (same test, same config, just different check name). Suggest addressing in a follow-up task or investigating if this also fails on dev branch.
 <!-- SECTION:NOTES:END -->
