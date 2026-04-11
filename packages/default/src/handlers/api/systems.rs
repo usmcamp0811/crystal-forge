@@ -389,7 +389,21 @@ pub async fn trigger_system_cve_scan(
 
     let scan_id = match trigger_immediate_cve_scan(pool.clone(), target.derivation_id).await {
         Ok(value) => value,
-        Err(err) => return internal_error(&format!("Failed to queue CVE scan: {err}")),
+        Err(err) => {
+            let err_msg = err.to_string();
+            if err_msg.contains("vulnix is not available") {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(ApiError {
+                        error: "scan_ineligible".to_string(),
+                        message: "vulnix is not available on this node; immediate scan cannot start".to_string(),
+                        details: None,
+                    }),
+                )
+                    .into_response();
+            }
+            return internal_error(&format!("Failed to queue CVE scan: {err}"));
+        }
     };
 
     if record_system_mutation_audit(

@@ -1885,6 +1885,18 @@ pub async fn trigger_flake_config_cve_scan(
     let scan_id = match trigger_immediate_cve_scan(pool.clone(), target.derivation_id).await {
         Ok(value) => value,
         Err(err) => {
+            let err_msg = err.to_string();
+            if err_msg.contains("vulnix is not available") {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(ApiError {
+                        error: "scan_ineligible".to_string(),
+                        message: "vulnix is not available on this node; immediate scan cannot start".to_string(),
+                        details: None,
+                    }),
+                )
+                    .into_response();
+            }
             error!(
                 "Failed to queue immediate CVE scan for flake {} config {}: {err:#}",
                 flake_id, target.config_name
