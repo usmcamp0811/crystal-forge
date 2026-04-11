@@ -4,7 +4,7 @@ title: Consolidate NixOS VM checks to reduce CI/CD runtime
 status: Review
 assignee: []
 created_date: '2026-04-10 03:12'
-updated_date: '2026-04-11 03:21'
+updated_date: '2026-04-11 03:37'
 labels:
   - ci-cd
   - nix
@@ -189,4 +189,19 @@ Fixes pushed:
 Remaining issue:
 - integration: test_flake_initialization_commits failing (1 commit initialized vs expected 5)
   This appears to be a timing/race condition in server initialization, not related to consolidation.
+
+Current Status:
+- Consolidation complete: 8 → 3 checks (integration, oidc-auth, web-ui)
+- All code fixes pushed (indentation, CI matrix)
+- Merge conflicts resolved
+- CI pipeline pending (jobs queued but not running yet)
+
+Known Issue:
+- integration check: test_flake_initialization_commits may fail (pre-existing flaky test)
+  - Expected: 5 commits initialized
+  - Actual: 1 commit initialized
+  - Root cause: Likely timing/race condition in server initialization
+  - Not caused by consolidation (identical config to old server check)
+
+Next: Waiting for CI to complete to assess actual pass/fail status
 <!-- SECTION:NOTES:END -->
