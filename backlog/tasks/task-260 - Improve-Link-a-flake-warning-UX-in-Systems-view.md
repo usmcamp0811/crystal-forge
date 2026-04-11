@@ -1,10 +1,10 @@
 ---
 id: TASK-260
 title: Improve "Link a flake" warning UX in Systems view
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-04-11 00:00'
-updated_date: '2026-04-11 00:52'
+updated_date: '2026-04-11 01:11'
 labels:
   - ux
   - systems-view
@@ -74,7 +74,7 @@ Dependencies:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Follow-up commit `6701cb47` stabilizes `12f-systems-deploy-modal` by asserting `Deploy System` heading visibility before commit-selector assertion.
+MR opened: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/225
 
-Re-verified with `nix build .#checks.x86_64-linux.web-ui -L --show-trace`: `12f` now passes, along with TASK-260 steps (`12b`, `12g`). Existing non-critical failures remain in `15e` and `15g`.
+Included web-ui screenshot attachments from check output in MR description (`12b-systems-config-warning`, `12g-systems-warning-clears-after-link`).
 <!-- SECTION:NOTES:END -->
