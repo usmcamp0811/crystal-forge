@@ -9,6 +9,10 @@ use sqlx::PgPool;
 use tracing::debug;
 use uuid::Uuid;
 
+fn truncate_for_varchar(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
+}
+
 /// Get derivations that need CVE scanning
 pub async fn get_targets_needing_cve_scan(
     pool: &PgPool,
@@ -255,6 +259,13 @@ pub async fn save_scan_results(
         );
 
         let store_path = get_store_path_from_drv(&entry.derivation).await?;
+        let package_version = truncate_for_varchar(&entry.version, 100);
+        if package_version != entry.version {
+            debug!(
+                "Truncated package version for DB insert (max=100): original='{}', truncated='{}'",
+                entry.version, package_version
+            );
+        }
         // Insert package as a derivation with type 'package' and NULL commit_id
         let package_derivation_id = sqlx::query!(
             r#"
@@ -283,7 +294,7 @@ pub async fn save_scan_results(
             entry.derivation, // This is the derivation path from vulnix
             None::<String>,   // derivation_target is NULL for packages discovered during scanning
             entry.pname,
-            entry.version,
+            package_version,
             11i32, // Status ID for 'complete'
             store_path,
         )

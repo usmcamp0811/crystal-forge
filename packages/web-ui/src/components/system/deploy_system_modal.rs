@@ -37,7 +37,7 @@ pub fn DeploySystemModal(
     rsx! {
         // Modal backdrop
         div {
-            class: "fixed inset-0 bg-black/50 flex items-center justify-center z-50",
+            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
             onclick: move |_| on_close.call(()),
 
             // Modal content
