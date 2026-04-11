@@ -47,7 +47,7 @@ pub fn EditSystemModal(
 
             // Modal content
             div {
-                class: "relative bg-gray-900 rounded-xl border {theme::surface::CARD_BORDER} shadow-2xl w-full max-w-2xl mx-4",
+                class: "relative bg-gray-900 rounded-xl border {theme::surface::CARD_BORDER} shadow-2xl w-full max-w-xl mx-4",
                 onclick: move |e| e.stop_propagation(),
 
                 // Header

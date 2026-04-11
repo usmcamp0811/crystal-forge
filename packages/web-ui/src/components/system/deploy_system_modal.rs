@@ -42,7 +42,7 @@ pub fn DeploySystemModal(
 
             // Modal content
             div {
-                class: "bg-gray-900 rounded-xl border {theme::surface::CARD_BORDER} shadow-2xl w-full max-w-3xl mx-4 max-h-[90vh] overflow-hidden flex flex-col",
+                class: "bg-gray-900 rounded-xl border {theme::surface::CARD_BORDER} shadow-2xl w-full max-w-2xl mx-4 max-h-[90vh] overflow-hidden flex flex-col",
                 onclick: move |e| e.stop_propagation(),
 
                 // Header
