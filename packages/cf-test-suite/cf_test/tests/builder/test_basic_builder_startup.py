@@ -72,10 +72,8 @@ def builder_test_data(cf_client, test_commit_hash):
 
     yield test_data
 
-    # Cleanup
-    cf_client.execute_sql("DELETE FROM derivations WHERE id = %s", (derivation_id,))
-    cf_client.execute_sql("DELETE FROM commits WHERE id = %s", (commit_id,))
-    cf_client.execute_sql("DELETE FROM flakes WHERE id = %s", (flake_id,))
+    # No teardown cleanup needed - fixture is idempotent and session-scoped
+    # Database is destroyed with the VM after tests complete
 
 
 def test_builder_service_exists_and_runs(cf_client, cfServer):
