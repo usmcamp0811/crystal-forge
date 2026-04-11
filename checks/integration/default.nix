@@ -205,9 +205,6 @@ in pkgs.testers.runNixOSTest {
     server.wait_for_unit("postgresql.service")
     server.wait_for_open_port(5432)
 
-    # Stop builder immediately; it will be started again for the builder test phase.
-    server.succeed("systemctl stop crystal-forge-builder.service || true")
-
     # Migrations are automatically run by the crystal-forge module (local-database = true).
     # No explicit migration call needed here.
 
@@ -341,9 +338,8 @@ in pkgs.testers.runNixOSTest {
       raise SystemExit(exit_code)
 
     # --- Phase 4: Builder tests ---
-    # Start the builder now that server tests are done to prevent interference.
     print("=== Phase 4: Builder tests ===")
-    server.succeed("systemctl start crystal-forge-builder.service")
+    # Builder is already running; no need to start it explicitly.
     server.wait_for_unit("crystal-forge-builder.service")
 
     exit_code = pytest.main([
