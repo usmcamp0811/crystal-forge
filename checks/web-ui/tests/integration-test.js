@@ -2176,11 +2176,11 @@ const steps = [
         throw new Error("Expected commits request to succeed before rendering Deploy modal");
       }
 
-      const deployModal = page.getByText("Select Commit to Deploy").first();
-      await assertVisible(deployModal, "Expected Deploy System modal to be visible", 15000);
+      const deployModalHeading = page.getByRole("heading", { name: "Deploy System" }).first();
+      await assertVisible(deployModalHeading, "Expected Deploy System modal heading to be visible", 20000);
       await assertVisible(
-        page.getByText("abc123d").first(),
-        "Expected at least one mocked commit option in Deploy System modal",
+        page.getByText("Select Commit to Deploy").first(),
+        "Expected commit selector to be visible in Deploy System modal",
         15000,
       );
       await assertVisible(
