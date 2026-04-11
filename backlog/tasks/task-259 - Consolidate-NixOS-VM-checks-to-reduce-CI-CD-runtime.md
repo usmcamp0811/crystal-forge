@@ -1,10 +1,10 @@
 ---
 id: TASK-259
 title: Consolidate NixOS VM checks to reduce CI/CD runtime
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-04-10 03:12'
-updated_date: '2026-04-11 02:43'
+updated_date: '2026-04-11 02:44'
 labels:
   - ci-cd
   - nix
@@ -163,4 +163,8 @@ All acceptance criteria met:
 - AC#11: Reused existing helpers (makeGitServerNode, makeAtticCacheNode, makeS3CacheNode) ✓
 
 Commit: 24657d9e
+
+MR created: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/227
+
+Awaiting CI verification of consolidated checks.
 <!-- SECTION:NOTES:END -->
