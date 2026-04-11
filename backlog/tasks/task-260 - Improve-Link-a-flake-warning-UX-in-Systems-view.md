@@ -4,7 +4,7 @@ title: Improve "Link a flake" warning UX in Systems view
 status: Review
 assignee: []
 created_date: '2026-04-11 00:00'
-updated_date: '2026-04-11 01:11'
+updated_date: '2026-04-11 01:55'
 labels:
   - ux
   - systems-view
@@ -74,7 +74,7 @@ Dependencies:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-MR opened: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/225
+Resolved MR !225 merge conflicts by merging latest `origin/dev` and pushing merge commit `b05eb74b`.
 
-Included web-ui screenshot attachments from check output in MR description (`12b-systems-config-warning`, `12g-systems-warning-clears-after-link`).
+Current MR state: `has_conflicts=false`; head pipeline: https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2445502520 (pending).
 <!-- SECTION:NOTES:END -->
