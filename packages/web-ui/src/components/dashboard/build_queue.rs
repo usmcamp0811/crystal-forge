@@ -29,10 +29,7 @@ pub fn BuildQueuePanel(
         }
     });
 
-    let max_items = if flake_filter.is_some() { 4 } else { 5 };
-    let total_items = active_items.len();
-    let filtered_items: Vec<BuildQueueItem> = active_items.into_iter().take(max_items).collect();
-    let remaining_count = total_items.saturating_sub(filtered_items.len());
+    let filtered_items: Vec<BuildQueueItem> = active_items;
 
     let mut queued_rank = 0;
     let ordered_rows: Vec<(BuildQueueItem, Option<String>)> = filtered_items
@@ -54,7 +51,7 @@ pub fn BuildQueuePanel(
 
     rsx! {
         div {
-            class: "flex flex-col h-full",
+            class: "flex flex-col h-full min-h-0 overflow-hidden",
             "data-testid": "build-queue",
 
             if let Some(ref flake_name) = flake_filter {
@@ -92,15 +89,11 @@ pub fn BuildQueuePanel(
                 p { class: "text-sm {theme::text::SECONDARY}", "No builds running or queued." }
             } else {
                 div {
-                    class: "flex-1 min-h-0 overflow-hidden space-y-2",
+                    class: "flex-1 min-h-0 overflow-y-auto space-y-2 pr-1",
+                    style: "overflow-y: auto; overscroll-behavior: contain;",
+                    "data-testid": "build-queue-scroll",
                     for (item, label) in ordered_rows {
                         BuildQueueRow { item, position_label: label }
-                    }
-                }
-                if remaining_count > 0 {
-                    p {
-                        class: "text-[10px] {theme::text::MUTED} mt-2",
-                        "+{remaining_count} more builds queued"
                     }
                 }
             }

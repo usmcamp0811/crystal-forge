@@ -18,6 +18,10 @@ pub struct CveScanEligibleTarget {
     pub blocked_reason: Option<String>,
 }
 
+fn truncate_for_varchar(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
+}
+
 /// Get derivations that need CVE scanning
 pub async fn get_targets_needing_cve_scan(
     pool: &PgPool,
@@ -221,6 +225,17 @@ pub async fn save_scan_results(
     vulnix_results: &VulnixScanOutput,
     scan_duration_ms: Option<i32>,
 ) -> Result<()> {
+    save_scan_results_with_store_path_override(pool, scan_id, vulnix_results, scan_duration_ms, None)
+        .await
+}
+
+pub(crate) async fn save_scan_results_with_store_path_override(
+    pool: &PgPool,
+    scan_id: Uuid,
+    vulnix_results: &VulnixScanOutput,
+    scan_duration_ms: Option<i32>,
+    store_path_override: Option<&str>,
+) -> Result<()> {
     // Calculate statistics from vulnix results
     let stats = VulnixParser::calculate_stats(vulnix_results);
 
@@ -263,7 +278,17 @@ pub async fn save_scan_results(
             entry.name, entry.pname, entry.version, entry.derivation, entry.affected_by
         );
 
-        let store_path = get_store_path_from_drv(&entry.derivation).await?;
+        let store_path = match store_path_override {
+            Some(path) => path.to_string(),
+            None => get_store_path_from_drv(&entry.derivation).await?,
+        };
+        let package_version = truncate_for_varchar(&entry.version, 100);
+        if package_version != entry.version {
+            debug!(
+                "Truncated package version for DB insert (max=100): original='{}', truncated='{}'",
+                entry.version, package_version
+            );
+        }
         // Insert package as a derivation with type 'package' and NULL commit_id
         let package_derivation_id = sqlx::query!(
             r#"
@@ -292,7 +317,7 @@ pub async fn save_scan_results(
             entry.derivation, // This is the derivation path from vulnix
             None::<String>,   // derivation_target is NULL for packages discovered during scanning
             entry.pname,
-            entry.version,
+            package_version,
             11i32, // Status ID for 'complete'
             store_path,
         )
