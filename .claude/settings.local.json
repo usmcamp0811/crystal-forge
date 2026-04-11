@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//home/mcamp/code/crystal-forge/TASK-259-consolidate-vm-checks/**)",
+      "Bash(rm -rf checks/server checks/database checks/dashboard checks/builder)",
+      "Bash(grep -r \"checks\\\\.\\\\\\(server\\\\|database\\\\|dashboard\\\\|builder\\\\\\)\" /home/mcamp/code/crystal-forge/TASK-259-consolidate-vm-checks --include=*.nix --include=*.yml --include=*.yaml --include=*.json -l)",
+      "Bash(nix build:*)",
+      "Bash(distill \"what is the first meaningful failure? Show: which test phase failed, which unit or assertion failed, the exact error message. Be concise, max 8 lines.\")"
+    ]
+  }
+}

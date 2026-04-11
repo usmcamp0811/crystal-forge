@@ -18,9 +18,9 @@ use web_sys::{Node, window};
 
 use crate::api::client::{
     ApiClientError, accept_flake_history_rewrite, create_flake, delete_flake,
-    delete_flake_credentials, fetch_commit_diff, fetch_flake_credentials, fetch_flake_timelines,
-    fetch_flake_timelines_for_ids, fetch_flakes, put_flake_credentials, request_sync_all_flakes,
-    request_sync_flake, update_flake,
+    delete_flake_credentials, fetch_commit_diff, fetch_cve_scan_status, fetch_flake_credentials,
+    fetch_flake_timelines, fetch_flake_timelines_for_ids, fetch_flakes, put_flake_credentials,
+    request_sync_all_flakes, request_sync_flake, trigger_flake_config_cve_scan, update_flake,
 };
 use crate::api::models::{
     BuildStatus as ApiBuildStatus, CreateFlakeCredentialRequest, CreateFlakeRequest,
@@ -347,6 +347,7 @@ pub fn FlakesListView() -> Element {
     let mut sync_note = use_signal(|| None::<String>);
     let mut last_manual_sync = use_signal(|| None::<DateTime<Utc>>);
     let mut rewrite_prompt = use_signal(|| None::<(i32, String, String)>);
+    let mut cve_scan_status = use_signal(HashMap::<String, String>::new);
 
     let current_flakes = flakes.read().clone();
     let environments = unique_environments(&current_flakes);
@@ -802,6 +803,7 @@ pub fn FlakesListView() -> Element {
                 selected_flake_id: selected_history_flake,
                 selected_commit_hash: selected_history_commit,
                 timelines: flake_timelines.read().clone(),
+                cve_scan_status: cve_scan_status,
             }
 
             if let Some(editing) = editing_flake.read().clone() {
@@ -1288,6 +1290,7 @@ fn FlakeHistoryExplorer(
     selected_flake_id: Signal<Option<i32>>,
     selected_commit_hash: Signal<Option<String>>,
     timelines: Vec<FlakeTimeline>,
+    cve_scan_status: Signal<HashMap<String, String>>,
 ) -> Element {
     use crate::hooks::websocket::{SystemEvalStatus, use_websocket_eval_stream};
     let navigator = use_navigator();
@@ -1724,6 +1727,77 @@ fn FlakeHistoryExplorer(
                                                                 if let Some(detail) = path_detail.as_ref() {
                                                                     if detail.is_cf_system {
                                                                         span { class: "text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-200 border border-blue-500/40", "CF system" }
+                                                                    }
+
+                                                                    {
+                                                                        let scan_key = format!("{}::{}", active_flake_id, detail.config_name);
+                                                                        let current_scan_status = cve_scan_status.read().get(&scan_key).cloned();
+                                                                        let disabled_reason = detail.cve_scan_blocked_reason.clone().unwrap_or_else(|| "CVE scan eligibility unavailable".to_string());
+                                                                        let can_trigger_scan = detail.cve_scan_eligible;
+                                                                        rsx! {
+                                                                            button {
+                                                                                class: "text-[10px] uppercase tracking-wide px-2 py-1 rounded border border-amber-500/50 bg-amber-500/10 text-amber-200 hover:bg-amber-500/20 disabled:opacity-60 disabled:cursor-not-allowed",
+                                                                                disabled: !can_trigger_scan,
+                                                                                title: if can_trigger_scan {
+                                                                                    Some("Run CVE scan immediately")
+                                                                                } else {
+                                                                                    Some(disabled_reason.as_str())
+                                                                                },
+                                                                                onclick: {
+                                                                                    let config_name = detail.config_name.clone();
+                                                                                    move |_| {
+                                                                                        if !can_trigger_scan {
+                                                                                            return;
+                                                                                        }
+
+                                                                                        let key = format!("{}::{}", active_flake_id, config_name.clone());
+                                                                                        let request_config_name = config_name.clone();
+                                                                                        cve_scan_status.write().insert(key.clone(), "queued".to_string());
+
+                                                                                        spawn(async move {
+                                                                                            match trigger_flake_config_cve_scan(active_flake_id, &request_config_name).await {
+                                                                                                Ok(triggered) => {
+                                                                                                    cve_scan_status.write().insert(key.clone(), "running".to_string());
+                                                                                                    for _ in 0..25 {
+                                                                                                        match fetch_cve_scan_status(&triggered.scan_id).await {
+                                                                                                            Ok(status) => {
+                                                                                                                let normalized = status.status.to_lowercase();
+                                                                                                                if normalized == "completed" {
+                                                                                                                    cve_scan_status.write().insert(key.clone(), "completed".to_string());
+                                                                                                                    break;
+                                                                                                                }
+                                                                                                                if normalized == "failed" {
+                                                                                                                    cve_scan_status.write().insert(key.clone(), "failed".to_string());
+                                                                                                                    break;
+                                                                                                                }
+                                                                                                                cve_scan_status.write().insert(key.clone(), "running".to_string());
+                                                                                                            }
+                                                                                                            Err(_) => {
+                                                                                                                cve_scan_status.write().insert(key.clone(), "status_error".to_string());
+                                                                                                                break;
+                                                                                                            }
+                                                                                                        }
+
+                                                                                                        use gloo_timers::future::TimeoutFuture;
+                                                                                                        TimeoutFuture::new(1500).await;
+                                                                                                    }
+                                                                                                }
+                                                                                                Err(_) => {
+                                                                                                    cve_scan_status.write().insert(key.clone(), "trigger_failed".to_string());
+                                                                                                }
+                                                                                            }
+                                                                                        });
+                                                                                    }
+                                                                                },
+                                                                                "Run CVE Scan"
+                                                                            }
+                                                                            if let Some(scan_state) = current_scan_status {
+                                                                                span {
+                                                                                    class: "text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-200 border border-slate-600",
+                                                                                    "scan: {scan_state}"
+                                                                                }
+                                                                            }
+                                                                        }
                                                                     }
                                                                 }
                                                             }
@@ -4083,6 +4157,8 @@ mod tests {
                     mapped_host_count: 1,
                     expected_store_path: Some("/nix/store/expected-gamma".to_string()),
                     current_store_path: Some("/nix/store/current-gamma".to_string()),
+                    cve_scan_eligible: true,
+                    cve_scan_blocked_reason: None,
                 }],
                 build_status: None,
                 evaluation_status: None,

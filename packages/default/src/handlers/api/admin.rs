@@ -707,6 +707,7 @@ fn parse_audit_action(value: &str) -> Option<AuditAction> {
         "system_sync_requested" => Some(AuditAction::SystemSyncRequested),
         "system_deploy_requested" => Some(AuditAction::SystemDeployRequested),
         "system_rollback_requested" => Some(AuditAction::SystemRollbackRequested),
+        "cve_scan_requested" => Some(AuditAction::CveScanRequested),
         "session_invalidated" => Some(AuditAction::SessionInvalidated),
         _ => None,
     }
@@ -893,6 +894,7 @@ fn action_to_str(action: AuditAction) -> &'static str {
         AuditAction::SystemSyncRequested => "system_sync_requested",
         AuditAction::SystemDeployRequested => "system_deploy_requested",
         AuditAction::SystemRollbackRequested => "system_rollback_requested",
+        AuditAction::CveScanRequested => "cve_scan_requested",
         AuditAction::SessionInvalidated => "session_invalidated",
     }
 }
