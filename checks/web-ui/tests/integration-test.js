@@ -2036,10 +2036,27 @@ const steps = [
       await routeSystemsWarningData(page);
       await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
-      await page
+      const warningBanner = page.locator("[data-testid='systems-missing-flake-warning']").first();
+      await warningBanner.waitFor({ timeout: 5000 });
+      await warningBanner
         .getByText(/not linked to a flake and won't be included in evaluations/i)
         .first()
         .waitFor({ timeout: 5000 });
+      await warningBanner.getByText(/Affected system: warning-system-01/i).first().waitFor({ timeout: 5000 });
+      await warningBanner
+        .getByText(/To resolve: click Edit on each affected system and set Flake Name./i)
+        .first()
+        .waitFor({ timeout: 5000 });
+      const remediationLink = warningBanner.getByRole("link", {
+        name: /Review affected systems/i,
+      });
+      await remediationLink.waitFor({ timeout: 5000 });
+      const remediationHref = await remediationLink.getAttribute("href");
+      if (remediationHref !== "/systems") {
+        throw new Error(
+          `Expected warning remediation link to target /systems, got: ${remediationHref}`,
+        );
+      }
       await unrouteSystemsWarningData(page);
       await unrouteConfigHealth(page);
     },
@@ -2197,6 +2214,47 @@ const steps = [
       }
 
       await unrouteSystemsApiFailure(page);
+    },
+  },
+  {
+    name: "12g-systems-warning-clears-after-link",
+    description: "Systems missing-flake warning clears after linking flake via Edit modal",
+    action: async (page) => {
+      await routeSystemsWarningData(page);
+      await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2200);
+
+      const warningBanner = page.locator("[data-testid='systems-missing-flake-warning']").first();
+      await assertVisible(warningBanner, "Expected missing-flake warning before linking", 15000);
+
+      const systemRow = page.locator("tr").filter({ hasText: "warning-system-01" }).first();
+      await assertVisible(systemRow, "Expected warning-system-01 row to be visible", 15000);
+
+      const detailResponsePromise = page
+        .waitForResponse(
+          (response) =>
+            response.request().method() === "GET" &&
+            response.url().includes("/api/v1/systems/00000000-0000-0000-0000-0000000000a1"),
+          { timeout: 15000 },
+        )
+        .catch(() => null);
+
+      await systemRow.getByRole("button", { name: "Edit" }).first().click();
+
+      const detailResponse = await detailResponsePromise;
+      if (!detailResponse || !detailResponse.ok()) {
+        throw new Error("Expected system detail request to succeed before editing flake linkage");
+      }
+
+      await page.getByText("Update system configuration and deployment settings").first().waitFor({ timeout: 15000 });
+      await page.getByRole("button", { name: "Save Changes" }).first().click();
+      await page.waitForTimeout(1200);
+
+      if (await warningBanner.isVisible().catch(() => false)) {
+        throw new Error("Expected missing-flake warning to clear after linking flake via Edit modal");
+      }
+
+      await unrouteSystemsWarningData(page);
     },
   },
   {
@@ -3019,10 +3077,12 @@ const CI_FAST_STEP_NAMES = new Set([
   "06z-fleet-health-widget-assert",
   "15-builds",
   "11b-builds-queue-card-focus",
+  "12b-systems-config-warning",
   "12c-systems-modal-config-field",
   "12e-systems-edit-modal",
   "12f-systems-deploy-modal",
   "12d-systems-api-error-no-mock-fallback",
+  "12g-systems-warning-clears-after-link",
   "13d-flakes-stress-dataset",
   "13e-flakes-add-modal-credentials",
   "13f-flakes-edit-modal-credentials",
