@@ -1,10 +1,10 @@
 ---
 id: TASK-264
 title: Fix Systems Edit modal rendering regression with flake warning banner
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-04-11 16:00'
-updated_date: '2026-04-11 16:02'
+updated_date: '2026-04-11 16:20'
 labels:
   - bug
   - ui
@@ -58,14 +58,20 @@ Medium (user-facing modal layout/regression fix).
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Clicking Systems → Edit opens an isolated modal overlay; global flake-link warning banner and page navigation/content do not render inside modal body.
-- [ ] #2 Edit modal remains functional (hostname/config/environment/policy fields and Save/Cancel actions still render and behave normally).
-- [ ] #3 Systems page warning banner remains visible in page context when applicable, outside modal overlay.
-- [ ] #4 web-ui verification captures the corrected modal behavior (via existing or updated check evidence).
+- [x] #1 Clicking Systems → Edit opens an isolated modal overlay; global flake-link warning banner and page navigation/content do not render inside modal body.
+- [x] #2 Edit modal remains functional (hostname/config/environment/policy fields and Save/Cancel actions still render and behave normally).
+- [x] #3 Systems page warning banner remains visible in page context when applicable, outside modal overlay.
+- [x] #4 web-ui verification captures the corrected modal behavior (via existing or updated check evidence).
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-LOCK: gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-264-fix-systems-edit-modal-overlay
+Implemented modal overlay isolation fix in `packages/web-ui/src/components/system/edit_system_modal.rs` (bounded max-height + internal scroll + fixed backdrop padding/overflow).
+
+Added web-ui integration assertion in `checks/web-ui/tests/integration-test.js` step `12e-systems-edit-modal` to ensure warning banner text remains outside modal overlay.
+
+Verification executed: `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml` and `nix build .#checks.x86_64-linux.web-ui -L --show-trace`.
+
+MR opened: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/229
 <!-- SECTION:NOTES:END -->
