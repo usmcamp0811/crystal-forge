@@ -6,8 +6,17 @@ use anyhow::Result;
 use bigdecimal::BigDecimal;
 use bigdecimal::FromPrimitive;
 use sqlx::PgPool;
+use sqlx::Row;
 use tracing::debug;
 use uuid::Uuid;
+
+#[derive(Debug, Clone)]
+pub struct CveScanEligibleTarget {
+    pub derivation_id: i32,
+    pub config_name: String,
+    pub hostname: Option<String>,
+    pub blocked_reason: Option<String>,
+}
 
 fn truncate_for_varchar(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
@@ -467,4 +476,176 @@ pub async fn get_latest_scan(pool: &PgPool, derivation_id: i32) -> Result<Option
     .await?;
 
     Ok(scan)
+}
+
+pub async fn get_scan_by_id(pool: &PgPool, scan_id: Uuid) -> Result<Option<CveScan>> {
+    let scan = sqlx::query_as::<_, CveScan>(
+        r#"
+        SELECT
+            id,
+            derivation_id,
+            scheduled_at,
+            completed_at,
+            status,
+            attempts,
+            scanner_name,
+            scanner_version,
+            total_packages,
+            total_vulnerabilities,
+            critical_count,
+            high_count,
+            medium_count,
+            low_count,
+            scan_duration_ms,
+            scan_metadata,
+            created_at
+        FROM cve_scans
+        WHERE id = $1
+        "#,
+    )
+    .bind(scan_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(scan)
+}
+
+pub async fn get_active_scan_for_derivation(
+    pool: &PgPool,
+    derivation_id: i32,
+) -> Result<Option<Uuid>> {
+    let row = sqlx::query(
+        r#"
+        SELECT id
+        FROM cve_scans
+        WHERE derivation_id = $1
+          AND status IN ('pending', 'in_progress')
+        ORDER BY created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(derivation_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|r| r.get::<Uuid, _>("id")))
+}
+
+pub async fn resolve_flake_config_cve_scan_target(
+    pool: &PgPool,
+    flake_id: i32,
+    config_name: &str,
+) -> Result<Option<CveScanEligibleTarget>> {
+    let row = sqlx::query(
+        r#"
+        WITH latest_host AS (
+            SELECT s.hostname
+            FROM systems s
+            WHERE s.flake_id = $1
+              AND s.is_active = TRUE
+              AND COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname) = $2
+            ORDER BY s.updated_at DESC, s.created_at DESC
+            LIMIT 1
+        )
+        SELECT
+            d.id AS derivation_id,
+            d.derivation_name AS config_name,
+            (SELECT hostname FROM latest_host) AS hostname,
+            CASE
+                WHEN d.store_path IS NULL THEN 'Build output is unavailable for this configuration.'
+                WHEN NOT EXISTS (
+                    SELECT 1
+                    FROM cache_push_jobs cpj
+                    WHERE cpj.derivation_id = d.id
+                      AND cpj.status = 'completed'
+                ) THEN 'CVE scan requires a completed cache push for this configuration.'
+                ELSE NULL
+            END AS blocked_reason
+        FROM derivations d
+        JOIN commits c ON c.id = d.commit_id
+        WHERE c.flake_id = $1
+          AND d.derivation_type = 'nixos'
+          AND d.derivation_name = $2
+        ORDER BY
+            (
+                SELECT MAX(cpj.completed_at)
+                FROM cache_push_jobs cpj
+                WHERE cpj.derivation_id = d.id
+                  AND cpj.status = 'completed'
+            ) DESC NULLS LAST,
+            d.completed_at DESC NULLS LAST,
+            d.id DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(flake_id)
+    .bind(config_name)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|r| CveScanEligibleTarget {
+        derivation_id: r.get("derivation_id"),
+        config_name: r.get("config_name"),
+        hostname: r.get("hostname"),
+        blocked_reason: r.get("blocked_reason"),
+    }))
+}
+
+pub async fn resolve_system_cve_scan_target(
+    pool: &PgPool,
+    system_id: Uuid,
+) -> Result<Option<CveScanEligibleTarget>> {
+    let row = sqlx::query(
+        r#"
+        WITH selected_system AS (
+            SELECT
+                s.id,
+                s.hostname,
+                s.flake_id,
+                COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname) AS config_name
+            FROM systems s
+            WHERE s.id = $1
+              AND s.is_active = TRUE
+        )
+        SELECT
+            d.id AS derivation_id,
+            ss.config_name,
+            ss.hostname,
+            CASE
+                WHEN d.store_path IS NULL THEN 'Build output is unavailable for this system configuration.'
+                WHEN NOT EXISTS (
+                    SELECT 1
+                    FROM cache_push_jobs cpj
+                    WHERE cpj.derivation_id = d.id
+                      AND cpj.status = 'completed'
+                ) THEN 'CVE scan requires a completed cache push for this system configuration.'
+                ELSE NULL
+            END AS blocked_reason
+        FROM selected_system ss
+        JOIN commits c ON c.flake_id = ss.flake_id
+        JOIN derivations d ON d.commit_id = c.id
+        WHERE d.derivation_type = 'nixos'
+          AND d.derivation_name = ss.config_name
+        ORDER BY
+            (
+                SELECT MAX(cpj.completed_at)
+                FROM cache_push_jobs cpj
+                WHERE cpj.derivation_id = d.id
+                  AND cpj.status = 'completed'
+            ) DESC NULLS LAST,
+            d.completed_at DESC NULLS LAST,
+            d.id DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(system_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|r| CveScanEligibleTarget {
+        derivation_id: r.get("derivation_id"),
+        config_name: r.get("config_name"),
+        hostname: r.get("hostname"),
+        blocked_reason: r.get("blocked_reason"),
+    }))
 }
