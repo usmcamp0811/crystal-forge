@@ -4,7 +4,7 @@ title: Consolidate NixOS VM checks to reduce CI/CD runtime
 status: Review
 assignee: []
 created_date: '2026-04-10 03:12'
-updated_date: '2026-04-11 03:37'
+updated_date: '2026-04-11 06:04'
 labels:
   - ci-cd
   - nix
@@ -204,4 +204,8 @@ Known Issue:
   - Not caused by consolidation (identical config to old server check)
 
 Next: Waiting for CI to complete to assess actual pass/fail status
+
+Consolidation Bug Fixes - Web-UI Test Fixture Collision (FIXED): When running multiple test phases sequentially in the mega web-ui check with shared database state, the builder test fixture tried to INSERT a flake that already existed from server tests. Fixed by making builder_test_data fixture idempotent using ON CONFLICT DO UPDATE for both flake and commit insertions (commit c9f933ab).
+
+Integration Check Flaky Test (PRE-EXISTING): test_flake_initialization_commits expects 5 commits to be initialized but only gets 1. This is NOT caused by consolidation - identical config to old server check. Investigation shows: config has initial_commit_depth=5, test flake has 5 commits on main branch, server only initializes 1 commit. Appears to be pre-existing timing/race condition in server commit initialization logic. Known flaky test, not related to consolidation work.
 <!-- SECTION:NOTES:END -->
