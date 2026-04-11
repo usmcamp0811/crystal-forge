@@ -10,10 +10,12 @@ use std::collections::BTreeSet;
 use uuid::Uuid;
 
 use crate::api::models::{
-    ApiError, AuditAction, CommitInfo, CreateSystemRequest, CveSummary, DeploySystemRequest,
+    ApiError, AuditAction, CommitInfo, CreateSystemRequest, CveScanEligibilityResponse,
+    CveScanStatusResponse, CveScanTriggerResponse, CveSummary, DeploySystemRequest,
     DeploymentStatus, PipelineStage, SortOrder, SystemCommitsResponse, SystemDetail,
     SystemHardwareInfo, SystemMutationResponse, SystemNetworkInfo, SystemRollbackRequest,
-    SystemSecurityInfo, SystemSummary, SystemVulnerability, SystemsListParams,
+    SystemSecurityInfo, SystemSummary,
+    SystemVulnerability, SystemsListParams,
     UpdateSystemPublicKeyRequest, UpdateSystemRequest,
 };
 use crate::auth::models::Role;
@@ -28,6 +30,8 @@ use crate::queries::systems::{
     touch_system_updated_at, update_public_key, update_system_desired_target,
     update_system_metadata,
 };
+use crate::queries::cve_scans::{get_scan_by_id, resolve_system_cve_scan_target};
+use crate::services::cve_scans::trigger_immediate_cve_scan;
 use crate::services::systems::SystemsListContext;
 
 pub async fn list_systems(
@@ -272,6 +276,212 @@ pub async fn get_system_cves(
         .collect::<Vec<_>>();
 
     (StatusCode::OK, Json(vulnerabilities)).into_response()
+}
+
+pub async fn get_system_cve_scan_eligibility(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(system_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+
+    let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+
+    let row = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+
+    if !caller_role.can_access_system_environment(row.environment_id, &environment_memberships) {
+        return not_found();
+    }
+
+    let payload = match resolve_system_cve_scan_target(&pool, system_id).await {
+        Ok(Some(target)) => CveScanEligibilityResponse {
+            eligible: target.blocked_reason.is_none(),
+            reason: target.blocked_reason,
+            derivation_id: Some(target.derivation_id),
+            config_name: Some(target.config_name),
+            hostname: target.hostname,
+        },
+        Ok(None) => CveScanEligibilityResponse {
+            eligible: false,
+            reason: Some("No eligible derivation was found for this system configuration.".to_string()),
+            derivation_id: None,
+            config_name: None,
+            hostname: Some(row.hostname),
+        },
+        Err(_) => return internal_error("Failed to evaluate CVE scan eligibility"),
+    };
+
+    (StatusCode::OK, Json(payload)).into_response()
+}
+
+pub async fn trigger_system_cve_scan(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(system_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+
+    if !caller_role.can_mutate_systems() {
+        return forbidden_mutation();
+    }
+
+    let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+
+    let row = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+
+    if !caller_role.can_access_system_environment(row.environment_id, &environment_memberships) {
+        return not_found();
+    }
+
+    let target = match resolve_system_cve_scan_target(&pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(ApiError {
+                    error: "scan_ineligible".to_string(),
+                    message: "No build target found for this system configuration.".to_string(),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
+        Err(_) => return internal_error("Failed to resolve CVE scan target"),
+    };
+
+    if let Some(reason) = target.blocked_reason.as_ref() {
+        return (
+            StatusCode::CONFLICT,
+            Json(ApiError {
+                error: "scan_ineligible".to_string(),
+                message: reason.clone(),
+                details: None,
+            }),
+        )
+            .into_response();
+    }
+
+    let scan_id = match trigger_immediate_cve_scan(pool.clone(), target.derivation_id).await {
+        Ok(value) => value,
+        Err(err) => return internal_error(&format!("Failed to queue CVE scan: {err}")),
+    };
+
+    if record_system_mutation_audit(
+        &pool,
+        user_id,
+        AuditAction::CveScanRequested,
+        format!("{} ({})", row.hostname, row.id),
+        extract_request_origin(&headers),
+        serde_json::json!({
+            "operation": "cve_scan",
+            "derivation_id": target.derivation_id,
+            "scan_id": scan_id,
+            "config_name": target.config_name
+        }),
+    )
+    .await
+    .is_err()
+    {
+        return internal_error("Failed to write audit event");
+    }
+
+    (
+        StatusCode::ACCEPTED,
+        Json(CveScanTriggerResponse {
+            scan_id,
+            status: "accepted".to_string(),
+            message: format!(
+                "CVE scan queued for {} ({})",
+                row.hostname, target.config_name
+            ),
+        }),
+    )
+        .into_response()
+}
+
+pub async fn get_cve_scan_status(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(scan_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+
+    if !caller_role.can_mutate_systems() {
+        return forbidden_mutation();
+    }
+
+    let scan = match get_scan_by_id(&pool, scan_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiError {
+                    error: "not_found".to_string(),
+                    message: "CVE scan not found".to_string(),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
+        Err(_) => return internal_error("Failed to load CVE scan status"),
+    };
+
+    (
+        StatusCode::OK,
+        Json(CveScanStatusResponse {
+            scan_id: scan.id,
+            derivation_id: scan.derivation_id,
+            status: match scan.status {
+                crate::models::cve_scans::ScanStatus::Pending => "pending",
+                crate::models::cve_scans::ScanStatus::InProgress => "in_progress",
+                crate::models::cve_scans::ScanStatus::Completed => "completed",
+                crate::models::cve_scans::ScanStatus::Failed => "failed",
+            }
+            .to_string(),
+            scanner_name: scan.scanner_name,
+            scheduled_at: scan.scheduled_at,
+            completed_at: scan.completed_at,
+            attempts: scan.attempts,
+            total_vulnerabilities: scan.total_vulnerabilities,
+            critical_count: scan.critical_count,
+            high_count: scan.high_count,
+            medium_count: scan.medium_count,
+            low_count: scan.low_count,
+        }),
+    )
+        .into_response()
 }
 
 fn parse_cve_severity(value: &str) -> crate::api::models::CveSeverity {
@@ -860,6 +1070,7 @@ fn action_to_str(action: AuditAction) -> &'static str {
         AuditAction::SystemSyncRequested => "system_sync_requested",
         AuditAction::SystemDeployRequested => "system_deploy_requested",
         AuditAction::SystemRollbackRequested => "system_rollback_requested",
+        AuditAction::CveScanRequested => "cve_scan_requested",
         AuditAction::SessionInvalidated => "session_invalidated",
     }
 }
@@ -1165,6 +1376,57 @@ mod tests {
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
+    #[tokio::test]
+    async fn get_system_cve_scan_eligibility_requires_authenticated_role() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+
+        let response = get_system_cve_scan_eligibility(
+            State(pool),
+            HeaderMap::new(),
+            Path(Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid")),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn trigger_system_cve_scan_requires_authenticated_role() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+
+        let response = trigger_system_cve_scan(
+            State(pool),
+            HeaderMap::new(),
+            Path(Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid")),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn get_cve_scan_status_requires_authenticated_role() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+
+        let response = get_cve_scan_status(
+            State(pool),
+            HeaderMap::new(),
+            Path(Uuid::parse_str("00000000-0000-0000-0000-000000000002").expect("uuid")),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
     #[test]
     fn parse_cve_severity_maps_expected_values() {
         assert_eq!(
@@ -1281,6 +1543,10 @@ mod tests {
         assert_eq!(
             action_to_str(AuditAction::SystemRollbackRequested),
             "system_rollback_requested"
+        );
+        assert_eq!(
+            action_to_str(AuditAction::CveScanRequested),
+            "cve_scan_requested"
         );
     }
 }

@@ -15,11 +15,15 @@ use uuid::Uuid;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::{JsCast, JsValue};
 
-use crate::api::client::{fetch_system_cves, request_system_rollback, request_system_sync};
+use crate::api::client::{
+    fetch_cve_scan_status, fetch_system_cve_scan_eligibility, fetch_system_cves,
+    request_system_rollback, request_system_sync, trigger_system_cve_scan,
+};
 use crate::api::models::{
-    BuildStatus, CveSeverity, CveSummary, DeploymentLogEntry, DeploymentStatus, LogLevel,
-    PipelineStage, SystemCommitHistory, SystemDetail, SystemHardwareInfo, SystemNetworkInfo,
-    SystemRollbackRequest, SystemSecurityInfo, SystemVulnerability,
+    BuildStatus, CveScanEligibilityResponse, CveSeverity, CveSummary, DeploymentLogEntry,
+    DeploymentStatus, LogLevel, PipelineStage, SystemCommitHistory, SystemDetail,
+    SystemHardwareInfo, SystemNetworkInfo, SystemRollbackRequest, SystemSecurityInfo,
+    SystemVulnerability,
 };
 use crate::components::cve::CvesTab;
 use crate::components::diff::DiffViewer;
@@ -117,6 +121,8 @@ pub fn SystemDetailView(id: String) -> Element {
     // Confirmation dialog state for Sync
     let mut show_sync_dialog = use_signal(|| false);
     let mut sync_in_progress = use_signal(|| false);
+    let mut cve_scan_in_progress = use_signal(|| false);
+    let mut cve_scan_status_text: Signal<Option<String>> = use_signal(|| None);
 
     // Confirmation dialog state for rollback/deploying a historical commit
     let mut show_rollback_dialog = use_signal(|| false);
@@ -143,6 +149,18 @@ pub fn SystemDetailView(id: String) -> Element {
             fetch_system_cves(&system_id)
                 .await
                 .unwrap_or_else(|_| mock_vulnerabilities())
+        }
+    });
+
+    let id_for_scan_eligibility = id.clone();
+    let scan_eligibility_resource = use_resource(move || {
+        let id = id_for_scan_eligibility.clone();
+        async move {
+            let Ok(system_id) = Uuid::parse_str(&id) else {
+                return None;
+            };
+
+            fetch_system_cve_scan_eligibility(&system_id).await.ok()
         }
     });
 
@@ -194,9 +212,19 @@ pub fn SystemDetailView(id: String) -> Element {
         None => mock_vulnerabilities(),
     };
     let deployment_logs = mock_deployment_logs();
+    let scan_eligibility: Option<CveScanEligibilityResponse> =
+        (*scan_eligibility_resource.read_unchecked()).clone().flatten();
 
     let auth_context = app_state.read().auth.clone();
     let can_mutate = auth::can_mutate_systems(&auth_context);
+    let cve_scan_eligible = scan_eligibility
+        .as_ref()
+        .map(|item| item.eligible)
+        .unwrap_or(false);
+    let cve_scan_blocked_reason = scan_eligibility
+        .as_ref()
+        .and_then(|item| item.reason.clone())
+        .unwrap_or_else(|| "CVE scan availability is still loading.".to_string());
 
     let environment = system
         .environment
@@ -290,6 +318,91 @@ pub fn SystemDetailView(id: String) -> Element {
                 div {
                     class: "flex items-center gap-2",
                     button {
+                        class: "inline-flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm transition-all text-white border border-amber-400/40 bg-amber-600/50 hover:bg-amber-600/70 hover:border-amber-300/60 disabled:opacity-60 disabled:cursor-not-allowed",
+                        disabled: *cve_scan_in_progress.read() || !can_mutate || !cve_scan_eligible,
+                        title: if cve_scan_eligible {
+                            Some("Run CVE scan immediately for this system configuration")
+                        } else {
+                            Some(cve_scan_blocked_reason.as_str())
+                        },
+                        onclick: {
+                            let system_id = system.id;
+                            move |_| {
+                                if !can_mutate || !cve_scan_eligible {
+                                    return;
+                                }
+
+                                cve_scan_in_progress.set(true);
+                                cve_scan_status_text.set(Some("CVE scan queued...".to_string()));
+                                spawn(async move {
+                                    let trigger_result = trigger_system_cve_scan(&system_id).await;
+                                    match trigger_result {
+                                        Ok(triggered) => {
+                                            cve_scan_status_text
+                                                .set(Some("CVE scan running...".to_string()));
+                                            let mut terminal_status: Option<String> = None;
+
+                                            for _ in 0..25 {
+                                                match fetch_cve_scan_status(&triggered.scan_id).await {
+                                                    Ok(status) => {
+                                                        let normalized = status.status.to_lowercase();
+                                                        if normalized == "completed" {
+                                                            terminal_status = Some(format!(
+                                                                "CVE scan completed: {} vulnerabilities found",
+                                                                status.total_vulnerabilities
+                                                            ));
+                                                            break;
+                                                        }
+                                                        if normalized == "failed" {
+                                                            terminal_status = Some(
+                                                                "CVE scan failed. Check server logs for details."
+                                                                    .to_string(),
+                                                            );
+                                                            break;
+                                                        }
+                                                        cve_scan_status_text
+                                                            .set(Some("CVE scan running...".to_string()));
+                                                    }
+                                                    Err(_) => {
+                                                        terminal_status = Some(
+                                                            "Unable to poll CVE scan status."
+                                                                .to_string(),
+                                                        );
+                                                        break;
+                                                    }
+                                                }
+
+                                                use gloo_timers::future::TimeoutFuture;
+                                                TimeoutFuture::new(1500).await;
+                                            }
+
+                                            if let Some(msg) = terminal_status {
+                                                let is_success = msg.contains("completed");
+                                                toast_message.set(Some((msg.clone(), is_success)));
+                                                cve_scan_status_text.set(Some(msg));
+                                            }
+                                        }
+                                        Err(err) => {
+                                            let msg = format!("Failed to trigger CVE scan: {}", err);
+                                            toast_message.set(Some((msg.clone(), false)));
+                                            cve_scan_status_text.set(Some(msg));
+                                        }
+                                    }
+
+                                    cve_scan_in_progress.set(false);
+                                });
+                            }
+                        },
+
+                        if *cve_scan_in_progress.read() {
+                            "Scanning..."
+                        } else if !can_mutate {
+                            "Run CVE Scan (Operator/Admin required)"
+                        } else {
+                            "Run CVE Scan"
+                        }
+                    }
+                    button {
                         class: "inline-flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm transition-all text-white border border-purple-400/40 bg-purple-600/60 hover:bg-purple-600/80 hover:border-purple-300/60 shadow-sm shadow-purple-900/30",
                         disabled: *sync_in_progress.read() || !can_mutate,
                         onclick: move |_| show_sync_dialog.set(true),
@@ -331,6 +444,12 @@ pub fn SystemDetailView(id: String) -> Element {
                             }
                             "Sync Now"
                         }
+                    }
+                }
+                if let Some(scan_status) = cve_scan_status_text() {
+                    p {
+                        class: "text-xs text-amber-200 mt-1",
+                        "{scan_status}"
                     }
                 }
             }

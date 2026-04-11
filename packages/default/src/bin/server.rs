@@ -191,6 +191,14 @@ async fn main() -> anyhow::Result<()> {
             get(systems::get_system).patch(systems::update_system_handler),
         )
         .route("/api/v1/systems/:id/cves", get(systems::get_system_cves))
+        .route(
+            "/api/v1/systems/:id/cve-scan-eligibility",
+            get(systems::get_system_cve_scan_eligibility),
+        )
+        .route(
+            "/api/v1/systems/:id/cve-scan",
+            post(systems::trigger_system_cve_scan),
+        )
         .route("/api/v1/systems/:id/sync", post(systems::sync_system))
         .route(
             "/api/v1/systems/:id/rollback",
@@ -253,6 +261,10 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/v1/flakes/:id/sync", post(flakes::sync_flake_handler))
         .route(
+            "/api/v1/flakes/:id/configs/:config_name/cve-scan",
+            post(flakes::trigger_flake_config_cve_scan),
+        )
+        .route(
             "/api/v1/flakes/:id/credentials",
             get(flakes::get_flake_credentials)
                 .put(flakes::put_flake_credentials)
@@ -269,6 +281,7 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/flakes/:id/commits/:hash/diff",
             get(flakes::get_commit_diff_handler),
         )
+        .route("/api/v1/cve-scans/:id", get(systems::get_cve_scan_status))
         // Builder management (admin endpoints)
         .route(
             "/api/v1/builders",

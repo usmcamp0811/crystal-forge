@@ -12,7 +12,8 @@ use tracing::{error, info, warn};
 
 use crate::api::models::{
     ApiError, CommitDiffResponse, CreateFlakeCredentialRequest, CreateFlakeRequest,
-    FlakeCommitSystemPath, FlakeCredentialSummary, FlakeRegistryItem, FlakeTimeline,
+    CveScanTriggerResponse, FlakeCommitSystemPath, FlakeCredentialSummary, FlakeRegistryItem,
+    FlakeTimeline,
     UpdateFlakeCredentialRequest, UpdateFlakeRequest,
 };
 use crate::auth::extractors::{AuthenticatedUser, RequireAdmin, RequireAuth, RequireOperator};
@@ -36,7 +37,9 @@ use crate::queries::flakes::{
     fetch_dashboard_flake_timelines, fetch_flake_timelines, get_flake_by_id, get_flake_by_name,
     insert_flake, list_flake_registry, purge_flake_commit_history, soft_delete_flake, update_flake,
 };
+use crate::queries::cve_scans::resolve_flake_config_cve_scan_target;
 use crate::queries::users::get_by_email;
+use crate::services::cve_scans::trigger_immediate_cve_scan;
 
 const MAX_HYDRATION_COMMITS_PER_REQUEST: usize = 20;
 
@@ -301,6 +304,7 @@ struct CommitConfigPathRow {
     mapped_host_count: i64,
     expected_store_path: Option<String>,
     current_store_path: Option<String>,
+    cve_scan_blocked_reason: Option<String>,
 }
 
 async fn fetch_commit_config_paths(
@@ -312,7 +316,7 @@ async fn fetch_commit_config_paths(
         return Ok(HashMap::new());
     }
 
-    let rows = sqlx::query_as::<_, (String, String, i64, Option<String>, Option<String>, Option<String>)>(
+    let rows = sqlx::query_as::<_, (String, String, i64, Option<String>, Option<String>, Option<String>, Option<String>)>(
         r#"
         SELECT
             c.git_commit_hash,
@@ -320,7 +324,17 @@ async fn fetch_commit_config_paths(
             COALESCE(mapped_hosts.mapped_host_count, 0)::bigint,
             selected_state.hostname,
             d.expected_store_path,
-            selected_state.store_path
+            selected_state.store_path,
+            CASE
+                WHEN d.store_path IS NULL THEN 'Build output is unavailable for this configuration.'
+                WHEN NOT EXISTS (
+                    SELECT 1
+                    FROM cache_push_jobs cpj
+                    WHERE cpj.derivation_id = d.id
+                      AND cpj.status = 'completed'
+                ) THEN 'CVE scan requires a completed cache push for this configuration.'
+                ELSE NULL
+            END AS cve_scan_blocked_reason
         FROM commits c
         JOIN derivations d
             ON d.commit_id = c.id
@@ -370,6 +384,7 @@ async fn fetch_commit_config_paths(
         cf_hostname,
         expected_store_path,
         current_store_path,
+        cve_scan_blocked_reason,
     ) in rows
     {
         out.entry(hash)
@@ -381,6 +396,7 @@ async fn fetch_commit_config_paths(
                 mapped_host_count,
                 expected_store_path,
                 current_store_path,
+                cve_scan_blocked_reason,
             });
     }
 
@@ -436,6 +452,8 @@ fn build_commit_system_paths(
             mapped_host_count: detail.map(|row| row.mapped_host_count).unwrap_or(0),
             expected_store_path: detail.and_then(|row| row.expected_store_path.clone()),
             current_store_path: detail.and_then(|row| row.current_store_path.clone()),
+            cve_scan_eligible: detail.and_then(|row| row.cve_scan_blocked_reason.clone()).is_none(),
+            cve_scan_blocked_reason: detail.and_then(|row| row.cve_scan_blocked_reason.clone()),
         });
     }
 
@@ -453,6 +471,8 @@ fn build_commit_system_paths(
                 mapped_host_count: row.mapped_host_count,
                 expected_store_path: row.expected_store_path.clone(),
                 current_store_path: row.current_store_path.clone(),
+                cve_scan_eligible: row.cve_scan_blocked_reason.is_none(),
+                cve_scan_blocked_reason: row.cve_scan_blocked_reason.clone(),
             });
         }
     }
@@ -1814,6 +1834,88 @@ fn synthetic_mock_sync_hash(
 
     format!("{:016x}{:016x}{:08x}", a, b, flake_id as u32)
 }
+
+pub async fn trigger_flake_config_cve_scan(
+    RequireOperator(_user): RequireOperator,
+    State(pool): State<PgPool>,
+    Path((flake_id, config_name)): Path<(i32, String)>,
+) -> impl IntoResponse {
+    let target = match resolve_flake_config_cve_scan_target(&pool, flake_id, &config_name).await {
+        Ok(Some(value)) => value,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiError {
+                    error: "not_found".to_string(),
+                    message: "No derivation found for this flake configuration".to_string(),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            error!(
+                "Failed to resolve CVE scan target for flake {} config {}: {err:#}",
+                flake_id, config_name
+            );
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    error: "internal_error".to_string(),
+                    message: "Failed to resolve CVE scan target".to_string(),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    if let Some(reason) = target.blocked_reason.as_ref() {
+        return (
+            StatusCode::CONFLICT,
+            Json(ApiError {
+                error: "scan_ineligible".to_string(),
+                message: reason.clone(),
+                details: None,
+            }),
+        )
+            .into_response();
+    }
+
+    let scan_id = match trigger_immediate_cve_scan(pool.clone(), target.derivation_id).await {
+        Ok(value) => value,
+        Err(err) => {
+            error!(
+                "Failed to queue immediate CVE scan for flake {} config {}: {err:#}",
+                flake_id, target.config_name
+            );
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    error: "internal_error".to_string(),
+                    message: "Failed to queue CVE scan".to_string(),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    (
+        StatusCode::ACCEPTED,
+        Json(CveScanTriggerResponse {
+            scan_id,
+            status: "accepted".to_string(),
+            message: format!(
+                "CVE scan queued for {} ({})",
+                target.hostname.unwrap_or_else(|| "unknown host".to_string()),
+                target.config_name
+            ),
+        }),
+    )
+        .into_response()
+}
+
 fn forbidden_viewer() -> axum::response::Response {
     (
         StatusCode::FORBIDDEN,
@@ -2008,6 +2110,7 @@ mod tests {
                 mapped_host_count: 1,
                 expected_store_path: Some("/nix/store/alpha".to_string()),
                 current_store_path: Some("/nix/store/alpha".to_string()),
+                cve_scan_blocked_reason: None,
             },
         );
 
@@ -2028,6 +2131,7 @@ mod tests {
                 mapped_host_count: 2,
                 expected_store_path: Some("/nix/store/alpha".to_string()),
                 current_store_path: Some("/nix/store/current-alpha".to_string()),
+                cve_scan_blocked_reason: None,
             },
         );
 

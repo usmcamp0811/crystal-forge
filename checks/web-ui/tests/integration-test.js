@@ -810,6 +810,16 @@ function buildFlakeStressFixture() {
       const systems = Array.from({ length: systemCount }, (_, systemIdx) =>
         `${flake.name}-host-${String(systemIdx + 1).padStart(2, "0")}`,
       );
+      const system_paths = systems.slice(0, 8).map((configName) => ({
+        config_name: configName,
+        is_cf_system: true,
+        cf_hostname: configName,
+        mapped_host_count: 1,
+        expected_store_path: `/nix/store/${configName}`,
+        current_store_path: `/nix/store/${configName}`,
+        cve_scan_eligible: true,
+        cve_scan_blocked_reason: null,
+      }));
 
       return {
         id: flake.id * 1000 + commitIdx,
@@ -820,6 +830,7 @@ function buildFlakeStressFixture() {
         system_count: systemCount,
         commits_behind: commitIdx,
         systems,
+        system_paths,
         build_status: commitIdx % 3 === 0 ? "queued" : commitIdx % 4 === 0 ? "building" : "idle",
         evaluation_status: commitIdx % 5 === 0 ? "failed" : "complete",
         evaluation_error_message:
@@ -2090,6 +2101,49 @@ const steps = [
         "Expected Edit System modal controls to be visible",
         15000,
       );
+
+      await page.route(
+        "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cve-scan-eligibility*",
+        async (route) => {
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({
+              eligible: true,
+              reason: null,
+              derivation_id: 42,
+              config_name: "warning-system-01",
+              hostname: "warning-system-01",
+            }),
+          });
+        },
+      );
+      await page.route("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cves*", async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+      });
+      await page.route("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/commits*", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ commits: [], current_commit: null }),
+        });
+      });
+
+      await page.goto(`${baseUrl}/systems/00000000-0000-0000-0000-0000000000a1`, {
+        timeout: LOAD_TIMEOUT,
+      });
+      await page.waitForTimeout(1200);
+      await assertVisible(
+        page.locator("button:has-text('Run CVE Scan')").first(),
+        "Expected Run CVE Scan action to be visible on system detail",
+        12000,
+      );
+
+      await page.unroute(
+        "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cve-scan-eligibility*",
+      );
+      await page.unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cves*");
+      await page.unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/commits*");
       await unrouteSystemsWarningData(page);
     },
   },
@@ -2273,6 +2327,12 @@ const steps = [
       if (probe < 1) {
         throw new Error("Flakes stress dataset responsiveness probe did not execute");
       }
+
+      await assertVisible(
+        page.locator("button:has-text('Run CVE Scan')").first(),
+        "Expected per-config Run CVE Scan action in flakes history",
+        12000,
+      );
 
       await unrouteFlakesStressData(page);
     },
@@ -2837,15 +2897,16 @@ const steps = [
       // Click the Critical severity filter button.
       const criticalBtn = page.locator("button:has-text('Critical')").first();
       await criticalBtn.waitFor({ timeout: 5000 });
-      await criticalBtn.click();
-
-      // Wait for a new vulnerabilities request that includes severity=critical.
-      await page.waitForResponse(
+      const filteredResponsePromise = page.waitForResponse(
         (resp) =>
           resp.url().includes("/api/v1/cves/vulnerabilities") &&
           resp.url().includes("severity=critical"),
         { timeout: 8000 },
       );
+      await criticalBtn.click();
+
+      // Wait for a new vulnerabilities request that includes severity=critical.
+      await filteredResponsePromise;
 
       // Assert a new request was fired after the click (filter is reactive).
       if (vulnerabilityUrls.length <= initialCount) {
