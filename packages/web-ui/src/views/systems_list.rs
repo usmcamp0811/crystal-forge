@@ -295,15 +295,35 @@ pub fn SystemsListView() -> Element {
                     if no_flake_count > 0 {
                         let suffix_s = if no_flake_count == 1 { "" } else { "s" };
                         let suffix_v = if no_flake_count == 1 { "is" } else { "are" };
+                        let affected_hostnames: Vec<String> = systems_snap
+                            .iter()
+                            .filter(|system| system.flake_id.is_none())
+                            .map(|system| system.hostname.clone())
+                            .collect();
+                        let listed_hostnames = affected_hostnames
+                            .iter()
+                            .take(3)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        let remaining = affected_hostnames.len().saturating_sub(3);
+                        let affected_summary = if remaining > 0 {
+                            format!("{listed_hostnames} (+{remaining} more)")
+                        } else {
+                            listed_hostnames
+                        };
                         let msg = format!(
-                            "{no_flake_count} system{suffix_s} {suffix_v} not linked to a flake and won't be included in evaluations."
+                            "{no_flake_count} system{suffix_s} {suffix_v} not linked to a flake and won't be included in evaluations. Affected system{suffix_s}: {affected_summary}. To resolve: click Edit on each affected system and set Flake Name."
                         );
                         rsx! {
-                            AlertBanner {
-                                severity: AlertSeverity::Warning,
-                                message: msg,
-                                action_label: Some("Link a flake".to_string()),
-                                action_url: Some("/flakes".to_string()),
+                            div {
+                                "data-testid": "systems-missing-flake-warning",
+                                AlertBanner {
+                                    severity: AlertSeverity::Warning,
+                                    message: msg,
+                                    action_label: Some("Review affected systems".to_string()),
+                                    action_url: Some("/systems".to_string()),
+                                }
                             }
                         }
                     } else {
@@ -733,6 +753,7 @@ pub fn SystemsListView() -> Element {
                                         values[pos].hostname = updated_detail.hostname.clone();
                                         values[pos].system_configuration_name = updated_detail.system_configuration_name.clone();
                                         values[pos].environment = updated_detail.environment.clone();
+                                        values[pos].flake_id = updated_detail.flake.as_ref().map(|flake| flake.id);
                                         values[pos].deployment_policy = updated_detail.deployment_policy.clone();
                                         local_systems.set(values);
                                     }
