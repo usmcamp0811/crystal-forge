@@ -2113,6 +2113,22 @@ const steps = [
 
       const editModal = page.getByText("Update system configuration and deployment settings").first();
       await assertVisible(editModal, "Expected Edit System modal to be visible", 15000);
+      const warningBanner = page
+        .getByText(/not linked to a flake and won't be included in evaluations/i)
+        .first();
+      await assertVisible(
+        warningBanner,
+        "Expected systems warning banner to remain visible outside the modal",
+        15000,
+      );
+      const modalOverlay = page.locator("div.fixed.inset-0").filter({ hasText: "Edit System" }).first();
+      await assertVisible(modalOverlay, "Expected edit modal overlay container to be visible", 15000);
+      const warningLeakCount = await modalOverlay
+        .getByText(/not linked to a flake and won't be included in evaluations/i)
+        .count();
+      if (warningLeakCount > 0) {
+        throw new Error("Expected warning banner text to stay outside edit modal overlay");
+      }
       await assertVisible(
         page.getByRole("button", { name: "Save Changes" }).first(),
         "Expected Edit System modal controls to be visible",
