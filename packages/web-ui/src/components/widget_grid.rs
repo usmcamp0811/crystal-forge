@@ -172,7 +172,7 @@ pub fn GridWidget(props: GridWidgetProps) -> Element {
 
             // Widget content
             div {
-                class: "p-4 h-full",
+                class: "p-4 h-full min-h-0 overflow-hidden",
                 {children}
             }
         }

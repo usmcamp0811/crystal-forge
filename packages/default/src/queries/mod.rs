@@ -21,3 +21,6 @@ pub mod status;
 pub mod system_states;
 pub mod systems;
 pub mod users;
+
+#[cfg(test)]
+mod cve_scans_tests;
