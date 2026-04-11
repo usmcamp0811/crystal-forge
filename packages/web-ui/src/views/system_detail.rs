@@ -17,7 +17,7 @@ use wasm_bindgen::{JsCast, JsValue};
 
 use crate::api::client::{
     fetch_cve_scan_status, fetch_system_cve_scan_eligibility, fetch_system_cves,
-    request_system_rollback, request_system_sync, trigger_system_cve_scan,
+    request_system_rollback, request_system_sync, trigger_system_cve_scan, ApiClientError,
 };
 use crate::api::models::{
     BuildStatus, CveScanEligibilityResponse, CveSeverity, CveSummary, DeploymentLogEntry,
@@ -381,6 +381,11 @@ pub fn SystemDetailView(id: String) -> Element {
                                                 toast_message.set(Some((msg.clone(), is_success)));
                                                 cve_scan_status_text.set(Some(msg));
                                             }
+                                        }
+                                        Err(ApiClientError::Status { code: 409, body }) if body.contains("scan_ineligible") => {
+                                            let msg = "CVE scanning is not available on this node (vulnix not installed).".to_string();
+                                            toast_message.set(Some((msg.clone(), false)));
+                                            cve_scan_status_text.set(Some(msg));
                                         }
                                         Err(err) => {
                                             let msg = format!("Failed to trigger CVE scan: {}", err);

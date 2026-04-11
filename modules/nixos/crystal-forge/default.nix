@@ -1836,6 +1836,7 @@ in {
         git
         nix-fast-build
         nix-eval-jobs
+        vulnix
         coreutils
         findutils
         gnused
