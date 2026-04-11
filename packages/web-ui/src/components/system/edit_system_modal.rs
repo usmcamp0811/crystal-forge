@@ -7,6 +7,7 @@ use dioxus::prelude::*;
 #[component]
 pub fn EditSystemModal(
     system: SystemDetail,
+    flake_names: Vec<String>,
     on_close: EventHandler<()>,
     on_save: EventHandler<UpdateSystemRequest>,
 ) -> Element {
@@ -15,6 +16,13 @@ pub fn EditSystemModal(
         use_signal(|| system.system_configuration_name.clone().unwrap_or_default());
     let mut environment = use_signal(|| system.environment.clone().unwrap_or_default());
     let mut deployment_policy = use_signal(|| system.deployment_policy.clone());
+    let mut flake_name = use_signal(|| {
+        system
+            .flake
+            .as_ref()
+            .map(|flake| flake.name.clone())
+            .unwrap_or_default()
+    });
     let mut is_saving = use_signal(|| false);
 
     let handle_save = move |_| {
@@ -32,7 +40,11 @@ pub fn EditSystemModal(
             } else {
                 Some(environment.read().clone())
             },
-            flake_name: None, // Not editable in this version
+            flake_name: if flake_name.read().trim().is_empty() {
+                None
+            } else {
+                Some(flake_name.read().clone())
+            },
             deployment_policy: deployment_policy.read().clone(),
         };
 
@@ -110,6 +122,24 @@ pub fn EditSystemModal(
                             value: "{environment}",
                             placeholder: "e.g., production, staging",
                             oninput: move |e| environment.set(e.value().clone()),
+                        }
+                    }
+
+                    // Flake Name
+                    div {
+                        label {
+                            class: "block text-sm font-medium text-gray-300 mb-2",
+                            "Flake Name"
+                            span { class: "text-gray-500 text-xs ml-2", "(optional)" }
+                        }
+                        select {
+                            class: "w-full px-4 py-2 bg-gray-800 border {theme::surface::CARD_BORDER} rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-emerald-500",
+                            value: "{flake_name}",
+                            onchange: move |e| flake_name.set(e.value().clone()),
+                            option { value: "", "Select flake" }
+                            for name in flake_names {
+                                option { value: "{name}", "{name}" }
+                            }
                         }
                     }
 

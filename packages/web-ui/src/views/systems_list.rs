@@ -714,6 +714,7 @@ pub fn SystemsListView() -> Element {
             if let Some(detail) = edit_modal_system.read().clone() {
                 EditSystemModal {
                     system: detail.clone(),
+                    flake_names: registered_flakes.clone(),
                     on_close: move |_| edit_modal_system.set(None),
                     on_save: move |request: crate::api::models::UpdateSystemRequest| {
                         let system_id = detail.id;
@@ -734,6 +735,7 @@ pub fn SystemsListView() -> Element {
                                         values[pos].system_configuration_name = updated_detail.system_configuration_name.clone();
                                         values[pos].environment = updated_detail.environment.clone();
                                         values[pos].deployment_policy = updated_detail.deployment_policy.clone();
+                                        values[pos].flake_id = updated_detail.flake.as_ref().map(|flake| flake.id);
                                         local_systems.set(values);
                                     }
                                     edit_modal_system.set(None);
