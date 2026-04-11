@@ -1,10 +1,10 @@
 ---
 id: TASK-264
 title: Fix Systems Edit modal rendering regression with flake warning banner
-status: Review
+status: Done
 assignee: []
 created_date: '2026-04-11 16:00'
-updated_date: '2026-04-11 16:20'
+updated_date: '2026-04-11 19:09'
 labels:
   - bug
   - ui
@@ -75,3 +75,9 @@ Verification executed: `nix develop -c cargo check --manifest-path packages/web-
 
 MR opened: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/229
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Added Flake Name dropdown to EditSystemModal so users can link a system to a flake directly from the Edit modal. Fixed select rendering using explicit `selected` attributes on each option. Narrowed modal to `max-w-lg`. Added inline amber warning when no flake is selected. Also updated on_save callback to propagate `flake_id` back to local systems list so the warning banner clears immediately after saving.\n\nMR #229 merged into dev."
+<!-- SECTION:FINAL_SUMMARY:END -->
