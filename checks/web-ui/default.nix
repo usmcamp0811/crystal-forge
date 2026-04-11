@@ -143,7 +143,9 @@ in pkgs.testers.runNixOSTest {
       services.crystal-forge = {
         enable = true;
         local-database = true;
-        log_level = "warn";
+        # Builder startup tests assert INFO-level startup logs.
+        # Keep INFO here so those assertions remain observable in the mega check.
+        log_level = "info";
 
         client = {
           enable = true;
