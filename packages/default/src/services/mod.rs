@@ -5,3 +5,4 @@
 //! contain direct SQL queries.
 
 pub mod systems;
+pub mod cve_scans;

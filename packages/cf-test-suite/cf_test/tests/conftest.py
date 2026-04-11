@@ -259,6 +259,7 @@ def clean_test_data(cf_client: CFTestClient):
         )
 
         # Step 4: Delete derivations (references commits)
+        # NOTE: Exclude 'test-flake' - this is the real integration test flake used by server tests
         cf_client.execute_sql(
             """
             DELETE FROM derivations 
@@ -268,22 +269,25 @@ def clean_test_data(cf_client: CFTestClient):
                OR commit_id IN (
                    SELECT c.id FROM commits c
                    JOIN flakes f ON c.flake_id = f.id
-                   WHERE f.repo_url LIKE 'https://example.com/%'
+                   WHERE (f.repo_url LIKE 'https://example.com/%'
                       OR f.repo_url LIKE '%/test.git'
-                      OR f.name ILIKE '%test%'
+                      OR f.name ILIKE '%test%')
+                     AND f.name != 'test-flake'
                )
             """
         )
 
         # Step 5: Delete commits (references flakes)
+        # NOTE: Exclude 'test-flake' - this is the real integration test flake used by server tests
         cf_client.execute_sql(
             """
             DELETE FROM commits
             WHERE flake_id IN (
                     SELECT id FROM flakes
-                    WHERE repo_url LIKE 'https://example.com/%'
+                    WHERE (repo_url LIKE 'https://example.com/%'
                        OR repo_url LIKE '%/test.git'
-                       OR name ILIKE '%test%'
+                       OR name ILIKE '%test%')
+                      AND name != 'test-flake'
                   )
                OR git_commit_hash LIKE 'working123-%'
                OR git_commit_hash LIKE 'broken456-%'
@@ -294,12 +298,14 @@ def clean_test_data(cf_client: CFTestClient):
         )
 
         # Step 6: Finally delete flakes (no dependencies)
+        # NOTE: Exclude 'test-flake' - this is the real integration test flake used by server tests
         cf_client.execute_sql(
             """
             DELETE FROM flakes
-            WHERE repo_url LIKE 'https://example.com/%'
+            WHERE (repo_url LIKE 'https://example.com/%'
                OR repo_url LIKE '%/test.git'
-               OR name ILIKE '%test%'
+               OR name ILIKE '%test%')
+              AND name != 'test-flake'
             """
         )
 

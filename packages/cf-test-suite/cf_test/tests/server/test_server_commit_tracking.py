@@ -325,7 +325,10 @@ def test_branch_polling_picks_up_new_commit(cf_client, server, gitserver):
 def test_webhook_and_commit_ingest(cf_client, server, smoke_data):
     """Test webhook processing and commit ingestion"""
     # Send webhook
-    cf_client.send_webhook(server, C.API_PORT, smoke_data.webhook_payload)
+    # Use configured test server port (integration check runs API on 8000).
+    cf_client.send_webhook(
+        server, cf_client.config.server_port, smoke_data.webhook_payload
+    )
 
     # Wait for webhook processing
     cf_client.wait_for_service_log(
