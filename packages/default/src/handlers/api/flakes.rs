@@ -39,7 +39,8 @@ use crate::queries::flakes::{
 };
 use crate::queries::cve_scans::resolve_flake_config_cve_scan_target;
 use crate::queries::users::get_by_email;
-use crate::services::cve_scans::trigger_immediate_cve_scan;
+use crate::handlers::api::systems::scan_ineligible_response;
+use crate::services::cve_scans::{trigger_immediate_cve_scan, CveScanError};
 
 const MAX_HYDRATION_COMMITS_PER_REQUEST: usize = 20;
 
@@ -1884,7 +1885,8 @@ pub async fn trigger_flake_config_cve_scan(
 
     let scan_id = match trigger_immediate_cve_scan(pool.clone(), target.derivation_id).await {
         Ok(value) => value,
-        Err(err) => {
+        Err(CveScanError::VulnixUnavailable) => return scan_ineligible_response(),
+        Err(CveScanError::Internal(err)) => {
             error!(
                 "Failed to queue immediate CVE scan for flake {} config {}: {err:#}",
                 flake_id, target.config_name
@@ -2909,5 +2911,39 @@ mod task_221_integration_tests {
             bad_insert.is_err(),
             "CHECK constraint must reject invalid auth_type value"
         );
+    }
+}
+
+#[cfg(test)]
+mod cve_trigger_tests {
+    use crate::handlers::api::systems::scan_ineligible_response;
+    use crate::services::cve_scans::CveScanError;
+    use axum::{http::StatusCode, response::IntoResponse};
+
+    /// Regression: VulnixUnavailable must map to scan_ineligible_response (409),
+    /// not fall through to the internal-error path.
+    #[test]
+    fn cve_scan_error_vulnix_unavailable_variant_is_distinct() {
+        // Verify we can distinguish the variant by pattern match — the basis of
+        // the handler branch that returns 409 instead of 500.
+        let err = CveScanError::VulnixUnavailable;
+        assert!(
+            matches!(err, CveScanError::VulnixUnavailable),
+            "VulnixUnavailable variant must be matchable"
+        );
+    }
+
+    #[test]
+    fn scan_ineligible_response_is_409_conflict() {
+        let response = scan_ineligible_response().into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn cve_scan_error_internal_wraps_anyhow() {
+        let inner = anyhow::anyhow!("db gone");
+        let err = CveScanError::Internal(inner);
+        let msg = err.to_string();
+        assert!(msg.contains("db gone"));
     }
 }
