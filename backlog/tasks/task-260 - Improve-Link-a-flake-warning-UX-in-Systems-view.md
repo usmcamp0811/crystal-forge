@@ -1,7 +1,7 @@
 ---
 id: TASK-260
 title: Improve "Link a flake" warning UX in Systems view
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-04-11 00:00'
 updated_date: '2026-04-11 00:02'
@@ -74,5 +74,5 @@ Dependencies:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Promoted to To Do by explicit user request for immediate execution.
+LOCK: gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-260-link-flake-warning-ux
 <!-- SECTION:NOTES:END -->
