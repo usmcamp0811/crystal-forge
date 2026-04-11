@@ -54,7 +54,7 @@ pub fn EditSystemModal(
     rsx! {
         // Modal backdrop
         div {
-            class: "fixed inset-0 z-50 bg-black/50 p-4 flex items-center justify-center overflow-y-auto",
+            class: "fixed inset-0 z-50 bg-black/50 p-4 flex items-center justify-center overflow-y-auto cf-modal-overlay",
             onclick: move |_| on_close.call(()),
 
             // Modal content
