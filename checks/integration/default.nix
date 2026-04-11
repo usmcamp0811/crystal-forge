@@ -36,13 +36,12 @@ in pkgs.testers.runNixOSTest {
     };
 
     server = {
-      nix.settings = {
-        experimental-features = [ "nix-command" "flakes" ];
-      };
+      nix.settings = { experimental-features = [ "nix-command" "flakes" ]; };
       imports = [ inputs.self.nixosModules.crystal-forge ];
 
       networking.useDHCP = true;
-      networking.firewall.allowedTCPPorts = [ CF_TEST_SERVER_PORT GRAFANA_PORT 5432 ];
+      networking.firewall.allowedTCPPorts =
+        [ CF_TEST_SERVER_PORT GRAFANA_PORT 5432 ];
 
       virtualisation.writableStore = true;
       virtualisation.memorySize = 8096;
@@ -173,7 +172,8 @@ in pkgs.testers.runNixOSTest {
 
         systems = [{
           hostname = "server";
-          public_key = lib.strings.trim (builtins.readFile "${pubPath}/agent.pub");
+          public_key =
+            lib.strings.trim (builtins.readFile "${pubPath}/agent.pub");
           environment = "test";
           flake_name = "test-flake";
         }];
@@ -208,10 +208,8 @@ in pkgs.testers.runNixOSTest {
     # Stop builder immediately; it will be started again for the builder test phase.
     server.succeed("systemctl stop crystal-forge-builder.service || true")
 
-    # Run DB migrations explicitly (required for -m database tests).
-    server.succeed(
-      "DATABASE_URL='postgresql://postgres@127.0.0.1:5432/crystal_forge' crystal-forge-migrate"
-    )
+    # Migrations are automatically run by the crystal-forge module (local-database = true).
+    # No explicit migration call needed here.
 
     server.wait_for_unit("crystal-forge-server.service")
     server.wait_for_open_port(${toString CF_TEST_SERVER_PORT})
@@ -228,20 +226,40 @@ in pkgs.testers.runNixOSTest {
 
     # Forward ports to host for Python test access.
     server.forward_port(5433, 5432)
-    server.forward_port(${toString CF_TEST_SERVER_PORT}, ${toString CF_TEST_SERVER_PORT})
+    server.forward_port(${toString CF_TEST_SERVER_PORT}, ${
+      toString CF_TEST_SERVER_PORT
+    })
     server.forward_port(${toString GRAFANA_PORT}, ${toString GRAFANA_PORT})
 
     from cf_test.vm_helpers import wait_for_git_server_ready
     wait_for_git_server_ready(gitserver, timeout=120)
 
     # Read commit metadata from test flake.
-    main_head = "${lib.strings.trim (builtins.readFile (lib.crystal-forge.testFlake + "/MAIN_HEAD"))}"
-    dev_head = "${lib.strings.trim (builtins.readFile (lib.crystal-forge.testFlake + "/DEVELOPMENT_HEAD"))}"
-    feature_head = "${lib.strings.trim (builtins.readFile (lib.crystal-forge.testFlake + "/FEATURE_HEAD"))}"
+    main_head = "${
+      lib.strings.trim
+      (builtins.readFile (lib.crystal-forge.testFlake + "/MAIN_HEAD"))
+    }"
+    dev_head = "${
+      lib.strings.trim
+      (builtins.readFile (lib.crystal-forge.testFlake + "/DEVELOPMENT_HEAD"))
+    }"
+    feature_head = "${
+      lib.strings.trim
+      (builtins.readFile (lib.crystal-forge.testFlake + "/FEATURE_HEAD"))
+    }"
 
-    main_commits = """${lib.strings.trim (builtins.readFile (lib.crystal-forge.testFlake + "/MAIN_COMMITS"))}"""
-    dev_commits = """${lib.strings.trim (builtins.readFile (lib.crystal-forge.testFlake + "/DEVELOPMENT_COMMITS"))}"""
-    feature_commits = """${lib.strings.trim (builtins.readFile (lib.crystal-forge.testFlake + "/FEATURE_COMMITS"))}"""
+    main_commits = """${
+      lib.strings.trim
+      (builtins.readFile (lib.crystal-forge.testFlake + "/MAIN_COMMITS"))
+    }"""
+    dev_commits = """${
+      lib.strings.trim
+      (builtins.readFile (lib.crystal-forge.testFlake + "/DEVELOPMENT_COMMITS"))
+    }"""
+    feature_commits = """${
+      lib.strings.trim
+      (builtins.readFile (lib.crystal-forge.testFlake + "/FEATURE_COMMITS"))
+    }"""
 
     os.environ.update({
       "CF_TEST_GIT_SERVER_URL": "http://gitserver/crystal-forge",
@@ -253,9 +271,18 @@ in pkgs.testers.runNixOSTest {
       "CF_TEST_MAIN_COMMITS": main_commits.replace('\n', ','),
       "CF_TEST_DEVELOPMENT_COMMITS": dev_commits.replace('\n', ','),
       "CF_TEST_FEATURE_COMMITS": feature_commits.replace('\n', ','),
-      "CF_TEST_MAIN_COMMIT_COUNT": "${lib.strings.trim (builtins.readFile (lib.crystal-forge.testFlake + "/MAIN_COMMIT_COUNT"))}",
-      "CF_TEST_DEVELOPMENT_COMMIT_COUNT": "${lib.strings.trim (builtins.readFile (lib.crystal-forge.testFlake + "/DEVELOPMENT_COMMIT_COUNT"))}",
-      "CF_TEST_FEATURE_COMMIT_COUNT": "${lib.strings.trim (builtins.readFile (lib.crystal-forge.testFlake + "/FEATURE_COMMIT_COUNT"))}",
+      "CF_TEST_MAIN_COMMIT_COUNT": "${
+        lib.strings.trim
+        (builtins.readFile (lib.crystal-forge.testFlake + "/MAIN_COMMIT_COUNT"))
+      }",
+      "CF_TEST_DEVELOPMENT_COMMIT_COUNT": "${
+        lib.strings.trim (builtins.readFile
+          (lib.crystal-forge.testFlake + "/DEVELOPMENT_COMMIT_COUNT"))
+      }",
+      "CF_TEST_FEATURE_COMMIT_COUNT": "${
+        lib.strings.trim (builtins.readFile
+          (lib.crystal-forge.testFlake + "/FEATURE_COMMIT_COUNT"))
+      }",
       "CF_TEST_DB_HOST": "127.0.0.1",
       "CF_TEST_DB_PORT": "5433",
       "CF_TEST_DB_USER": "postgres",
@@ -289,7 +316,9 @@ in pkgs.testers.runNixOSTest {
     print("=== Phase 2: Dashboard tests ===")
     print("Checking Grafana provisioning...")
     server.succeed(
-      "curl -sS -u admin:admin http://127.0.0.1:${toString GRAFANA_PORT}/api/datasources | jq . || echo 'API unavailable'"
+      "curl -sS -u admin:admin http://127.0.0.1:${
+        toString GRAFANA_PORT
+      }/api/datasources | jq . || echo 'API unavailable'"
     )
     server.succeed(
       "systemctl status crystal-forge-grafana-db-init || true"
