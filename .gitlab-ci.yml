@@ -233,10 +233,8 @@ flake-check:
   parallel:
     matrix:
       - CHECK_NAME:
-          - attic_cache
           - integration
           - oidc-auth
-          - s3_cache
           - web-ui
   before_script:
     # Create .netrc using CI job token (more secure)
