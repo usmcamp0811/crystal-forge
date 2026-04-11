@@ -1,7 +1,7 @@
 ---
 id: TASK-264
 title: Fix Systems Edit modal rendering regression with flake warning banner
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-04-11 16:00'
 updated_date: '2026-04-11 16:02'
@@ -67,5 +67,5 @@ Medium (user-facing modal layout/regression fix).
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Promoted to To Do by explicit user instruction for immediate execution.
+LOCK: gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-264-fix-systems-edit-modal-overlay
 <!-- SECTION:NOTES:END -->
