@@ -189,9 +189,12 @@ def test_builder_directories_exist(cf_client, cfServer):
 def test_builder_logs_show_startup(cf_client, cfServer):
     """Test that builder logs show successful startup"""
 
-    # Wait for builder startup message
+    # Wait for builder startup message - can be API mode or legacy mode
+    # API mode: "🌐 Starting Crystal Forge Builder in API mode..."
+    # Legacy mode: "💾 Starting Crystal Forge Builder in legacy database mode..."
+    # Both modes then start the job polling loop
     cf_client.wait_for_service_log(
-        cfServer, "crystal-forge-builder.service", "🔍 Starting", timeout=60
+        cfServer, "crystal-forge-builder.service", "Starting job polling loop", timeout=60
     )
 
 

@@ -200,6 +200,12 @@ in pkgs.testers.runNixOSTest {
     start_all()
 
     # --- Infrastructure setup ---
+    # IMPORTANT: Wait for git server FIRST, before crystal-forge-server starts polling.
+    # The server will try to initialize flakes on startup, so git must be ready.
+    from cf_test.vm_helpers import wait_for_git_server_ready
+    wait_for_git_server_ready(gitserver, timeout=120)
+    print("Git server ready")
+
     server.wait_for_unit("postgresql.service")
     server.wait_for_open_port(5432)
 
@@ -225,9 +231,6 @@ in pkgs.testers.runNixOSTest {
       toString CF_TEST_SERVER_PORT
     })
     server.forward_port(${toString GRAFANA_PORT}, ${toString GRAFANA_PORT})
-
-    from cf_test.vm_helpers import wait_for_git_server_ready
-    wait_for_git_server_ready(gitserver, timeout=120)
 
     # Read commit metadata from test flake.
     main_head = "${
