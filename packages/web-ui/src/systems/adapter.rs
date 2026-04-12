@@ -17,13 +17,14 @@ use uuid::Uuid;
 
 use crate::api::client::{
     ApiClientError, create_system, deactivate_system, deploy_system, fetch_flakes, fetch_system,
-    fetch_system_commits, fetch_systems, update_system, update_system_public_key,
+    fetch_system_agent_events, fetch_system_commits, fetch_system_history, fetch_systems,
+    update_system, update_system_public_key,
 };
 use crate::api::models::{
     CommitInfo, CreateSystemRequest, CveSummary, DeploySystemRequest, DeploymentStatus,
-    HealthStatus, PaginatedResponse, PipelineStage, SystemCommitsResponse, SystemDetail,
-    SystemHardwareInfo, SystemNetworkInfo, SystemSecurityInfo, SystemSummary, SystemsListParams,
-    UpdateSystemPublicKeyRequest, UpdateSystemRequest,
+    HealthStatus, PaginatedResponse, PipelineStage, SystemAgentEvent, SystemCommitsResponse,
+    SystemDetail, SystemHardwareInfo, SystemHistoryEntry, SystemNetworkInfo, SystemSecurityInfo,
+    SystemSummary, SystemsListParams, UpdateSystemPublicKeyRequest, UpdateSystemRequest,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -56,6 +57,20 @@ pub struct SystemDetailLoadResult {
 #[derive(Debug, Clone)]
 pub struct FlakeNamesLoadResult {
     pub names: Vec<String>,
+    pub notice: Option<String>,
+    pub redirect_to_login: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct SystemHistoryLoadResult {
+    pub entries: Vec<SystemHistoryEntry>,
+    pub notice: Option<String>,
+    pub redirect_to_login: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct SystemAgentEventsLoadResult {
+    pub entries: Vec<SystemAgentEvent>,
     pub notice: Option<String>,
     pub redirect_to_login: bool,
 }
@@ -220,10 +235,7 @@ pub async fn update_system_public_key_via_api(
 }
 
 /// Deploy a system to a specific commit via the backend API.
-pub async fn deploy_system_via_api(
-    system_id: Uuid,
-    commit_sha: String,
-) -> Result<String, String> {
+pub async fn deploy_system_via_api(system_id: Uuid, commit_sha: String) -> Result<String, String> {
     let request = DeploySystemRequest { commit_sha };
 
     match deploy_system(&system_id, &request).await {
@@ -249,6 +261,48 @@ pub async fn fetch_system_commits_via_api(
         Err(ApiClientError::Status { body, .. }) => Err(body),
         Err(ApiClientError::Network(msg)) => Err(format!("Network error: {}", msg)),
         Err(ApiClientError::Deserialize(msg)) => Err(format!("Invalid response: {}", msg)),
+    }
+}
+
+pub async fn load_system_history_with_fallback(system_id: Uuid) -> SystemHistoryLoadResult {
+    match fetch_system_history(&system_id).await {
+        Ok(entries) => SystemHistoryLoadResult {
+            entries,
+            notice: None,
+            redirect_to_login: false,
+        },
+        Err(error) if should_redirect_to_login(&error) => SystemHistoryLoadResult {
+            entries: vec![],
+            notice: None,
+            redirect_to_login: true,
+        },
+        Err(error) => SystemHistoryLoadResult {
+            entries: vec![],
+            notice: Some(format!("History API unavailable: {error}")),
+            redirect_to_login: false,
+        },
+    }
+}
+
+pub async fn load_system_agent_events_with_fallback(
+    system_id: Uuid,
+) -> SystemAgentEventsLoadResult {
+    match fetch_system_agent_events(&system_id).await {
+        Ok(entries) => SystemAgentEventsLoadResult {
+            entries,
+            notice: None,
+            redirect_to_login: false,
+        },
+        Err(error) if should_redirect_to_login(&error) => SystemAgentEventsLoadResult {
+            entries: vec![],
+            notice: None,
+            redirect_to_login: true,
+        },
+        Err(error) => SystemAgentEventsLoadResult {
+            entries: vec![],
+            notice: Some(format!("Agent events API unavailable: {error}")),
+            redirect_to_login: false,
+        },
     }
 }
 

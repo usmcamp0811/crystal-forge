@@ -221,6 +221,20 @@ pub async fn fetch_system_commits(
     fetch_json(&url).await
 }
 
+pub async fn fetch_system_history(
+    id: &uuid::Uuid,
+) -> Result<Vec<crate::api::models::SystemHistoryEntry>, ApiClientError> {
+    let url = format!("{}/systems/{}/history", base_url(), id);
+    fetch_json(&url).await
+}
+
+pub async fn fetch_system_agent_events(
+    id: &uuid::Uuid,
+) -> Result<Vec<crate::api::models::SystemAgentEvent>, ApiClientError> {
+    let url = format!("{}/systems/{}/agent-events", base_url(), id);
+    fetch_json(&url).await
+}
+
 /// Fetch the evaluation queue (active + completed commits).
 pub async fn fetch_eval_queue() -> Result<EvalQueueSummary, ApiClientError> {
     let url = format!(

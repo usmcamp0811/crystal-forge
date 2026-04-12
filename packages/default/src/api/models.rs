@@ -779,6 +779,30 @@ pub struct CommitInfo {
     pub timestamp: String,
 }
 
+/// A single system state transition for timeline/history views.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemHistoryEntry {
+    pub timestamp: DateTime<Utc>,
+    pub store_path: Option<String>,
+    pub system_configuration_name: Option<String>,
+    pub change_reason: String,
+    pub commit_hash: Option<String>,
+    pub flake_name: Option<String>,
+    pub flake_repo_url: Option<String>,
+    pub actor: String,
+    pub outcome: String,
+}
+
+/// Agent-originated event shown on system details logs tab.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemAgentEvent {
+    pub timestamp: DateTime<Utc>,
+    pub level: String,
+    pub event_type: String,
+    pub message: String,
+    pub deployment_related: bool,
+}
+
 /// Generic response for accepted system mutation actions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemMutationResponse {

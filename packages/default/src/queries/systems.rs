@@ -13,6 +13,26 @@ pub struct SystemCommitRow {
     pub timestamp: DateTime<Utc>,
 }
 
+#[derive(Debug, sqlx::FromRow)]
+pub struct SystemHistoryRow {
+    pub timestamp: DateTime<Utc>,
+    pub store_path: Option<String>,
+    pub system_configuration_name: Option<String>,
+    pub change_reason: Option<String>,
+    pub commit_hash: Option<String>,
+    pub flake_name: Option<String>,
+    pub flake_repo_url: Option<String>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct SystemAgentEventRow {
+    pub timestamp: DateTime<Utc>,
+    pub level: String,
+    pub event_type: String,
+    pub message: String,
+    pub deployment_related: bool,
+}
+
 pub async fn update_hostname(pool: &PgPool, system: &System, new_hostname: &str) -> Result<()> {
     sqlx::query("UPDATE systems SET hostname = $1, updated_at = NOW() WHERE id = $2")
         .bind(new_hostname)
@@ -264,6 +284,100 @@ pub async fn list_recent_commits_for_system(
     .bind(limit)
     .fetch_all(pool)
     .await?;
+    Ok(rows)
+}
+
+pub async fn list_system_history_rows(
+    pool: &PgPool,
+    system_id: Uuid,
+    limit: i64,
+) -> Result<Vec<SystemHistoryRow>> {
+    let rows = sqlx::query_as::<_, SystemHistoryRow>(
+        r#"
+        SELECT
+            ss.timestamp,
+            ss.store_path,
+            COALESCE(NULLIF(s.system_configuration_name, ''), s.hostname) AS system_configuration_name,
+            ss.change_reason,
+            c.git_commit_hash AS commit_hash,
+            f.name AS flake_name,
+            f.repo_url AS flake_repo_url
+        FROM systems s
+        JOIN system_states ss ON ss.hostname = s.hostname
+        LEFT JOIN derivations d
+          ON ss.store_path = COALESCE(d.store_path, d.expected_store_path)
+         AND d.derivation_type = 'nixos'
+         AND d.derivation_name = COALESCE(NULLIF(s.system_configuration_name, ''), s.hostname)
+        LEFT JOIN commits c ON c.id = d.commit_id
+        LEFT JOIN flakes f ON f.id = c.flake_id
+        WHERE s.id = $1
+        ORDER BY ss.timestamp DESC
+        LIMIT $2
+        "#,
+    )
+    .bind(system_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows)
+}
+
+pub async fn list_system_agent_event_rows(
+    pool: &PgPool,
+    system_id: Uuid,
+    limit: i64,
+) -> Result<Vec<SystemAgentEventRow>> {
+    let rows = sqlx::query_as::<_, SystemAgentEventRow>(
+        r#"
+        WITH target AS (
+            SELECT hostname
+            FROM systems
+            WHERE id = $1
+        )
+        SELECT *
+        FROM (
+            SELECT
+                ss.timestamp,
+                CASE
+                    WHEN ss.change_reason = 'cf_deployment' THEN 'info'
+                    WHEN ss.change_reason = 'startup' THEN 'info'
+                    WHEN ss.change_reason = 'config_change' THEN 'info'
+                    ELSE 'debug'
+                END AS level,
+                'state_change'::text AS event_type,
+                CONCAT(
+                    'agent reported ', COALESCE(ss.change_reason, 'state_delta'),
+                    COALESCE(CONCAT(' (', ss.store_path, ')'), '')
+                ) AS message,
+                (ss.change_reason = 'cf_deployment') AS deployment_related
+            FROM target t
+            JOIN system_states ss ON ss.hostname = t.hostname
+
+            UNION ALL
+
+            SELECT
+                ah.timestamp,
+                'debug'::text AS level,
+                'heartbeat'::text AS event_type,
+                CONCAT(
+                    'agent heartbeat',
+                    COALESCE(CONCAT(' version=', ah.agent_version), '')
+                ) AS message,
+                false AS deployment_related
+            FROM target t
+            JOIN system_states ss ON ss.hostname = t.hostname
+            JOIN agent_heartbeats ah ON ah.system_state_id = ss.id
+        ) events
+        ORDER BY timestamp DESC
+        LIMIT $2
+        "#,
+    )
+    .bind(system_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
     Ok(rows)
 }
 
