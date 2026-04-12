@@ -713,6 +713,10 @@ pub struct FlakeCommitSystemPath {
     pub expected_store_path: Option<String>,
     #[serde(default)]
     pub current_store_path: Option<String>,
+    #[serde(default)]
+    pub cve_scan_eligible: bool,
+    #[serde(default)]
+    pub cve_scan_blocked_reason: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -911,6 +915,38 @@ pub struct SystemAgentEvent {
 pub struct SystemMutationResponse {
     pub status: String,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CveScanEligibilityResponse {
+    pub eligible: bool,
+    pub reason: Option<String>,
+    pub derivation_id: Option<i32>,
+    pub config_name: Option<String>,
+    pub hostname: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CveScanTriggerResponse {
+    pub scan_id: uuid::Uuid,
+    pub status: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CveScanStatusResponse {
+    pub scan_id: uuid::Uuid,
+    pub derivation_id: i32,
+    pub status: String,
+    pub scanner_name: String,
+    pub scheduled_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub attempts: i32,
+    pub total_vulnerabilities: i32,
+    pub critical_count: i32,
+    pub high_count: i32,
+    pub medium_count: i32,
+    pub low_count: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

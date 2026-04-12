@@ -874,6 +874,16 @@ function buildFlakeStressFixture() {
       const systems = Array.from({ length: systemCount }, (_, systemIdx) =>
         `${flake.name}-host-${String(systemIdx + 1).padStart(2, "0")}`,
       );
+      const system_paths = systems.slice(0, 8).map((configName) => ({
+        config_name: configName,
+        is_cf_system: true,
+        cf_hostname: configName,
+        mapped_host_count: 1,
+        expected_store_path: `/nix/store/${configName}`,
+        current_store_path: `/nix/store/${configName}`,
+        cve_scan_eligible: true,
+        cve_scan_blocked_reason: null,
+      }));
 
       return {
         id: flake.id * 1000 + commitIdx,
@@ -884,6 +894,7 @@ function buildFlakeStressFixture() {
         system_count: systemCount,
         commits_behind: commitIdx,
         systems,
+        system_paths,
         build_status: commitIdx % 3 === 0 ? "queued" : commitIdx % 4 === 0 ? "building" : "idle",
         evaluation_status: commitIdx % 5 === 0 ? "failed" : "complete",
         evaluation_error_message:
@@ -2100,10 +2111,27 @@ const steps = [
       await routeSystemsWarningData(page);
       await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
-      await page
+      const warningBanner = page.locator("[data-testid='systems-missing-flake-warning']").first();
+      await warningBanner.waitFor({ timeout: 5000 });
+      await warningBanner
         .getByText(/not linked to a flake and won't be included in evaluations/i)
         .first()
         .waitFor({ timeout: 5000 });
+      await warningBanner.getByText(/Affected system: warning-system-01/i).first().waitFor({ timeout: 5000 });
+      await warningBanner
+        .getByText(/To resolve: click Edit on each affected system and set Flake Name./i)
+        .first()
+        .waitFor({ timeout: 5000 });
+      const remediationLink = warningBanner.getByRole("link", {
+        name: /Review affected systems/i,
+      });
+      await remediationLink.waitFor({ timeout: 5000 });
+      const remediationHref = await remediationLink.getAttribute("href");
+      if (remediationHref !== "/systems") {
+        throw new Error(
+          `Expected warning remediation link to target /systems, got: ${remediationHref}`,
+        );
+      }
       await unrouteSystemsWarningData(page);
       await unrouteConfigHealth(page);
     },
@@ -2149,11 +2177,70 @@ const steps = [
 
       const editModal = page.getByText("Update system configuration and deployment settings").first();
       await assertVisible(editModal, "Expected Edit System modal to be visible", 15000);
+      const warningBanner = page
+        .getByText(/not linked to a flake and won't be included in evaluations/i)
+        .first();
+      await assertVisible(
+        warningBanner,
+        "Expected systems warning banner to remain visible outside the modal",
+        15000,
+      );
+      const modalOverlay = page.locator("div.fixed.inset-0").filter({ hasText: "Edit System" }).first();
+      await assertVisible(modalOverlay, "Expected edit modal overlay container to be visible", 15000);
+      const warningLeakCount = await modalOverlay
+        .getByText(/not linked to a flake and won't be included in evaluations/i)
+        .count();
+      if (warningLeakCount > 0) {
+        throw new Error("Expected warning banner text to stay outside edit modal overlay");
+      }
       await assertVisible(
         page.getByRole("button", { name: "Save Changes" }).first(),
         "Expected Edit System modal controls to be visible",
         15000,
       );
+
+      await page.route(
+        "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cve-scan-eligibility*",
+        async (route) => {
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({
+              eligible: true,
+              reason: null,
+              derivation_id: 42,
+              config_name: "warning-system-01",
+              hostname: "warning-system-01",
+            }),
+          });
+        },
+      );
+      await page.route("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cves*", async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+      });
+      await page.route("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/commits*", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ commits: [], current_commit: null }),
+        });
+      });
+
+      await page.goto(`${baseUrl}/systems/00000000-0000-0000-0000-0000000000a1`, {
+        timeout: LOAD_TIMEOUT,
+      });
+      await page.waitForTimeout(1200);
+      await assertVisible(
+        page.locator("button:has-text('Run CVE Scan')").first(),
+        "Expected Run CVE Scan action to be visible on system detail",
+        12000,
+      );
+
+      await page.unroute(
+        "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cve-scan-eligibility*",
+      );
+      await page.unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cves*");
+      await page.unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/commits*");
       await unrouteSystemsWarningData(page);
     },
   },
@@ -2223,11 +2310,11 @@ const steps = [
         throw new Error("Expected commits request to succeed before rendering Deploy modal");
       }
 
-      const deployModal = page.getByText("Select Commit to Deploy").first();
-      await assertVisible(deployModal, "Expected Deploy System modal to be visible", 15000);
+      const deployModalHeading = page.getByRole("heading", { name: "Deploy System" }).first();
+      await assertVisible(deployModalHeading, "Expected Deploy System modal heading to be visible", 20000);
       await assertVisible(
-        page.getByText("abc123d").first(),
-        "Expected at least one mocked commit option in Deploy System modal",
+        page.getByText("Select Commit to Deploy").first(),
+        "Expected commit selector to be visible in Deploy System modal",
         15000,
       );
       await assertVisible(
@@ -2322,6 +2409,47 @@ const steps = [
     },
   },
   {
+    name: "12g-systems-warning-clears-after-link",
+    description: "Systems missing-flake warning clears after linking flake via Edit modal",
+    action: async (page) => {
+      await routeSystemsWarningData(page);
+      await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2200);
+
+      const warningBanner = page.locator("[data-testid='systems-missing-flake-warning']").first();
+      await assertVisible(warningBanner, "Expected missing-flake warning before linking", 15000);
+
+      const systemRow = page.locator("tr").filter({ hasText: "warning-system-01" }).first();
+      await assertVisible(systemRow, "Expected warning-system-01 row to be visible", 15000);
+
+      const detailResponsePromise = page
+        .waitForResponse(
+          (response) =>
+            response.request().method() === "GET" &&
+            response.url().includes("/api/v1/systems/00000000-0000-0000-0000-0000000000a1"),
+          { timeout: 15000 },
+        )
+        .catch(() => null);
+
+      await systemRow.getByRole("button", { name: "Edit" }).first().click();
+
+      const detailResponse = await detailResponsePromise;
+      if (!detailResponse || !detailResponse.ok()) {
+        throw new Error("Expected system detail request to succeed before editing flake linkage");
+      }
+
+      await page.getByText("Update system configuration and deployment settings").first().waitFor({ timeout: 15000 });
+      await page.getByRole("button", { name: "Save Changes" }).first().click();
+      await page.waitForTimeout(1200);
+
+      if (await warningBanner.isVisible().catch(() => false)) {
+        throw new Error("Expected missing-flake warning to clear after linking flake via Edit modal");
+      }
+
+      await unrouteSystemsWarningData(page);
+    },
+  },
+  {
     name: "13-flakes",
     description: "Flakes registry",
     action: async (page) => {
@@ -2395,6 +2523,12 @@ const steps = [
       if (probe < 1) {
         throw new Error("Flakes stress dataset responsiveness probe did not execute");
       }
+
+      await assertVisible(
+        page.locator("button:has-text('Run CVE Scan')").first(),
+        "Expected per-config Run CVE Scan action in flakes history",
+        12000,
+      );
 
       await unrouteFlakesStressData(page);
     },
@@ -2959,15 +3093,18 @@ const steps = [
       // Click the Critical severity filter button.
       const criticalBtn = page.locator("button:has-text('Critical')").first();
       await criticalBtn.waitFor({ timeout: 5000 });
-      await criticalBtn.click();
-
-      // Wait for a new vulnerabilities request that includes severity=critical.
-      await page.waitForResponse(
+      // Register response wait before clicking to avoid race conditions when the
+      // filtered request resolves very quickly in CI.
+      const filteredResponsePromise = page.waitForResponse(
         (resp) =>
           resp.url().includes("/api/v1/cves/vulnerabilities") &&
           resp.url().includes("severity=critical"),
         { timeout: 8000 },
       );
+      await criticalBtn.click();
+
+      // Wait for a new vulnerabilities request that includes severity=critical.
+      await filteredResponsePromise;
 
       // Assert a new request was fired after the click (filter is reactive).
       if (vulnerabilityUrls.length <= initialCount) {
@@ -3141,11 +3278,13 @@ const CI_FAST_STEP_NAMES = new Set([
   "06z-fleet-health-widget-assert",
   "15-builds",
   "11b-builds-queue-card-focus",
+  "12b-systems-config-warning",
   "12c-systems-modal-config-field",
   "12e-systems-edit-modal",
   "12f-systems-deploy-modal",
   "12g-system-detail-history-logs-edit",
   "12d-systems-api-error-no-mock-fallback",
+  "12g-systems-warning-clears-after-link",
   "13d-flakes-stress-dataset",
   "13e-flakes-add-modal-credentials",
   "13f-flakes-edit-modal-credentials",

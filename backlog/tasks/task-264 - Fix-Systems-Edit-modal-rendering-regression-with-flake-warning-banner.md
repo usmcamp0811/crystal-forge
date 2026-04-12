@@ -1,10 +1,10 @@
 ---
 id: TASK-264
 title: Fix Systems Edit modal rendering regression with flake warning banner
-status: Done
+status: To Do
 assignee: []
 created_date: '2026-04-11 16:00'
-updated_date: '2026-04-11 19:09'
+updated_date: '2026-04-11 16:02'
 labels:
   - bug
   - ui
@@ -58,26 +58,14 @@ Medium (user-facing modal layout/regression fix).
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [x] #1 Clicking Systems → Edit opens an isolated modal overlay; global flake-link warning banner and page navigation/content do not render inside modal body.
-- [x] #2 Edit modal remains functional (hostname/config/environment/policy fields and Save/Cancel actions still render and behave normally).
-- [x] #3 Systems page warning banner remains visible in page context when applicable, outside modal overlay.
-- [x] #4 web-ui verification captures the corrected modal behavior (via existing or updated check evidence).
+- [ ] #1 Clicking Systems → Edit opens an isolated modal overlay; global flake-link warning banner and page navigation/content do not render inside modal body.
+- [ ] #2 Edit modal remains functional (hostname/config/environment/policy fields and Save/Cancel actions still render and behave normally).
+- [ ] #3 Systems page warning banner remains visible in page context when applicable, outside modal overlay.
+- [ ] #4 web-ui verification captures the corrected modal behavior (via existing or updated check evidence).
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Implemented modal overlay isolation fix in `packages/web-ui/src/components/system/edit_system_modal.rs` (bounded max-height + internal scroll + fixed backdrop padding/overflow).
-
-Added web-ui integration assertion in `checks/web-ui/tests/integration-test.js` step `12e-systems-edit-modal` to ensure warning banner text remains outside modal overlay.
-
-Verification executed: `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml` and `nix build .#checks.x86_64-linux.web-ui -L --show-trace`.
-
-MR opened: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/229
+Promoted to To Do by explicit user instruction for immediate execution.
 <!-- SECTION:NOTES:END -->
-
-## Final Summary
-
-<!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Added Flake Name dropdown to EditSystemModal so users can link a system to a flake directly from the Edit modal. Fixed select rendering using explicit `selected` attributes on each option. Narrowed modal to `max-w-lg`. Added inline amber warning when no flake is selected. Also updated on_save callback to propagate `flake_id` back to local systems list so the warning banner clears immediately after saving.\n\nMR #229 merged into dev."
-<!-- SECTION:FINAL_SUMMARY:END -->

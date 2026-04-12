@@ -5,6 +5,15 @@ use sqlx::PgPool;
 use std::collections::BTreeSet;
 use uuid::Uuid;
 
+const DEACTIVATE_DUPLICATE_ACTIVE_SYSTEMS_SQL: &str =
+    "UPDATE systems
+     SET is_active = FALSE,
+         updated_at = NOW()
+     WHERE is_active = TRUE
+       AND hostname <> $1
+       AND public_key = $2
+     RETURNING hostname";
+
 #[derive(Debug, sqlx::FromRow)]
 pub struct SystemCommitRow {
     pub sha: String,
@@ -262,6 +271,27 @@ pub async fn deactivate_system(pool: &PgPool, system_id: Uuid) -> Result<()> {
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// Deactivate any *other* active systems that share the same public key.
+///
+/// This is a safety hotfix for hostname-renamed/re-joined agents where the same
+/// agent keypair ends up attached to multiple active system rows, which can
+/// cause stale duplicate hosts to remain critical/offline in health views.
+///
+/// Returns the list of hostnames that were deactivated.
+pub async fn deactivate_duplicate_active_systems_by_public_key(
+    pool: &PgPool,
+    current_hostname: &str,
+    public_key_base64: &str,
+) -> Result<Vec<String>> {
+    let deactivated_hostnames = sqlx::query_scalar::<_, String>(DEACTIVATE_DUPLICATE_ACTIVE_SYSTEMS_SQL)
+    .bind(current_hostname)
+    .bind(public_key_base64)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(deactivated_hostnames)
 }
 
 pub async fn list_recent_commits_for_system(
@@ -730,6 +760,46 @@ pub async fn get_flake_id_by_name(pool: &PgPool, name: &str) -> Result<Option<i3
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::models::public_key::PublicKey;
+    use crate::models::systems::System;
+    use ed25519_dalek::SigningKey;
+    use sqlx::Executor;
+    use uuid::Uuid;
+
+    async fn make_test_system(pool: &PgPool, hostname: &str) -> System {
+        let key = SigningKey::from_bytes(&[42u8; 32]);
+        let public_key = PublicKey::from_verifying_key(key.verifying_key());
+
+        let system = System {
+            id: Uuid::new_v4(),
+            hostname: hostname.to_string(),
+            environment_id: None,
+            is_active: true,
+            public_key,
+            flake_id: None,
+            derivation: String::new(),
+            system_configuration_name: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            desired_target: None,
+            deployment_policy: "manual".to_string(),
+        };
+
+        insert_system(pool, &system)
+            .await
+            .expect("insert_system should succeed for test system")
+    }
+
+    async fn test_pool_from_env() -> PgPool {
+        let db_url = std::env::var("DATABASE_URL")
+            .expect("DATABASE_URL must be set for TASK-258 db-backed tests");
+
+        PgPool::connect(&db_url)
+            .await
+            .expect("failed to connect to DATABASE_URL")
+    }
+
     #[test]
     fn hotfix_migration_updates_system_list_view_heartbeat_ordering() {
         let migration = include_str!(
@@ -756,6 +826,175 @@ mod tests {
                     .count()
                     >= 2,
             "hotfix migration must update system detail view to prefer non-null heartbeat rows"
+        );
+    }
+
+    #[test]
+    fn hotfix_migration_restores_view_system_vulnerabilities() {
+        let migration = include_str!(
+            "../../migrations/0107_restore_view_system_vulnerabilities.sql"
+        );
+
+        assert!(
+            migration.contains("CREATE OR REPLACE VIEW public.view_system_vulnerabilities AS")
+                && migration.contains("FROM public.derivations d")
+                && migration.contains("JOIN public.cve_scans scan ON d.id = scan.derivation_id")
+                && migration.contains("JOIN public.derivation_statuses ds ON d.status_id = ds.id")
+                && migration.contains("pkg_d.derivation_name AS package_name")
+                && migration.contains("pkg_d.pname AS package_pname")
+                && migration.contains("pkg_d.version AS package_version")
+                && migration.contains("ds.name = ANY (ARRAY['build-complete'::text, 'complete'::text])")
+                && !migration.contains("pkg_d.package_name")
+                && !migration.contains("pkg_d.package_pname")
+                && !migration.contains("pkg_d.package_version")
+                && !migration.contains("d.status ="),
+            "migration must restore the derivation-based view_system_vulnerabilities definition"
+        );
+    }
+
+    #[test]
+    fn hotfix_migration_restores_nonzero_cve_counts_in_system_views() {
+        let migration =
+            include_str!("../../migrations/0108_fix_system_views_cve_counts.sql");
+
+        assert!(
+            migration.contains("CREATE OR REPLACE VIEW public.view_system_list AS")
+                && migration.contains("CREATE OR REPLACE VIEW public.view_system_detail AS")
+                && migration.contains("FROM view_system_vulnerabilities")
+                && migration.contains("COALESCE(cc.critical_cve_count, 0)::integer AS critical_cve_count")
+                && migration.contains("COALESCE(cc.high_cve_count, 0)::integer AS high_cve_count")
+                && migration.contains("COALESCE(cc.medium_cve_count, 0)::integer AS medium_cve_count")
+                && migration.contains("COALESCE(cc.low_cve_count, 0)::integer AS low_cve_count")
+                && !migration.contains("0::integer AS critical_cve_count")
+                && !migration.contains("0::integer AS high_cve_count")
+                && !migration.contains("0::integer AS medium_cve_count")
+                && !migration.contains("0::integer AS low_cve_count"),
+            "migration must derive system CVE counts from view_system_vulnerabilities, not hardcode zeros"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn hotfix_system_views_cve_counts_from_view_system_vulnerabilities() {
+        let pool = test_pool_from_env().await;
+        let vulnerable_hostname = format!("task258-vuln-{}", Uuid::new_v4());
+        let clean_hostname = format!("task258-clean-{}", Uuid::new_v4());
+
+        let vulnerable_system = make_test_system(&pool, &vulnerable_hostname).await;
+        let clean_system = make_test_system(&pool, &clean_hostname).await;
+
+        let mut tx = pool.begin().await.expect("failed to begin transaction");
+
+        tx.execute(
+            "CREATE TEMP TABLE task258_vuln_seed (
+                 hostname TEXT NOT NULL,
+                 severity TEXT NOT NULL
+             ) ON COMMIT DROP",
+        )
+        .await
+        .expect("failed to create temp seed table");
+
+        for severity in ["critical", "high", "high", "low"] {
+            sqlx::query("INSERT INTO task258_vuln_seed (hostname, severity) VALUES ($1, $2)")
+                .bind(&vulnerable_hostname)
+                .bind(severity)
+                .execute(&mut *tx)
+                .await
+                .expect("failed to seed vulnerability row");
+        }
+
+        tx.execute(
+            "CREATE OR REPLACE VIEW public.view_system_vulnerabilities AS
+             SELECT
+                 seed.hostname,
+                 NULL::text AS package_name,
+                 NULL::text AS package_pname,
+                 NULL::text AS package_version,
+                 NULL::text AS derivation_path,
+                 format('test-cve-%s', row_number() OVER ()) AS cve_id,
+                 NULL::double precision AS cvss_v3_score,
+                 seed.severity,
+                 NULL::text AS description,
+                 FALSE AS is_whitelisted,
+                 NULL::text AS whitelist_reason,
+                 NULL::text AS fixed_version,
+                 NULL::text AS detection_method,
+                 NOW() AS completed_at,
+                 'task258-test'::text AS scanner_name,
+                 NULL::text AS evaluation_derivation_path,
+                 NULL::text AS git_commit_hash,
+                 NULL::text AS flake_name
+             FROM task258_vuln_seed seed",
+        )
+        .await
+        .expect("failed to replace view_system_vulnerabilities for test");
+
+        tx.execute(include_str!("../../migrations/0108_fix_system_views_cve_counts.sql"))
+            .await
+            .expect("failed to apply TASK-258 migration SQL");
+
+        let list_counts = sqlx::query_as::<_, (i32, i32, i32, i32)>(
+            "SELECT critical_cve_count, high_cve_count, medium_cve_count, low_cve_count
+             FROM view_system_list
+             WHERE hostname = $1",
+        )
+        .bind(&vulnerable_hostname)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("failed to read vulnerable host from view_system_list");
+        assert_eq!(list_counts, (1, 2, 0, 1));
+
+        let clean_list_counts = sqlx::query_as::<_, (i32, i32, i32, i32)>(
+            "SELECT critical_cve_count, high_cve_count, medium_cve_count, low_cve_count
+             FROM view_system_list
+             WHERE hostname = $1",
+        )
+        .bind(&clean_hostname)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("failed to read clean host from view_system_list");
+        assert_eq!(clean_list_counts, (0, 0, 0, 0));
+
+        let detail_counts = sqlx::query_as::<_, (i32, i32, i32, i32)>(
+            "SELECT critical_cve_count, high_cve_count, medium_cve_count, low_cve_count
+             FROM view_system_detail
+             WHERE id = $1",
+        )
+        .bind(vulnerable_system.id)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("failed to read vulnerable host from view_system_detail");
+        assert_eq!(detail_counts, (1, 2, 0, 1));
+
+        let clean_detail_counts = sqlx::query_as::<_, (i32, i32, i32, i32)>(
+            "SELECT critical_cve_count, high_cve_count, medium_cve_count, low_cve_count
+             FROM view_system_detail
+             WHERE id = $1",
+        )
+        .bind(clean_system.id)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("failed to read clean host from view_system_detail");
+        assert_eq!(clean_detail_counts, (0, 0, 0, 0));
+
+        tx.rollback()
+            .await
+            .expect("failed to roll back transaction");
+    }
+
+    #[test]
+    fn duplicate_public_key_hotfix_query_has_safe_predicates() {
+        assert!(
+            DEACTIVATE_DUPLICATE_ACTIVE_SYSTEMS_SQL.contains("is_active = TRUE"),
+            "must only affect currently active rows"
+        );
+        assert!(
+            DEACTIVATE_DUPLICATE_ACTIVE_SYSTEMS_SQL.contains("hostname <> $1"),
+            "must never deactivate the currently authenticated hostname"
+        );
+        assert!(
+            DEACTIVATE_DUPLICATE_ACTIVE_SYSTEMS_SQL.contains("public_key = $2"),
+            "must only match rows sharing the same public key"
         );
     }
 }

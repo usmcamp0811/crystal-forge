@@ -170,6 +170,39 @@ pub async fn fetch_system_cves(
     fetch_json(&url).await
 }
 
+pub async fn fetch_system_cve_scan_eligibility(
+    id: &uuid::Uuid,
+) -> Result<CveScanEligibilityResponse, ApiClientError> {
+    let url = format!("{}/systems/{}/cve-scan-eligibility", base_url(), id);
+    fetch_json(&url).await
+}
+
+pub async fn trigger_system_cve_scan(
+    id: &uuid::Uuid,
+) -> Result<CveScanTriggerResponse, ApiClientError> {
+    let url = format!("{}/systems/{}/cve-scan", base_url(), id);
+    send_json_with_csrf("POST", &url, None::<&()>).await
+}
+
+pub async fn trigger_flake_config_cve_scan(
+    flake_id: i32,
+    config_name: &str,
+) -> Result<CveScanTriggerResponse, ApiClientError> {
+    let encoded_config: String = js_sys::encode_uri_component(config_name).into();
+    let url = format!(
+        "{}/flakes/{}/configs/{}/cve-scan",
+        base_url(),
+        flake_id,
+        encoded_config
+    );
+    send_json_with_csrf("POST", &url, None::<&()>).await
+}
+
+pub async fn fetch_cve_scan_status(scan_id: &uuid::Uuid) -> Result<CveScanStatusResponse, ApiClientError> {
+    let url = format!("{}/cve-scans/{}", base_url(), scan_id);
+    fetch_json(&url).await
+}
+
 /// Create a new system.
 pub async fn create_system(request: &CreateSystemRequest) -> Result<SystemDetail, ApiClientError> {
     let url = format!("{}/systems", base_url());
