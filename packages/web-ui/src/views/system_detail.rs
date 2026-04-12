@@ -21,8 +21,9 @@ use crate::api::client::{
 };
 use crate::api::models::{
     BuildStatus, CveScanEligibilityResponse, CveSeverity, CveSummary, DeploymentLogEntry,
-    DeploymentStatus, LogLevel, PipelineStage, SystemCommitHistory, SystemDetail,
-    SystemHardwareInfo, SystemNetworkInfo, SystemRollbackRequest, SystemSecurityInfo,
+    DeploymentStatus, LogLevel, PipelineStage, SystemAgentEvent, SystemCommitHistory,
+    SystemDetail, SystemHardwareInfo, SystemHistoryEntry, SystemNetworkInfo,
+    SystemRollbackRequest, SystemSecurityInfo,
     SystemVulnerability,
 };
 use crate::components::cve::CvesTab;
@@ -31,12 +32,16 @@ use crate::components::layout::Card;
 use crate::components::modals::{RollbackConfirmDialog, SyncConfirmDialog};
 use crate::components::notifications::Toast;
 use crate::components::system::{
-    AgentCard, BooleanRow, HardwareCard, InfoRow, InfoRowMono, LogLine, LogsTab, NetworkCard,
-    SecurityCard, StatusBadge, SystemInfoCard, environment_style,
+    AgentCard, BooleanRow, EditSystemModal, HardwareCard, InfoRow, InfoRowMono, LogLine, LogsTab,
+    NetworkCard, SecurityCard, StatusBadge, SystemInfoCard, environment_style,
 };
 use crate::routes::Route;
 use crate::state::{app_state::AppState, auth};
 use crate::systems::adapter::{fallback_system_detail, load_system_detail_with_fallback};
+use crate::systems::adapter::{
+    load_system_agent_events_with_fallback, load_system_history_with_fallback,
+    update_system_via_api,
+};
 use crate::theme;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_futures::JsFuture;
@@ -117,6 +122,7 @@ pub fn SystemDetailView(id: String) -> Element {
 
     // Current tab state
     let mut active_tab = use_signal(|| Tab::Overview);
+    let mut edit_modal_open = use_signal(|| false);
 
     // Confirmation dialog state for Sync
     let mut show_sync_dialog = use_signal(|| false);
@@ -133,7 +139,7 @@ pub fn SystemDetailView(id: String) -> Element {
 
     // System data state — use_resource keyed on id prevents repeated fetches.
     let id_for_detail = id.clone();
-    let detail_resource = use_resource(move || {
+    let mut detail_resource = use_resource(move || {
         let id = id_for_detail.clone();
         async move { load_system_detail_with_fallback(&id).await }
     });
@@ -149,6 +155,32 @@ pub fn SystemDetailView(id: String) -> Element {
             fetch_system_cves(&system_id)
                 .await
                 .unwrap_or_else(|_| mock_vulnerabilities())
+        }
+    });
+
+    let id_for_history = id.clone();
+    let history_resource = use_resource(move || {
+        let id = id_for_history.clone();
+        async move {
+            let Ok(system_id) = Uuid::parse_str(&id) else {
+                return Vec::<SystemHistoryEntry>::new();
+            };
+
+            load_system_history_with_fallback(system_id).await.entries
+        }
+    });
+
+    let id_for_events = id.clone();
+    let agent_events_resource = use_resource(move || {
+        let id = id_for_events.clone();
+        async move {
+            let Ok(system_id) = Uuid::parse_str(&id) else {
+                return Vec::<SystemAgentEvent>::new();
+            };
+
+            load_system_agent_events_with_fallback(system_id)
+                .await
+                .entries
         }
     });
 
@@ -206,12 +238,21 @@ pub fn SystemDetailView(id: String) -> Element {
         };
     }
 
-    let commit_history = mock_commit_history_for_system(&system);
+    let history_entries = history_resource
+        .read_unchecked()
+        .clone()
+        .unwrap_or_default();
+    let commit_history = map_history_entries_to_commit_history(&history_entries);
     let vulnerabilities = match &*vulnerabilities_resource.read_unchecked() {
         Some(value) => value.clone(),
         None => mock_vulnerabilities(),
     };
-    let deployment_logs = mock_deployment_logs();
+    let deployment_logs = map_agent_events_to_logs(
+        agent_events_resource
+            .read_unchecked()
+            .clone()
+            .unwrap_or_default(),
+    );
     let scan_eligibility: Option<CveScanEligibilityResponse> =
         (*scan_eligibility_resource.read_unchecked()).clone().flatten();
 
@@ -317,6 +358,16 @@ pub fn SystemDetailView(id: String) -> Element {
                 }
                 div {
                     class: "flex items-center gap-2",
+                    button {
+                        class: "inline-flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm transition-all text-white border border-gray-500/40 bg-gray-700/50 hover:bg-gray-700/80 hover:border-gray-300/60",
+                        disabled: !can_mutate,
+                        onclick: move |_| edit_modal_open.set(true),
+                        if !can_mutate {
+                            "Edit (Operator/Admin required)"
+                        } else {
+                            "Edit"
+                        }
+                    }
                     button {
                         class: "inline-flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm transition-all text-white border border-amber-400/40 bg-amber-600/50 hover:bg-amber-600/70 hover:border-amber-300/60 disabled:opacity-60 disabled:cursor-not-allowed",
                         disabled: *cve_scan_in_progress.read() || !can_mutate || !cve_scan_eligible,
@@ -530,6 +581,43 @@ pub fn SystemDetailView(id: String) -> Element {
                     message: message.clone(),
                     is_success: is_success,
                     on_dismiss: move |_| toast_message.set(None)
+                }
+            }
+        }
+
+        // Sync confirmation dialog (rendered as portal outside main content)
+        if *edit_modal_open.read() {
+            EditSystemModal {
+                system: system.clone(),
+                flake_names: system
+                    .flake
+                    .as_ref()
+                    .map(|flake| vec![flake.name.clone()])
+                    .unwrap_or_default(),
+                on_close: move |_| edit_modal_open.set(false),
+                on_save: move |request: crate::api::models::UpdateSystemRequest| {
+                    let system_id = system.id;
+                    spawn(async move {
+                        match update_system_via_api(
+                            system_id,
+                            request.hostname,
+                            request.system_configuration_name,
+                            request.environment,
+                            request.flake_name,
+                            request.deployment_policy,
+                        )
+                        .await
+                        {
+                            Ok(_) => {
+                                edit_modal_open.set(false);
+                                detail_resource.restart();
+                            }
+                            Err(error_message) => {
+                                toast_message.set(Some((error_message, false)));
+                                edit_modal_open.set(false);
+                            }
+                        }
+                    });
                 }
             }
         }
@@ -972,10 +1060,28 @@ fn CommitTimelineNode(
                     div {
                         class: "flex flex-wrap items-center gap-x-4 gap-y-1 text-xs {theme::text::MUTED}",
 
+                        if let Some(ref config_identity) = commit.config_identity {
+                            span {
+                                class: "inline-flex items-center gap-1 rounded bg-slate-800/70 px-1.5 py-0.5 text-slate-300",
+                                "Config"
+                                code { class: "font-mono text-slate-200", "{config_identity}" }
+                            }
+                        }
+
                         // Hash
                         code {
                             class: "font-mono bg-gray-800 px-1.5 py-0.5 rounded text-gray-400",
                             "{short_hash}"
+                        }
+
+                        if let Some(ref repo_url) = commit.flake_repo_url {
+                            a {
+                                class: "text-blue-400 hover:text-blue-300 underline",
+                                href: "{repo_url}",
+                                target: "_blank",
+                                rel: "noopener noreferrer",
+                                "Flake"
+                            }
                         }
 
                         // Author
@@ -1983,74 +2089,94 @@ fn show_notification(message: &str, is_success: bool) -> Result<Notification, Js
 // Mock Data Functions
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn mock_commit_history_for_system(system: &SystemDetail) -> Vec<SystemCommitHistory> {
-    let flake_name = system.flake.as_ref().map(|flake| flake.name.as_str());
-    let timelines = crate::views::dashboard::mock_flake_timelines();
-    let Some(timeline) =
-        flake_name.and_then(|name| timelines.iter().find(|t| t.flake_name == name))
-    else {
-        return Vec::new();
-    };
+fn map_history_entries_to_commit_history(
+    entries: &[SystemHistoryEntry],
+) -> Vec<SystemCommitHistory> {
+    use std::collections::HashSet;
 
-    let mut commits: Vec<SystemCommitHistory> = timeline
-        .commits
+    let mut seen_store_paths: HashSet<String> = HashSet::new();
+
+    entries
         .iter()
-        .map(|commit| SystemCommitHistory {
-            hash: commit.hash.clone(),
-            message: commit.message.clone(),
-            author: commit.author.clone(),
-            committed_at: commit.committed_at,
-            was_deployed: false,
-            deployed_at: None,
-            is_current: false,
-            is_ready_to_deploy: false,
-            build_status: commit.build_status,
-            diff_summary: Some(diff_for_commit(&commit.hash, &commit.message)),
+        .enumerate()
+        .map(|(idx, entry)| {
+            let reverted = entry
+                .store_path
+                .as_ref()
+                .map(|path| !seen_store_paths.insert(path.clone()))
+                .unwrap_or(false);
+
+            let config_identity = entry
+                .system_configuration_name
+                .clone()
+                .or_else(|| entry.store_path.clone());
+
+            let hash = entry
+                .commit_hash
+                .clone()
+                .or_else(|| {
+                    entry.store_path.as_ref().and_then(|path| {
+                        path.split('/')
+                            .next_back()
+                            .and_then(|store_name| store_name.split('-').next())
+                            .map(|value| value.to_string())
+                    })
+                })
+                .unwrap_or_else(|| format!("state-{idx}"));
+
+            let mut status_fragments = vec![format!("Reason: {}", entry.change_reason)];
+            status_fragments.push(format!("Outcome: {}", entry.outcome));
+            if reverted {
+                status_fragments.push("Revert detected".to_string());
+            }
+
+            SystemCommitHistory {
+                hash,
+                message: config_identity
+                    .clone()
+                    .map(|value| format!("Configuration {value}"))
+                    .unwrap_or_else(|| "Configuration update".to_string()),
+                author: format!(
+                    "{} · {} · {}",
+                    entry.actor, entry.change_reason, entry.outcome
+                ),
+                committed_at: entry.timestamp,
+                was_deployed: true,
+                deployed_at: Some(entry.timestamp),
+                is_current: idx == 0,
+                is_ready_to_deploy: false,
+                build_status: None,
+                diff_summary: Some(status_fragments.join(" · ")),
+                flake_repo_url: entry.flake_repo_url.clone(),
+                config_identity,
+            }
         })
-        .collect();
+        .collect()
+}
 
-    if commits.is_empty() {
-        return commits;
-    }
+fn map_agent_events_to_logs(events: Vec<SystemAgentEvent>) -> Vec<DeploymentLogEntry> {
+    events
+        .into_iter()
+        .map(|event| {
+            let level = match event.level.to_ascii_lowercase().as_str() {
+                "error" => LogLevel::Error,
+                "warn" | "warning" => LogLevel::Warn,
+                "debug" => LogLevel::Debug,
+                _ => LogLevel::Info,
+            };
 
-    let mut current_idx: Option<usize> = match system.deployment_status {
-        DeploymentStatus::UpToDate => Some(0),
-        DeploymentStatus::Behind => Some(2.min(commits.len() - 1)),
-        DeploymentStatus::Ahead => Some(0),
-        DeploymentStatus::NeverDeployed => None,
-        DeploymentStatus::NoCommitsAvailable => return Vec::new(),
-        DeploymentStatus::Unknown => Some(1.min(commits.len() - 1)),
-    };
-
-    if system.hostname == "ws-001" {
-        current_idx = Some(3.min(commits.len().saturating_sub(1)));
-    }
-
-    if let Some(idx) = current_idx {
-        commits[idx].is_current = true;
-        commits[idx].was_deployed = true;
-        commits[idx].deployed_at = Some(commits[idx].committed_at + Duration::hours(1));
-
-        for i in (idx + 1)..commits.len() {
-            commits[i].was_deployed = true;
-            commits[i].deployed_at = Some(commits[i].committed_at + Duration::hours(1));
-        }
-    }
-
-    // Mark ready-to-deploy commit when pipeline is ready
-    if matches!(system.pipeline_stage, Some(PipelineStage::ReadyForDeploy)) {
-        let ready_idx = current_idx
-            .and_then(|idx| if idx > 0 { Some(idx - 1) } else { None })
-            .unwrap_or(0);
-        if ready_idx < commits.len() {
-            commits[ready_idx].is_ready_to_deploy = true;
-            commits[ready_idx].was_deployed = false;
-            commits[ready_idx].deployed_at = None;
-            commits[ready_idx].is_current = false;
-        }
-    }
-
-    commits
+            DeploymentLogEntry {
+                message: event.message,
+                timestamp: event.timestamp,
+                level,
+                phase: Some(if event.deployment_related {
+                    "Deployment".to_string()
+                } else {
+                    event.event_type
+                }),
+            }
+        })
+        .collect()
 }
 
 fn mock_vulnerabilities() -> Vec<SystemVulnerability> {
@@ -2118,59 +2244,78 @@ fn mock_vulnerabilities() -> Vec<SystemVulnerability> {
     ]
 }
 
-fn mock_deployment_logs() -> Vec<DeploymentLogEntry> {
-    let base_time = Utc::now() - Duration::hours(1);
-
-    vec![
-        DeploymentLogEntry {
-            message: "Starting deployment for commit a1b2c3d".to_string(),
-            timestamp: base_time,
-            level: LogLevel::Info,
-            phase: Some("Deployment".to_string()),
-        },
-        DeploymentLogEntry {
-            message: "Fetching derivation from build cache...".to_string(),
-            timestamp: base_time + Duration::seconds(2),
-            level: LogLevel::Info,
-            phase: Some("Deployment".to_string()),
-        },
-        DeploymentLogEntry {
-            message: "Cache hit: /nix/store/abc123-nixos-system-server-01".to_string(),
-            timestamp: base_time + Duration::seconds(5),
-            level: LogLevel::Info,
-            phase: Some("Deployment".to_string()),
-        },
-        DeploymentLogEntry {
-            message: "Activating new configuration...".to_string(),
-            timestamp: base_time + Duration::seconds(8),
-            level: LogLevel::Info,
-            phase: Some("Deployment".to_string()),
-        },
-        DeploymentLogEntry {
-            message: "Restarting nginx.service".to_string(),
-            timestamp: base_time + Duration::seconds(10),
-            level: LogLevel::Info,
-            phase: Some("Deployment".to_string()),
-        },
-        DeploymentLogEntry {
-            message: "Warning: postgresql.service restart skipped (no changes)".to_string(),
-            timestamp: base_time + Duration::seconds(11),
-            level: LogLevel::Warn,
-            phase: Some("Deployment".to_string()),
-        },
-        DeploymentLogEntry {
-            message: "Setting system profile...".to_string(),
-            timestamp: base_time + Duration::seconds(13),
-            level: LogLevel::Info,
-            phase: Some("Deployment".to_string()),
-        },
-        DeploymentLogEntry {
-            message: "Deployment complete. System now running a1b2c3d".to_string(),
-            timestamp: base_time + Duration::seconds(15),
-            level: LogLevel::Info,
-            phase: Some("Deployment".to_string()),
-        },
-    ]
-}
-
 // fallback_system_detail() has been moved to crate::systems::adapter
+
+#[cfg(test)]
+mod tests {
+    use super::{map_agent_events_to_logs, map_history_entries_to_commit_history};
+    use crate::api::models::{SystemAgentEvent, SystemHistoryEntry};
+    use chrono::{Duration, Utc};
+
+    #[test]
+    fn history_mapping_marks_revert_when_store_path_reappears() {
+        let now = Utc::now();
+        let entries = vec![
+            SystemHistoryEntry {
+                timestamp: now,
+                store_path: Some("/nix/store/aaaa-system".to_string()),
+                system_configuration_name: Some("web-01".to_string()),
+                change_reason: "cf_deployment".to_string(),
+                commit_hash: Some("aaaaaaaa".to_string()),
+                flake_name: Some("infra".to_string()),
+                flake_repo_url: Some("https://example.com/infra.git".to_string()),
+                actor: "agent".to_string(),
+                outcome: "recorded".to_string(),
+            },
+            SystemHistoryEntry {
+                timestamp: now - Duration::minutes(10),
+                store_path: Some("/nix/store/bbbb-system".to_string()),
+                system_configuration_name: Some("web-01".to_string()),
+                change_reason: "cf_deployment".to_string(),
+                commit_hash: Some("bbbbbbbb".to_string()),
+                flake_name: Some("infra".to_string()),
+                flake_repo_url: Some("https://example.com/infra.git".to_string()),
+                actor: "agent".to_string(),
+                outcome: "recorded".to_string(),
+            },
+            SystemHistoryEntry {
+                timestamp: now - Duration::minutes(20),
+                store_path: Some("/nix/store/aaaa-system".to_string()),
+                system_configuration_name: Some("web-01".to_string()),
+                change_reason: "cf_deployment".to_string(),
+                commit_hash: Some("aaaaaaaa".to_string()),
+                flake_name: Some("infra".to_string()),
+                flake_repo_url: Some("https://example.com/infra.git".to_string()),
+                actor: "agent".to_string(),
+                outcome: "recorded".to_string(),
+            },
+        ];
+
+        let timeline = map_history_entries_to_commit_history(&entries);
+
+        assert_eq!(timeline.len(), 3);
+        assert!(timeline[0].is_current);
+        assert!(
+            timeline[2]
+                .diff_summary
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Revert detected")
+        );
+    }
+
+    #[test]
+    fn agent_event_mapping_preserves_deployment_phase() {
+        let now = Utc::now();
+        let logs = map_agent_events_to_logs(vec![SystemAgentEvent {
+            timestamp: now,
+            level: "info".to_string(),
+            event_type: "state_change".to_string(),
+            message: "agent reported cf_deployment".to_string(),
+            deployment_related: true,
+        }]);
+
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].phase.as_deref(), Some("Deployment"));
+    }
+}

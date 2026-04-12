@@ -889,6 +889,28 @@ pub struct CommitInfo {
     pub timestamp: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemHistoryEntry {
+    pub timestamp: DateTime<Utc>,
+    pub store_path: Option<String>,
+    pub system_configuration_name: Option<String>,
+    pub change_reason: String,
+    pub commit_hash: Option<String>,
+    pub flake_name: Option<String>,
+    pub flake_repo_url: Option<String>,
+    pub actor: String,
+    pub outcome: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemAgentEvent {
+    pub timestamp: DateTime<Utc>,
+    pub level: String,
+    pub event_type: String,
+    pub message: String,
+    pub deployment_related: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemMutationResponse {
     pub status: String,
@@ -992,6 +1014,12 @@ pub struct SystemCommitHistory {
     pub build_status: Option<BuildStatus>,
     /// Config diff summary (e.g., "+5 -3 lines" or "nginx, redis changed").
     pub diff_summary: Option<String>,
+    /// Optional external flake repository URL for this timeline entry.
+    #[serde(default)]
+    pub flake_repo_url: Option<String>,
+    /// Optional config identity shown on timeline cards.
+    #[serde(default)]
+    pub config_identity: Option<String>,
 }
 
 /// Deployment log entry for the Logs tab.
