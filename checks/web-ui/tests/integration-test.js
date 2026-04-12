@@ -663,9 +663,73 @@ async function routeSystemsWarningData(page) {
     updated_at: "2026-04-07T00:00:00Z",
   };
 
+  const historyEntries = [
+    {
+      changed_at: "2026-04-07T08:10:00Z",
+      commit_hash: "1111111111111111111111111111111111111111",
+      commit_message: "feat: deploy stable release",
+      actor: "agent",
+      change_reason: "cf_deployment",
+      outcome: "applied",
+      deployment_status: "deployed",
+      pipeline_stage: "deployed",
+      store_path: "/nix/store/11111111111111111111111111111111-system",
+      flake_repo_url: "https://gitlab.com/crystal-forge/platform-core.git",
+      config_identity: "platform-core#warning-system-01",
+    },
+    {
+      changed_at: "2026-04-06T22:00:00Z",
+      commit_hash: "2222222222222222222222222222222222222222",
+      commit_message: "fix: rollback unstable release",
+      actor: "operator",
+      change_reason: "rollback",
+      outcome: "applied",
+      deployment_status: "deployed",
+      pipeline_stage: "deployed",
+      store_path: "/nix/store/22222222222222222222222222222222-system",
+      flake_repo_url: "https://gitlab.com/crystal-forge/platform-core.git",
+      config_identity: "platform-core#warning-system-01",
+    },
+  ];
+
+  const agentEvents = [
+    {
+      occurred_at: "2026-04-07T08:12:00Z",
+      event_type: "heartbeat",
+      level: "info",
+      message: "Agent heartbeat received",
+      deployment_phase: "idle",
+      correlation_id: null,
+    },
+    {
+      occurred_at: "2026-04-07T08:11:00Z",
+      event_type: "deploy",
+      level: "info",
+      message: "Applied deployment for warning-system-01",
+      deployment_phase: "switch",
+      correlation_id: "cf-test-corr-1",
+    },
+  ];
+
   await page.route("**/api/v1/systems**", async (route) => {
     const url = route.request().url();
     const pathname = new URL(url).pathname;
+    if (/^\/api\/v1\/systems\/[0-9a-f-]+\/history$/.test(pathname)) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(historyEntries),
+      });
+      return;
+    }
+    if (/^\/api\/v1\/systems\/[0-9a-f-]+\/agent-events$/.test(pathname)) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(agentEvents),
+      });
+      return;
+    }
     if (/^\/api\/v1\/systems\/[0-9a-f-]+$/.test(pathname)) {
       const requestedId = pathname.split("/").pop() || detail.id;
       await route.fulfill({
@@ -2177,6 +2241,64 @@ const steps = [
     },
   },
   {
+    name: "12g-system-detail-history-logs-edit",
+    description: "System detail history/logs tabs and edit action",
+    action: async (page) => {
+      await routeSystemsWarningData(page);
+
+      const historyResponsePromise = page
+        .waitForResponse(
+          (response) =>
+            response.request().method() === "GET" &&
+            /\/api\/v1\/systems\/[0-9a-f-]+\/history$/.test(new URL(response.url()).pathname),
+          { timeout: 15000 },
+        )
+        .catch(() => null);
+
+      const eventsResponsePromise = page
+        .waitForResponse(
+          (response) =>
+            response.request().method() === "GET" &&
+            /\/api\/v1\/systems\/[0-9a-f-]+\/agent-events$/.test(new URL(response.url()).pathname),
+          { timeout: 15000 },
+        )
+        .catch(() => null);
+
+      await page.goto(`${baseUrl}/systems/00000000-0000-0000-0000-0000000000a1`, {
+        timeout: LOAD_TIMEOUT,
+      });
+      await page.waitForTimeout(1800);
+
+      const historyResponse = await historyResponsePromise;
+      const eventsResponse = await eventsResponsePromise;
+      if (!historyResponse || !historyResponse.ok()) {
+        throw new Error("Expected system history request to succeed on system detail page");
+      }
+      if (!eventsResponse || !eventsResponse.ok()) {
+        throw new Error("Expected system agent-events request to succeed on system detail page");
+      }
+
+      await page.getByRole("button", { name: "History" }).first().click();
+      await assertVisible(
+        page.getByText("Current").first(),
+        "Expected history timeline to render API-backed history entries",
+      );
+
+      await page.getByRole("button", { name: "Logs" }).first().click();
+      await assertVisible(
+        page.getByText("Agent Events").first(),
+        "Expected logs tab to render API-backed agent events",
+      );
+
+      await assertVisible(
+        page.getByRole("button", { name: /^Edit$/ }).first(),
+        "Expected system detail header to render Edit action",
+      );
+
+      await unrouteSystemsWarningData(page);
+    },
+  },
+  {
     name: "12d-systems-api-error-no-mock-fallback",
     description: "Systems API failures show error state without deterministic mock hosts",
     action: async (page) => {
@@ -3022,6 +3144,7 @@ const CI_FAST_STEP_NAMES = new Set([
   "12c-systems-modal-config-field",
   "12e-systems-edit-modal",
   "12f-systems-deploy-modal",
+  "12g-system-detail-history-logs-edit",
   "12d-systems-api-error-no-mock-fallback",
   "13d-flakes-stress-dataset",
   "13e-flakes-add-modal-credentials",

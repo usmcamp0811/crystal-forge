@@ -243,6 +243,7 @@ in pkgs.testers.runNixOSTest {
       "12c-systems-modal-config-field",
       "12e-systems-edit-modal",
       "12f-systems-deploy-modal",
+      "12g-system-detail-history-logs-edit",
       "13e-flakes-add-modal-credentials",
       "13f-flakes-edit-modal-credentials",
       # TASK-17: CVE dashboard evidence
@@ -278,6 +279,7 @@ in pkgs.testers.runNixOSTest {
       "12c-systems-modal-config-field",
       "12e-systems-edit-modal",
       "12f-systems-deploy-modal",
+      "12g-system-detail-history-logs-edit",
       "13e-flakes-add-modal-credentials",
       "13f-flakes-edit-modal-credentials",
       "07-sidebar-desktop-expanded",
