@@ -12,11 +12,10 @@ use uuid::Uuid;
 use crate::api::models::{
     ApiError, AuditAction, CommitInfo, CreateSystemRequest, CveScanEligibilityResponse,
     CveScanStatusResponse, CveScanTriggerResponse, CveSummary, DeploySystemRequest,
-    DeploymentStatus, PipelineStage, SortOrder, SystemCommitsResponse, SystemDetail,
-    SystemHardwareInfo, SystemMutationResponse, SystemNetworkInfo, SystemRollbackRequest,
-    SystemSecurityInfo, SystemSummary,
-    SystemVulnerability, SystemsListParams,
-    UpdateSystemPublicKeyRequest, UpdateSystemRequest,
+    DeploymentStatus, PipelineStage, SortOrder, SystemAgentEvent, SystemCommitsResponse,
+    SystemDetail, SystemHardwareInfo, SystemHistoryEntry, SystemMutationResponse,
+    SystemNetworkInfo, SystemRollbackRequest, SystemSecurityInfo, SystemSummary,
+    SystemVulnerability, SystemsListParams, UpdateSystemPublicKeyRequest, UpdateSystemRequest,
 };
 use crate::auth::models::Role;
 use crate::handlers::api::rbac::{
@@ -27,8 +26,8 @@ use crate::queries::systems::{
     SystemAccessRow, SystemDetailRow, SystemListRow, commit_belongs_to_system_flake,
     deactivate_system, find_system_access_row, get_system_detail_by_id,
     get_user_environment_membership_ids, list_recent_commits_for_system, list_system_access_rows,
-    touch_system_updated_at, update_public_key, update_system_desired_target,
-    update_system_metadata,
+    list_system_agent_event_rows, list_system_history_rows, touch_system_updated_at,
+    update_public_key, update_system_desired_target, update_system_metadata,
 };
 use crate::queries::cve_scans::{get_scan_by_id, resolve_system_cve_scan_target};
 use crate::services::cve_scans::{trigger_immediate_cve_scan, CveScanError};
@@ -1152,7 +1151,8 @@ pub async fn deploy_system(
         return bad_request("Manual deployment is not allowed for auto_latest systems");
     }
 
-    let belongs_to_flake = match commit_belongs_to_system_flake(&pool, system_id, commit_sha).await {
+    let belongs_to_flake = match commit_belongs_to_system_flake(&pool, system_id, commit_sha).await
+    {
         Ok(value) => value,
         Err(_) => return internal_error("Failed to validate requested commit"),
     };
@@ -1187,7 +1187,10 @@ pub async fn deploy_system(
         StatusCode::ACCEPTED,
         Json(SystemMutationResponse {
             status: "accepted".to_string(),
-            message: format!("Deployment requested for {} to commit {}", row.hostname, commit_sha),
+            message: format!(
+                "Deployment requested for {} to commit {}",
+                row.hostname, commit_sha
+            ),
         }),
     )
         .into_response()
@@ -1199,50 +1202,80 @@ pub async fn get_system_commits(
     Path(system_id): Path<Uuid>,
 ) -> impl IntoResponse {
     let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
-        return (StatusCode::FORBIDDEN, Json(ApiError {
-            error: "forbidden".to_string(),
-            message: "Authentication required".to_string(),
-            details: None,
-        })).into_response();
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ApiError {
+                error: "forbidden".to_string(),
+                message: "Authentication required".to_string(),
+                details: None,
+            }),
+        )
+            .into_response();
     };
 
     let Some(caller_role) = highest_role(&roles) else {
-        return (StatusCode::FORBIDDEN, Json(ApiError {
-            error: "forbidden".to_string(),
-            message: "Authentication required".to_string(),
-            details: None,
-        })).into_response();
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ApiError {
+                error: "forbidden".to_string(),
+                message: "Authentication required".to_string(),
+                details: None,
+            }),
+        )
+            .into_response();
     };
 
     let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
         Ok(value) => value,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError {
-            error: "internal_error".to_string(),
-            message: "Failed to load environment memberships".to_string(),
-            details: None,
-        })).into_response(),
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    error: "internal_error".to_string(),
+                    message: "Failed to load environment memberships".to_string(),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
     };
 
     let row = match find_system_access_row(&pool, system_id).await {
         Ok(Some(value)) => value,
-        Ok(None) => return (StatusCode::NOT_FOUND, Json(ApiError {
-            error: "not_found".to_string(),
-            message: "System not found".to_string(),
-            details: None,
-        })).into_response(),
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError {
-            error: "internal_error".to_string(),
-            message: "Failed to load system".to_string(),
-            details: None,
-        })).into_response(),
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiError {
+                    error: "not_found".to_string(),
+                    message: "System not found".to_string(),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    error: "internal_error".to_string(),
+                    message: "Failed to load system".to_string(),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
     };
 
     if !caller_role.can_access_system_environment(row.environment_id, &environment_memberships) {
-        return (StatusCode::NOT_FOUND, Json(ApiError {
-            error: "not_found".to_string(),
-            message: "System not found".to_string(),
-            details: None,
-        })).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(ApiError {
+                error: "not_found".to_string(),
+                message: "System not found".to_string(),
+                details: None,
+            }),
+        )
+            .into_response();
     }
 
     let commits = match list_recent_commits_for_system(&pool, system_id, 50).await {
@@ -1278,6 +1311,106 @@ pub async fn get_system_commits(
     };
 
     (StatusCode::OK, Json(response)).into_response()
+}
+
+pub async fn get_system_history(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(system_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+
+    let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+
+    let row = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+
+    if !caller_role.can_access_system_environment(row.environment_id, &environment_memberships) {
+        return not_found();
+    }
+
+    let rows = match list_system_history_rows(&pool, system_id, 200).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load system history"),
+    };
+
+    let entries = rows
+        .into_iter()
+        .map(|row| SystemHistoryEntry {
+            timestamp: row.timestamp,
+            store_path: row.store_path,
+            system_configuration_name: row.system_configuration_name,
+            change_reason: row
+                .change_reason
+                .unwrap_or_else(|| "state_delta".to_string()),
+            commit_hash: row.commit_hash,
+            flake_name: row.flake_name,
+            flake_repo_url: row.flake_repo_url,
+            actor: "agent".to_string(),
+            outcome: "recorded".to_string(),
+        })
+        .collect::<Vec<_>>();
+
+    (StatusCode::OK, Json(entries)).into_response()
+}
+
+pub async fn get_system_agent_events(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(system_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+
+    let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+
+    let row = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+
+    if !caller_role.can_access_system_environment(row.environment_id, &environment_memberships) {
+        return not_found();
+    }
+
+    let rows = match list_system_agent_event_rows(&pool, system_id, 300).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load agent events"),
+    };
+
+    let entries = rows
+        .into_iter()
+        .map(|row| SystemAgentEvent {
+            timestamp: row.timestamp,
+            level: row.level,
+            event_type: row.event_type,
+            message: row.message,
+            deployment_related: row.deployment_related,
+        })
+        .collect::<Vec<_>>();
+
+    (StatusCode::OK, Json(entries)).into_response()
 }
 
 async fn record_system_mutation_audit(
@@ -1533,6 +1666,40 @@ mod tests {
             .expect("lazy pool should construct");
 
         let response = get_system_commits(
+            State(pool),
+            HeaderMap::new(),
+            Path(Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid")),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn get_system_history_requires_authenticated_role() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+
+        let response = get_system_history(
+            State(pool),
+            HeaderMap::new(),
+            Path(Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid")),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn get_system_agent_events_requires_authenticated_role() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+
+        let response = get_system_agent_events(
             State(pool),
             HeaderMap::new(),
             Path(Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid")),

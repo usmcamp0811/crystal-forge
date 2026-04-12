@@ -212,13 +212,18 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/systems/:id/deactivate",
             post(systems::deactivate_system_handler),
         )
-        .route(
-            "/api/v1/systems/:id/deploy",
-            post(systems::deploy_system),
-        )
+        .route("/api/v1/systems/:id/deploy", post(systems::deploy_system))
         .route(
             "/api/v1/systems/:id/commits",
             get(systems::get_system_commits),
+        )
+        .route(
+            "/api/v1/systems/:id/history",
+            get(systems::get_system_history),
+        )
+        .route(
+            "/api/v1/systems/:id/agent-events",
+            get(systems::get_system_agent_events),
         )
         .route(
             "/api/v1/environments",
