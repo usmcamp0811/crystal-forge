@@ -478,6 +478,33 @@ pub async fn get_latest_scan(pool: &PgPool, derivation_id: i32) -> Result<Option
     Ok(scan)
 }
 
+/// Count high CVEs without whitelist justification for a derivation's latest scan.
+/// Returns None if no completed scan exists.
+pub async fn count_unjustified_high_cves(
+    pool: &PgPool,
+    derivation_id: i32,
+) -> Result<Option<i64>> {
+    let count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::bigint
+        FROM package_vulnerabilities pv
+        JOIN cve_scans cs ON pv.derivation_id = cs.derivation_id
+        WHERE pv.derivation_id = $1
+          AND cs.status = 'completed'
+          AND pv.cvss_score >= 7.0
+          AND pv.cvss_score < 9.0
+          AND (pv.is_whitelisted = false OR pv.whitelist_reason IS NULL OR pv.whitelist_reason = '')
+        ORDER BY cs.completed_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(derivation_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(count)
+}
+
 pub async fn get_scan_by_id(pool: &PgPool, scan_id: Uuid) -> Result<Option<CveScan>> {
     let scan = sqlx::query_as::<_, CveScan>(
         r#"

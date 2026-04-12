@@ -170,22 +170,106 @@ fn validate_policy_config(
             }
         }
         "custom_check" => {
-            let expression = obj
+            let has_expression = obj
                 .get("expression")
                 .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .ok_or((
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false);
+
+            let has_rules = obj
+                .get("rules")
+                .and_then(|v| v.as_array())
+                .map(|a| !a.is_empty())
+                .unwrap_or(false);
+
+            if !has_expression && !has_rules {
+                return Err((
                     StatusCode::BAD_REQUEST,
-                    "custom_check policy requires non-empty config.expression".to_string(),
-                ))?;
+                    "custom_check policy requires either non-empty config.expression or non-empty config.rules[]".to_string(),
+                ));
+            }
 
-            // Validate and normalize the expression
-            let normalized_expr = validate_and_normalize_nix_expression(expression)?;
+            if has_expression && !has_rules {
+                // Single-expression (legacy) path — normalize
+                let expression = obj
+                    .get("expression")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .unwrap();
+                let normalized_expr = validate_and_normalize_nix_expression(expression)?;
+                if let Some(config_obj) = validated_config.as_object_mut() {
+                    config_obj.insert("expression".to_string(), Value::String(normalized_expr));
+                }
+            }
 
-            // Update the config with the normalized expression
-            if let Some(config_obj) = validated_config.as_object_mut() {
-                config_obj.insert("expression".to_string(), Value::String(normalized_expr));
+            if has_rules {
+                // Multi-rule path — validate each rule
+                let rules = obj.get("rules").and_then(|v| v.as_array()).unwrap();
+                for (i, rule) in rules.iter().enumerate() {
+                    let rule_obj = rule.as_object().ok_or((
+                        StatusCode::BAD_REQUEST,
+                        format!("config.rules[{}] must be an object", i),
+                    ))?;
+
+                    let expr = rule_obj
+                        .get("expression")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .ok_or((
+                            StatusCode::BAD_REQUEST,
+                            format!("config.rules[{}].expression must be a non-empty string", i),
+                        ))?;
+                    validate_and_normalize_nix_expression(expr)?;
+
+                    if rule_obj
+                        .get("field_name")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.trim().is_empty())
+                        .unwrap_or(true)
+                    {
+                        return Err((
+                            StatusCode::BAD_REQUEST,
+                            format!("config.rules[{}].field_name must be a non-empty string", i),
+                        ));
+                    }
+                }
+
+                // Validate mode if present
+                if let Some(mode) = obj.get("mode") {
+                    let mode_str = mode.as_str().ok_or((
+                        StatusCode::BAD_REQUEST,
+                        "config.mode must be a string (\"all\" or \"any\")".to_string(),
+                    ))?;
+                    if mode_str != "all" && mode_str != "any" {
+                        return Err((
+                            StatusCode::BAD_REQUEST,
+                            "config.mode must be \"all\" or \"any\"".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+        "require_cve_check" => {
+            // Validate by attempting deserialization into CveCheckConfig
+            serde_json::from_value::<crate::models::deployment_policies::CveCheckConfig>(
+                config.clone(),
+            )
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("Invalid require_cve_check config: {}", e),
+                )
+            })?;
+
+            // Validate when_no_scan string value if present
+            if let Some(wns) = obj.get("when_no_scan").and_then(|v| v.as_str()) {
+                if wns != "block" && wns != "skip" {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        "config.when_no_scan must be \"block\" or \"skip\"".to_string(),
+                    ));
+                }
             }
         }
         _ => {}
@@ -335,7 +419,7 @@ pub async fn create_deployment_policy(
     }
 
     // Validate policy_type
-    let valid_types = ["require_cf_agent", "require_packages", "custom_check"];
+    let valid_types = ["require_cf_agent", "require_packages", "custom_check", "require_cve_check"];
     if !valid_types.contains(&request.policy_type.as_str()) {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -516,7 +600,7 @@ pub async fn update_deployment_policy(
 
     // Validate policy_type if provided
     if let Some(ref policy_type) = request.policy_type {
-        let valid_types = ["require_cf_agent", "require_packages", "custom_check"];
+        let valid_types = ["require_cf_agent", "require_packages", "custom_check", "require_cve_check"];
         if !valid_types.contains(&policy_type.as_str()) {
             return Err((
                 StatusCode::BAD_REQUEST,

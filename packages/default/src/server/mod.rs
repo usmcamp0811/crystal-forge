@@ -151,7 +151,23 @@ fn parse_deployment_policy_record(
                 description,
                 field_name,
                 strict,
+                rules: vec![],
+                mode: crate::models::deployment_policies::RuleMode::All,
             })
+        }
+        "require_cve_check" => {
+            match serde_json::from_value::<crate::models::deployment_policies::CveCheckConfig>(
+                cfg.clone(),
+            ) {
+                Ok(config) => Some(DeploymentPolicy::RequireCveCheck { config }),
+                Err(err) => {
+                    warn!(
+                        "Skipping require_cve_check policy '{}' ({}): invalid config: {}",
+                        record.name, record.id, err
+                    );
+                    None
+                }
+            }
         }
         other => {
             warn!(
@@ -166,14 +182,21 @@ fn parse_deployment_policy_record(
 async fn load_deployment_policies_for_eval(pool: &PgPool) -> Vec<DeploymentPolicy> {
     match list_enabled_deployment_policies(pool).await {
         Ok(records) => {
-            let mut policies = records
+            let all_policies = records
                 .iter()
                 .filter_map(parse_deployment_policy_record)
                 .collect::<Vec<_>>();
 
+            // Only pass Nix-evaluated policies to the evaluator.
+            // RequireCveCheck policies are handled in the deployment manager.
+            let mut policies: Vec<DeploymentPolicy> = all_policies
+                .into_iter()
+                .filter(|p| p.is_nix_evaluated())
+                .collect();
+
             if policies.is_empty() {
                 warn!(
-                    "No valid deployment policies found in DB, falling back to strict CF agent check"
+                    "No valid Nix-evaluated deployment policies found in DB, falling back to strict CF agent check"
                 );
                 // Use strict mode in fallback to enforce core security policy even in error scenarios.
                 // This ensures systems without the agent package cannot pass evaluation when policy
@@ -192,6 +215,25 @@ async fn load_deployment_policies_for_eval(pool: &PgPool) -> Vec<DeploymentPolic
             // This ensures systems without the agent package cannot pass evaluation when policy
             // loading fails, maintaining the "always enforce core policy" safety model.
             vec![DeploymentPolicy::RequireCrystalForgeAgent { strict: true }]
+        }
+    }
+}
+
+/// Load enabled `require_cve_check` policies from the database.
+/// Called by the deployment manager to evaluate post-build CVE gates.
+pub async fn load_cve_policies(pool: &PgPool) -> Vec<DeploymentPolicy> {
+    match list_enabled_deployment_policies(pool).await {
+        Ok(records) => records
+            .iter()
+            .filter_map(parse_deployment_policy_record)
+            .filter(|p| matches!(p, DeploymentPolicy::RequireCveCheck { .. }))
+            .collect(),
+        Err(err) => {
+            error!(
+                "Failed to load CVE deployment policies from DB: {:#}",
+                err
+            );
+            vec![]
         }
     }
 }

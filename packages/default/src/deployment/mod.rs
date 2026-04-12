@@ -1,7 +1,11 @@
 use crate::config::CrystalForgeConfig;
 use crate::models::systems::DeploymentPolicy;
 use crate::queries::deployment::{get_systems_with_auto_latest_policy, update_desired_target};
-use crate::queries::derivations::get_latest_deployable_targets_for_flake_hosts;
+use crate::queries::derivations::{
+    get_derivation_id_by_store_path, get_latest_deployable_targets_for_flake_hosts,
+};
+use crate::server::load_cve_policies;
+use crate::services::cve_policy_gate::check_cve_policies;
 use anyhow::{Context, Result};
 use sqlx::PgPool;
 use std::collections::HashMap;
@@ -155,6 +159,52 @@ impl DeploymentPolicyManager {
             if system.desired_target.as_deref() == Some(latest_target_for_host.as_str()) {
                 debug!("System {} already at latest target", system.hostname);
                 continue;
+            }
+
+            // ── CVE gate: run before updating desired_target ──────────────
+            let cve_policies = load_cve_policies(&self.pool).await;
+            if !cve_policies.is_empty() {
+                match get_derivation_id_by_store_path(&self.pool, latest_target_for_host).await {
+                    Ok(Some(derivation_id)) => {
+                        match check_cve_policies(&self.pool, derivation_id, &cve_policies).await {
+                            Ok(gate) if !gate.deployment_allowed => {
+                                warn!(
+                                    "🛑 CVE gate blocked deployment for {} -> {}: {}",
+                                    system.hostname,
+                                    latest_target_for_host,
+                                    gate.block_reason.as_deref().unwrap_or("policy violation")
+                                );
+                                // Skip updating desired_target — deployment is blocked.
+                                continue;
+                            }
+                            Ok(_) => {
+                                debug!(
+                                    "✅ CVE gate passed for {} -> {}",
+                                    system.hostname, latest_target_for_host
+                                );
+                            }
+                            Err(e) => {
+                                error!(
+                                    "CVE gate evaluation error for {} -> {}: {:#}. Allowing deployment.",
+                                    system.hostname, latest_target_for_host, e
+                                );
+                                // Fail open on unexpected errors to avoid blocking all deployments.
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        debug!(
+                            "No derivation found for store path {}; skipping CVE gate for {}",
+                            latest_target_for_host, system.hostname
+                        );
+                    }
+                    Err(e) => {
+                        error!(
+                            "Failed to look up derivation for {}: {:#}. Allowing deployment.",
+                            latest_target_for_host, e
+                        );
+                    }
+                }
             }
 
             if let Err(e) =
