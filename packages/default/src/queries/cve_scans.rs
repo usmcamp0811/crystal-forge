@@ -478,23 +478,30 @@ pub async fn get_latest_scan(pool: &PgPool, derivation_id: i32) -> Result<Option
     Ok(scan)
 }
 
-/// Count high CVEs without whitelist justification for a derivation's latest scan.
-/// Returns None if no completed scan exists.
+/// Count high CVEs (CVSS 7.0–8.9) without whitelist justification for a
+/// derivation's most recent completed scan.
+///
+/// Returns `None` if no completed scan exists for this derivation.
+/// Returns `Some(0)` if the latest scan has no unjustified high CVEs.
+///
+/// The query:
+/// 1. Identifies the single most-recent completed scan for the derivation.
+/// 2. Counts only `package_vulnerabilities` rows joined through `scan_packages`
+///    for that scan — scoping to the latest scan rather than all historical data.
+/// 3. Filters for high severity (CVSS 7.0 ≤ score < 9.0) and not whitelisted.
 pub async fn count_unjustified_high_cves(
     pool: &PgPool,
     derivation_id: i32,
 ) -> Result<Option<i64>> {
-    let count = sqlx::query_scalar::<_, i64>(
+    // First check whether any completed scan exists; if not, return None so
+    // the caller can distinguish "no scan" from "scan with zero findings".
+    let latest_scan_id: Option<uuid::Uuid> = sqlx::query_scalar(
         r#"
-        SELECT COUNT(*)::bigint
-        FROM package_vulnerabilities pv
-        JOIN cve_scans cs ON pv.derivation_id = cs.derivation_id
-        WHERE pv.derivation_id = $1
-          AND cs.status = 'completed'
-          AND pv.cvss_score >= 7.0
-          AND pv.cvss_score < 9.0
-          AND (pv.is_whitelisted = false OR pv.whitelist_reason IS NULL OR pv.whitelist_reason = '')
-        ORDER BY cs.completed_at DESC
+        SELECT id
+        FROM cve_scans
+        WHERE derivation_id = $1
+          AND status = 'completed'
+        ORDER BY completed_at DESC
         LIMIT 1
         "#,
     )
@@ -502,7 +509,30 @@ pub async fn count_unjustified_high_cves(
     .fetch_optional(pool)
     .await?;
 
-    Ok(count)
+    let Some(scan_id) = latest_scan_id else {
+        return Ok(None);
+    };
+
+    // Count unjustified high-severity CVEs scoped to that scan via scan_packages.
+    let count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)::bigint
+        FROM scan_packages sp
+        JOIN package_vulnerabilities pv ON sp.derivation_id = pv.derivation_id
+        JOIN cves c ON pv.cve_id = c.id
+        WHERE sp.scan_id = $1
+          AND c.cvss_v3_score >= 7.0
+          AND c.cvss_v3_score < 9.0
+          AND (pv.is_whitelisted = false
+               OR pv.whitelist_reason IS NULL
+               OR pv.whitelist_reason = '')
+        "#,
+    )
+    .bind(scan_id)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(Some(count))
 }
 
 pub async fn get_scan_by_id(pool: &PgPool, scan_id: Uuid) -> Result<Option<CveScan>> {

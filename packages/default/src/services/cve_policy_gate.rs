@@ -180,15 +180,19 @@ async fn evaluate_cve_config(
     }
 
     // Check high justification requirement.
+    // count_unjustified_high_cves returns None when no completed scan exists
+    // for the derivation.  We can only reach this code path when scan.status ==
+    // Completed (checked above), so None here means the scan_packages join
+    // returned no rows — treat as 0 unjustified CVEs.
     if config.require_high_justification {
-        let unjustified = count_unjustified_high_cves(pool, derivation_id).await?;
-        if let Some(count) = unjustified {
-            if count > 0 {
-                violations.push(format!(
-                    "{} high CVE(s) lack whitelist justification",
-                    count
-                ));
-            }
+        let unjustified = count_unjustified_high_cves(pool, derivation_id)
+            .await?
+            .unwrap_or(0);
+        if unjustified > 0 {
+            violations.push(format!(
+                "{} high CVE(s) lack whitelist justification",
+                unjustified
+            ));
         }
     }
 
