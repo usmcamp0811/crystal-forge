@@ -13,6 +13,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashSet;
 use uuid::Uuid;
 
 use crate::auth::extractors::{RequireAdmin, RequireAuth, RequireOperator};
@@ -170,22 +171,137 @@ fn validate_policy_config(
             }
         }
         "custom_check" => {
-            let expression = obj
+            let has_expression = obj
                 .get("expression")
                 .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .ok_or((
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false);
+
+            let has_rules = obj
+                .get("rules")
+                .and_then(|v| v.as_array())
+                .map(|a| !a.is_empty())
+                .unwrap_or(false);
+
+            if !has_expression && !has_rules {
+                return Err((
                     StatusCode::BAD_REQUEST,
-                    "custom_check policy requires non-empty config.expression".to_string(),
-                ))?;
+                    "custom_check policy requires either non-empty config.expression or non-empty config.rules[]".to_string(),
+                ));
+            }
 
-            // Validate and normalize the expression
-            let normalized_expr = validate_and_normalize_nix_expression(expression)?;
+            if has_expression && !has_rules {
+                // Single-expression (legacy) path — normalize
+                let expression = obj
+                    .get("expression")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .unwrap();
+                let normalized_expr = validate_and_normalize_nix_expression(expression)?;
+                if let Some(config_obj) = validated_config.as_object_mut() {
+                    config_obj.insert("expression".to_string(), Value::String(normalized_expr));
+                }
+            }
 
-            // Update the config with the normalized expression
-            if let Some(config_obj) = validated_config.as_object_mut() {
-                config_obj.insert("expression".to_string(), Value::String(normalized_expr));
+            if has_rules {
+                // Multi-rule path — validate each rule
+                let rules = obj.get("rules").and_then(|v| v.as_array()).unwrap();
+                let mut seen_field_names: HashSet<String> = HashSet::new();
+                let mut normalized_rule_expressions: Vec<String> = Vec::with_capacity(rules.len());
+                for (i, rule) in rules.iter().enumerate() {
+                    let rule_obj = rule.as_object().ok_or((
+                        StatusCode::BAD_REQUEST,
+                        format!("config.rules[{}] must be an object", i),
+                    ))?;
+
+                    let expr = rule_obj
+                        .get("expression")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .ok_or((
+                            StatusCode::BAD_REQUEST,
+                            format!("config.rules[{}].expression must be a non-empty string", i),
+                        ))?;
+                    let normalized_expr = validate_and_normalize_nix_expression(expr)?;
+                    normalized_rule_expressions.push(normalized_expr);
+
+                    let field_name = rule_obj
+                        .get("field_name")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .ok_or((
+                            StatusCode::BAD_REQUEST,
+                            format!("config.rules[{}].field_name must be a non-empty string", i),
+                        ))?;
+
+                    if !seen_field_names.insert(field_name.to_string()) {
+                        return Err((
+                            StatusCode::BAD_REQUEST,
+                            format!(
+                                "config.rules[{}].field_name duplicates existing field_name '{}'",
+                                i, field_name
+                            ),
+                        ));
+                    }
+                }
+
+                if let Some(config_obj) = validated_config.as_object_mut() {
+                    if let Some(validated_rules) =
+                        config_obj.get_mut("rules").and_then(|v| v.as_array_mut())
+                    {
+                        for (i, normalized_expr) in
+                            normalized_rule_expressions.into_iter().enumerate()
+                        {
+                            if let Some(rule_obj) = validated_rules
+                                .get_mut(i)
+                                .and_then(|rule| rule.as_object_mut())
+                            {
+                                rule_obj.insert(
+                                    "expression".to_string(),
+                                    Value::String(normalized_expr),
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // Validate mode if present
+                if let Some(mode) = obj.get("mode") {
+                    let mode_str = mode.as_str().ok_or((
+                        StatusCode::BAD_REQUEST,
+                        "config.mode must be a string (\"all\" or \"any\")".to_string(),
+                    ))?;
+                    if mode_str != "all" && mode_str != "any" {
+                        return Err((
+                            StatusCode::BAD_REQUEST,
+                            "config.mode must be \"all\" or \"any\"".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+        "require_cve_check" => {
+            // Validate by attempting deserialization into CveCheckConfig
+            serde_json::from_value::<crate::models::deployment_policies::CveCheckConfig>(
+                config.clone(),
+            )
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("Invalid require_cve_check config: {}", e),
+                )
+            })?;
+
+            // Validate when_no_scan string value if present
+            if let Some(wns) = obj.get("when_no_scan").and_then(|v| v.as_str()) {
+                if wns != "block" && wns != "skip" {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        "config.when_no_scan must be \"block\" or \"skip\"".to_string(),
+                    ));
+                }
             }
         }
         _ => {}
@@ -335,7 +451,12 @@ pub async fn create_deployment_policy(
     }
 
     // Validate policy_type
-    let valid_types = ["require_cf_agent", "require_packages", "custom_check"];
+    let valid_types = [
+        "require_cf_agent",
+        "require_packages",
+        "custom_check",
+        "require_cve_check",
+    ];
     if !valid_types.contains(&request.policy_type.as_str()) {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -516,7 +637,12 @@ pub async fn update_deployment_policy(
 
     // Validate policy_type if provided
     if let Some(ref policy_type) = request.policy_type {
-        let valid_types = ["require_cf_agent", "require_packages", "custom_check"];
+        let valid_types = [
+            "require_cf_agent",
+            "require_packages",
+            "custom_check",
+            "require_cve_check",
+        ];
         if !valid_types.contains(&policy_type.as_str()) {
             return Err((
                 StatusCode::BAD_REQUEST,
@@ -738,6 +864,69 @@ mod tests {
             result.get("expression").and_then(|v| v.as_str()),
             Some("!cfg.config.services.openssh.settings.PasswordAuthentication"),
             "Complex expressions should be auto-corrected"
+        );
+    }
+
+    #[test]
+    fn validate_policy_config_rejects_duplicate_multi_rule_field_names() {
+        let err = validate_policy_config(
+            "custom_check",
+            &serde_json::json!({
+                "mode": "all",
+                "rules": [
+                    {
+                        "field_name": "sshEnabled",
+                        "expression": "cfg.config.services.openssh.enable",
+                        "strict": true
+                    },
+                    {
+                        "field_name": "sshEnabled",
+                        "expression": "cfg.config.services.sshd.enable",
+                        "strict": true
+                    }
+                ]
+            }),
+        )
+        .expect_err("duplicate rule field_name values must be rejected");
+
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("duplicates existing field_name"));
+    }
+
+    #[test]
+    fn validate_policy_config_normalizes_multi_rule_expressions() {
+        let result = validate_policy_config(
+            "custom_check",
+            &serde_json::json!({
+                "mode": "any",
+                "rules": [
+                    {
+                        "field_name": "sshEnabled",
+                        "expression": "config.services.openssh.enable",
+                        "strict": true
+                    },
+                    {
+                        "field_name": "httpEnabled",
+                        "expression": "cfg.config.services.nginx.enable",
+                        "strict": false
+                    }
+                ]
+            }),
+        )
+        .expect("multi-rule config should validate and normalize expressions");
+
+        let rules = result
+            .get("rules")
+            .and_then(|v| v.as_array())
+            .expect("validated config should preserve rules array");
+
+        assert_eq!(
+            rules[0].get("expression").and_then(|v| v.as_str()),
+            Some("cfg.config.services.openssh.enable")
+        );
+        assert_eq!(
+            rules[1].get("expression").and_then(|v| v.as_str()),
+            Some("cfg.config.services.nginx.enable")
         );
     }
 
