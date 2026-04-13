@@ -491,6 +491,20 @@ The devshell helpers MAY be used:
 - sqlx-refresh
 - sqlx-prepare
 
+## DATABASE SAFETY GUARD (MANDATORY)
+
+`sqlx-refresh` performs destructive database operations (drop/reset). It MUST only
+be run against an isolated local development database started by this repository's
+process-compose workflow.
+
+Before running `sqlx-refresh`, agents MUST verify and state:
+- the active DATABASE_URL target is local dev-only
+- the database is not a shared integration/staging/production environment
+
+If the database target cannot be verified as isolated local dev:
+YOU MUST NOT run `sqlx-refresh`.
+Use `sqlx-prepare` (non-destructive) instead and STOP/REPORT if that is insufficient.
+
 ## STOP CONDITIONS
 
 If the database cannot be started, cannot be reached, or sqlx prepare fails:
