@@ -1,4 +1,4 @@
--- Migration 0107: Seed canonical CVE deployment policies (disabled by default)
+-- Migration 0109: Seed canonical CVE deployment policies (disabled by default)
 --
 -- These policies are seeded as disabled. Admins can enable them from the UI
 -- or via API when their fleet has CVE scanning active and they wish to gate

@@ -111,49 +111,136 @@ fn parse_deployment_policy_record(
             Some(DeploymentPolicy::RequirePackages { packages, strict })
         }
         "custom_check" => {
-            let expression = cfg
+            use crate::models::deployment_policies::{PolicyRule, RuleMode};
+
+            // Determine which shape this record uses: multi-rule (rules[]) or legacy (expression).
+            let raw_rules = cfg
+                .get("rules")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+
+            let has_rules = !raw_rules.is_empty();
+            let raw_expression = cfg
                 .get("expression")
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            let Some(expression) = expression else {
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+
+            if !has_rules && raw_expression.is_empty() {
                 warn!(
-                    "Skipping custom_check policy '{}' ({}): missing config.expression",
+                    "Skipping custom_check policy '{}' ({}): neither config.expression nor config.rules[] is present",
                     record.name, record.id
                 );
                 return None;
-            };
-            let (expression, normalized_legacy_ref) =
-                normalize_custom_policy_expression(&expression);
-            if normalized_legacy_ref {
-                warn!(
-                    "Auto-normalized legacy custom_check expression for policy '{}' ({}): replaced `config.` with `cfg.config.`",
-                    record.name, record.id
-                );
             }
-
-            let description = cfg
-                .get("description")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .or_else(|| record.description.clone())
-                .unwrap_or_else(|| format!("Custom policy: {}", record.name));
-
-            let field_name = cfg
-                .get("field_name")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| custom_field_name(&record.name, record.id));
 
             let strict = cfg.get("strict").and_then(|v| v.as_bool()).unwrap_or(false);
 
-            Some(DeploymentPolicy::CustomCheck {
-                expression,
-                description,
-                field_name,
-                strict,
-                rules: vec![],
-                mode: crate::models::deployment_policies::RuleMode::All,
-            })
+            let mode = match cfg.get("mode").and_then(|v| v.as_str()).unwrap_or("all") {
+                "any" => RuleMode::Any,
+                _ => RuleMode::All,
+            };
+
+            if has_rules {
+                // Multi-rule path: parse each rule from config.rules[].
+                let mut parsed_rules: Vec<PolicyRule> = Vec::with_capacity(raw_rules.len());
+                for (i, rule) in raw_rules.iter().enumerate() {
+                    let rule_obj = match rule.as_object() {
+                        Some(o) => o,
+                        None => {
+                            warn!(
+                                "Skipping custom_check policy '{}' ({}): rules[{}] is not an object",
+                                record.name, record.id, i
+                            );
+                            return None;
+                        }
+                    };
+                    let expression = match rule_obj.get("expression").and_then(|v| v.as_str()) {
+                        Some(e) => e.to_string(),
+                        None => {
+                            warn!(
+                                "Skipping custom_check policy '{}' ({}): rules[{}] missing expression",
+                                record.name, record.id, i
+                            );
+                            return None;
+                        }
+                    };
+                    let field_name = match rule_obj.get("field_name").and_then(|v| v.as_str()) {
+                        Some(f) => f.to_string(),
+                        None => {
+                            warn!(
+                                "Skipping custom_check policy '{}' ({}): rules[{}] missing field_name",
+                                record.name, record.id, i
+                            );
+                            return None;
+                        }
+                    };
+                    let description = rule_obj
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| format!("rule_{}", i));
+                    let rule_strict = rule_obj
+                        .get("strict")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(true);
+                    parsed_rules.push(PolicyRule {
+                        expression,
+                        description,
+                        field_name,
+                        strict: rule_strict,
+                    });
+                }
+
+                let description = cfg
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .or_else(|| record.description.clone())
+                    .unwrap_or_else(|| format!("Multi-rule policy: {}", record.name));
+
+                Some(DeploymentPolicy::CustomCheck {
+                    expression: String::new(),
+                    description,
+                    field_name: record.name.clone(),
+                    strict,
+                    rules: parsed_rules,
+                    mode,
+                })
+            } else {
+                // Legacy single-expression path.
+                let (expression, normalized_legacy_ref) =
+                    normalize_custom_policy_expression(&raw_expression);
+                if normalized_legacy_ref {
+                    warn!(
+                        "Auto-normalized legacy custom_check expression for policy '{}' ({}): replaced `config.` with `cfg.config.`",
+                        record.name, record.id
+                    );
+                }
+
+                let description = cfg
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .or_else(|| record.description.clone())
+                    .unwrap_or_else(|| format!("Custom policy: {}", record.name));
+
+                let field_name = cfg
+                    .get("field_name")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| custom_field_name(&record.name, record.id));
+
+                Some(DeploymentPolicy::CustomCheck {
+                    expression,
+                    description,
+                    field_name,
+                    strict,
+                    rules: vec![],
+                    mode: RuleMode::All,
+                })
+            }
         }
         "require_cve_check" => {
             match serde_json::from_value::<crate::models::deployment_policies::CveCheckConfig>(

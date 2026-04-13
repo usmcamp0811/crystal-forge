@@ -351,31 +351,54 @@ impl PolicyCheckResult {
                             failed_policies.push((description.clone(), *strict));
                         }
                     } else {
-                        // Multi-rule path
-                        let mut rule_results: Vec<bool> = Vec::new();
+                        // Multi-rule path.
+                        //
+                        // Step 1: collect raw results and per-rule warnings WITHOUT yet recording
+                        // failures. We cannot know which per-rule failures matter until we know
+                        // whether the overall mode verdict passes.
+                        let mut rule_results: Vec<(bool, &PolicyRule)> = Vec::new();
                         for rule in rules {
                             let value = policies_json
                                 .get(&rule.field_name)
                                 .and_then(|v| v.as_bool());
                             let passed = value.unwrap_or(false);
                             custom_checks.insert(rule.field_name.clone(), passed);
-                            rule_results.push(passed);
+                            rule_results.push((passed, rule));
+                        }
+
+                        // Step 2: compute overall mode verdict. This is authoritative.
+                        let overall_passed = match mode {
+                            RuleMode::All => rule_results.iter().all(|(p, _)| *p),
+                            RuleMode::Any => rule_results.iter().any(|(p, _)| *p),
+                        };
+
+                        // Step 3: emit warnings and failures using the overall verdict.
+                        //
+                        // For Any: if at least one rule passed, the policy passes — no strict
+                        // failures are recorded, even for failing alternatives. Individual
+                        // warnings are still emitted for observability.
+                        //
+                        // For All: every failing rule contributes a strict failure if the
+                        // rule is marked strict AND the policy as a whole failed.
+                        for (passed, rule) in &rule_results {
                             if !passed {
                                 warnings.push(format!(
                                     "{}: rule '{}' failed",
                                     system_name, rule.description
                                 ));
-                                if rule.strict {
+                                // Only push strict failure when the overall policy failed.
+                                // This ensures Any-mode does not punish failed alternatives
+                                // when a sibling rule succeeded.
+                                if !overall_passed && rule.strict {
                                     failed_policies.push((rule.description.clone(), true));
                                 }
                             }
                         }
-                        // Evaluate overall mode
-                        let overall_passed = match mode {
-                            RuleMode::All => rule_results.iter().all(|&r| r),
-                            RuleMode::Any => rule_results.iter().any(|&r| r),
-                        };
-                        if !overall_passed && *strict {
+
+                        // Top-level policy failure when strict + overall failed.
+                        if !overall_passed && *strict && failed_policies.is_empty() {
+                            // No per-rule strict failures (all rules were non-strict) —
+                            // record the overall policy failure at top-level.
                             failed_policies
                                 .push((format!("Multi-rule check ({:?} mode) failed", mode), true));
                         }
@@ -386,12 +409,6 @@ impl PolicyCheckResult {
                 }
             }
         }
-
-        let meets_requirements = failed_policies.iter().all(|(_, is_strict)| !is_strict)
-            && warnings
-                .iter()
-                .zip(failed_policies.iter())
-                .all(|(_, (_, strict))| !strict);
 
         let meets_requirements = !failed_policies.iter().any(|(_, is_strict)| *is_strict);
 
@@ -667,6 +684,7 @@ mod tests {
 
     #[test]
     fn policy_check_result_multi_rule_any_mode_passes_on_one_success() {
+        // Any mode: ruleB passes → overall passes → ruleA's failure is not a strict failure.
         let policies = vec![DeploymentPolicy::CustomCheck {
             expression: String::new(),
             description: "multi-any".to_string(),
@@ -677,20 +695,54 @@ mod tests {
                     expression: "false".to_string(),
                     description: "fails".to_string(),
                     field_name: "ruleA".to_string(),
-                    strict: false,
+                    strict: true, // strict on this rule — but overall Any passes, so no failure
                 },
                 PolicyRule {
                     expression: "true".to_string(),
                     description: "passes".to_string(),
                     field_name: "ruleB".to_string(),
-                    strict: false,
+                    strict: true,
                 },
             ],
             mode: RuleMode::Any,
         }];
         let json = serde_json::json!({ "ruleA": false, "ruleB": true });
         let result = PolicyCheckResult::from_json("test-host".to_string(), &json, &policies);
-        // In Any mode with strict=false rules, no strict failures → meets_requirements = true
+        // Any mode: one rule passed → overall passed → no strict failures → meets_requirements
         assert!(result.meets_requirements);
+        assert!(
+            result.failed_policies.is_empty(),
+            "Any-mode overall pass must not produce strict failures"
+        );
+    }
+
+    #[test]
+    fn policy_check_result_multi_rule_any_mode_fails_when_all_fail() {
+        // Any mode: both fail → overall fails → per-rule strict failures are recorded.
+        let policies = vec![DeploymentPolicy::CustomCheck {
+            expression: String::new(),
+            description: "multi-any-fail".to_string(),
+            field_name: "multi".to_string(),
+            strict: true,
+            rules: vec![
+                PolicyRule {
+                    expression: "false".to_string(),
+                    description: "ruleA fails".to_string(),
+                    field_name: "ruleA".to_string(),
+                    strict: true,
+                },
+                PolicyRule {
+                    expression: "false".to_string(),
+                    description: "ruleB fails".to_string(),
+                    field_name: "ruleB".to_string(),
+                    strict: true,
+                },
+            ],
+            mode: RuleMode::Any,
+        }];
+        let json = serde_json::json!({ "ruleA": false, "ruleB": false });
+        let result = PolicyCheckResult::from_json("test-host".to_string(), &json, &policies);
+        assert!(!result.meets_requirements);
+        assert!(!result.failed_policies.is_empty());
     }
 }
