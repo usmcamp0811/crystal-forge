@@ -3188,6 +3188,252 @@ const steps = [
       await page.getByText("Policy Definition").first().waitFor({ timeout: 5000 });
     },
   },
+  // ── CVE policy API round-trip checks ────────────────────────────────────
+  // These tests exercise the new policy types introduced in TASK-176 through
+  // the real server API to verify the full create → parse → list round-trip.
+  {
+    name: "20b-policies-cve-gate-create-roundtrip",
+    description: "API: create require_cve_check policy and verify it round-trips correctly",
+    action: async (page) => {
+      // Create a require_cve_check policy via the API.
+      const createResponse = await page.evaluate(async (base) => {
+        const res = await fetch(`${base}/api/v1/deployment-policies`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: "ci-test-cve-gate",
+            description: "CI check: CVE gate round-trip",
+            policy_type: "require_cve_check",
+            config: {
+              max_critical: 0,
+              max_high: 5,
+              require_high_justification: true,
+              strict: true,
+              when_no_scan: "block",
+            },
+            enabled: false,
+          }),
+          credentials: "include",
+        });
+        return { status: res.status, body: await res.json() };
+      }, baseUrl);
+
+      if (createResponse.status !== 201) {
+        throw new Error(
+          `Expected 201 creating require_cve_check policy, got ${createResponse.status}: ${JSON.stringify(createResponse.body)}`
+        );
+      }
+
+      const createdId = createResponse.body.id;
+      if (!createdId) {
+        throw new Error("Created policy has no id field");
+      }
+
+      // Fetch it back and verify the config was stored correctly.
+      const getResponse = await page.evaluate(async ({ base, id }) => {
+        const res = await fetch(`${base}/api/v1/deployment-policies/${id}`, {
+          credentials: "include",
+        });
+        return { status: res.status, body: await res.json() };
+      }, { base: baseUrl, id: createdId });
+
+      if (getResponse.status !== 200) {
+        throw new Error(
+          `Expected 200 fetching policy ${createdId}, got ${getResponse.status}`
+        );
+      }
+
+      const policy = getResponse.body;
+      if (policy.policy_type !== "require_cve_check") {
+        throw new Error(`policy_type mismatch: expected require_cve_check, got ${policy.policy_type}`);
+      }
+      const cfg = policy.config;
+      if (cfg.max_critical !== 0) {
+        throw new Error(`max_critical mismatch: expected 0, got ${cfg.max_critical}`);
+      }
+      if (cfg.max_high !== 5) {
+        throw new Error(`max_high mismatch: expected 5, got ${cfg.max_high}`);
+      }
+      if (cfg.when_no_scan !== "block") {
+        throw new Error(`when_no_scan mismatch: expected block, got ${cfg.when_no_scan}`);
+      }
+      if (cfg.require_high_justification !== true) {
+        throw new Error(`require_high_justification mismatch: expected true, got ${cfg.require_high_justification}`);
+      }
+
+      // Clean up.
+      await page.evaluate(async ({ base, id }) => {
+        await fetch(`${base}/api/v1/deployment-policies/${id}`, {
+          method: "DELETE",
+          credentials: "include",
+        });
+      }, { base: baseUrl, id: createdId });
+    },
+  },
+  {
+    name: "20c-policies-multirule-create-roundtrip",
+    description: "API: create multi-rule custom_check (mode=any) and verify rules[] round-trips",
+    action: async (page) => {
+      // Create a multi-rule custom_check with mode=any.
+      const createResponse = await page.evaluate(async (base) => {
+        const res = await fetch(`${base}/api/v1/deployment-policies`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: "ci-test-multi-rule",
+            description: "CI check: multi-rule any-mode round-trip",
+            policy_type: "custom_check",
+            config: {
+              rules: [
+                {
+                  expression: "(cfg.config.services.crystal-forge.enable or false)",
+                  description: "CF agent enabled",
+                  field_name: "cfAgentEnabled",
+                  strict: true,
+                },
+                {
+                  expression: "(builtins.elem \"git\" (builtins.map (p: p.pname or \"\") cfg.config.environment.systemPackages))",
+                  description: "git installed",
+                  field_name: "gitInstalled",
+                  strict: true,
+                },
+              ],
+              mode: "any",
+              strict: true,
+            },
+            enabled: false,
+          }),
+          credentials: "include",
+        });
+        return { status: res.status, body: await res.json() };
+      }, baseUrl);
+
+      if (createResponse.status !== 201) {
+        throw new Error(
+          `Expected 201 creating multi-rule policy, got ${createResponse.status}: ${JSON.stringify(createResponse.body)}`
+        );
+      }
+
+      const createdId = createResponse.body.id;
+
+      // Fetch back and assert rules[] and mode are preserved.
+      const getResponse = await page.evaluate(async ({ base, id }) => {
+        const res = await fetch(`${base}/api/v1/deployment-policies/${id}`, {
+          credentials: "include",
+        });
+        return { status: res.status, body: await res.json() };
+      }, { base: baseUrl, id: createdId });
+
+      if (getResponse.status !== 200) {
+        throw new Error(`Expected 200, got ${getResponse.status}`);
+      }
+
+      const policy = getResponse.body;
+      const cfg = policy.config;
+
+      if (!Array.isArray(cfg.rules) || cfg.rules.length !== 2) {
+        throw new Error(
+          `Expected 2 rules in stored policy, got: ${JSON.stringify(cfg.rules)}`
+        );
+      }
+      if (cfg.mode !== "any") {
+        throw new Error(`mode mismatch: expected any, got ${cfg.mode}`);
+      }
+      if (cfg.rules[0].field_name !== "cfAgentEnabled") {
+        throw new Error(`rules[0].field_name mismatch: got ${cfg.rules[0].field_name}`);
+      }
+      if (cfg.rules[1].field_name !== "gitInstalled") {
+        throw new Error(`rules[1].field_name mismatch: got ${cfg.rules[1].field_name}`);
+      }
+
+      // Clean up.
+      await page.evaluate(async ({ base, id }) => {
+        await fetch(`${base}/api/v1/deployment-policies/${id}`, {
+          method: "DELETE",
+          credentials: "include",
+        });
+      }, { base: baseUrl, id: createdId });
+    },
+  },
+  {
+    name: "20d-policies-cve-gate-invalid-rejected",
+    description: "API: require_cve_check with invalid when_no_scan value is rejected 400",
+    action: async (page) => {
+      const createResponse = await page.evaluate(async (base) => {
+        const res = await fetch(`${base}/api/v1/deployment-policies`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: "ci-test-cve-bad",
+            policy_type: "require_cve_check",
+            config: {
+              max_critical: 0,
+              when_no_scan: "invalid_value",
+            },
+            enabled: false,
+          }),
+          credentials: "include",
+        });
+        return { status: res.status };
+      }, baseUrl);
+
+      if (createResponse.status !== 400) {
+        throw new Error(
+          `Expected 400 for invalid when_no_scan, got ${createResponse.status}`
+        );
+      }
+    },
+  },
+  {
+    name: "20e-policies-multirule-rules-only-no-expression-required",
+    description: "API: rules-only custom_check (no top-level expression) is accepted",
+    action: async (page) => {
+      // Regression: before the parser fix, a rules-only policy was accepted by the
+      // API validator but silently dropped when loading policies for evaluation.
+      // This verifies acceptance at the API boundary.
+      const createResponse = await page.evaluate(async (base) => {
+        const res = await fetch(`${base}/api/v1/deployment-policies`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: "ci-test-rules-only",
+            description: "CI check: rules-only policy (no expression field)",
+            policy_type: "custom_check",
+            config: {
+              rules: [
+                {
+                  expression: "true",
+                  description: "always passes",
+                  field_name: "alwaysPass",
+                  strict: true,
+                },
+              ],
+              mode: "all",
+              strict: true,
+            },
+            enabled: false,
+          }),
+          credentials: "include",
+        });
+        return { status: res.status, body: await res.json() };
+      }, baseUrl);
+
+      if (createResponse.status !== 201) {
+        throw new Error(
+          `Expected 201 for rules-only policy, got ${createResponse.status}: ${JSON.stringify(createResponse.body)}`
+        );
+      }
+
+      // Clean up.
+      await page.evaluate(async ({ base, id }) => {
+        await fetch(`${base}/api/v1/deployment-policies/${id}`, {
+          method: "DELETE",
+          credentials: "include",
+        });
+      }, { base: baseUrl, id: createResponse.body.id });
+    },
+  },
+  // ── End CVE/multi-rule policy checks ─────────────────────────────────────
   {
     name: "21-caches",
     description: "Cache management view",

@@ -26,9 +26,52 @@ pub fn PolicyCard(
         pt == "require_cf_agent" || pt == "require_crystal_forge_agent"
     });
 
-    let format_badge = match policy.format {
-        PolicyFormat::Toml => ("TOML", "bg-orange-500/20 text-orange-400"),
-        PolicyFormat::Json => ("JSON", "bg-blue-500/20 text-blue-400"),
+    let is_cve_policy = policy
+        .policy_type
+        .as_deref()
+        .map_or(false, |pt| pt == "require_cve_check");
+
+    let format_badge = if is_cve_policy {
+        ("CVE Gate", "bg-amber-500/20 text-amber-400")
+    } else {
+        match policy.format {
+            PolicyFormat::Toml => ("TOML", "bg-orange-500/20 text-orange-400"),
+            PolicyFormat::Json => ("JSON", "bg-blue-500/20 text-blue-400"),
+        }
+    };
+
+    // For CVE policies render a human-readable summary instead of raw JSON
+    let cve_summary: Option<String> = if is_cve_policy {
+        let config: Option<serde_json::Value> = serde_json::from_str(&policy.body)
+            .ok()
+            .and_then(|v: serde_json::Value| v.get("config").cloned().or(Some(v)));
+        config.map(|c| {
+            let mut parts = Vec::new();
+            if let Some(max_c) = c.get("max_critical").and_then(|v| v.as_u64()) {
+                parts.push(format!("critical ≤ {}", max_c));
+            }
+            if let Some(max_h) = c.get("max_high").and_then(|v| v.as_u64()) {
+                parts.push(format!("high ≤ {}", max_h));
+            }
+            if c.get("require_high_justification")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                parts.push("high requires justification".to_string());
+            }
+            let when_no_scan = c
+                .get("when_no_scan")
+                .and_then(|v| v.as_str())
+                .unwrap_or("block");
+            parts.push(format!("no-scan → {}", when_no_scan));
+            let strict = c.get("strict").and_then(|v| v.as_bool()).unwrap_or(true);
+            if !strict {
+                parts.push("warn-only".to_string());
+            }
+            parts.join(" · ")
+        })
+    } else {
+        None
     };
 
     let policy_for_edit = policy.clone();
@@ -82,17 +125,24 @@ pub fn PolicyCard(
                 }
             }
 
-            // Code preview with syntax highlighting
+            // Code preview — CVE policies get a human-readable summary; others use syntax highlighting
             div {
                 class: "rounded-lg bg-gray-950/70 border border-gray-800 overflow-hidden mb-3",
                 div {
                     class: "p-3 overflow-x-auto",
                     style: if *expanded.read() { "max-height: 400px; overflow-y: auto;" } else { "max-height: 100px; overflow: hidden;" },
-                    pre {
-                        class: "text-xs font-mono",
-                        code {
-                            class: "hljs language-{language}",
-                            dangerous_inner_html: "{highlighted_html}"
+                    if let Some(ref summary) = cve_summary {
+                        p {
+                            class: "text-xs text-amber-300/80 font-mono",
+                            "{summary}"
+                        }
+                    } else {
+                        pre {
+                            class: "text-xs font-mono",
+                            code {
+                                class: "hljs language-{language}",
+                                dangerous_inner_html: "{highlighted_html}"
+                            }
                         }
                     }
                 }

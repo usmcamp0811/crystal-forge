@@ -968,6 +968,7 @@ pub async fn evaluate_with_mock_eval_jobs(
             } else {
                 vec![]
             },
+            cve_checks: vec![],
         };
         checks.push(check);
 
@@ -1344,7 +1345,8 @@ mod tests {
         let result_2 =
             PolicyCheckResult::from_json("test-system-2".to_string(), &policies_json_2, &policies);
 
-        assert!(!result_2.meets_requirements);
+        // Non-strict failures should warn, but not block requirements.
+        assert!(result_2.meets_requirements);
         assert_eq!(result_2.failed_policies.len(), 1);
         assert_eq!(result_2.failed_policies[0].0, "Required packages: git");
         assert!(!result_2.failed_policies[0].1); // is_strict = false
@@ -1409,6 +1411,7 @@ mod tests {
             meets_requirements: false,
             warnings: vec!["evaluation failed".to_string()],
             failed_policies: vec![],
+            cve_checks: vec![],
         }];
 
         let (
