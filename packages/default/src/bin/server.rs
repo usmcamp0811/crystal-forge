@@ -192,6 +192,10 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/v1/systems/:id/cves", get(systems::get_system_cves))
         .route(
+            "/api/v1/systems/:id/cves/:cve_id/justification",
+            put(systems::save_system_cve_justification),
+        )
+        .route(
             "/api/v1/systems/:id/cve-scan-eligibility",
             get(systems::get_system_cve_scan_eligibility),
         )

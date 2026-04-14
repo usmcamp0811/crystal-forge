@@ -184,6 +184,21 @@ pub async fn trigger_system_cve_scan(
     send_json_with_csrf("POST", &url, None::<&()>).await
 }
 
+pub async fn save_system_cve_justification(
+    id: &uuid::Uuid,
+    cve_id: &str,
+    request: &SaveSystemCveJustificationRequest,
+) -> Result<SystemMutationResponse, ApiClientError> {
+    let encoded_cve: String = js_sys::encode_uri_component(cve_id).into();
+    let url = format!(
+        "{}/systems/{}/cves/{}/justification",
+        base_url(),
+        id,
+        encoded_cve
+    );
+    send_json_with_csrf("PUT", &url, Some(request)).await
+}
+
 pub async fn trigger_flake_config_cve_scan(
     flake_id: i32,
     config_name: &str,

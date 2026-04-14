@@ -1082,6 +1082,21 @@ pub struct SystemVulnerability {
     /// Current status (open/fixed/ignored).
     #[serde(default)]
     pub status: Option<String>,
+    /// Optional saved justification category for this system/CVE.
+    #[serde(default)]
+    pub justification_category: Option<String>,
+    /// Optional saved justification reason for this system/CVE.
+    #[serde(default)]
+    pub justification_reason: Option<String>,
+    /// Last update timestamp for saved justification.
+    #[serde(default)]
+    pub justification_updated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SaveSystemCveJustificationRequest {
+    pub category: Option<String>,
+    pub reason: String,
 }
 
 impl CveSeverity {

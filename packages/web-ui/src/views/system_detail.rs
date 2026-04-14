@@ -145,7 +145,7 @@ pub fn SystemDetailView(id: String) -> Element {
     });
 
     let id_for_vulns = id.clone();
-    let vulnerabilities_resource = use_resource(move || {
+    let mut vulnerabilities_resource = use_resource(move || {
         let id = id_for_vulns.clone();
         async move {
             let Ok(system_id) = Uuid::parse_str(&id) else {
@@ -565,8 +565,13 @@ pub fn SystemDetailView(id: String) -> Element {
                     },
                     Tab::Cves => rsx! {
                         CvesTab {
+                            system_id: system.id,
                             cve_counts: system.cve_counts.clone(),
-                            vulnerabilities: vulnerabilities.clone()
+                            vulnerabilities: vulnerabilities.clone(),
+                            allow_mutations: can_mutate,
+                            on_saved: move |_| {
+                                vulnerabilities_resource.restart();
+                            }
                         }
                     },
                     Tab::Logs => rsx! {
@@ -2192,6 +2197,9 @@ fn mock_vulnerabilities() -> Vec<SystemVulnerability> {
             first_seen: Some(Utc::now() - Duration::days(20)),
             published_at: Some(Utc::now() - Duration::days(30)),
             status: Some("open".to_string()),
+            justification_category: None,
+            justification_reason: None,
+            justification_updated_at: None,
         },
         SystemVulnerability {
             cve_id: "CVE-2024-5678".to_string(),
@@ -2204,6 +2212,9 @@ fn mock_vulnerabilities() -> Vec<SystemVulnerability> {
             first_seen: Some(Utc::now() - Duration::days(10)),
             published_at: Some(Utc::now() - Duration::days(14)),
             status: Some("open".to_string()),
+            justification_category: None,
+            justification_reason: None,
+            justification_updated_at: None,
         },
         SystemVulnerability {
             cve_id: "CVE-2024-9012".to_string(),
@@ -2216,6 +2227,9 @@ fn mock_vulnerabilities() -> Vec<SystemVulnerability> {
             first_seen: Some(Utc::now() - Duration::days(5)),
             published_at: Some(Utc::now() - Duration::days(7)),
             status: Some("open".to_string()),
+            justification_category: None,
+            justification_reason: None,
+            justification_updated_at: None,
         },
         SystemVulnerability {
             cve_id: "CVE-2024-3456".to_string(),
@@ -2228,6 +2242,9 @@ fn mock_vulnerabilities() -> Vec<SystemVulnerability> {
             first_seen: Some(Utc::now() - Duration::days(30)),
             published_at: Some(Utc::now() - Duration::days(45)),
             status: Some("fixed".to_string()),
+            justification_category: None,
+            justification_reason: None,
+            justification_updated_at: None,
         },
         SystemVulnerability {
             cve_id: "CVE-2024-7890".to_string(),
@@ -2240,6 +2257,9 @@ fn mock_vulnerabilities() -> Vec<SystemVulnerability> {
             first_seen: Some(Utc::now() - Duration::days(40)),
             published_at: Some(Utc::now() - Duration::days(60)),
             status: Some("open".to_string()),
+            justification_category: None,
+            justification_reason: None,
+            justification_updated_at: None,
         },
     ]
 }

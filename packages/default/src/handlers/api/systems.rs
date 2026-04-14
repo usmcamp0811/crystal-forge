@@ -12,6 +12,7 @@ use uuid::Uuid;
 use crate::api::models::{
     ApiError, AuditAction, CommitInfo, CreateSystemRequest, CveScanEligibilityResponse,
     CveScanStatusResponse, CveScanTriggerResponse, CveSummary, DeploySystemRequest,
+    SaveSystemCveJustificationRequest,
     DeploymentStatus, PipelineStage, SortOrder, SystemAgentEvent, SystemCommitsResponse,
     SystemDetail, SystemHardwareInfo, SystemHistoryEntry, SystemMutationResponse,
     SystemNetworkInfo, SystemRollbackRequest, SystemSecurityInfo, SystemSummary,
@@ -237,10 +238,16 @@ pub async fn get_system_cves(
             c.published_date::timestamptz AS published_at,
             -- 'fix_available' = upstream patched version exists; does NOT mean system is patched.
             -- 'open' = no upstream fix known yet.
-            CASE WHEN v.fixed_version IS NULL THEN 'open' ELSE 'fix_available' END AS status
+            CASE WHEN v.fixed_version IS NULL THEN 'open' ELSE 'fix_available' END AS status,
+            j.category AS justification_category,
+            j.reason AS justification_reason,
+            j.updated_at AS justification_updated_at
         FROM view_system_vulnerabilities v
         JOIN systems s ON s.hostname = v.hostname
         LEFT JOIN cves c ON c.id = v.cve_id
+        LEFT JOIN system_cve_justifications j
+            ON j.system_id = s.id
+           AND j.cve_id = v.cve_id
         WHERE s.id = $1
         ORDER BY v.cvss_v3_score DESC NULLS LAST, v.cve_id ASC
         "#,
@@ -270,11 +277,125 @@ pub async fn get_system_cves(
                 first_seen: row.get("first_seen"),
                 published_at: row.get("published_at"),
                 status: row.get("status"),
+                justification_category: row.get("justification_category"),
+                justification_reason: row.get("justification_reason"),
+                justification_updated_at: row.get("justification_updated_at"),
             }
         })
         .collect::<Vec<_>>();
 
     (StatusCode::OK, Json(vulnerabilities)).into_response()
+}
+
+pub async fn save_system_cve_justification(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path((system_id, cve_id)): Path<(Uuid, String)>,
+    Json(payload): Json<SaveSystemCveJustificationRequest>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+
+    if !caller_role.can_mutate_systems() {
+        return forbidden_mutation();
+    }
+
+    let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+
+    let row = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+
+    if !caller_role.can_access_system_environment(row.environment_id, &environment_memberships) {
+        return not_found();
+    }
+
+    let cve_id = cve_id.trim().to_string();
+    if cve_id.is_empty() {
+        return bad_request("CVE ID is required");
+    }
+
+    let reason = payload.reason.trim();
+    if reason.is_empty() {
+        return bad_request("Justification reason is required");
+    }
+
+    if reason.len() > 2000 {
+        return bad_request("Justification reason must be 2000 characters or less");
+    }
+
+    let category = payload
+        .category
+        .as_ref()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let cve_present_on_system = match sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM view_system_vulnerabilities v
+            JOIN systems s ON s.hostname = v.hostname
+            WHERE s.id = $1
+              AND v.cve_id = $2
+        )
+        "#,
+    )
+    .bind(system_id)
+    .bind(&cve_id)
+    .fetch_one(&pool)
+    .await
+    {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to validate system CVE"),
+    };
+
+    if !cve_present_on_system {
+        return bad_request("CVE was not found for this system");
+    }
+
+    if sqlx::query(
+        r#"
+        INSERT INTO system_cve_justifications (system_id, cve_id, category, reason, updated_by, updated_at)
+        VALUES ($1, $2, $3, $4, $5, NOW())
+        ON CONFLICT (system_id, cve_id)
+        DO UPDATE SET
+            category = EXCLUDED.category,
+            reason = EXCLUDED.reason,
+            updated_by = EXCLUDED.updated_by,
+            updated_at = NOW()
+        "#,
+    )
+    .bind(system_id)
+    .bind(&cve_id)
+    .bind(category)
+    .bind(reason)
+    .bind(user_id)
+    .execute(&pool)
+    .await
+    .is_err()
+    {
+        return internal_error("Failed to save CVE justification");
+    }
+
+    (
+        StatusCode::OK,
+        Json(SystemMutationResponse {
+            status: "ok".to_string(),
+            message: "CVE justification saved".to_string(),
+        }),
+    )
+        .into_response()
 }
 
 pub async fn get_system_cve_scan_eligibility(
@@ -1520,6 +1641,30 @@ mod tests {
             State(pool),
             HeaderMap::new(),
             Path(Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid")),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn save_system_cve_justification_requires_authenticated_role() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+
+        let response = save_system_cve_justification(
+            State(pool),
+            HeaderMap::new(),
+            Path((
+                Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid"),
+                "CVE-2025-1234".to_string(),
+            )),
+            Json(SaveSystemCveJustificationRequest {
+                category: Some("accepted_risk".to_string()),
+                reason: "Risk accepted pending upstream patch".to_string(),
+            }),
         )
         .await
         .into_response();

@@ -237,6 +237,18 @@ pub struct SystemVulnerability {
     pub first_seen: Option<DateTime<Utc>>,
     pub published_at: Option<DateTime<Utc>>,
     pub status: String,
+    #[serde(default)]
+    pub justification_category: Option<String>,
+    #[serde(default)]
+    pub justification_reason: Option<String>,
+    #[serde(default)]
+    pub justification_updated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaveSystemCveJustificationRequest {
+    pub category: Option<String>,
+    pub reason: String,
 }
 
 /// A single recent deployment event for the dashboard timeline.
