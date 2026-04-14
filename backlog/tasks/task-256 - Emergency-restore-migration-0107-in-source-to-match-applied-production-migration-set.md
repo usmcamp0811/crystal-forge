@@ -3,10 +3,10 @@ id: TASK-256
 title: >-
   Emergency: restore migration 0107 in source to match applied production
   migration set
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-04-10 01:07'
-updated_date: '2026-04-10 01:08'
+updated_date: '2026-04-14 00:34'
 labels:
   - hotfix
   - database
