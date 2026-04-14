@@ -1,10 +1,10 @@
 ---
 id: TASK-264
 title: Fix Systems Edit modal rendering regression with flake warning banner
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-04-11 16:00'
-updated_date: '2026-04-11 16:02'
+updated_date: '2026-04-14 00:41'
 labels:
   - bug
   - ui
