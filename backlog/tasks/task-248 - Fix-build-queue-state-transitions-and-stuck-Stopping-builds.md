@@ -1,11 +1,11 @@
 ---
 id: TASK-248
 title: Fix build queue state transitions and stuck "Stopping" builds
-status: Review
+status: Done
 assignee:
   - agent-claude
 created_date: '2026-04-07 23:27'
-updated_date: '2026-04-08 02:58'
+updated_date: '2026-04-14 00:34'
 labels:
   - bug
   - build-queue
