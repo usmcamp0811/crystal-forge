@@ -5,8 +5,13 @@ status: Backlog
 assignee: []
 created_date: '2026-04-14 01:16'
 updated_date: '2026-04-14 01:16'
-labels: []
+labels:
+  - ui
+  - systems
+  - ux
+  - sprint-ready
 dependencies: []
+priority: high
 ---
 
 ## Description
@@ -80,3 +85,15 @@ Refine the System History view so it matches site design standards, has working 
 - `packages/web-ui/src/components/system/history*` (if separate component)
 - API query layer if pagination requires backend changes
 <!-- SECTION:DESCRIPTION:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 #1 Clicking each status filter button (Current, Deployed, Pending, Not Ready, Skipped) filters the timeline to show only matching entries
+- [ ] #2 #2 Active filter button has distinct visual state (e.g., different background color, underline)
+- [ ] #3 #3 Timeline loads with a reasonable page size (20-50 entries); older entries load via 'Load More' button or infinite scroll
+- [ ] #4 #4 Scrolling the timeline keeps the filter bar pinned to the top of the view
+- [ ] #5 #5 Scrolling the timeline keeps the tab navigation (Overview | History | Logs) pinned
+- [ ] #6 #6 Filter bar styling matches site design system (chips/badges, spacing, colors)
+- [ ] #7 #7 Performance is acceptable with 100+ historical entries (no UI freeze or excessive memory)
+- [ ] #8 #8 Verification: functional test that each filter shows correct subset of entries
+<!-- AC:END -->
