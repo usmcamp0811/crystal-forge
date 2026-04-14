@@ -1,10 +1,10 @@
 ---
 id: TASK-259
 title: Consolidate NixOS VM checks to reduce CI/CD runtime
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-04-10 03:12'
-updated_date: '2026-04-10 03:13'
+updated_date: '2026-04-14 00:34'
 labels:
   - ci-cd
   - nix
