@@ -1,10 +1,10 @@
 ---
 id: TASK-221
 title: Add flake credential management and convert system add/edit to modal UI
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-03-28 22:14'
-updated_date: '2026-03-29 19:37'
+updated_date: '2026-04-14 00:38'
 labels:
   - backend
   - frontend
