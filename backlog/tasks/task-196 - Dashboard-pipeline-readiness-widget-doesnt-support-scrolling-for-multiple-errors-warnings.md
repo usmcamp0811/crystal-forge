@@ -3,10 +3,10 @@ id: TASK-196
 title: >-
   Dashboard pipeline readiness widget doesn't support scrolling for multiple
   errors/warnings
-status: Review
+status: Done
 assignee: []
 created_date: '2026-03-19 12:36'
-updated_date: '2026-04-07 03:31'
+updated_date: '2026-04-14 00:34'
 labels:
   - bug
   - ui
