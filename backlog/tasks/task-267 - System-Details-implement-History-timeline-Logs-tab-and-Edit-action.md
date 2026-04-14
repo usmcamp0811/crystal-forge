@@ -1,10 +1,10 @@
 ---
 id: TASK-267
 title: 'System Details: implement History timeline, Logs tab, and Edit action'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-04-12 18:24'
-updated_date: '2026-04-12 18:25'
+updated_date: '2026-04-14 00:41'
 labels:
   - ui
   - systems
