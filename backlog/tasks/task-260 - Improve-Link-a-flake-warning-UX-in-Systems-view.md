@@ -1,10 +1,10 @@
 ---
 id: TASK-260
 title: Improve "Link a flake" warning UX in Systems view
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-04-11 00:00'
-updated_date: '2026-04-11 00:02'
+updated_date: '2026-04-14 00:41'
 labels:
   - ux
   - systems-view
