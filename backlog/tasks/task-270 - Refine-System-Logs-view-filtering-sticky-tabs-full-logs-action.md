@@ -1,17 +1,19 @@
 ---
 id: TASK-270
 title: 'Refine System Logs view: filtering, sticky tabs, full logs action'
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-04-14 01:31'
-updated_date: '2026-04-14 01:32'
+updated_date: '2026-04-14 01:38'
 labels:
   - ui
   - systems
   - ux
   - sprint-ready
+milestone: System Details Hardening
 dependencies: []
 priority: high
+ordinal: 2700
 ---
 
 ## Description
@@ -19,55 +21,57 @@ priority: high
 <!-- SECTION:DESCRIPTION:BEGIN -->
 ## Problem Statement
 
-The System Detail → Logs tab needs similar UX improvements to the History view (TASK-268):
+The System Detail → Logs tab needs UX improvements similar to History:
 
-1. **Filter not working** — The filter options at the top of the Logs view don't actually filter the displayed events.
-
-2. **Tabs don't stick** — When scrolling through a long log list, the tab navigation (Overview | History | Logs) scrolls away. It should stay visible like in the History view.
-
-3. **"View full logs" does nothing** — There's a "View full logs" link/button that doesn't actually do anything meaningful.
+1. **Filter options are non-functional** — UI controls do not actually filter logs.
+2. **Tabs don't stick** — Overview | History | Logs navigation scrolls away during long log browsing.
+3. **"View full logs" does nothing** — The action has no effective behavior.
 
 ## Goal
 
-Refine the Logs view with functional filters, sticky tab navigation, and working "View full logs" action.
-
-## Scope
-
-1. **Functional filters** — Make filter options actually filter the log events. Common filter types for agent/system logs:
-   - Event type (deployment, heartbeat, error, etc.)
-   - Severity level (info, warning, error)
-   - Date/time range
-   - Search in log message text
-
-2. **Sticky tabs** — Keep the tab navigation (Overview | History | Logs) visible while scrolling through logs, similar to the History view fix.
-
-3. **"View full logs" action** — Make this actually do something useful:
-   - Could open a full-page log viewer
-   - Could download logs as file
-   - Could open external log viewer/integration
-   - At minimum should show all logs, not just a preview
-
-4. **Design consistency** — Match site design system for filters, buttons, and layout.
+Refine Logs view with working filters, sticky navigation, and a meaningful full-logs action.
 
 ## Non-Goals
 
-- No changes to log ingestion or storage
-- No redesign of log entry content
+- No changes to log ingestion/storage pipeline.
+- No redesign of individual log entry content.
+
+## Scope
+
+1. Functional logs filtering by event type/severity and text search.
+2. Sticky tabs/navigation while scrolling logs.
+3. Implement working "View full logs" behavior (open full log view/page or equivalent complete log rendering path).
+4. Design consistency with existing site standards.
+
+## Architectural Constraints
+
+- Keep filtering behavior in UI unless backend query-side filtering is required for scale.
+- Reuse existing System Detail tab/navigation patterns.
+- Keep scope focused on Logs tab behavior and wiring.
+
+## Verification Plan
+
+- Functional: filters narrow logs correctly by type/severity/text.
+- Sticky behavior: tabs remain visible while scrolling long logs.
+- Action behavior: "View full logs" navigates/displays full log content.
+- Automated: web-ui integration checks cover filter + sticky + full logs action.
 
 ## Impact Areas
 
-- `packages/web-ui/src/views/system_detail.rs` (Logs tab component)
-- `packages/web-ui/src/components/system/logs*` (if separate component)
+- `packages/web-ui/src/views/system_detail.rs` (Logs tab)
+- `packages/web-ui/src/components/system/logs*` (if split component)
+- API/query layer only if needed for full-log retrieval or scalable filtering.
+
+## Risk Level
+
+Medium (user-facing UX + potential log retrieval path wiring).
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 #1 Filter options at top of Logs view actually filter the displayed log events
-- [ ] #2 #2 Filter by event type works (e.g., deployment, heartbeat, error)
-- [ ] #3 #3 Filter by severity level works (info, warning, error)
-- [ ] #4 #4 Search box filters logs by message text
-- [ ] #5 #5 Scrolling log list keeps tab navigation (Overview | History | Logs) pinned to top
-- [ ] #6 #6 Clicking 'View full logs' opens a view showing all logs (not just preview)
-- [ ] #7 #7 Filter bar styling matches site design system
-- [ ] #8 #8 Verification: functional test that filters work, tabs stick, and full logs action works
+- [ ] #1 #1 Logs filters (type/severity/text) actually filter displayed entries
+- [ ] #2 #2 Filter controls have clear active visual state consistent with design system
+- [ ] #3 #3 Overview | History | Logs navigation remains visible while scrolling logs
+- [ ] #4 #4 Clicking "View full logs" opens complete log view/content (not a no-op)
+- [ ] #5 #5 web-ui verification includes assertions for filtering, sticky tabs, and full logs action
 <!-- AC:END -->
