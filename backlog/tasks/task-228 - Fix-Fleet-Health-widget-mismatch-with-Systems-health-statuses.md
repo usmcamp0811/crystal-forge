@@ -1,10 +1,10 @@
 ---
 id: TASK-228
 title: Fix Fleet Health widget mismatch with Systems health statuses
-status: Review
+status: Done
 assignee: []
 created_date: '2026-03-30 03:04'
-updated_date: '2026-04-07 02:21'
+updated_date: '2026-04-14 00:34'
 labels:
   - dashboard
   - health
