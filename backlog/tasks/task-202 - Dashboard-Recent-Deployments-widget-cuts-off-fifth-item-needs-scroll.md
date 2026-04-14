@@ -1,10 +1,10 @@
 ---
 id: TASK-202
 title: 'Dashboard Recent Deployments widget cuts off fifth item, needs scroll'
-status: Review
+status: Done
 assignee: []
 created_date: '2026-03-20 13:40'
-updated_date: '2026-04-07 03:07'
+updated_date: '2026-04-14 00:34'
 labels:
   - frontend
   - dashboard
