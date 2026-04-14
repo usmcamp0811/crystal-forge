@@ -378,7 +378,7 @@ pub async fn save_system_cve_justification(
     )
     .bind(system_id)
     .bind(&cve_id)
-    .bind(category)
+    .bind(category.clone())
     .bind(reason)
     .bind(user_id)
     .execute(&pool)
@@ -386,6 +386,27 @@ pub async fn save_system_cve_justification(
     .is_err()
     {
         return internal_error("Failed to save CVE justification");
+    }
+
+    if record_system_mutation_audit(
+        &pool,
+        user_id,
+        AuditAction::UserUpdated,
+        format!("{} ({})", row.hostname, row.id),
+        extract_request_origin(&headers),
+        serde_json::json!({
+            "operation": "cve_justification_saved",
+            "system_id": row.id,
+            "hostname": row.hostname,
+            "cve_id": cve_id,
+            "category": category,
+            "reason_length": reason.len()
+        }),
+    )
+    .await
+    .is_err()
+    {
+        return internal_error("Failed to write audit event");
     }
 
     (
