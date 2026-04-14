@@ -3,10 +3,10 @@ id: TASK-237
 title: >-
   Fix Builds queue control correctness and operator UX consistency
   (stop/run-next/state/table view)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-04-02 01:09'
-updated_date: '2026-04-02 12:47'
+updated_date: '2026-04-14 00:37'
 labels:
   - builds
   - queue
