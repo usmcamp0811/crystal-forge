@@ -258,30 +258,35 @@ pub async fn get_system_cves(
 
     let rows = match sqlx::query(
         r#"
-        SELECT
-            v.cve_id,
-            lower(v.severity) AS severity,
-            v.cvss_v3_score::double precision AS cvss_score,
-            COALESCE(v.description, '') AS description,
-            v.package_name,
-            v.package_version AS installed_version,
-            v.fixed_version,
-            v.completed_at AS first_seen,
-            c.published_date::timestamptz AS published_at,
-            -- 'fix_available' = upstream patched version exists; does NOT mean system is patched.
-            -- 'open' = no upstream fix known yet.
-            CASE WHEN v.fixed_version IS NULL THEN 'open' ELSE 'fix_available' END AS status,
-            j.category AS justification_category,
-            j.reason AS justification_reason,
-            j.updated_at AS justification_updated_at
-        FROM view_system_vulnerabilities v
-        JOIN systems s ON s.hostname = v.hostname
-        LEFT JOIN cves c ON c.id = v.cve_id
-        LEFT JOIN system_cve_justifications j
-            ON j.system_id = s.id
-           AND j.cve_id = v.cve_id
-        WHERE s.id = $1
-        ORDER BY v.cvss_v3_score DESC NULLS LAST, v.cve_id ASC
+        WITH deduped AS (
+            SELECT DISTINCT ON (v.cve_id, v.package_name, v.package_version)
+                v.cve_id,
+                lower(v.severity) AS severity,
+                v.cvss_v3_score::double precision AS cvss_score,
+                COALESCE(v.description, '') AS description,
+                v.package_name,
+                v.package_version AS installed_version,
+                v.fixed_version,
+                v.completed_at AS first_seen,
+                c.published_date::timestamptz AS published_at,
+                -- 'fix_available' = upstream patched version exists; does NOT mean system is patched.
+                -- 'open' = no upstream fix known yet.
+                CASE WHEN v.fixed_version IS NULL THEN 'open' ELSE 'fix_available' END AS status,
+                j.category AS justification_category,
+                j.reason AS justification_reason,
+                j.updated_at AS justification_updated_at
+            FROM view_system_vulnerabilities v
+            JOIN systems s ON s.hostname = v.hostname
+            LEFT JOIN cves c ON c.id = v.cve_id
+            LEFT JOIN system_cve_justifications j
+                ON j.system_id = s.id
+               AND j.cve_id = v.cve_id
+            WHERE s.id = $1
+            ORDER BY v.cve_id, v.package_name, v.package_version, v.completed_at DESC
+        )
+        SELECT *
+        FROM deduped
+        ORDER BY cvss_score DESC NULLS LAST, cve_id ASC, package_name ASC, installed_version ASC
         "#,
     )
     .bind(system_id)

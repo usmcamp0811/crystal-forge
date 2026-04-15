@@ -289,6 +289,13 @@ pub fn CvesTab(
                                                 }
 
                                                 p { class: "mt-2 text-sm {theme::text::SECONDARY} line-clamp-2", "{group.description}" }
+
+                                                if let Some(ref reason) = group.justification_reason {
+                                                    p {
+                                                        class: "mt-2 text-xs text-emerald-300/90 line-clamp-2",
+                                                        "Justification: {reason}"
+                                                    }
+                                                }
                                             }
 
                                             div { class: "text-right shrink-0 space-y-1",
@@ -334,28 +341,6 @@ pub fn CvesTab(
                                                     span { class: "{theme::text::MUTED}", "Published: {published_label}" }
                                                 }
                                                 span { class: "{theme::text::MUTED}", "Status: {status_label(&group.status)}" }
-                                            }
-
-                                            div {
-                                                class: "space-y-2",
-                                                h4 { class: "{theme::typography::TABLE_HEADER}", "Affected packages" }
-                                                for item in group.package_instances.iter() {
-                                                    div {
-                                                        key: "{group.cve_id}-{item.package_name}-{item.installed_version}",
-                                                        class: "text-sm {theme::text::SECONDARY} flex items-center gap-3 flex-wrap rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2",
-                                                        span { class: "font-medium {theme::text::PRIMARY}", "{item.package_name}" }
-                                                        span { class: "{theme::text::MUTED}", "Installed: {item.installed_version}" }
-                                                        span {
-                                                            class: "text-xs rounded px-2 py-0.5 border {theme::surface::CARD_BORDER} {theme::text::SECONDARY}",
-                                                            {status_label(item.status.as_deref().unwrap_or("open"))}
-                                                        }
-                                                        if let Some(ref fixed) = item.fixed_version {
-                                                            span { class: "text-emerald-400", "Fix: {fixed}" }
-                                                        } else {
-                                                            span { class: "{theme::text::MUTED}", "No fix yet" }
-                                                        }
-                                                    }
-                                                }
                                             }
 
                                             div {
@@ -482,6 +467,28 @@ pub fn CvesTab(
                                                     }
                                                 }
                                             }
+
+                                            div {
+                                                class: "space-y-2",
+                                                h4 { class: "{theme::typography::TABLE_HEADER}", "Affected packages" }
+                                                for item in group.package_instances.iter() {
+                                                    div {
+                                                        key: "{group.cve_id}-{item.package_name}-{item.installed_version}",
+                                                        class: "text-sm {theme::text::SECONDARY} flex items-center gap-3 flex-wrap rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2",
+                                                        span { class: "font-medium {theme::text::PRIMARY}", "{item.package_name}" }
+                                                        span { class: "{theme::text::MUTED}", "Installed: {item.installed_version}" }
+                                                        span {
+                                                            class: "text-xs rounded px-2 py-0.5 border {theme::surface::CARD_BORDER} {theme::text::SECONDARY}",
+                                                            {status_label(item.status.as_deref().unwrap_or("open"))}
+                                                        }
+                                                        if let Some(ref fixed) = item.fixed_version {
+                                                            span { class: "text-emerald-400", "Fix: {fixed}" }
+                                                        } else {
+                                                            span { class: "{theme::text::MUTED}", "No fix yet" }
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -513,7 +520,16 @@ fn group_vulnerabilities_by_cve(vulnerabilities: &[SystemVulnerability]) -> Vec<
                 justification_updated_at: vuln.justification_updated_at,
             });
 
-        entry.package_instances.push(vuln.clone());
+        // Deduplicate by package_name + installed_version to avoid showing
+        // go-1.24.4 repeated 50+ times from different store paths/derivations
+        let already_has_package = entry.package_instances.iter().any(|item| {
+            item.package_name == vuln.package_name
+                && item.installed_version == vuln.installed_version
+        });
+
+        if !already_has_package {
+            entry.package_instances.push(vuln.clone());
+        }
 
         if severity_rank(&vuln.severity) > severity_rank(&entry.severity) {
             entry.severity = vuln.severity.clone();
@@ -533,6 +549,13 @@ fn group_vulnerabilities_by_cve(vulnerabilities: &[SystemVulnerability]) -> Vec<
     }
 
     let mut groups = grouped.into_values().collect::<Vec<_>>();
+    for group in &mut groups {
+        group.package_instances.sort_by(|a, b| {
+            a.package_name
+                .cmp(&b.package_name)
+                .then_with(|| a.installed_version.cmp(&b.installed_version))
+        });
+    }
     groups.sort_by(|a, b| {
         b.cvss_score
             .partial_cmp(&a.cvss_score)
