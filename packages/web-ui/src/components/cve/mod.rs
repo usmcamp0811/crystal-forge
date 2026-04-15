@@ -146,10 +146,10 @@ pub fn CvesTab(
                             class: "text-[11px] px-2 py-0.5 rounded-md border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} {theme::text::SECONDARY}",
                             "{format_count(filtered.len() as i64)} grouped CVEs"
                         }
-                        span { class: "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border border-red-900/70 bg-red-950/35 text-red-300", "Critical {format_count(cve_counts.critical)}" }
-                        span { class: "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border border-orange-900/70 bg-orange-950/35 text-orange-300", "High {format_count(cve_counts.high)}" }
-                        span { class: "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border border-yellow-900/70 bg-yellow-950/35 text-yellow-300", "Medium {format_count(cve_counts.medium)}" }
-                        span { class: "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border border-blue-900/70 bg-blue-950/35 text-blue-300", "Low {format_count(cve_counts.low)}" }
+                        span { class: "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium {CveSeverity::Critical.color_class()} {CveSeverity::Critical.bg_class()}", "Critical {format_count(cve_counts.critical)}" }
+                        span { class: "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium {CveSeverity::High.color_class()} {CveSeverity::High.bg_class()}", "High {format_count(cve_counts.high)}" }
+                        span { class: "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium {CveSeverity::Medium.color_class()} {CveSeverity::Medium.bg_class()}", "Medium {format_count(cve_counts.medium)}" }
+                        span { class: "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium {CveSeverity::Low.color_class()} {CveSeverity::Low.bg_class()}", "Low {format_count(cve_counts.low)}" }
                     }
                 }
             }
@@ -277,7 +277,7 @@ pub fn CvesTab(
                                                         "{package_label}"
                                                     }
                                                     span {
-                                                        class: "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium {group.severity.bg_class()} text-white",
+                                                        class: "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium {group.severity.color_class()} {group.severity.bg_class()}",
                                                         "{group.severity.label()}"
                                                     }
                                                     if has_justification {
@@ -356,9 +356,9 @@ pub fn CvesTab(
                                                     if let Some(ref reason) = group.justification_reason {
                                                         div { class: "text-sm {theme::text::SECONDARY} leading-relaxed", "{reason}" }
                                                         if let Some(ref category) = group.justification_category {
-                                                            div {
-                                                                class: "inline-flex text-xs rounded-md border border-emerald-700/40 bg-emerald-950/30 px-2 py-1 text-emerald-300",
-                                                                "Category: {category}"
+                                                            span {
+                                                                class: "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium {justification_category_class(category)}",
+                                                                "Category: {humanize_category(category)}"
                                                             }
                                                         }
                                                     } else {
@@ -601,6 +601,32 @@ fn status_label(status: &str) -> &'static str {
         "mixed" => "Mixed package status",
         _ => "Status unknown",
     }
+}
+
+fn justification_category_class(category: &str) -> &'static str {
+    match category {
+        "false_positive" => "text-violet-300 bg-violet-500/15",
+        "accepted_risk" => "text-amber-300 bg-amber-500/15",
+        "compensating_control" => "text-blue-300 bg-blue-500/15",
+        "planned_remediation" => "text-emerald-300 bg-emerald-500/15",
+        "vendor_pending_fix" => "text-orange-300 bg-orange-500/15",
+        _ => "text-slate-300 bg-slate-500/15",
+    }
+}
+
+fn humanize_category(category: &str) -> String {
+    category
+        .split('_')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn format_count(value: i64) -> String {
