@@ -203,11 +203,8 @@ mod tests {
 
         // run_cve_scan_loop returns () when vulnix is unavailable (the check at the
         // top of the function short-circuits). We wrap it in a timeout to be safe.
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            run_cve_scan_loop(pool),
-        )
-        .await;
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(5), run_cve_scan_loop(pool)).await;
 
         // Either it completed within the timeout (vulnix absent → fast return)
         // or it timed out (vulnix present → loop running, also fine in dev envs).

@@ -25,7 +25,10 @@ impl std::fmt::Display for CveScanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CveScanError::VulnixUnavailable => {
-                write!(f, "vulnix is not available on this node; immediate scan cannot start")
+                write!(
+                    f,
+                    "vulnix is not available on this node; immediate scan cannot start"
+                )
             }
             CveScanError::Internal(err) => write!(f, "{err:#}"),
         }

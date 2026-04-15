@@ -2386,6 +2386,260 @@ const steps = [
     },
   },
   {
+    name: "12h-system-detail-cves-grouped-justification",
+    description: "System detail CVEs tab grouped list, filters, details link, and justification save",
+    action: async (page) => {
+      await routeSystemsWarningData(page);
+
+      await page.route(
+        "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cve-scan-eligibility*",
+        async (route) => {
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({
+              eligible: true,
+              reason: null,
+              derivation_id: 42,
+              config_name: "warning-system-01",
+              hostname: "warning-system-01",
+            }),
+          });
+        },
+      );
+
+      let justificationSaved = false;
+      let capturedJustificationRequest = null;
+
+      await page.route("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cves*", async (route) => {
+        const payload = [
+          {
+            cve_id: "CVE-2025-1111",
+            severity: "high",
+            cvss_score: 8.7,
+            description: "Kernel memory corruption under crafted input",
+            package_name: "linuxPackages_6_10.kernel",
+            installed_version: "6.10.12",
+            fixed_version: "6.10.14",
+            first_seen: "2026-04-10T09:00:00Z",
+            published_at: "2026-04-08T00:00:00Z",
+            status: "fix_available",
+            justification_category: justificationSaved ? "accepted_risk" : null,
+            justification_reason: justificationSaved
+              ? "Accepted risk until scheduled maintenance window"
+              : null,
+            justification_updated_at: justificationSaved ? "2026-04-12T12:00:00Z" : null,
+          },
+          {
+            cve_id: "CVE-2025-1111",
+            severity: "high",
+            cvss_score: 8.7,
+            description: "Kernel memory corruption under crafted input",
+            package_name: "linuxPackages_6_1.kernel",
+            installed_version: "6.1.93",
+            fixed_version: "6.1.95",
+            first_seen: "2026-04-10T09:00:00Z",
+            published_at: "2026-04-08T00:00:00Z",
+            status: "fix_available",
+            justification_category: justificationSaved ? "accepted_risk" : null,
+            justification_reason: justificationSaved
+              ? "Accepted risk until scheduled maintenance window"
+              : null,
+            justification_updated_at: justificationSaved ? "2026-04-12T12:00:00Z" : null,
+          },
+          {
+            cve_id: "CVE-2024-2222",
+            severity: "low",
+            cvss_score: 3.1,
+            description: "Minor issue in optional diagnostics package",
+            package_name: "diag-tools",
+            installed_version: "2.3.1",
+            fixed_version: null,
+            first_seen: "2026-04-10T09:00:00Z",
+            published_at: "2026-01-15T00:00:00Z",
+            status: "open",
+            justification_category: null,
+            justification_reason: null,
+            justification_updated_at: null,
+          },
+        ];
+
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(payload),
+        });
+      });
+
+      await page.route(
+        "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cves/CVE-2025-1111/justification",
+        async (route) => {
+          capturedJustificationRequest = route.request().postDataJSON();
+          justificationSaved = true;
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({ status: "ok", message: "CVE justification saved" }),
+          });
+        },
+      );
+
+      await page.route("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/commits*", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ commits: [], current_commit: null }),
+        });
+      });
+
+      await page.goto(`${baseUrl}/systems/00000000-0000-0000-0000-0000000000a1`, {
+        timeout: LOAD_TIMEOUT,
+      });
+      await page.waitForTimeout(1200);
+
+      await page.getByRole("button", { name: "CVEs" }).first().click();
+
+      await assertVisible(
+        page.getByText("2 grouped CVEs").first(),
+        "Expected grouped CVE count to collapse duplicate CVE IDs",
+        12000,
+      );
+
+      await assertVisible(
+        page.getByText("2 packages").first(),
+        "Expected grouped CVE row to show affected package count",
+      );
+
+      await page.locator("button", { hasText: "CVE-2025-1111" }).first().click();
+
+      await assertVisible(
+        page.getByText("Kernel memory corruption under crafted input").first(),
+        "Expected expanded CVE entry to show internal description",
+      );
+      await assertVisible(
+        page.getByText("linuxPackages_6_10.kernel").first(),
+        "Expected expanded grouped CVE to show first affected package",
+      );
+      await assertVisible(
+        page.getByText("linuxPackages_6_1.kernel").first(),
+        "Expected expanded grouped CVE to show second affected package",
+      );
+
+      const nvdHref = await page.locator("a:has-text('View on NVD')").first().getAttribute("href");
+      if (nvdHref !== "https://nvd.nist.gov/vuln/detail/CVE-2025-1111") {
+        throw new Error(`Expected CVE details link to point at NVD detail page, got: ${nvdHref}`);
+      }
+
+      await page.locator("input[placeholder='Filter package/version']").fill("diag-tools");
+      await assertVisible(
+        page.getByText("CVE-2024-2222").first(),
+        "Expected package filter to keep matching CVE",
+      );
+
+      const cve1111VisibleAfterPackageFilter = await page
+        .getByText("CVE-2025-1111")
+        .first()
+        .isVisible({ timeout: 1500 })
+        .catch(() => false);
+      if (cve1111VisibleAfterPackageFilter) {
+        throw new Error("Expected package filter to hide non-matching grouped CVE row");
+      }
+
+      await page.locator("input[placeholder='Filter package/version']").fill("");
+      await page.locator("select").first().selectOption("high");
+      await assertVisible(
+        page.getByText("CVE-2025-1111").first(),
+        "Expected severity filter to retain High CVE",
+      );
+      await assertHidden(
+        page.getByText("CVE-2024-2222").first(),
+        "Expected severity filter to hide Low CVE row",
+      );
+
+      await page.locator("select").first().selectOption("all");
+      const cve1111Toggle = page.locator("button", { hasText: "CVE-2025-1111" }).first();
+      const editJustificationButton = page
+        .getByRole("button", { name: "Edit justification" })
+        .first();
+      const editButtonInitiallyVisible = await editJustificationButton
+        .isVisible({ timeout: 1000 })
+        .catch(() => false);
+      if (!editButtonInitiallyVisible) {
+        await cve1111Toggle.click();
+      }
+      await assertVisible(
+        editJustificationButton,
+        "Expected CVE row to provide justification edit action",
+      );
+      await editJustificationButton.click();
+
+      await page.locator("select").nth(1).selectOption("accepted_risk");
+      const reasonInput = page.locator("textarea[placeholder='Document risk acceptance / mitigation rationale']").first();
+      const seededReason = await reasonInput.inputValue();
+      if (!seededReason.toLowerCase().includes("accepted risk")) {
+        throw new Error(`Expected preset selection to auto-populate justification reason, got: ${seededReason}`);
+      }
+
+      await reasonInput.fill("Accepted risk until scheduled maintenance window");
+
+      const justificationResponsePromise = page
+        .waitForResponse(
+          (response) =>
+            response.request().method() === "PUT" &&
+            response
+              .url()
+              .includes("/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cves/CVE-2025-1111/justification"),
+          { timeout: 15000 },
+        )
+        .catch(() => null);
+
+      await page.getByRole("button", { name: "Save" }).first().click();
+
+      const justificationResponse = await justificationResponsePromise;
+      if (!justificationResponse || !justificationResponse.ok()) {
+        throw new Error("Expected CVE justification save request to succeed");
+      }
+
+      if (!capturedJustificationRequest) {
+        throw new Error("Expected justification save payload to be captured");
+      }
+      if (capturedJustificationRequest.category !== "accepted_risk") {
+        throw new Error(
+          `Expected justification category accepted_risk, got ${capturedJustificationRequest.category}`,
+        );
+      }
+      if (
+        capturedJustificationRequest.reason !==
+        "Accepted risk until scheduled maintenance window"
+      ) {
+        throw new Error(
+          `Unexpected justification reason payload: ${capturedJustificationRequest.reason}`,
+        );
+      }
+
+      await assertVisible(
+        page.getByText("Justification saved").first(),
+        "Expected UI acknowledgement after saving CVE justification",
+      );
+
+      await page.locator("button", { hasText: "CVE-2025-1111" }).first().click();
+      await assertVisible(
+        page.getByText("Justified").first(),
+        "Expected grouped CVE row to remain visually marked after save + reload",
+      );
+
+      await page.unroute(
+        "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cve-scan-eligibility*",
+      );
+      await page.unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cves*");
+      await page.unroute(
+        "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cves/CVE-2025-1111/justification",
+      );
+      await page.unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/commits*");
+      await unrouteSystemsWarningData(page);
+    },
+  },
+  {
     name: "12d-systems-api-error-no-mock-fallback",
     description: "Systems API failures show error state without deterministic mock hosts",
     action: async (page) => {
@@ -3529,6 +3783,7 @@ const CI_FAST_STEP_NAMES = new Set([
   "12e-systems-edit-modal",
   "12f-systems-deploy-modal",
   "12g-system-detail-history-logs-edit",
+  "12h-system-detail-cves-grouped-justification",
   "12d-systems-api-error-no-mock-fallback",
   "12g-systems-warning-clears-after-link",
   "13d-flakes-stress-dataset",

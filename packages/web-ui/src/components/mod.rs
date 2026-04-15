@@ -49,7 +49,7 @@ pub mod widget_grid;
 
 // Re-exports for convenience
 pub use charts::{DonutArc, DonutChartWithLegend, DonutSegment};
-pub use cve::{CveSeverityRow, CvesTab, VulnerabilityRow};
+pub use cve::CvesTab;
 pub use diff::DiffViewer;
 pub use eval_log_modal::EvalLogModal;
 pub use filters::{

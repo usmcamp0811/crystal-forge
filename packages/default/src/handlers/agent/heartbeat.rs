@@ -192,10 +192,8 @@ mod tests {
     #[tokio::test]
     async fn handle_duplicate_cleanup_returns_deactivated_hosts_on_success() {
         let host = "nix-builder";
-        let deactivated = handle_duplicate_active_system_cleanup_result(
-            host,
-            Ok(vec!["base".to_string()]),
-        );
+        let deactivated =
+            handle_duplicate_active_system_cleanup_result(host, Ok(vec!["base".to_string()]));
 
         assert_eq!(deactivated, vec!["base".to_string()]);
     }
@@ -203,8 +201,10 @@ mod tests {
     #[tokio::test]
     async fn handle_duplicate_cleanup_is_non_fatal_on_error() {
         let host = "nix-builder";
-        let deactivated =
-            handle_duplicate_active_system_cleanup_result(host, Err(anyhow::anyhow!("db unavailable")));
+        let deactivated = handle_duplicate_active_system_cleanup_result(
+            host,
+            Err(anyhow::anyhow!("db unavailable")),
+        );
 
         assert!(
             deactivated.is_empty(),
