@@ -20,14 +20,16 @@ use tracing::error;
 const CVE_DASHBOARD_SUMMARY_SQL: &str = r#"
         WITH per_system_counts AS (
             SELECT
-                hostname,
+                v.hostname,
                 COUNT(DISTINCT cve_id) FILTER (WHERE severity = 'CRITICAL')::BIGINT AS critical_cves,
                 COUNT(DISTINCT cve_id) FILTER (WHERE severity = 'HIGH')::BIGINT AS high_cves,
                 COUNT(DISTINCT cve_id) FILTER (WHERE severity = 'MEDIUM')::BIGINT AS medium_cves,
                 COUNT(DISTINCT cve_id) FILTER (WHERE severity = 'LOW')::BIGINT AS low_cves,
                 COUNT(DISTINCT cve_id)::BIGINT AS total_cves
-            FROM view_system_vulnerabilities
-            GROUP BY hostname
+            FROM view_system_vulnerabilities v
+            JOIN systems s ON s.hostname = v.hostname
+            WHERE s.is_active = TRUE
+            GROUP BY v.hostname
         )
         SELECT
             -- severity totals: SUM/COUNT aggregate always returns one row
@@ -40,15 +42,19 @@ const CVE_DASHBOARD_SUMMARY_SQL: &str = r#"
             COALESCE((
                 SELECT COUNT(DISTINCT v.cve_id)
                 FROM view_system_vulnerabilities v
+                JOIN systems s ON s.hostname = v.hostname
                 JOIN cves c ON c.id = v.cve_id
-                WHERE c.published_date >= (CURRENT_DATE - INTERVAL '7 days')
+                WHERE s.is_active = TRUE
+                  AND c.published_date >= (CURRENT_DATE - INTERVAL '7 days')
             ), 0)::BIGINT                                                       AS new_cves,
             -- oldest CVE age: scalar subquery always returns one row (NULL if no data)
             (
                 SELECT (CURRENT_DATE - MIN(c.published_date::date))::BIGINT
                 FROM view_system_vulnerabilities v
+                JOIN systems s ON s.hostname = v.hostname
                 JOIN cves c ON c.id = v.cve_id
-                WHERE c.published_date IS NOT NULL
+                WHERE s.is_active = TRUE
+                  AND c.published_date IS NOT NULL
             )                                                                   AS oldest_age_days
         FROM per_system_counts p
         "#;

@@ -81,13 +81,15 @@ pub async fn fetch_cve_summary(pool: &PgPool) -> Result<CveSummary> {
     let row = sqlx::query_as::<_, (i64, i64, i64, i64)>(
         "WITH per_system_counts AS ( \
             SELECT \
-                hostname, \
+                v.hostname, \
                 COUNT(DISTINCT cve_id) FILTER (WHERE severity = 'CRITICAL')::BIGINT AS critical_cves, \
                 COUNT(DISTINCT cve_id) FILTER (WHERE severity = 'HIGH')::BIGINT AS high_cves, \
                 COUNT(DISTINCT cve_id) FILTER (WHERE severity = 'MEDIUM')::BIGINT AS medium_cves, \
                 COUNT(DISTINCT cve_id) FILTER (WHERE severity = 'LOW')::BIGINT AS low_cves \
-            FROM view_system_vulnerabilities \
-            GROUP BY hostname \
+            FROM view_system_vulnerabilities v \
+            JOIN systems s ON s.hostname = v.hostname \
+            WHERE s.is_active = TRUE \
+            GROUP BY v.hostname \
          ) \
          SELECT \
             COALESCE(SUM(critical_cves), 0), \
