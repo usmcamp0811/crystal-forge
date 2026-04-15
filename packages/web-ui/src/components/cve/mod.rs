@@ -288,16 +288,16 @@ pub fn CvesTab(
                                                     }
                                                 }
 
-                                                p { class: "mt-2 text-sm text-slate-300 line-clamp-2", "{group.description}" }
+                                                p { class: "mt-2 text-sm {theme::text::SECONDARY} line-clamp-2", "{group.description}" }
                                             }
 
                                             div { class: "text-right shrink-0 space-y-1",
                                                 if let Some(score) = group.cvss_score {
                                                     div { class: "text-lg font-bold {group.severity.color_class()}", "{score:.1}" }
-                                                    div { class: "text-xs text-slate-500", "CVSS" }
+                                                    div { class: "text-xs {theme::text::MUTED}", "CVSS" }
                                                 }
                                                 div {
-                                                    class: "text-slate-500",
+                                                    class: "{theme::text::MUTED}",
                                                     svg {
                                                         class: "w-4 h-4 inline-block transition-transform {chevron_class}",
                                                         fill: "none",
@@ -315,7 +315,7 @@ pub fn CvesTab(
                                         }
                                     }
 
-                                    div { class: "px-4 pb-3 text-xs text-slate-400", "{status_label(&group.status)}" }
+                                    div { class: "px-4 pb-3 text-xs {theme::text::MUTED}", "{status_label(&group.status)}" }
 
                                     if is_expanded {
                                         div {
@@ -331,9 +331,9 @@ pub fn CvesTab(
                                                     "View on NVD"
                                                 }
                                                 if let Some(ref published_label) = published_label {
-                                                    span { class: "text-slate-400", "Published: {published_label}" }
+                                                    span { class: "{theme::text::MUTED}", "Published: {published_label}" }
                                                 }
-                                                span { class: "text-slate-400", "Status: {status_label(&group.status)}" }
+                                                span { class: "{theme::text::MUTED}", "Status: {status_label(&group.status)}" }
                                             }
 
                                             div {
@@ -346,13 +346,13 @@ pub fn CvesTab(
                                                         span { class: "font-medium {theme::text::PRIMARY}", "{item.package_name}" }
                                                         span { class: "{theme::text::MUTED}", "Installed: {item.installed_version}" }
                                                         span {
-                                                            class: "text-xs rounded px-2 py-0.5 border border-gray-700 text-slate-300",
+                                                            class: "text-xs rounded px-2 py-0.5 border {theme::surface::CARD_BORDER} {theme::text::SECONDARY}",
                                                             {status_label(item.status.as_deref().unwrap_or("open"))}
                                                         }
                                                         if let Some(ref fixed) = item.fixed_version {
                                                             span { class: "text-emerald-400", "Fix: {fixed}" }
                                                         } else {
-                                                            span { class: "text-slate-500", "No fix yet" }
+                                                            span { class: "{theme::text::MUTED}", "No fix yet" }
                                                         }
                                                     }
                                                 }
