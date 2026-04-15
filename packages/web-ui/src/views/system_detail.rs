@@ -520,7 +520,7 @@ pub fn SystemDetailView(id: String) -> Element {
                         {
                             let is_active = *active_tab.read() == tab;
                             let tab_class = if is_active {
-                                "px-4 py-2 text-sm font-medium text-white border-b-2 border-blue-500"
+                                "px-4 py-2 text-sm font-semibold text-white border-b-2 border-cyan-400"
                             } else {
                                 "px-4 py-2 text-sm font-medium {theme::text::SECONDARY} hover:text-white transition-colors border-b-2 border-transparent"
                             };
