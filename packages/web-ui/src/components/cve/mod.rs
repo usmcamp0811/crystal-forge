@@ -282,7 +282,7 @@ pub fn CvesTab(
                                                     }
                                                     if has_justification {
                                                         span {
-                                                            class: "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium text-emerald-300 bg-emerald-500/15 border border-emerald-500/30",
+                                                            class: "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold text-emerald-100 bg-emerald-600/80",
                                                             "Justified"
                                                         }
                                                     }
@@ -477,14 +477,8 @@ pub fn CvesTab(
                                                         class: "text-sm {theme::text::SECONDARY} flex items-center gap-2.5 flex-wrap rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-2.5 py-1.5",
                                                         span { class: "font-medium {theme::text::PRIMARY}", "{item.package_name}" }
                                                         span { class: "{theme::text::MUTED}", "Installed: {item.installed_version}" }
-                                                        span {
-                                                            class: "text-xs rounded px-2 py-0.5 border {theme::surface::CARD_BORDER} {theme::text::SECONDARY}",
-                                                            {status_label(item.status.as_deref().unwrap_or("open"))}
-                                                        }
                                                         if let Some(ref fixed) = item.fixed_version {
                                                             span { class: "text-emerald-400", "Fix: {fixed}" }
-                                                        } else {
-                                                            span { class: "{theme::text::MUTED}", "No fix yet" }
                                                         }
                                                     }
                                                 }
@@ -605,12 +599,12 @@ fn status_label(status: &str) -> &'static str {
 
 fn justification_category_class(category: &str) -> &'static str {
     match category {
-        "false_positive" => "text-violet-300 bg-violet-500/15",
-        "accepted_risk" => "text-amber-300 bg-amber-500/15",
-        "compensating_control" => "text-blue-300 bg-blue-500/15",
-        "planned_remediation" => "text-emerald-300 bg-emerald-500/15",
-        "vendor_pending_fix" => "text-orange-300 bg-orange-500/15",
-        _ => "text-slate-300 bg-slate-500/15",
+        "false_positive" => "text-violet-300 bg-violet-500/15 border border-violet-500/35",
+        "accepted_risk" => "text-amber-300 bg-amber-500/15 border border-amber-500/35",
+        "compensating_control" => "text-blue-300 bg-blue-500/15 border border-blue-500/35",
+        "planned_remediation" => "text-emerald-300 bg-emerald-500/15 border border-emerald-500/35",
+        "vendor_pending_fix" => "text-orange-300 bg-orange-500/15 border border-orange-500/35",
+        _ => "text-slate-300 bg-slate-500/15 border border-slate-500/35",
     }
 }
 
