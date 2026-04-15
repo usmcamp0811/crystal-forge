@@ -1000,4 +1000,435 @@ mod tests {
             "must only match rows sharing the same public key"
         );
     }
+
+    // ── TASK-272: CVE count deduplication tests ─────────────────────────────
+
+    #[test]
+    fn cve_dedup_migration_uses_count_distinct_in_system_list_view() {
+        let migration =
+            include_str!("../../migrations/0111_deduplicate_cve_counts_in_system_views.sql");
+
+        assert!(
+            migration.contains("CREATE OR REPLACE VIEW public.view_system_list AS"),
+            "migration must redefine view_system_list"
+        );
+        // The cve_counts CTE must use COUNT(DISTINCT cve_id) for all four severities
+        assert!(
+            migration.contains("COUNT(DISTINCT cve_id) FILTER (WHERE severity = 'CRITICAL')"),
+            "view_system_list cve_counts must use COUNT(DISTINCT cve_id) for CRITICAL"
+        );
+        assert!(
+            migration.contains("COUNT(DISTINCT cve_id) FILTER (WHERE severity = 'HIGH')"),
+            "view_system_list cve_counts must use COUNT(DISTINCT cve_id) for HIGH"
+        );
+        assert!(
+            migration.contains("COUNT(DISTINCT cve_id) FILTER (WHERE severity = 'MEDIUM')"),
+            "view_system_list cve_counts must use COUNT(DISTINCT cve_id) for MEDIUM"
+        );
+        assert!(
+            migration.contains("COUNT(DISTINCT cve_id) FILTER (WHERE severity = 'LOW')"),
+            "view_system_list cve_counts must use COUNT(DISTINCT cve_id) for LOW"
+        );
+        // Must NOT use the old bare COUNT(*) pattern in cve_counts
+        assert!(
+            !migration.contains("COUNT(*) FILTER (WHERE severity ="),
+            "migration must not use COUNT(*) in cve_counts — must be COUNT(DISTINCT cve_id)"
+        );
+    }
+
+    #[test]
+    fn cve_dedup_migration_uses_count_distinct_in_system_detail_view() {
+        let migration =
+            include_str!("../../migrations/0111_deduplicate_cve_counts_in_system_views.sql");
+
+        assert!(
+            migration.contains("CREATE OR REPLACE VIEW public.view_system_detail AS"),
+            "migration must redefine view_system_detail"
+        );
+        // Count occurrences: both view_system_list and view_system_detail must have the CTE
+        let distinct_count = migration
+            .matches("COUNT(DISTINCT cve_id) FILTER (WHERE severity = 'CRITICAL')")
+            .count();
+        assert_eq!(
+            distinct_count, 2,
+            "COUNT(DISTINCT cve_id) for CRITICAL must appear in both views (got {distinct_count})"
+        );
+    }
+
+    #[test]
+    fn cve_dedup_migration_does_not_touch_migration_0110() {
+        // Sanity check: ensure migration 0111 file is independent and
+        // does not reference the content of migration 0110 in a way that
+        // would imply they are being merged or that 0110 is modified.
+        let migration_0111 =
+            include_str!("../../migrations/0111_deduplicate_cve_counts_in_system_views.sql");
+        assert!(
+            !migration_0111.contains("system_cve_justifications"),
+            "migration 0111 must not touch the system_cve_justifications table from 0110"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn cve_dedup_migration_counts_each_cve_id_once_despite_package_fanout() {
+        // Scenario: one CVE appears on three different package derivation paths
+        // for the same hostname. Without COUNT(DISTINCT cve_id) the count would
+        // be 3; with deduplication it must be 1.
+        //
+        // Strategy: insert real rows into the underlying base tables that
+        // view_system_vulnerabilities reads from, so we exercise the real
+        // view logic instead of replacing it.
+        let pool = test_pool_from_env().await;
+        let hostname = format!("task272-fanout-{}", Uuid::new_v4());
+        let system = make_test_system(&pool, &hostname).await;
+
+        // Apply migration 0111 first so the views are up to date.
+        pool.execute(include_str!(
+            "../../migrations/0111_deduplicate_cve_counts_in_system_views.sql"
+        ))
+        .await
+        .expect("failed to apply migration 0111");
+
+        // Insert a test CVE record.
+        let cve_id = format!(
+            "CVE-2024-{}",
+            (Uuid::new_v4().as_u128() % 9_000_000) + 1_000_000
+        );
+        sqlx::query(
+            "INSERT INTO cves (id, description, cvss_v3_score, published_date)
+             VALUES ($1, 'task272 fanout test', 9.8, '2024-01-01')
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(&cve_id)
+        .execute(&pool)
+        .await
+        .expect("failed to insert test CVE");
+
+        // Insert a flake + commit + three derivations (one NixOS host +
+        // three package derivations) with a scan that links all three
+        // package derivations to the same CVE.
+        let flake_id: i32 =
+            sqlx::query_scalar("INSERT INTO flakes (name, repo_url) VALUES ($1, $2) RETURNING id")
+                .bind(format!("task272-flake-{}", Uuid::new_v4()))
+                .bind(format!("https://example.com/task272/{}", Uuid::new_v4()))
+                .fetch_one(&pool)
+                .await
+                .expect("failed to insert test flake");
+
+        let commit_id: i32 = sqlx::query_scalar(
+            "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp)
+             VALUES ($1, $2, NOW()) RETURNING id",
+        )
+        .bind(flake_id)
+        .bind(format!("deadbeef{}", &Uuid::new_v4().to_string()[..8]))
+        .fetch_one(&pool)
+        .await
+        .expect("failed to insert test commit");
+
+        // Get the 'complete' derivation status id
+        let complete_status_id: i32 =
+            sqlx::query_scalar("SELECT id FROM derivation_statuses WHERE name = 'complete'")
+                .fetch_one(&pool)
+                .await
+                .expect("failed to get complete status id");
+
+        // Insert the NixOS host derivation
+        let host_deriv_id: i32 = sqlx::query_scalar(
+            "INSERT INTO derivations (commit_id, derivation_name, derivation_type,
+                                      derivation_path, status_id, completed_at)
+             VALUES ($1, $2, 'nixos', $3, $4, NOW()) RETURNING id",
+        )
+        .bind(commit_id)
+        .bind(&hostname)
+        .bind(format!("/nix/store/task272-host-{}.drv", Uuid::new_v4()))
+        .bind(complete_status_id)
+        .fetch_one(&pool)
+        .await
+        .expect("failed to insert host derivation");
+
+        // Insert a scan for this derivation
+        let scan_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO cve_scans (id, derivation_id, scanner_name, completed_at,
+                                    status, attempts,
+                                    total_packages, total_vulnerabilities,
+                                    critical_count, high_count, medium_count, low_count)
+             VALUES ($1, $2, 'task272-scanner', NOW(),
+                     'completed', 1,
+                     3, 3, 3, 0, 0, 0)",
+        )
+        .bind(scan_id)
+        .bind(host_deriv_id)
+        .execute(&pool)
+        .await
+        .expect("failed to insert test scan");
+
+        // Insert three package derivations, each linked to the same CVE
+        for pkg in ["go-1.21", "go-1.22", "go-1.23"] {
+            let pkg_deriv_id: i32 = sqlx::query_scalar(
+                "INSERT INTO derivations (commit_id, derivation_name, derivation_type,
+                                          derivation_path, pname, version, status_id, completed_at)
+                 VALUES ($1, $2, 'package', $3, $4, '1.0', $5, NOW()) RETURNING id",
+            )
+            .bind(commit_id)
+            .bind(format!("{pkg}-{}", Uuid::new_v4()))
+            .bind(format!("/nix/store/task272-{pkg}-{}.drv", Uuid::new_v4()))
+            .bind(pkg)
+            .bind(complete_status_id)
+            .fetch_one(&pool)
+            .await
+            .expect("failed to insert package derivation");
+
+            sqlx::query(
+                "INSERT INTO scan_packages (id, scan_id, derivation_id)
+                 VALUES ($1, $2, $3)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(scan_id)
+            .bind(pkg_deriv_id)
+            .execute(&pool)
+            .await
+            .expect("failed to link scan package");
+
+            sqlx::query(
+                "INSERT INTO package_vulnerabilities (derivation_id, cve_id,
+                                                      is_whitelisted, detection_method)
+                 VALUES ($1, $2, FALSE, 'test')
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(pkg_deriv_id)
+            .bind(&cve_id)
+            .execute(&pool)
+            .await
+            .expect("failed to insert package vulnerability");
+        }
+
+        // With COUNT(DISTINCT cve_id): critical=1 (not 3), others=0
+        let list_counts = sqlx::query_as::<_, (i32, i32, i32, i32)>(
+            "SELECT critical_cve_count, high_cve_count, medium_cve_count, low_cve_count
+             FROM view_system_list WHERE hostname = $1",
+        )
+        .bind(&hostname)
+        .fetch_one(&pool)
+        .await
+        .expect("failed to read from view_system_list");
+
+        // Cleanup before asserting (so test data doesn't leak on failure path)
+        sqlx::query("DELETE FROM systems WHERE id = $1")
+            .bind(system.id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM commits WHERE flake_id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM cves WHERE id = $1")
+            .bind(&cve_id)
+            .execute(&pool)
+            .await
+            .ok();
+
+        assert_eq!(
+            list_counts,
+            (1, 0, 0, 0),
+            "view_system_list must count {cve_id} once despite 3 package rows (got {list_counts:?})"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn cve_dedup_migration_counts_distinct_per_severity_correctly() {
+        // Scenario: two distinct CRITICAL CVEs each appearing on two packages,
+        // plus one HIGH CVE appearing on three packages. Counts must be 2/1/0/0
+        // not 4/3/0/0.
+        let pool = test_pool_from_env().await;
+        let hostname = format!("task272-severity-{}", Uuid::new_v4());
+        let system = make_test_system(&pool, &hostname).await;
+
+        pool.execute(include_str!(
+            "../../migrations/0111_deduplicate_cve_counts_in_system_views.sql"
+        ))
+        .await
+        .expect("failed to apply migration 0111");
+
+        let flake_id: i32 =
+            sqlx::query_scalar("INSERT INTO flakes (name, repo_url) VALUES ($1, $2) RETURNING id")
+                .bind(format!("task272-sev-flake-{}", Uuid::new_v4()))
+                .bind(format!(
+                    "https://example.com/task272-sev/{}",
+                    Uuid::new_v4()
+                ))
+                .fetch_one(&pool)
+                .await
+                .expect("failed to insert test flake");
+
+        let commit_id: i32 = sqlx::query_scalar(
+            "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp)
+             VALUES ($1, $2, NOW()) RETURNING id",
+        )
+        .bind(flake_id)
+        .bind(format!("cafebabe{}", &Uuid::new_v4().to_string()[..8]))
+        .fetch_one(&pool)
+        .await
+        .expect("failed to insert test commit");
+
+        let complete_status_id: i32 =
+            sqlx::query_scalar("SELECT id FROM derivation_statuses WHERE name = 'complete'")
+                .fetch_one(&pool)
+                .await
+                .expect("failed to get complete status id");
+
+        let host_deriv_id: i32 = sqlx::query_scalar(
+            "INSERT INTO derivations (commit_id, derivation_name, derivation_type,
+                                      derivation_path, status_id, completed_at)
+             VALUES ($1, $2, 'nixos', $3, $4, NOW()) RETURNING id",
+        )
+        .bind(commit_id)
+        .bind(&hostname)
+        .bind(format!(
+            "/nix/store/task272-sev-host-{}.drv",
+            Uuid::new_v4()
+        ))
+        .bind(complete_status_id)
+        .fetch_one(&pool)
+        .await
+        .expect("failed to insert host derivation");
+
+        let scan_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO cve_scans (id, derivation_id, scanner_name, completed_at,
+                                    status, attempts,
+                                    total_packages, total_vulnerabilities,
+                                    critical_count, high_count, medium_count, low_count)
+             VALUES ($1, $2, 'task272-scanner', NOW(),
+                     'completed', 1,
+                     5, 5, 4, 3, 0, 0)",
+        )
+        .bind(scan_id)
+        .bind(host_deriv_id)
+        .execute(&pool)
+        .await
+        .expect("failed to insert test scan");
+
+        // cve1 and cve2 → CRITICAL (9.8), each on 2 packages
+        // cve3 → HIGH (7.5), on 3 packages
+        let base_cve_num = (Uuid::new_v4().as_u128() % 8_999_997) + 1_000_000;
+        let cve1 = format!("CVE-2024-{base_cve_num}");
+        let cve2 = format!("CVE-2024-{}", base_cve_num + 1);
+        let cve3 = format!("CVE-2024-{}", base_cve_num + 2);
+
+        for (cve_id, score) in [(&cve1, 9.8_f64), (&cve2, 9.8), (&cve3, 7.5)] {
+            sqlx::query(
+                "INSERT INTO cves (id, description, cvss_v3_score, published_date)
+                 VALUES ($1, 'task272 severity test', $2, '2024-01-01')
+                 ON CONFLICT (id) DO NOTHING",
+            )
+            .bind(cve_id)
+            .bind(score)
+            .execute(&pool)
+            .await
+            .expect("failed to insert test CVE");
+        }
+
+        // critical cve1: packages pkg-a, pkg-b
+        // critical cve2: packages pkg-c, pkg-d
+        // high    cve3: packages pkg-a, pkg-b, pkg-c
+        let pkg_cves: &[(&str, &str)] = &[
+            ("pkg-a", &cve1),
+            ("pkg-b", &cve1),
+            ("pkg-c", &cve2),
+            ("pkg-d", &cve2),
+            ("pkg-a", &cve3),
+            ("pkg-b", &cve3),
+            ("pkg-c", &cve3),
+        ];
+
+        for (pkg, cve_id) in pkg_cves {
+            let pkg_deriv_id: i32 = sqlx::query_scalar(
+                "INSERT INTO derivations (commit_id, derivation_name, derivation_type,
+                                          derivation_path, pname, version, status_id, completed_at)
+                 VALUES ($1, $2, 'package', $3, $4, '1.0', $5, NOW()) RETURNING id",
+            )
+            .bind(commit_id)
+            .bind(format!("{pkg}-{cve_id}-{}", Uuid::new_v4()))
+            .bind(format!(
+                "/nix/store/task272-{pkg}-{cve_id}-{}.drv",
+                Uuid::new_v4()
+            ))
+            .bind(pkg)
+            .bind(complete_status_id)
+            .fetch_one(&pool)
+            .await
+            .expect("failed to insert package derivation");
+
+            sqlx::query(
+                "INSERT INTO scan_packages (id, scan_id, derivation_id)
+                 VALUES ($1, $2, $3)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(scan_id)
+            .bind(pkg_deriv_id)
+            .execute(&pool)
+            .await
+            .expect("failed to link scan package");
+
+            sqlx::query(
+                "INSERT INTO package_vulnerabilities (derivation_id, cve_id,
+                                                      is_whitelisted, detection_method)
+                 VALUES ($1, $2, FALSE, 'test')
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(pkg_deriv_id)
+            .bind(*cve_id)
+            .execute(&pool)
+            .await
+            .expect("failed to insert package vulnerability");
+        }
+
+        let list_counts = sqlx::query_as::<_, (i32, i32, i32, i32)>(
+            "SELECT critical_cve_count, high_cve_count, medium_cve_count, low_cve_count
+             FROM view_system_list WHERE hostname = $1",
+        )
+        .bind(&hostname)
+        .fetch_one(&pool)
+        .await
+        .expect("failed to read from view_system_list");
+
+        // Cleanup
+        sqlx::query("DELETE FROM systems WHERE id = $1")
+            .bind(system.id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM commits WHERE flake_id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await
+            .ok();
+        for cve_id in [&cve1, &cve2, &cve3] {
+            sqlx::query("DELETE FROM cves WHERE id = $1")
+                .bind(cve_id)
+                .execute(&pool)
+                .await
+                .ok();
+        }
+
+        assert_eq!(
+            list_counts,
+            (2, 1, 0, 0),
+            "expected 2 distinct CRITICAL and 1 distinct HIGH (got {list_counts:?})"
+        );
+    }
 }
