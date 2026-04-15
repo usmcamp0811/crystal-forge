@@ -2035,6 +2035,44 @@ mod tests {
     }
 
     #[test]
+    fn category_validation_rejects_values_not_in_preset_list() {
+        // This test verifies that the validation logic (lines 354-360) correctly
+        // identifies categories that are not in the allowed preset.
+        let valid_categories = vec![
+            "false_positive",
+            "accepted_risk",
+            "compensating_control",
+            "planned_remediation",
+            "vendor_pending_fix",
+        ];
+
+        let invalid_categories = vec![
+            "custom_reason",
+            "not_applicable",
+            "temporary_exception",
+            "executive_override",
+        ];
+
+        for cat in valid_categories {
+            assert!(
+                ALLOWED_CVE_JUSTIFICATION_CATEGORIES
+                    .iter()
+                    .any(|allowed| *allowed == cat),
+                "Valid category '{cat}' should be accepted"
+            );
+        }
+
+        for cat in invalid_categories {
+            assert!(
+                !ALLOWED_CVE_JUSTIFICATION_CATEGORIES
+                    .iter()
+                    .any(|allowed| *allowed == cat),
+                "Invalid category '{cat}' should be rejected"
+            );
+        }
+    }
+
+    #[test]
     fn allowed_cve_categories_match_ui_presets() {
         // This test documents the expected alignment between backend validation
         // and UI preset list defined in packages/web-ui/src/components/cve/mod.rs
