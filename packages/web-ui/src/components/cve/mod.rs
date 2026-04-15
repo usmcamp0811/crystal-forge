@@ -282,7 +282,7 @@ pub fn CvesTab(
                                                     }
                                                     if has_justification {
                                                         span {
-                                                            class: "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold text-emerald-100 bg-emerald-600/80",
+                                                            class: "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold text-emerald-300 bg-emerald-900/50 border border-emerald-500/50",
                                                             "Justified"
                                                         }
                                                     }
