@@ -141,15 +141,15 @@ pub fn CvesTab(
                         }
                     }
 
-                    div { class: "flex items-center gap-2 flex-wrap",
+                    div { class: "flex items-center gap-1.5 flex-wrap",
                         span {
-                            class: "text-xs px-2.5 py-1 rounded-md border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} {theme::text::SECONDARY}",
-                            "{filtered.len()} grouped CVEs"
+                            class: "text-[11px] px-2 py-0.5 rounded-md border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} {theme::text::SECONDARY}",
+                            "{format_count(filtered.len() as i64)} grouped CVEs"
                         }
-                        span { class: "text-xs px-2.5 py-1 rounded-md border border-red-900/70 bg-red-950/35 text-red-300", "Critical {cve_counts.critical}" }
-                        span { class: "text-xs px-2.5 py-1 rounded-md border border-orange-900/70 bg-orange-950/35 text-orange-300", "High {cve_counts.high}" }
-                        span { class: "text-xs px-2.5 py-1 rounded-md border border-yellow-900/70 bg-yellow-950/35 text-yellow-300", "Medium {cve_counts.medium}" }
-                        span { class: "text-xs px-2.5 py-1 rounded-md border border-blue-900/70 bg-blue-950/35 text-blue-300", "Low {cve_counts.low}" }
+                        span { class: "text-[11px] px-2 py-0.5 rounded-md border border-red-900/70 bg-red-950/35 text-red-300", "Critical {format_count(cve_counts.critical)}" }
+                        span { class: "text-[11px] px-2 py-0.5 rounded-md border border-orange-900/70 bg-orange-950/35 text-orange-300", "High {format_count(cve_counts.high)}" }
+                        span { class: "text-[11px] px-2 py-0.5 rounded-md border border-yellow-900/70 bg-yellow-950/35 text-yellow-300", "Medium {format_count(cve_counts.medium)}" }
+                        span { class: "text-[11px] px-2 py-0.5 rounded-md border border-blue-900/70 bg-blue-950/35 text-blue-300", "Low {format_count(cve_counts.low)}" }
                     }
                 }
             }
@@ -258,7 +258,7 @@ pub fn CvesTab(
                                     class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} overflow-hidden",
 
                                     button {
-                                        class: "w-full p-4 text-left {theme::interactive::HOVER_BG} transition-colors {theme::interactive::FOCUS_RING}",
+                                        class: "w-full p-3 text-left {theme::interactive::HOVER_BG} transition-colors {theme::interactive::FOCUS_RING}",
                                         onclick: move |_| {
                                             let current = expanded_cve.read().clone();
                                             if current == Some(cve_id.clone()) {
@@ -268,7 +268,7 @@ pub fn CvesTab(
                                             }
                                         },
 
-                                        div { class: "flex items-start justify-between gap-4",
+                                        div { class: "flex items-start justify-between gap-3",
                                             div { class: "min-w-0",
                                                 div { class: "flex items-center gap-2 flex-wrap",
                                                     span { class: "{theme::typography::MONO} font-semibold {theme::text::PRIMARY} tracking-wide", "{group.cve_id}" }
@@ -288,11 +288,11 @@ pub fn CvesTab(
                                                     }
                                                 }
 
-                                                p { class: "mt-2 text-sm {theme::text::SECONDARY} line-clamp-2", "{group.description}" }
+                                                p { class: "mt-1 text-sm {theme::text::SECONDARY} line-clamp-1", "{group.description}" }
 
                                                 if let Some(ref reason) = group.justification_reason {
                                                     p {
-                                                        class: "mt-2 text-xs text-emerald-300/90 line-clamp-2",
+                                                        class: "mt-1 text-xs text-emerald-300/90 line-clamp-1",
                                                         "Justification: {reason}"
                                                     }
                                                 }
@@ -300,7 +300,7 @@ pub fn CvesTab(
 
                                             div { class: "text-right shrink-0 space-y-1",
                                                 if let Some(score) = group.cvss_score {
-                                                    div { class: "text-lg font-bold {group.severity.color_class()}", "{score:.1}" }
+                                                    div { class: "text-base font-bold {group.severity.color_class()}", "{score:.1}" }
                                                     div { class: "text-xs {theme::text::MUTED}", "CVSS" }
                                                 }
                                                 div {
@@ -322,11 +322,11 @@ pub fn CvesTab(
                                         }
                                     }
 
-                                    div { class: "px-4 pb-3 text-xs {theme::text::MUTED}", "{status_label(&group.status)}" }
+                                    div { class: "px-3 pb-2 text-xs {theme::text::MUTED}", "{status_label(&group.status)}" }
 
                                     if is_expanded {
                                         div {
-                                            class: "border-t {theme::surface::DIVIDER} p-4 space-y-4 {theme::surface::SUBTLE_BG}",
+                                            class: "border-t {theme::surface::DIVIDER} p-3 space-y-3 {theme::surface::SUBTLE_BG}",
 
                                             div {
                                                 class: "flex items-center gap-3 flex-wrap text-sm",
@@ -344,7 +344,7 @@ pub fn CvesTab(
                                             }
 
                                             div {
-                                                class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-4 space-y-3",
+                                                class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-3 space-y-2",
                                                 div { class: "flex items-center justify-between gap-3",
                                                     h4 { class: "text-sm font-semibold {theme::text::PRIMARY}", "Justification" }
                                                     if let Some(ref justification_updated_label) = justification_updated_label {
@@ -474,7 +474,7 @@ pub fn CvesTab(
                                                 for item in group.package_instances.iter() {
                                                     div {
                                                         key: "{group.cve_id}-{item.package_name}-{item.installed_version}",
-                                                        class: "text-sm {theme::text::SECONDARY} flex items-center gap-3 flex-wrap rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2",
+                                                        class: "text-sm {theme::text::SECONDARY} flex items-center gap-2.5 flex-wrap rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-2.5 py-1.5",
                                                         span { class: "font-medium {theme::text::PRIMARY}", "{item.package_name}" }
                                                         span { class: "{theme::text::MUTED}", "Installed: {item.installed_version}" }
                                                         span {
@@ -601,4 +601,23 @@ fn status_label(status: &str) -> &'static str {
         "mixed" => "Mixed package status",
         _ => "Status unknown",
     }
+}
+
+fn format_count(value: i64) -> String {
+    let negative = value < 0;
+    let reversed: Vec<char> = value.abs().to_string().chars().rev().collect();
+    let mut grouped = String::new();
+
+    for (idx, ch) in reversed.iter().enumerate() {
+        if idx > 0 && idx % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(*ch);
+    }
+
+    let mut formatted: String = grouped.chars().rev().collect();
+    if negative {
+        formatted.insert(0, '-');
+    }
+    formatted
 }
