@@ -43,9 +43,9 @@ const CVE_DASHBOARD_SUMMARY_SQL: &str = r#"
         "#;
 
 use crate::api::models::ApiError;
-use crate::api::models::CveDashboardVulnerability;
 use crate::api::models::CveDashboardSummary;
 use crate::api::models::CveDashboardTopSystem;
+use crate::api::models::CveDashboardVulnerability;
 use crate::api::models::CveScanFreshnessRow;
 use crate::api::models::CveSummary;
 use crate::api::models::DashboardSummary;
@@ -544,15 +544,24 @@ mod tests {
 
     #[test]
     fn normalize_severity_filter_accepts_expected_values() {
-        assert_eq!(normalize_severity_filter(Some("critical")).unwrap(), Some("critical".to_string()));
+        assert_eq!(
+            normalize_severity_filter(Some("critical")).unwrap(),
+            Some("critical".to_string())
+        );
         assert_eq!(normalize_severity_filter(Some("all")).unwrap(), None);
         assert!(normalize_severity_filter(Some("urgent")).is_err());
     }
 
     #[test]
     fn normalize_status_filter_accepts_expected_values() {
-        assert_eq!(normalize_status_filter(Some("open")).unwrap(), Some("open".to_string()));
-        assert_eq!(normalize_status_filter(Some("fix_available")).unwrap(), Some("fix_available".to_string()));
+        assert_eq!(
+            normalize_status_filter(Some("open")).unwrap(),
+            Some("open".to_string())
+        );
+        assert_eq!(
+            normalize_status_filter(Some("fix_available")).unwrap(),
+            Some("fix_available".to_string())
+        );
         assert_eq!(normalize_status_filter(Some("all")).unwrap(), None);
         // 'fixed' is not a valid status — having a fixed_version upstream does not mean
         // the system has been patched. Use 'fix_available' instead.

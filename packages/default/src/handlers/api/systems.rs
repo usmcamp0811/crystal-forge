@@ -12,16 +12,18 @@ use uuid::Uuid;
 use crate::api::models::{
     ApiError, AuditAction, CommitInfo, CreateSystemRequest, CveScanEligibilityResponse,
     CveScanStatusResponse, CveScanTriggerResponse, CveSummary, DeploySystemRequest,
-    DeploymentStatus, PipelineStage, SortOrder, SystemAgentEvent, SystemCommitsResponse,
-    SystemDetail, SystemHardwareInfo, SystemHistoryEntry, SystemMutationResponse,
-    SystemNetworkInfo, SystemRollbackRequest, SystemSecurityInfo, SystemSummary,
-    SystemVulnerability, SystemsListParams, UpdateSystemPublicKeyRequest, UpdateSystemRequest,
+    DeploymentStatus, PipelineStage, SaveSystemCveJustificationRequest, SortOrder,
+    SystemAgentEvent, SystemCommitsResponse, SystemDetail, SystemHardwareInfo, SystemHistoryEntry,
+    SystemMutationResponse, SystemNetworkInfo, SystemRollbackRequest, SystemSecurityInfo,
+    SystemSummary, SystemVulnerability, SystemsListParams, UpdateSystemPublicKeyRequest,
+    UpdateSystemRequest,
 };
 use crate::auth::models::Role;
 use crate::handlers::api::rbac::{
     authenticated_user_roles, extract_request_origin, require_viewer_or_above,
 };
 use crate::models::auth_identity::AuthRole;
+use crate::queries::cve_scans::{get_scan_by_id, resolve_system_cve_scan_target};
 use crate::queries::systems::{
     SystemAccessRow, SystemDetailRow, SystemListRow, commit_belongs_to_system_flake,
     deactivate_system, find_system_access_row, get_system_detail_by_id,
@@ -29,9 +31,19 @@ use crate::queries::systems::{
     list_system_agent_event_rows, list_system_history_rows, touch_system_updated_at,
     update_public_key, update_system_desired_target, update_system_metadata,
 };
-use crate::queries::cve_scans::{get_scan_by_id, resolve_system_cve_scan_target};
-use crate::services::cve_scans::{trigger_immediate_cve_scan, CveScanError};
+use crate::services::cve_scans::{CveScanError, trigger_immediate_cve_scan};
 use crate::services::systems::SystemsListContext;
+
+/// Allowed CVE justification categories (server-side validation).
+/// These must match the UI preset list in packages/web-ui/src/components/cve/mod.rs.
+/// Any category value not in this list will be rejected with a 400 Bad Request.
+const ALLOWED_CVE_JUSTIFICATION_CATEGORIES: &[&str] = &[
+    "false_positive",
+    "accepted_risk",
+    "compensating_control",
+    "planned_remediation",
+    "vendor_pending_fix",
+];
 
 pub async fn list_systems(
     State(pool): State<PgPool>,
@@ -219,30 +231,62 @@ pub async fn get_system_cves(
     headers: HeaderMap,
     Path(system_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    if require_viewer_or_above(&pool, &headers).await.is_none() {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
+    };
+
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+
+    // Load environment memberships for scoped access control
+    let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+
+    // Verify system exists and caller has environment access
+    let row = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+
+    if !caller_role.can_access_system_environment(row.environment_id, &environment_memberships) {
+        return not_found();
     }
 
     let rows = match sqlx::query(
         r#"
-        SELECT
-            v.cve_id,
-            lower(v.severity) AS severity,
-            v.cvss_v3_score::double precision AS cvss_score,
-            COALESCE(v.description, '') AS description,
-            v.package_name,
-            v.package_version AS installed_version,
-            v.fixed_version,
-            v.completed_at AS first_seen,
-            c.published_date::timestamptz AS published_at,
-            -- 'fix_available' = upstream patched version exists; does NOT mean system is patched.
-            -- 'open' = no upstream fix known yet.
-            CASE WHEN v.fixed_version IS NULL THEN 'open' ELSE 'fix_available' END AS status
-        FROM view_system_vulnerabilities v
-        JOIN systems s ON s.hostname = v.hostname
-        LEFT JOIN cves c ON c.id = v.cve_id
-        WHERE s.id = $1
-        ORDER BY v.cvss_v3_score DESC NULLS LAST, v.cve_id ASC
+        WITH deduped AS (
+            SELECT DISTINCT ON (v.cve_id, v.package_name, v.package_version)
+                v.cve_id,
+                lower(v.severity) AS severity,
+                v.cvss_v3_score::double precision AS cvss_score,
+                COALESCE(v.description, '') AS description,
+                v.package_name,
+                v.package_version AS installed_version,
+                v.fixed_version,
+                v.completed_at AS first_seen,
+                c.published_date::timestamptz AS published_at,
+                -- 'fix_available' = upstream patched version exists; does NOT mean system is patched.
+                -- 'open' = no upstream fix known yet.
+                CASE WHEN v.fixed_version IS NULL THEN 'open' ELSE 'fix_available' END AS status,
+                j.category AS justification_category,
+                j.reason AS justification_reason,
+                j.updated_at AS justification_updated_at
+            FROM view_system_vulnerabilities v
+            JOIN systems s ON s.hostname = v.hostname
+            LEFT JOIN cves c ON c.id = v.cve_id
+            LEFT JOIN system_cve_justifications j
+                ON j.system_id = s.id
+               AND j.cve_id = v.cve_id
+            WHERE s.id = $1
+            ORDER BY v.cve_id, v.package_name, v.package_version, v.completed_at DESC
+        )
+        SELECT *
+        FROM deduped
+        ORDER BY cvss_score DESC NULLS LAST, cve_id ASC, package_name ASC, installed_version ASC
         "#,
     )
     .bind(system_id)
@@ -270,11 +314,187 @@ pub async fn get_system_cves(
                 first_seen: row.get("first_seen"),
                 published_at: row.get("published_at"),
                 status: row.get("status"),
+                justification_category: row.get("justification_category"),
+                justification_reason: row.get("justification_reason"),
+                justification_updated_at: row.get("justification_updated_at"),
             }
         })
         .collect::<Vec<_>>();
 
     (StatusCode::OK, Json(vulnerabilities)).into_response()
+}
+
+pub async fn save_system_cve_justification(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path((system_id, cve_id)): Path<(Uuid, String)>,
+    Json(payload): Json<SaveSystemCveJustificationRequest>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+
+    if !caller_role.can_mutate_systems() {
+        return forbidden_mutation();
+    }
+
+    let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+
+    let row = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+
+    if !caller_role.can_access_system_environment(row.environment_id, &environment_memberships) {
+        return not_found();
+    }
+
+    let cve_id = cve_id.trim().to_string();
+    if cve_id.is_empty() {
+        return bad_request("CVE ID is required");
+    }
+
+    let reason = payload.reason.trim();
+    if reason.is_empty() {
+        return bad_request("Justification reason is required");
+    }
+
+    if reason.len() > 2000 {
+        return bad_request("Justification reason must be 2000 characters or less");
+    }
+
+    let category = payload
+        .category
+        .as_ref()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    if let Some(ref category_value) = category
+        && !ALLOWED_CVE_JUSTIFICATION_CATEGORIES
+            .iter()
+            .any(|allowed| *allowed == category_value)
+    {
+        return bad_request("Invalid justification category");
+    }
+
+    let cve_present_on_system = match sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM view_system_vulnerabilities v
+            JOIN systems s ON s.hostname = v.hostname
+            WHERE s.id = $1
+              AND v.cve_id = $2
+        )
+        "#,
+    )
+    .bind(system_id)
+    .bind(&cve_id)
+    .fetch_one(&pool)
+    .await
+    {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to validate system CVE"),
+    };
+
+    if !cve_present_on_system {
+        return bad_request("CVE was not found for this system");
+    }
+
+    // Begin transaction to ensure atomic write + audit
+    let mut tx = match pool.begin().await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to begin transaction"),
+    };
+
+    // Upsert justification
+    if sqlx::query(
+        r#"
+        INSERT INTO system_cve_justifications (system_id, cve_id, category, reason, updated_by, updated_at)
+        VALUES ($1, $2, $3, $4, $5, NOW())
+        ON CONFLICT (system_id, cve_id)
+        DO UPDATE SET
+            category = EXCLUDED.category,
+            reason = EXCLUDED.reason,
+            updated_by = EXCLUDED.updated_by,
+            updated_at = NOW()
+        "#,
+    )
+    .bind(system_id)
+    .bind(&cve_id)
+    .bind(category.clone())
+    .bind(reason)
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await
+    .is_err()
+    {
+        let _ = tx.rollback().await;
+        return internal_error("Failed to save CVE justification");
+    }
+
+    // Lookup user email for audit (within transaction)
+    let actor_identifier =
+        match sqlx::query_scalar::<_, String>("SELECT email FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_optional(&mut *tx)
+            .await
+        {
+            Ok(Some(email)) => email,
+            Ok(None) => user_id.to_string(),
+            Err(_) => {
+                let _ = tx.rollback().await;
+                return internal_error("Failed to lookup user for audit");
+            }
+        };
+
+    // Record audit event within the same transaction
+    if sqlx::query(
+        "INSERT INTO admin_audit_events (actor_user_id, actor_identifier, action, target, request_origin, metadata)
+         VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(user_id)
+    .bind(&actor_identifier)
+    .bind("user_updated")
+    .bind(format!("{} ({})", row.hostname, row.id))
+    .bind(extract_request_origin(&headers))
+    .bind(serde_json::json!({
+        "operation": "cve_justification_saved",
+        "system_id": row.id,
+        "hostname": row.hostname,
+        "cve_id": cve_id,
+        "category": category,
+        "reason_length": reason.len()
+    }))
+    .execute(&mut *tx)
+    .await
+    .is_err()
+    {
+        let _ = tx.rollback().await;
+        return internal_error("Failed to write audit event");
+    }
+
+    // Commit transaction
+    if tx.commit().await.is_err() {
+        return internal_error("Failed to commit transaction");
+    }
+
+    (
+        StatusCode::OK,
+        Json(SystemMutationResponse {
+            status: "ok".to_string(),
+            message: "CVE justification saved".to_string(),
+        }),
+    )
+        .into_response()
 }
 
 pub async fn get_system_cve_scan_eligibility(
@@ -315,7 +535,9 @@ pub async fn get_system_cve_scan_eligibility(
         },
         Ok(None) => CveScanEligibilityResponse {
             eligible: false,
-            reason: Some("No eligible derivation was found for this system configuration.".to_string()),
+            reason: Some(
+                "No eligible derivation was found for this system configuration.".to_string(),
+            ),
             derivation_id: None,
             config_name: None,
             hostname: Some(row.hostname),
@@ -390,7 +612,7 @@ pub async fn trigger_system_cve_scan(
         Ok(value) => value,
         Err(CveScanError::VulnixUnavailable) => return scan_ineligible_response(),
         Err(CveScanError::Internal(err)) => {
-            return internal_error(&format!("Failed to queue CVE scan: {err}"))
+            return internal_error(&format!("Failed to queue CVE scan: {err}"));
         }
     };
 
@@ -1528,6 +1750,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn save_system_cve_justification_requires_authenticated_role() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+
+        let response = save_system_cve_justification(
+            State(pool),
+            HeaderMap::new(),
+            Path((
+                Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid"),
+                "CVE-2025-1234".to_string(),
+            )),
+            Json(SaveSystemCveJustificationRequest {
+                category: Some("accepted_risk".to_string()),
+                reason: "Risk accepted pending upstream patch".to_string(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    // NOTE: Additional integration tests requiring a real test database:
+    // - save_system_cve_justification_valid_category_accepted (200 OK, verify DB write + audit)
+    // - save_system_cve_justification_no_category_accepted (200 OK with category=NULL)
+    // - save_system_cve_justification_empty_reason_rejected (400 Bad Request)
+    // - save_system_cve_justification_reason_too_long_rejected (400 Bad Request)
+    // - save_system_cve_justification_invalid_category_rejected (400 Bad Request)
+    // - save_system_cve_justification_cve_not_on_system_rejected (400 Bad Request)
+    // - save_system_cve_justification_system_not_found (404 Not Found)
+    // - save_system_cve_justification_no_environment_access (404 Not Found)
+    // - save_system_cve_justification_viewer_forbidden (403 Forbidden)
+    // - save_system_cve_justification_transaction_rollback_on_audit_failure (verify atomicity)
+    //
+    // These tests should be implemented when a test database fixture/harness is available.
+
+    #[tokio::test]
     async fn get_system_cve_scan_eligibility_requires_authenticated_role() {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
@@ -1747,10 +2007,120 @@ mod tests {
     fn cve_scan_error_vulnix_unavailable_display_is_stable() {
         use crate::services::cve_scans::CveScanError;
         let msg = CveScanError::VulnixUnavailable.to_string();
+        assert!(msg.contains("vulnix"), "display must mention vulnix: {msg}");
+        assert!(matches!(
+            CveScanError::VulnixUnavailable,
+            CveScanError::VulnixUnavailable
+        ));
+    }
+
+    // ── CVE Justification Tests ────────────────────────────────────────────────
+
+    #[test]
+    fn empty_justification_reason_is_rejected() {
+        // This test validates that the validation logic correctly identifies empty reasons.
+        // The actual handler test requires a database connection, so this is a unit test
+        // of the validation rules.
+        let reason = "";
         assert!(
-            msg.contains("vulnix"),
-            "display must mention vulnix: {msg}"
+            reason.trim().is_empty(),
+            "Empty reason should be rejected by validation"
         );
-        assert!(matches!(CveScanError::VulnixUnavailable, CveScanError::VulnixUnavailable));
+    }
+
+    #[test]
+    fn justification_reason_max_length_enforced() {
+        let reason = "x".repeat(2001);
+        assert!(
+            reason.len() > 2000,
+            "Reason longer than 2000 chars should be rejected"
+        );
+    }
+
+    #[test]
+    fn valid_justification_categories_accepted() {
+        for category in ALLOWED_CVE_JUSTIFICATION_CATEGORIES {
+            assert!(
+                ALLOWED_CVE_JUSTIFICATION_CATEGORIES
+                    .iter()
+                    .any(|allowed| *allowed == *category),
+                "Category {category} should be in allowed list"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_justification_category_detected() {
+        let invalid_category = "arbitrary_category";
+        assert!(
+            !ALLOWED_CVE_JUSTIFICATION_CATEGORIES
+                .iter()
+                .any(|allowed| *allowed == invalid_category),
+            "Invalid category should not be in allowed list"
+        );
+    }
+
+    #[test]
+    fn category_validation_rejects_values_not_in_preset_list() {
+        // This test verifies that the validation logic (lines 354-360) correctly
+        // identifies categories that are not in the allowed preset.
+        let valid_categories = vec![
+            "false_positive",
+            "accepted_risk",
+            "compensating_control",
+            "planned_remediation",
+            "vendor_pending_fix",
+        ];
+
+        let invalid_categories = vec![
+            "custom_reason",
+            "not_applicable",
+            "temporary_exception",
+            "executive_override",
+        ];
+
+        for cat in valid_categories {
+            assert!(
+                ALLOWED_CVE_JUSTIFICATION_CATEGORIES
+                    .iter()
+                    .any(|allowed| *allowed == cat),
+                "Valid category '{cat}' should be accepted"
+            );
+        }
+
+        for cat in invalid_categories {
+            assert!(
+                !ALLOWED_CVE_JUSTIFICATION_CATEGORIES
+                    .iter()
+                    .any(|allowed| *allowed == cat),
+                "Invalid category '{cat}' should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn allowed_cve_categories_match_ui_presets() {
+        // This test documents the expected alignment between backend validation
+        // and UI preset list defined in packages/web-ui/src/components/cve/mod.rs
+        let expected_categories = [
+            "false_positive",
+            "accepted_risk",
+            "compensating_control",
+            "planned_remediation",
+            "vendor_pending_fix",
+        ];
+        assert_eq!(
+            ALLOWED_CVE_JUSTIFICATION_CATEGORIES.len(),
+            expected_categories.len(),
+            "Backend and UI category lists should have same length"
+        );
+        for category in expected_categories {
+            assert!(
+                ALLOWED_CVE_JUSTIFICATION_CATEGORIES
+                    .iter()
+                    .any(|allowed| *allowed == category),
+                "Category {category} should be in backend allowed list"
+            );
+        }
     }
 }

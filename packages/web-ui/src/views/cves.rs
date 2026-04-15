@@ -4,7 +4,7 @@ use dioxus::prelude::*;
 
 use crate::api::client::{
     ApiClientError, fetch_cve_dashboard_summary, fetch_cve_dashboard_vulnerabilities,
-    fetch_cve_top_systems, fetch_cve_scan_freshness,
+    fetch_cve_scan_freshness, fetch_cve_top_systems,
 };
 use crate::api::models::{
     CveDashboardTopSystem, CveDashboardVulnerability, CveDashboardVulnerabilityParams,
@@ -75,13 +75,17 @@ pub fn CvesView() -> Element {
 
             let top_systems_content = match &*top_systems.read_unchecked() {
                 Some(Ok(systems)) => render_top_systems_table(systems),
-                Some(Err(_)) => rsx! { p { class: "{theme::text::SECONDARY}", "Failed to load top affected systems." } },
+                Some(Err(_)) => {
+                    rsx! { p { class: "{theme::text::SECONDARY}", "Failed to load top affected systems." } }
+                }
                 None => rsx! { p { class: "{theme::text::SECONDARY}", "Loading..." } },
             };
 
             let freshness_content = match &*scan_freshness.read_unchecked() {
                 Some(Ok(rows)) => render_scan_freshness_table(rows),
-                Some(Err(_)) => rsx! { p { class: "{theme::text::SECONDARY}", "Failed to load scan freshness data." } },
+                Some(Err(_)) => {
+                    rsx! { p { class: "{theme::text::SECONDARY}", "Failed to load scan freshness data." } }
+                }
                 None => rsx! { p { class: "{theme::text::SECONDARY}", "Loading..." } },
             };
 
@@ -283,11 +287,7 @@ fn is_forbidden_error(error: &ApiClientError) -> bool {
 }
 
 #[component]
-fn FilterButton(
-    label: &'static str,
-    active: bool,
-    onclick: EventHandler<MouseEvent>,
-) -> Element {
+fn FilterButton(label: &'static str, active: bool, onclick: EventHandler<MouseEvent>) -> Element {
     let class = if active {
         "px-3 py-1.5 rounded-md text-xs font-medium border bg-violet-600/20 border-violet-400/50 text-violet-100"
     } else {
@@ -431,7 +431,11 @@ fn render_scan_freshness_table(items: &[CveScanFreshnessRow]) -> Element {
         .iter()
         .map(|item| {
             let stale = item.days_since_scan.map(|d| d > 30).unwrap_or(true);
-            let age_class = if stale { "text-red-400" } else { "text-green-400" };
+            let age_class = if stale {
+                "text-red-400"
+            } else {
+                "text-green-400"
+            };
             let status = if stale { "Stale" } else { "Fresh" };
             let scan_date = item
                 .last_cve_scan

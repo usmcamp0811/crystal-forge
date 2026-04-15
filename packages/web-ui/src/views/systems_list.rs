@@ -190,10 +190,16 @@ pub fn SystemsListView() -> Element {
     let mut generated_keys = use_signal(|| None::<GeneratedKeyPair>);
     let mut update_key_error = use_signal(|| None::<String>);
     let mut onboarding_agent_reminder = use_signal(|| None::<String>);
-    
+
     // New modal state for edit and deploy
     let mut edit_modal_system = use_signal(|| None::<SystemDetail>);
-    let mut deploy_modal_system = use_signal(|| None::<(SystemDetail, Vec<crate::api::models::CommitInfo>, Option<String>)>);
+    let mut deploy_modal_system = use_signal(|| {
+        None::<(
+            SystemDetail,
+            Vec<crate::api::models::CommitInfo>,
+            Option<String>,
+        )>
+    });
     let mut deploy_error = use_signal(|| None::<String>);
 
     let current_systems = local_systems.read().clone();

@@ -16,15 +16,14 @@ use uuid::Uuid;
 use wasm_bindgen::{JsCast, JsValue};
 
 use crate::api::client::{
-    fetch_cve_scan_status, fetch_system_cve_scan_eligibility, fetch_system_cves,
-    request_system_rollback, request_system_sync, trigger_system_cve_scan, ApiClientError,
+    ApiClientError, fetch_cve_scan_status, fetch_system_cve_scan_eligibility, fetch_system_cves,
+    request_system_rollback, request_system_sync, trigger_system_cve_scan,
 };
 use crate::api::models::{
     BuildStatus, CveScanEligibilityResponse, CveSeverity, CveSummary, DeploymentLogEntry,
-    DeploymentStatus, LogLevel, PipelineStage, SystemAgentEvent, SystemCommitHistory,
-    SystemDetail, SystemHardwareInfo, SystemHistoryEntry, SystemNetworkInfo,
-    SystemRollbackRequest, SystemSecurityInfo,
-    SystemVulnerability,
+    DeploymentStatus, LogLevel, PipelineStage, SystemAgentEvent, SystemCommitHistory, SystemDetail,
+    SystemHardwareInfo, SystemHistoryEntry, SystemNetworkInfo, SystemRollbackRequest,
+    SystemSecurityInfo, SystemVulnerability,
 };
 use crate::components::cve::CvesTab;
 use crate::components::diff::DiffViewer;
@@ -145,7 +144,7 @@ pub fn SystemDetailView(id: String) -> Element {
     });
 
     let id_for_vulns = id.clone();
-    let vulnerabilities_resource = use_resource(move || {
+    let mut vulnerabilities_resource = use_resource(move || {
         let id = id_for_vulns.clone();
         async move {
             let Ok(system_id) = Uuid::parse_str(&id) else {
@@ -253,8 +252,10 @@ pub fn SystemDetailView(id: String) -> Element {
             .clone()
             .unwrap_or_default(),
     );
-    let scan_eligibility: Option<CveScanEligibilityResponse> =
-        (*scan_eligibility_resource.read_unchecked()).clone().flatten();
+    let scan_eligibility: Option<CveScanEligibilityResponse> = (*scan_eligibility_resource
+        .read_unchecked())
+    .clone()
+    .flatten();
 
     let auth_context = app_state.read().auth.clone();
     let can_mutate = auth::can_mutate_systems(&auth_context);
@@ -359,7 +360,7 @@ pub fn SystemDetailView(id: String) -> Element {
                 div {
                     class: "flex items-center gap-2",
                     button {
-                        class: "inline-flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm transition-all text-white border border-gray-500/40 bg-gray-700/50 hover:bg-gray-700/80 hover:border-gray-300/60",
+                        class: "inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} {theme::text::PRIMARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors disabled:opacity-60 disabled:cursor-not-allowed",
                         disabled: !can_mutate,
                         onclick: move |_| edit_modal_open.set(true),
                         if !can_mutate {
@@ -369,7 +370,7 @@ pub fn SystemDetailView(id: String) -> Element {
                         }
                     }
                     button {
-                        class: "inline-flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm transition-all text-white border border-amber-400/40 bg-amber-600/50 hover:bg-amber-600/70 hover:border-amber-300/60 disabled:opacity-60 disabled:cursor-not-allowed",
+                        class: "inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING} transition-colors disabled:opacity-60 disabled:cursor-not-allowed",
                         disabled: *cve_scan_in_progress.read() || !can_mutate || !cve_scan_eligible,
                         title: if cve_scan_eligible {
                             Some("Run CVE scan immediately for this system configuration")
@@ -459,7 +460,7 @@ pub fn SystemDetailView(id: String) -> Element {
                         }
                     }
                     button {
-                        class: "inline-flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm transition-all text-white border border-purple-400/40 bg-purple-600/60 hover:bg-purple-600/80 hover:border-purple-300/60 shadow-sm shadow-purple-900/30",
+                        class: "inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::SUCCESS_BTN} {theme::interactive::FOCUS_RING} transition-colors disabled:opacity-60 disabled:cursor-not-allowed",
                         disabled: *sync_in_progress.read() || !can_mutate,
                         onclick: move |_| show_sync_dialog.set(true),
 
@@ -519,9 +520,9 @@ pub fn SystemDetailView(id: String) -> Element {
                         {
                             let is_active = *active_tab.read() == tab;
                             let tab_class = if is_active {
-                                "px-4 py-2 text-sm font-medium text-white border-b-2 border-blue-500"
+                                "px-4 py-2 text-sm font-semibold text-cyan-300 border-b-2 border-cyan-400 bg-cyan-500/10"
                             } else {
-                                "px-4 py-2 text-sm font-medium {theme::text::SECONDARY} hover:text-white transition-colors border-b-2 border-transparent"
+                                "px-4 py-2 text-sm font-medium {theme::text::SECONDARY} hover:text-white hover:border-cyan-500/50 transition-colors border-b-2 border-transparent"
                             };
                             rsx! {
                                 button {
@@ -565,8 +566,13 @@ pub fn SystemDetailView(id: String) -> Element {
                     },
                     Tab::Cves => rsx! {
                         CvesTab {
+                            system_id: system.id,
                             cve_counts: system.cve_counts.clone(),
-                            vulnerabilities: vulnerabilities.clone()
+                            vulnerabilities: vulnerabilities.clone(),
+                            allow_mutations: can_mutate,
+                            on_saved: move |_| {
+                                vulnerabilities_resource.restart();
+                            }
                         }
                     },
                     Tab::Logs => rsx! {
@@ -2192,6 +2198,9 @@ fn mock_vulnerabilities() -> Vec<SystemVulnerability> {
             first_seen: Some(Utc::now() - Duration::days(20)),
             published_at: Some(Utc::now() - Duration::days(30)),
             status: Some("open".to_string()),
+            justification_category: None,
+            justification_reason: None,
+            justification_updated_at: None,
         },
         SystemVulnerability {
             cve_id: "CVE-2024-5678".to_string(),
@@ -2204,6 +2213,9 @@ fn mock_vulnerabilities() -> Vec<SystemVulnerability> {
             first_seen: Some(Utc::now() - Duration::days(10)),
             published_at: Some(Utc::now() - Duration::days(14)),
             status: Some("open".to_string()),
+            justification_category: None,
+            justification_reason: None,
+            justification_updated_at: None,
         },
         SystemVulnerability {
             cve_id: "CVE-2024-9012".to_string(),
@@ -2216,6 +2228,9 @@ fn mock_vulnerabilities() -> Vec<SystemVulnerability> {
             first_seen: Some(Utc::now() - Duration::days(5)),
             published_at: Some(Utc::now() - Duration::days(7)),
             status: Some("open".to_string()),
+            justification_category: None,
+            justification_reason: None,
+            justification_updated_at: None,
         },
         SystemVulnerability {
             cve_id: "CVE-2024-3456".to_string(),
@@ -2228,6 +2243,9 @@ fn mock_vulnerabilities() -> Vec<SystemVulnerability> {
             first_seen: Some(Utc::now() - Duration::days(30)),
             published_at: Some(Utc::now() - Duration::days(45)),
             status: Some("fixed".to_string()),
+            justification_category: None,
+            justification_reason: None,
+            justification_updated_at: None,
         },
         SystemVulnerability {
             cve_id: "CVE-2024-7890".to_string(),
@@ -2240,6 +2258,9 @@ fn mock_vulnerabilities() -> Vec<SystemVulnerability> {
             first_seen: Some(Utc::now() - Duration::days(40)),
             published_at: Some(Utc::now() - Duration::days(60)),
             status: Some("open".to_string()),
+            justification_category: None,
+            justification_reason: None,
+            justification_updated_at: None,
         },
     ]
 }

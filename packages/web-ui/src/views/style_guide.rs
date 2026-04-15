@@ -2,7 +2,7 @@
 
 use dioxus::prelude::*;
 
-use crate::api::models::{DeploymentStatus, HealthStatus};
+use crate::api::models::{CveSeverity, DeploymentStatus, HealthStatus};
 use crate::components::charts::{DonutChartWithLegend, DonutSegment};
 use crate::components::dashboard::{BuildQueueRow, BuildSummaryPanel, RecentDeploymentRow};
 use crate::components::filters::{ViewMode, ViewToggle};
@@ -53,6 +53,17 @@ pub fn StyleGuideView() -> Element {
                                 HealthBadge { status: HealthStatus::Healthy }
                                 HealthBadge { status: HealthStatus::Warning }
                                 HealthBadge { status: HealthStatus::Critical }
+                            }
+                        )
+                    }
+                    PrimitiveCard {
+                        title: "CVE Severity Badge",
+                        content: rsx!(
+                            div { class: "flex gap-2 flex-wrap",
+                                span { class: "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium {CveSeverity::Critical.bg_class()} text-white", "Critical" }
+                                span { class: "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium {CveSeverity::High.bg_class()} text-white", "High" }
+                                span { class: "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium {CveSeverity::Medium.bg_class()} text-white", "Medium" }
+                                span { class: "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium {CveSeverity::Low.bg_class()} text-white", "Low" }
                             }
                         )
                     }
