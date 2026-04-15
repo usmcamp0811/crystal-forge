@@ -360,7 +360,7 @@ pub fn SystemDetailView(id: String) -> Element {
                 div {
                     class: "flex items-center gap-2",
                     button {
-                        class: "inline-flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm transition-all text-white border border-gray-500/40 bg-gray-700/50 hover:bg-gray-700/80 hover:border-gray-300/60",
+                        class: "inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} {theme::text::PRIMARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors disabled:opacity-60 disabled:cursor-not-allowed",
                         disabled: !can_mutate,
                         onclick: move |_| edit_modal_open.set(true),
                         if !can_mutate {
@@ -370,7 +370,7 @@ pub fn SystemDetailView(id: String) -> Element {
                         }
                     }
                     button {
-                        class: "inline-flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm transition-all text-white border border-amber-400/40 bg-amber-600/50 hover:bg-amber-600/70 hover:border-amber-300/60 disabled:opacity-60 disabled:cursor-not-allowed",
+                        class: "inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING} transition-colors disabled:opacity-60 disabled:cursor-not-allowed",
                         disabled: *cve_scan_in_progress.read() || !can_mutate || !cve_scan_eligible,
                         title: if cve_scan_eligible {
                             Some("Run CVE scan immediately for this system configuration")
@@ -460,7 +460,7 @@ pub fn SystemDetailView(id: String) -> Element {
                         }
                     }
                     button {
-                        class: "inline-flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm transition-all text-white border border-purple-400/40 bg-purple-600/60 hover:bg-purple-600/80 hover:border-purple-300/60 shadow-sm shadow-purple-900/30",
+                        class: "inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::SUCCESS_BTN} {theme::interactive::FOCUS_RING} transition-colors disabled:opacity-60 disabled:cursor-not-allowed",
                         disabled: *sync_in_progress.read() || !can_mutate,
                         onclick: move |_| show_sync_dialog.set(true),
 

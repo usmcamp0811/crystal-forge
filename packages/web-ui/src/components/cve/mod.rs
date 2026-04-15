@@ -146,10 +146,10 @@ pub fn CvesTab(
                             class: "text-[11px] px-2 py-0.5 rounded-md border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} {theme::text::SECONDARY}",
                             "{format_count(filtered.len() as i64)} grouped CVEs"
                         }
-                        span { class: "text-[11px] px-2 py-0.5 rounded-md border border-red-900/70 bg-red-950/35 text-red-300", "Critical {format_count(cve_counts.critical)}" }
-                        span { class: "text-[11px] px-2 py-0.5 rounded-md border border-orange-900/70 bg-orange-950/35 text-orange-300", "High {format_count(cve_counts.high)}" }
-                        span { class: "text-[11px] px-2 py-0.5 rounded-md border border-yellow-900/70 bg-yellow-950/35 text-yellow-300", "Medium {format_count(cve_counts.medium)}" }
-                        span { class: "text-[11px] px-2 py-0.5 rounded-md border border-blue-900/70 bg-blue-950/35 text-blue-300", "Low {format_count(cve_counts.low)}" }
+                        span { class: "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border border-red-900/70 bg-red-950/35 text-red-300", "Critical {format_count(cve_counts.critical)}" }
+                        span { class: "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border border-orange-900/70 bg-orange-950/35 text-orange-300", "High {format_count(cve_counts.high)}" }
+                        span { class: "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border border-yellow-900/70 bg-yellow-950/35 text-yellow-300", "Medium {format_count(cve_counts.medium)}" }
+                        span { class: "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border border-blue-900/70 bg-blue-950/35 text-blue-300", "Low {format_count(cve_counts.low)}" }
                     }
                 }
             }
@@ -277,7 +277,7 @@ pub fn CvesTab(
                                                         "{package_label}"
                                                     }
                                                     span {
-                                                        class: "text-xs px-2 py-0.5 rounded-md {group.severity.bg_class()} text-white",
+                                                        class: "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium {group.severity.bg_class()} text-white",
                                                         "{group.severity.label()}"
                                                     }
                                                     if has_justification {
