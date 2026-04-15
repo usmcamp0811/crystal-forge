@@ -399,6 +399,244 @@ let
     '';
   };
 
+  seedCveMock = pkgs.writeShellApplication {
+    name = "seed-cve-mock";
+    runtimeInputs = with pkgs; [ postgresql coreutils ];
+    text = ''
+      set -euo pipefail
+
+      DB_URL="postgresql://crystal_forge@127.0.0.1:${
+        toString db_port
+      }/crystal_forge"
+
+      # Wait for schema and mock system bootstrapping to be ready.
+      for i in {1..60}; do
+        if psql "$DB_URL" -c "SELECT 1 FROM systems WHERE hostname = 'test.gray' LIMIT 1;" >/dev/null 2>&1; then
+          break
+        fi
+        if [ "$i" -eq 60 ]; then
+          echo "ERROR: timed out waiting for systems seed (test.gray)"
+          exit 1
+        fi
+        sleep 1
+      done
+
+      psql "$DB_URL" <<'SQL'
+      DO $$
+      DECLARE
+        v_status_id integer;
+        v_flake_id integer;
+        v_commit_id integer;
+        v_host_deriv_id integer;
+        v_scan_id uuid;
+        v_pkg_go_1 integer;
+        v_pkg_go_2 integer;
+        v_pkg_ssl_1 integer;
+        v_pkg_ssl_2 integer;
+      BEGIN
+        SELECT id INTO v_status_id
+        FROM derivation_statuses
+        WHERE name = 'complete'
+        LIMIT 1;
+
+        IF v_status_id IS NULL THEN
+          RAISE EXCEPTION 'missing derivation_statuses.complete';
+        END IF;
+
+        -- Idempotent flake/commit records used for mock CVE provenance.
+        INSERT INTO flakes (name, repo_url, branch, build_scope)
+        VALUES ('mock-cve-flake', 'https://example.com/mock-cve-flake', 'main', 'full')
+        ON CONFLICT (name) DO UPDATE SET
+          repo_url = EXCLUDED.repo_url,
+          branch = EXCLUDED.branch,
+          build_scope = EXCLUDED.build_scope
+        RETURNING id INTO v_flake_id;
+
+        SELECT id INTO v_commit_id
+        FROM commits
+        WHERE flake_id = v_flake_id
+          AND git_commit_hash = 'mockcve0001'
+        ORDER BY id DESC
+        LIMIT 1;
+
+        IF v_commit_id IS NULL THEN
+          INSERT INTO commits (
+            flake_id,
+            git_commit_hash,
+            commit_timestamp,
+            attempt_count,
+            evaluation_status,
+            evaluation_attempt_count
+          ) VALUES (
+            v_flake_id,
+            'mockcve0001',
+            NOW(),
+            0,
+            'completed',
+            0
+          )
+          RETURNING id INTO v_commit_id;
+        END IF;
+
+        -- Reuse existing host derivation if present; otherwise create one.
+        SELECT id INTO v_host_deriv_id
+        FROM derivations
+        WHERE derivation_name = 'test.gray'
+          AND derivation_type = 'nixos'
+        ORDER BY completed_at DESC NULLS LAST, id DESC
+        LIMIT 1;
+
+        IF v_host_deriv_id IS NULL THEN
+          INSERT INTO derivations (
+            commit_id,
+            derivation_type,
+            derivation_name,
+            derivation_path,
+            attempt_count,
+            status_id,
+            completed_at
+          ) VALUES (
+            v_commit_id,
+            'nixos',
+            'test.gray',
+            '/nix/store/mock-cve-test-gray.drv',
+            0,
+            v_status_id,
+            NOW()
+          )
+          RETURNING id INTO v_host_deriv_id;
+        END IF;
+
+        -- Idempotency guard: if the mock scan already exists for this host derivation, stop.
+        IF EXISTS (
+          SELECT 1
+          FROM cve_scans
+          WHERE derivation_id = v_host_deriv_id
+            AND scanner_name = 'mock-seed-cve'
+        ) THEN
+          RAISE NOTICE 'mock CVE data already seeded for test.gray';
+          RETURN;
+        END IF;
+
+        -- Seed four representative CVEs (critical/high/medium/low).
+        INSERT INTO cves (id, description, cvss_v3_score, published_date) VALUES
+          ('CVE-2024-7001', 'Mock critical CVE for server-stack-mock', 9.8, DATE '2024-01-01'),
+          ('CVE-2024-7002', 'Mock high CVE for server-stack-mock',     8.0, DATE '2024-01-02'),
+          ('CVE-2024-7003', 'Mock medium CVE for server-stack-mock',   6.5, DATE '2024-01-03'),
+          ('CVE-2024-7004', 'Mock low CVE for server-stack-mock',      3.5, DATE '2024-01-04')
+        ON CONFLICT (id) DO NOTHING;
+
+        INSERT INTO cve_scans (
+          id,
+          derivation_id,
+          scanner_name,
+          completed_at,
+          status,
+          attempts,
+          total_packages,
+          total_vulnerabilities,
+          critical_count,
+          high_count,
+          medium_count,
+          low_count,
+          scan_metadata
+        ) VALUES (
+          gen_random_uuid(),
+          v_host_deriv_id,
+          'mock-seed-cve',
+          NOW(),
+          'completed',
+          1,
+          5,
+          8,
+          2,
+          2,
+          2,
+          2,
+          '{"source":"server-stack-mock","seed":"task-272"}'::jsonb
+        )
+        RETURNING id INTO v_scan_id;
+
+        -- Insert package derivations used by the mock CVEs (idempotent by derivation_path).
+        SELECT id INTO v_pkg_go_1 FROM derivations WHERE derivation_path = '/nix/store/mock-go-1.drv' LIMIT 1;
+        IF v_pkg_go_1 IS NULL THEN
+          INSERT INTO derivations (
+            commit_id, derivation_type, derivation_name, derivation_path,
+            pname, version, attempt_count, status_id, completed_at
+          ) VALUES (
+            v_commit_id, 'package', 'mock-go-1', '/nix/store/mock-go-1.drv',
+            'go', '1.22.0', 0, v_status_id, NOW()
+          ) RETURNING id INTO v_pkg_go_1;
+        END IF;
+
+        SELECT id INTO v_pkg_go_2 FROM derivations WHERE derivation_path = '/nix/store/mock-go-2.drv' LIMIT 1;
+        IF v_pkg_go_2 IS NULL THEN
+          INSERT INTO derivations (
+            commit_id, derivation_type, derivation_name, derivation_path,
+            pname, version, attempt_count, status_id, completed_at
+          ) VALUES (
+            v_commit_id, 'package', 'mock-go-2', '/nix/store/mock-go-2.drv',
+            'go', '1.23.0', 0, v_status_id, NOW()
+          ) RETURNING id INTO v_pkg_go_2;
+        END IF;
+
+        SELECT id INTO v_pkg_ssl_1 FROM derivations WHERE derivation_path = '/nix/store/mock-openssl-1.drv' LIMIT 1;
+        IF v_pkg_ssl_1 IS NULL THEN
+          INSERT INTO derivations (
+            commit_id, derivation_type, derivation_name, derivation_path,
+            pname, version, attempt_count, status_id, completed_at
+          ) VALUES (
+            v_commit_id, 'package', 'mock-openssl-1', '/nix/store/mock-openssl-1.drv',
+            'openssl', '3.1.0', 0, v_status_id, NOW()
+          ) RETURNING id INTO v_pkg_ssl_1;
+        END IF;
+
+        SELECT id INTO v_pkg_ssl_2 FROM derivations WHERE derivation_path = '/nix/store/mock-openssl-2.drv' LIMIT 1;
+        IF v_pkg_ssl_2 IS NULL THEN
+          INSERT INTO derivations (
+            commit_id, derivation_type, derivation_name, derivation_path,
+            pname, version, attempt_count, status_id, completed_at
+          ) VALUES (
+            v_commit_id, 'package', 'mock-openssl-2', '/nix/store/mock-openssl-2.drv',
+            'openssl', '3.2.0', 0, v_status_id, NOW()
+          ) RETURNING id INTO v_pkg_ssl_2;
+        END IF;
+
+        INSERT INTO scan_packages (id, scan_id, derivation_id)
+        VALUES
+          (gen_random_uuid(), v_scan_id, v_pkg_go_1),
+          (gen_random_uuid(), v_scan_id, v_pkg_go_2),
+          (gen_random_uuid(), v_scan_id, v_pkg_ssl_1),
+          (gen_random_uuid(), v_scan_id, v_pkg_ssl_2)
+        ON CONFLICT DO NOTHING;
+
+        -- Explicit vulnerability mapping per package.
+        INSERT INTO package_vulnerabilities (id, derivation_id, cve_id, is_whitelisted, detection_method)
+        SELECT gen_random_uuid(), d.id, cve_id, FALSE, 'mock-seed'
+        FROM (
+          VALUES
+            ('mock-go-1', 'CVE-2024-7001'),
+            ('mock-go-2', 'CVE-2024-7001'),
+            ('mock-go-1', 'CVE-2024-7002'),
+            ('mock-go-2', 'CVE-2024-7002'),
+            ('mock-openssl-1', 'CVE-2024-7003'),
+            ('mock-openssl-2', 'CVE-2024-7003'),
+            ('mock-openssl-1', 'CVE-2024-7004'),
+            ('mock-openssl-2', 'CVE-2024-7004')
+        ) AS mapping(derivation_name, cve_id)
+        JOIN derivations d
+          ON d.derivation_name = mapping.derivation_name
+         AND d.derivation_type = 'package'
+        ON CONFLICT DO NOTHING;
+
+        RAISE NOTICE 'mock CVE data seeded for test.gray (task-272)';
+      END $$;
+      SQL
+
+      echo "✅ mock CVE data seeded"
+    '';
+  };
+
   startBuilderApi = pkgs.writeShellApplication {
     name = "start-builder-api";
     runtimeInputs = with pkgs; [ nix python3 coreutils hostname ];
@@ -682,6 +920,13 @@ let
         "00000000-0000-0000-0000-000000000001";
       CRYSTAL_FORGE__BUILDER__SERVER_URL =
         "http://127.0.0.1:${toString cf_port}";
+    };
+
+    settings.processes.seed-cve-mock = {
+      inherit namespace;
+      command = seedCveMock;
+      depends_on."db".condition = "process_healthy";
+      depends_on."server".condition = "process_healthy";
     };
   };
 

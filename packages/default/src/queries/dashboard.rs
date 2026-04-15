@@ -79,12 +79,22 @@ pub async fn fetch_deployment_status(pool: &PgPool) -> Result<DeploymentStatusSu
 /// Aggregate CVE counts from `view_systems_cve_summary` across all systems.
 pub async fn fetch_cve_summary(pool: &PgPool) -> Result<CveSummary> {
     let row = sqlx::query_as::<_, (i64, i64, i64, i64)>(
-        "SELECT \
+        "WITH per_system_counts AS ( \
+            SELECT \
+                hostname, \
+                COUNT(DISTINCT cve_id) FILTER (WHERE severity = 'CRITICAL')::BIGINT AS critical_cves, \
+                COUNT(DISTINCT cve_id) FILTER (WHERE severity = 'HIGH')::BIGINT AS high_cves, \
+                COUNT(DISTINCT cve_id) FILTER (WHERE severity = 'MEDIUM')::BIGINT AS medium_cves, \
+                COUNT(DISTINCT cve_id) FILTER (WHERE severity = 'LOW')::BIGINT AS low_cves \
+            FROM view_system_vulnerabilities \
+            GROUP BY hostname \
+         ) \
+         SELECT \
             COALESCE(SUM(critical_cves), 0), \
             COALESCE(SUM(high_cves), 0), \
             COALESCE(SUM(medium_cves), 0), \
             COALESCE(SUM(low_cves), 0) \
-         FROM view_systems_cve_summary",
+         FROM per_system_counts",
     )
     .fetch_one(pool)
     .await?;

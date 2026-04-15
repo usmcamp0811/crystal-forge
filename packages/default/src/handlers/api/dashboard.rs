@@ -18,13 +18,24 @@ use sqlx::Row;
 use tracing::error;
 
 const CVE_DASHBOARD_SUMMARY_SQL: &str = r#"
+        WITH per_system_counts AS (
+            SELECT
+                hostname,
+                COUNT(DISTINCT cve_id) FILTER (WHERE severity = 'CRITICAL')::BIGINT AS critical_cves,
+                COUNT(DISTINCT cve_id) FILTER (WHERE severity = 'HIGH')::BIGINT AS high_cves,
+                COUNT(DISTINCT cve_id) FILTER (WHERE severity = 'MEDIUM')::BIGINT AS medium_cves,
+                COUNT(DISTINCT cve_id) FILTER (WHERE severity = 'LOW')::BIGINT AS low_cves,
+                COUNT(DISTINCT cve_id)::BIGINT AS total_cves
+            FROM view_system_vulnerabilities
+            GROUP BY hostname
+        )
         SELECT
             -- severity totals: SUM/COUNT aggregate always returns one row
-            COALESCE(SUM(critical_cves), 0)::BIGINT                            AS critical,
-            COALESCE(SUM(high_cves), 0)::BIGINT                                AS high,
-            COALESCE(SUM(medium_cves), 0)::BIGINT                              AS medium,
-            COALESCE(SUM(low_cves), 0)::BIGINT                                 AS low,
-            COUNT(*) FILTER (WHERE total_cves > 0)::BIGINT                     AS affected_systems,
+            COALESCE(SUM(p.critical_cves), 0)::BIGINT                          AS critical,
+            COALESCE(SUM(p.high_cves), 0)::BIGINT                              AS high,
+            COALESCE(SUM(p.medium_cves), 0)::BIGINT                            AS medium,
+            COALESCE(SUM(p.low_cves), 0)::BIGINT                               AS low,
+            COUNT(*) FILTER (WHERE p.total_cves > 0)::BIGINT                   AS affected_systems,
             -- new CVEs in last 7 days: scalar subquery always returns one row (NULL if none)
             COALESCE((
                 SELECT COUNT(DISTINCT v.cve_id)
@@ -39,7 +50,7 @@ const CVE_DASHBOARD_SUMMARY_SQL: &str = r#"
                 JOIN cves c ON c.id = v.cve_id
                 WHERE c.published_date IS NOT NULL
             )                                                                   AS oldest_age_days
-        FROM view_systems_cve_summary
+        FROM per_system_counts p
         "#;
 
 use crate::api::models::ApiError;
@@ -351,20 +362,32 @@ pub async fn cve_dashboard_top_systems(
 
     let rows = match sqlx::query(
         r#"
+        WITH dedup_counts AS (
+            SELECT
+                hostname,
+                COUNT(DISTINCT cve_id) FILTER (WHERE severity = 'CRITICAL')::BIGINT AS critical_cves,
+                COUNT(DISTINCT cve_id) FILTER (WHERE severity = 'HIGH')::BIGINT AS high_cves,
+                COUNT(DISTINCT cve_id) FILTER (WHERE severity = 'MEDIUM')::BIGINT AS medium_cves,
+                COUNT(DISTINCT cve_id) FILTER (WHERE severity = 'LOW')::BIGINT AS low_cves,
+                COUNT(DISTINCT cve_id)::BIGINT AS total_cves
+            FROM view_system_vulnerabilities
+            GROUP BY hostname
+        )
         SELECT
             s.id AS system_id,
-            v.hostname,
-            COALESCE(v.total_cves, 0) AS total_cves,
-            COALESCE(v.critical_cves, 0) AS critical_cves,
-            COALESCE(v.high_cves, 0) AS high_cves,
-            COALESCE(v.medium_cves, 0) AS medium_cves,
-            COALESCE(v.low_cves, 0) AS low_cves,
+            d.hostname,
+            COALESCE(d.total_cves, 0) AS total_cves,
+            COALESCE(d.critical_cves, 0) AS critical_cves,
+            COALESCE(d.high_cves, 0) AS high_cves,
+            COALESCE(d.medium_cves, 0) AS medium_cves,
+            COALESCE(d.low_cves, 0) AS low_cves,
             v.days_since_scan::BIGINT AS days_since_scan,
             v.last_cve_scan AS last_cve_scan
-        FROM view_systems_cve_summary v
-        JOIN systems s ON s.hostname = v.hostname
-        WHERE v.total_cves > 0
-        ORDER BY v.critical_cves DESC, v.high_cves DESC, v.total_cves DESC
+        FROM dedup_counts d
+        JOIN systems s ON s.hostname = d.hostname
+        LEFT JOIN view_systems_cve_summary v ON v.hostname = d.hostname
+        WHERE d.total_cves > 0
+        ORDER BY d.critical_cves DESC, d.high_cves DESC, d.total_cves DESC
         LIMIT 20
         "#,
     )
@@ -416,14 +439,23 @@ pub async fn cve_scan_freshness(
 
     let rows = match sqlx::query(
         r#"
+        WITH dedup_counts AS (
+            SELECT
+                hostname,
+                COUNT(DISTINCT cve_id)::BIGINT AS total_cves
+            FROM view_system_vulnerabilities
+            GROUP BY hostname
+        )
         SELECT
             s.id AS system_id,
-            v.hostname,
+            s.hostname,
             v.days_since_scan::BIGINT AS days_since_scan,
             v.last_cve_scan AS last_cve_scan,
-            COALESCE(v.total_cves, 0) AS total_cves
-        FROM view_systems_cve_summary v
-        JOIN systems s ON s.hostname = v.hostname
+            COALESCE(d.total_cves, 0) AS total_cves
+        FROM systems s
+        LEFT JOIN view_systems_cve_summary v ON v.hostname = s.hostname
+        LEFT JOIN dedup_counts d ON d.hostname = s.hostname
+        WHERE s.is_active = TRUE
         ORDER BY
             CASE WHEN v.days_since_scan IS NULL THEN 1 ELSE 0 END DESC,
             v.days_since_scan DESC
