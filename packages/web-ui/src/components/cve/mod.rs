@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::api::client::save_system_cve_justification;
 use crate::api::models::{
-    CveSeverity, CveSummary, SaveSystemCveJustificationRequest, SystemVulnerability,
+    CveSeverity, CveSummary, HealthStatus, SaveSystemCveJustificationRequest, SystemVulnerability,
 };
 use crate::theme;
 
@@ -282,7 +282,7 @@ pub fn CvesTab(
                                                     }
                                                     if has_justification {
                                                         span {
-                                                            class: "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold text-emerald-300 bg-emerald-900/50 border border-emerald-500/50",
+                                                            class: "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium {HealthStatus::Healthy.color_class()} {HealthStatus::Healthy.bg_class()} border border-emerald-500/35",
                                                             "Justified"
                                                         }
                                                     }

@@ -520,9 +520,9 @@ pub fn SystemDetailView(id: String) -> Element {
                         {
                             let is_active = *active_tab.read() == tab;
                             let tab_class = if is_active {
-                                "px-4 py-2 text-sm font-semibold text-white border-b-2 border-cyan-400"
+                                "px-4 py-2 text-sm font-semibold text-cyan-300 border-b-2 border-cyan-400 bg-cyan-500/10"
                             } else {
-                                "px-4 py-2 text-sm font-medium {theme::text::SECONDARY} hover:text-white transition-colors border-b-2 border-transparent"
+                                "px-4 py-2 text-sm font-medium {theme::text::SECONDARY} hover:text-white hover:border-cyan-500/50 transition-colors border-b-2 border-transparent"
                             };
                             rsx! {
                                 button {
