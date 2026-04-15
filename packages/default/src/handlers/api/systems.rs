@@ -231,8 +231,29 @@ pub async fn get_system_cves(
     headers: HeaderMap,
     Path(system_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    if require_viewer_or_above(&pool, &headers).await.is_none() {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
+    };
+
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+
+    // Load environment memberships for scoped access control
+    let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+
+    // Verify system exists and caller has environment access
+    let row = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+
+    if !caller_role.can_access_system_environment(row.environment_id, &environment_memberships) {
+        return not_found();
     }
 
     let rows = match sqlx::query(
