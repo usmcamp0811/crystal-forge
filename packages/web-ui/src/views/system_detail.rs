@@ -16,15 +16,14 @@ use uuid::Uuid;
 use wasm_bindgen::{JsCast, JsValue};
 
 use crate::api::client::{
-    fetch_cve_scan_status, fetch_system_cve_scan_eligibility, fetch_system_cves,
-    request_system_rollback, request_system_sync, trigger_system_cve_scan, ApiClientError,
+    ApiClientError, fetch_cve_scan_status, fetch_system_cve_scan_eligibility, fetch_system_cves,
+    request_system_rollback, request_system_sync, trigger_system_cve_scan,
 };
 use crate::api::models::{
     BuildStatus, CveScanEligibilityResponse, CveSeverity, CveSummary, DeploymentLogEntry,
-    DeploymentStatus, LogLevel, PipelineStage, SystemAgentEvent, SystemCommitHistory,
-    SystemDetail, SystemHardwareInfo, SystemHistoryEntry, SystemNetworkInfo,
-    SystemRollbackRequest, SystemSecurityInfo,
-    SystemVulnerability,
+    DeploymentStatus, LogLevel, PipelineStage, SystemAgentEvent, SystemCommitHistory, SystemDetail,
+    SystemHardwareInfo, SystemHistoryEntry, SystemNetworkInfo, SystemRollbackRequest,
+    SystemSecurityInfo, SystemVulnerability,
 };
 use crate::components::cve::CvesTab;
 use crate::components::diff::DiffViewer;
@@ -253,8 +252,10 @@ pub fn SystemDetailView(id: String) -> Element {
             .clone()
             .unwrap_or_default(),
     );
-    let scan_eligibility: Option<CveScanEligibilityResponse> =
-        (*scan_eligibility_resource.read_unchecked()).clone().flatten();
+    let scan_eligibility: Option<CveScanEligibilityResponse> = (*scan_eligibility_resource
+        .read_unchecked())
+    .clone()
+    .flatten();
 
     let auth_context = app_state.read().auth.clone();
     let can_mutate = auth::can_mutate_systems(&auth_context);

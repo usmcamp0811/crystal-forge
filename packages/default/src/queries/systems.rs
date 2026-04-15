@@ -5,8 +5,7 @@ use sqlx::PgPool;
 use std::collections::BTreeSet;
 use uuid::Uuid;
 
-const DEACTIVATE_DUPLICATE_ACTIVE_SYSTEMS_SQL: &str =
-    "UPDATE systems
+const DEACTIVATE_DUPLICATE_ACTIVE_SYSTEMS_SQL: &str = "UPDATE systems
      SET is_active = FALSE,
          updated_at = NOW()
      WHERE is_active = TRUE
@@ -285,11 +284,12 @@ pub async fn deactivate_duplicate_active_systems_by_public_key(
     current_hostname: &str,
     public_key_base64: &str,
 ) -> Result<Vec<String>> {
-    let deactivated_hostnames = sqlx::query_scalar::<_, String>(DEACTIVATE_DUPLICATE_ACTIVE_SYSTEMS_SQL)
-    .bind(current_hostname)
-    .bind(public_key_base64)
-    .fetch_all(pool)
-    .await?;
+    let deactivated_hostnames =
+        sqlx::query_scalar::<_, String>(DEACTIVATE_DUPLICATE_ACTIVE_SYSTEMS_SQL)
+            .bind(current_hostname)
+            .bind(public_key_base64)
+            .fetch_all(pool)
+            .await?;
 
     Ok(deactivated_hostnames)
 }
@@ -831,9 +831,8 @@ mod tests {
 
     #[test]
     fn hotfix_migration_restores_view_system_vulnerabilities() {
-        let migration = include_str!(
-            "../../migrations/0107_restore_view_system_vulnerabilities.sql"
-        );
+        let migration =
+            include_str!("../../migrations/0107_restore_view_system_vulnerabilities.sql");
 
         assert!(
             migration.contains("CREATE OR REPLACE VIEW public.view_system_vulnerabilities AS")
@@ -843,7 +842,8 @@ mod tests {
                 && migration.contains("pkg_d.derivation_name AS package_name")
                 && migration.contains("pkg_d.pname AS package_pname")
                 && migration.contains("pkg_d.version AS package_version")
-                && migration.contains("ds.name = ANY (ARRAY['build-complete'::text, 'complete'::text])")
+                && migration
+                    .contains("ds.name = ANY (ARRAY['build-complete'::text, 'complete'::text])")
                 && !migration.contains("pkg_d.package_name")
                 && !migration.contains("pkg_d.package_pname")
                 && !migration.contains("pkg_d.package_version")
@@ -854,16 +854,17 @@ mod tests {
 
     #[test]
     fn hotfix_migration_restores_nonzero_cve_counts_in_system_views() {
-        let migration =
-            include_str!("../../migrations/0108_fix_system_views_cve_counts.sql");
+        let migration = include_str!("../../migrations/0108_fix_system_views_cve_counts.sql");
 
         assert!(
             migration.contains("CREATE OR REPLACE VIEW public.view_system_list AS")
                 && migration.contains("CREATE OR REPLACE VIEW public.view_system_detail AS")
                 && migration.contains("FROM view_system_vulnerabilities")
-                && migration.contains("COALESCE(cc.critical_cve_count, 0)::integer AS critical_cve_count")
+                && migration
+                    .contains("COALESCE(cc.critical_cve_count, 0)::integer AS critical_cve_count")
                 && migration.contains("COALESCE(cc.high_cve_count, 0)::integer AS high_cve_count")
-                && migration.contains("COALESCE(cc.medium_cve_count, 0)::integer AS medium_cve_count")
+                && migration
+                    .contains("COALESCE(cc.medium_cve_count, 0)::integer AS medium_cve_count")
                 && migration.contains("COALESCE(cc.low_cve_count, 0)::integer AS low_cve_count")
                 && !migration.contains("0::integer AS critical_cve_count")
                 && !migration.contains("0::integer AS high_cve_count")
@@ -929,9 +930,11 @@ mod tests {
         .await
         .expect("failed to replace view_system_vulnerabilities for test");
 
-        tx.execute(include_str!("../../migrations/0108_fix_system_views_cve_counts.sql"))
-            .await
-            .expect("failed to apply TASK-258 migration SQL");
+        tx.execute(include_str!(
+            "../../migrations/0108_fix_system_views_cve_counts.sql"
+        ))
+        .await
+        .expect("failed to apply TASK-258 migration SQL");
 
         let list_counts = sqlx::query_as::<_, (i32, i32, i32, i32)>(
             "SELECT critical_cve_count, high_cve_count, medium_cve_count, low_cve_count

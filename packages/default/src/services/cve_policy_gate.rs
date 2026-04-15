@@ -4,11 +4,11 @@
 //! scan for a derivation.  Called by the deployment manager after a build job
 //! reaches `build-complete` and before `desired_target` is updated on any system.
 
+use crate::models::cve_scans::ScanStatus;
 use crate::models::deployment_policies::{
-    CveCheckOutcome, CveCheckConfig, DeploymentPolicy, WhenNoScan,
+    CveCheckConfig, CveCheckOutcome, DeploymentPolicy, WhenNoScan,
 };
 use crate::queries::cve_scans::{count_unjustified_high_cves, get_latest_scan};
-use crate::models::cve_scans::ScanStatus;
 use anyhow::Result;
 use sqlx::PgPool;
 use tracing::{info, warn};
@@ -226,9 +226,8 @@ mod tests {
     #[test]
     fn no_cve_policies_returns_allowed() {
         // Purely synchronous check — no pool needed.
-        let policies: Vec<DeploymentPolicy> = vec![
-            DeploymentPolicy::RequireCrystalForgeAgent { strict: true },
-        ];
+        let policies: Vec<DeploymentPolicy> =
+            vec![DeploymentPolicy::RequireCrystalForgeAgent { strict: true }];
         let cve_policies: Vec<&CveCheckConfig> = policies
             .iter()
             .filter_map(|p| {
@@ -494,6 +493,9 @@ mod tests {
         .unwrap();
 
         assert!(!outcome.passed);
-        assert!(!outcome.blocking, "non-strict should not block even with violations");
+        assert!(
+            !outcome.blocking,
+            "non-strict should not block even with violations"
+        );
     }
 }

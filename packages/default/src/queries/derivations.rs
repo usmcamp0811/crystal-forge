@@ -2063,9 +2063,10 @@ pub async fn get_derivation_id_by_store_path(
     pool: &PgPool,
     store_path: &str,
 ) -> Result<Option<i32>> {
-    let id = sqlx::query_scalar::<_, i32>("SELECT id FROM derivations WHERE store_path = $1 LIMIT 1")
-        .bind(store_path)
-        .fetch_optional(pool)
-        .await?;
+    let id =
+        sqlx::query_scalar::<_, i32>("SELECT id FROM derivations WHERE store_path = $1 LIMIT 1")
+            .bind(store_path)
+            .fetch_optional(pool)
+            .await?;
     Ok(id)
 }

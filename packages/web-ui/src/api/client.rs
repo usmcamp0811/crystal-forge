@@ -213,7 +213,9 @@ pub async fn trigger_flake_config_cve_scan(
     send_json_with_csrf("POST", &url, None::<&()>).await
 }
 
-pub async fn fetch_cve_scan_status(scan_id: &uuid::Uuid) -> Result<CveScanStatusResponse, ApiClientError> {
+pub async fn fetch_cve_scan_status(
+    scan_id: &uuid::Uuid,
+) -> Result<CveScanStatusResponse, ApiClientError> {
     let url = format!("{}/cve-scans/{}", base_url(), scan_id);
     fetch_json(&url).await
 }

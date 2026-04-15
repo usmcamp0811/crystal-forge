@@ -13,8 +13,7 @@ use tracing::{error, info, warn};
 use crate::api::models::{
     ApiError, CommitDiffResponse, CreateFlakeCredentialRequest, CreateFlakeRequest,
     CveScanTriggerResponse, FlakeCommitSystemPath, FlakeCredentialSummary, FlakeRegistryItem,
-    FlakeTimeline,
-    UpdateFlakeCredentialRequest, UpdateFlakeRequest,
+    FlakeTimeline, UpdateFlakeCredentialRequest, UpdateFlakeRequest,
 };
 use crate::auth::extractors::{AuthenticatedUser, RequireAdmin, RequireAuth, RequireOperator};
 use crate::config::CrystalForgeConfig;
@@ -27,8 +26,10 @@ use crate::flake::commits::{
 use crate::flake::credentials::FlakeCredentialEnv;
 use crate::handlers::agent_request::CFState;
 use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_above};
+use crate::handlers::api::systems::scan_ineligible_response;
 use crate::queries::admin::insert_admin_audit_event;
 use crate::queries::commits::insert_commit_with_metadata;
+use crate::queries::cve_scans::resolve_flake_config_cve_scan_target;
 use crate::queries::flake_credentials::{
     delete_flake_credential, get_flake_credential, update_flake_credential, upsert_flake_credential,
 };
@@ -37,10 +38,8 @@ use crate::queries::flakes::{
     fetch_dashboard_flake_timelines, fetch_flake_timelines, get_flake_by_id, get_flake_by_name,
     insert_flake, list_flake_registry, purge_flake_commit_history, soft_delete_flake, update_flake,
 };
-use crate::queries::cve_scans::resolve_flake_config_cve_scan_target;
 use crate::queries::users::get_by_email;
-use crate::handlers::api::systems::scan_ineligible_response;
-use crate::services::cve_scans::{trigger_immediate_cve_scan, CveScanError};
+use crate::services::cve_scans::{CveScanError, trigger_immediate_cve_scan};
 
 const MAX_HYDRATION_COMMITS_PER_REQUEST: usize = 20;
 
@@ -453,7 +452,9 @@ fn build_commit_system_paths(
             mapped_host_count: detail.map(|row| row.mapped_host_count).unwrap_or(0),
             expected_store_path: detail.and_then(|row| row.expected_store_path.clone()),
             current_store_path: detail.and_then(|row| row.current_store_path.clone()),
-            cve_scan_eligible: detail.and_then(|row| row.cve_scan_blocked_reason.clone()).is_none(),
+            cve_scan_eligible: detail
+                .and_then(|row| row.cve_scan_blocked_reason.clone())
+                .is_none(),
             cve_scan_blocked_reason: detail.and_then(|row| row.cve_scan_blocked_reason.clone()),
         });
     }
@@ -1910,7 +1911,9 @@ pub async fn trigger_flake_config_cve_scan(
             status: "accepted".to_string(),
             message: format!(
                 "CVE scan queued for {} ({})",
-                target.hostname.unwrap_or_else(|| "unknown host".to_string()),
+                target
+                    .hostname
+                    .unwrap_or_else(|| "unknown host".to_string()),
                 target.config_name
             ),
         }),

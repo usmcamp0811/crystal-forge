@@ -18,7 +18,7 @@ struct GroupedCve {
     cvss_score: Option<f32>,
     description: String,
     published_at: Option<chrono::DateTime<chrono::Utc>>,
-    status: Option<String>,
+    status: String,
     package_instances: Vec<SystemVulnerability>,
     justification_category: Option<String>,
     justification_reason: Option<String>,
@@ -119,19 +119,19 @@ pub fn CvesTab(
         .unwrap_or(false);
 
     rsx! {
-        div {
-            class: "pt-6 space-y-5",
+            div {
+                class: "pt-6 space-y-5",
 
             div {
-                class: "rounded-xl border border-slate-800/90 bg-gradient-to-br from-slate-950 to-slate-900 p-4 md:p-5",
+                class: "{theme::presets::CARD}",
 
                 div { class: "flex flex-wrap items-end justify-between gap-4",
                     div {
                         class: "space-y-1",
-                        div { class: "text-xs uppercase tracking-[0.14em] text-slate-500", "System CVE review" }
+                        div { class: "{theme::typography::TABLE_HEADER}", "System CVE review" }
                         div { class: "flex items-baseline gap-3",
                             span {
-                                class: "text-3xl font-bold text-white",
+                                class: "{theme::typography::STAT_VALUE} {theme::text::PRIMARY}",
                                 "{cve_counts.total()}"
                             }
                             span {
@@ -143,25 +143,25 @@ pub fn CvesTab(
 
                     div { class: "flex items-center gap-2 flex-wrap",
                         span {
-                            class: "text-xs px-2.5 py-1 rounded-md border border-slate-700 bg-slate-900 text-slate-300",
+                            class: "text-xs px-2.5 py-1 rounded-md border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} {theme::text::SECONDARY}",
                             "{filtered.len()} grouped CVEs"
                         }
-                        span { class: "text-xs px-2.5 py-1 rounded-md border border-red-800/60 bg-red-950/40 text-red-300", "Critical {cve_counts.critical}" }
-                        span { class: "text-xs px-2.5 py-1 rounded-md border border-orange-800/60 bg-orange-950/40 text-orange-300", "High {cve_counts.high}" }
-                        span { class: "text-xs px-2.5 py-1 rounded-md border border-yellow-800/60 bg-yellow-950/40 text-yellow-300", "Medium {cve_counts.medium}" }
-                        span { class: "text-xs px-2.5 py-1 rounded-md border border-blue-800/60 bg-blue-950/40 text-blue-300", "Low {cve_counts.low}" }
+                        span { class: "text-xs px-2.5 py-1 rounded-md border border-red-900/70 bg-red-950/35 text-red-300", "Critical {cve_counts.critical}" }
+                        span { class: "text-xs px-2.5 py-1 rounded-md border border-orange-900/70 bg-orange-950/35 text-orange-300", "High {cve_counts.high}" }
+                        span { class: "text-xs px-2.5 py-1 rounded-md border border-yellow-900/70 bg-yellow-950/35 text-yellow-300", "Medium {cve_counts.medium}" }
+                        span { class: "text-xs px-2.5 py-1 rounded-md border border-blue-900/70 bg-blue-950/35 text-blue-300", "Low {cve_counts.low}" }
                     }
                 }
             }
 
             // Filters
             div {
-                class: "rounded-xl border border-slate-800/90 bg-slate-950/50 p-4 space-y-3",
+                class: "{theme::presets::CARD} space-y-3",
 
                 div { class: "flex items-center justify-between gap-3 flex-wrap",
-                    div { class: "text-xs uppercase tracking-[0.12em] text-slate-500", "Filters" }
+                    div { class: "{theme::typography::TABLE_HEADER}", "Filters" }
                     button {
-                        class: "px-3 py-1.5 rounded-md border border-slate-700 text-xs font-medium text-slate-300 hover:bg-slate-800/80 transition-colors disabled:opacity-40",
+                        class: "px-3 py-1.5 rounded-md border {theme::surface::CARD_BORDER} text-xs font-medium {theme::text::SECONDARY} {theme::interactive::HOVER_BG} transition-colors disabled:opacity-40 {theme::interactive::FOCUS_RING}",
                         disabled: !has_active_filters,
                         onclick: move |_| {
                             cve_search.set(String::new());
@@ -176,25 +176,25 @@ pub fn CvesTab(
                 div {
                     class: "grid grid-cols-1 md:grid-cols-4 gap-3",
                     input {
-                        class: "h-10 px-3 rounded-lg border border-slate-700 bg-slate-900/90 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-600/60",
+                        class: "{theme::interactive::INPUT} h-10",
                         placeholder: "Search CVE ID (e.g. CVE-2025)",
                         value: cve_search.read().clone(),
                         oninput: move |evt| cve_search.set(evt.value()),
                     }
                     input {
-                        class: "h-10 px-3 rounded-lg border border-slate-700 bg-slate-900/90 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-600/60",
+                        class: "{theme::interactive::INPUT} h-10",
                         placeholder: "Filter package/version",
                         value: package_search.read().clone(),
                         oninput: move |evt| package_search.set(evt.value()),
                     }
                     input {
-                        class: "h-10 px-3 rounded-lg border border-slate-700 bg-slate-900/90 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-600/60",
+                        class: "{theme::interactive::INPUT} h-10",
                         placeholder: "Search description",
                         value: description_search.read().clone(),
                         oninput: move |evt| description_search.set(evt.value()),
                     }
                     select {
-                        class: "h-10 px-3 rounded-lg border border-slate-700 bg-slate-900/90 text-sm text-white focus:outline-none focus:ring-2 focus:ring-blue-600/60",
+                        class: "{theme::interactive::INPUT} h-10",
                         value: severity_filter.read().clone(),
                         onchange: move |evt| severity_filter.set(evt.value()),
                         option { value: "all", "All severities" }
@@ -219,7 +219,7 @@ pub fn CvesTab(
 
             if filtered.is_empty() {
                 div {
-                    class: "rounded-xl border border-slate-800 bg-slate-950/40 p-8 text-sm text-slate-400",
+                    class: "{theme::presets::CARD} text-sm {theme::text::MUTED}",
                     "No CVEs match current filters."
                 }
             } else {
@@ -255,10 +255,10 @@ pub fn CvesTab(
                             rsx! {
                                 div {
                                     key: "{group.cve_id}",
-                                    class: "rounded-xl border border-slate-800/90 bg-slate-950/40 overflow-hidden shadow-[0_6px_24px_rgba(0,0,0,0.25)]",
+                                    class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} overflow-hidden",
 
                                     button {
-                                        class: "w-full p-4 text-left hover:bg-slate-900/60 transition-colors",
+                                        class: "w-full p-4 text-left {theme::interactive::HOVER_BG} transition-colors {theme::interactive::FOCUS_RING}",
                                         onclick: move |_| {
                                             let current = expanded_cve.read().clone();
                                             if current == Some(cve_id.clone()) {
@@ -271,9 +271,9 @@ pub fn CvesTab(
                                         div { class: "flex items-start justify-between gap-4",
                                             div { class: "min-w-0",
                                                 div { class: "flex items-center gap-2 flex-wrap",
-                                                    span { class: "font-mono text-sm font-semibold text-white tracking-wide", "{group.cve_id}" }
+                                                    span { class: "{theme::typography::MONO} font-semibold {theme::text::PRIMARY} tracking-wide", "{group.cve_id}" }
                                                     span {
-                                                        class: "text-xs px-2 py-0.5 rounded-md border border-slate-700 bg-slate-900 text-slate-300",
+                                                        class: "text-xs px-2 py-0.5 rounded-md border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} {theme::text::SECONDARY}",
                                                         "{package_label}"
                                                     }
                                                     span {
@@ -315,14 +315,16 @@ pub fn CvesTab(
                                         }
                                     }
 
+                                    div { class: "px-4 pb-3 text-xs text-slate-400", "{status_label(&group.status)}" }
+
                                     if is_expanded {
                                         div {
-                                            class: "border-t border-slate-800 p-4 space-y-4 bg-slate-950/40",
+                                            class: "border-t {theme::surface::DIVIDER} p-4 space-y-4 {theme::surface::SUBTLE_BG}",
 
                                             div {
                                                 class: "flex items-center gap-3 flex-wrap text-sm",
                                                 a {
-                                                    class: "text-blue-400 hover:text-blue-300 underline underline-offset-2",
+                                                    class: "text-blue-400 hover:text-blue-300 underline underline-offset-2 {theme::interactive::FOCUS_RING}",
                                                     href: "https://nvd.nist.gov/vuln/detail/{group.cve_id}",
                                                     target: "_blank",
                                                     rel: "noopener noreferrer",
@@ -331,20 +333,22 @@ pub fn CvesTab(
                                                 if let Some(ref published_label) = published_label {
                                                     span { class: "text-slate-400", "Published: {published_label}" }
                                                 }
-                                                if let Some(ref status) = group.status {
-                                                    span { class: "text-slate-400", "Status: {status}" }
-                                                }
+                                                span { class: "text-slate-400", "Status: {status_label(&group.status)}" }
                                             }
 
                                             div {
                                                 class: "space-y-2",
-                                                h4 { class: "text-xs uppercase tracking-[0.12em] text-slate-500", "Affected packages" }
+                                                h4 { class: "{theme::typography::TABLE_HEADER}", "Affected packages" }
                                                 for item in group.package_instances.iter() {
                                                     div {
                                                         key: "{group.cve_id}-{item.package_name}-{item.installed_version}",
-                                                        class: "text-sm text-slate-300 flex items-center gap-3 flex-wrap rounded-lg border border-slate-800 bg-slate-900/35 px-3 py-2",
-                                                        span { class: "font-medium text-white", "{item.package_name}" }
-                                                        span { class: "text-slate-500", "Installed: {item.installed_version}" }
+                                                        class: "text-sm {theme::text::SECONDARY} flex items-center gap-3 flex-wrap rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2",
+                                                        span { class: "font-medium {theme::text::PRIMARY}", "{item.package_name}" }
+                                                        span { class: "{theme::text::MUTED}", "Installed: {item.installed_version}" }
+                                                        span {
+                                                            class: "text-xs rounded px-2 py-0.5 border border-gray-700 text-slate-300",
+                                                            {status_label(item.status.as_deref().unwrap_or("open"))}
+                                                        }
                                                         if let Some(ref fixed) = item.fixed_version {
                                                             span { class: "text-emerald-400", "Fix: {fixed}" }
                                                         } else {
@@ -355,17 +359,17 @@ pub fn CvesTab(
                                             }
 
                                             div {
-                                                class: "rounded-xl border border-slate-800 bg-slate-900/35 p-4 space-y-3",
+                                                class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-4 space-y-3",
                                                 div { class: "flex items-center justify-between gap-3",
-                                                    h4 { class: "text-sm font-semibold text-white", "Justification" }
+                                                    h4 { class: "text-sm font-semibold {theme::text::PRIMARY}", "Justification" }
                                                     if let Some(ref justification_updated_label) = justification_updated_label {
-                                                        span { class: "text-xs text-slate-500", "Updated {justification_updated_label}" }
+                                                        span { class: "text-xs {theme::text::MUTED}", "Updated {justification_updated_label}" }
                                                     }
                                                 }
 
                                                 if !is_editing {
                                                     if let Some(ref reason) = group.justification_reason {
-                                                        div { class: "text-sm text-slate-200 leading-relaxed", "{reason}" }
+                                                        div { class: "text-sm {theme::text::SECONDARY} leading-relaxed", "{reason}" }
                                                         if let Some(ref category) = group.justification_category {
                                                             div {
                                                                 class: "inline-flex text-xs rounded-md border border-emerald-700/40 bg-emerald-950/30 px-2 py-1 text-emerald-300",
@@ -373,11 +377,11 @@ pub fn CvesTab(
                                                             }
                                                         }
                                                     } else {
-                                                        div { class: "text-sm text-slate-500", "No justification saved yet." }
+                                                        div { class: "text-sm {theme::text::MUTED}", "No justification saved yet." }
                                                     }
 
                                                     button {
-                                                        class: "px-3 py-2 rounded-md border border-slate-700 bg-slate-800 hover:bg-slate-700 text-sm font-medium text-white transition-colors disabled:opacity-50",
+                                                        class: "px-3 py-2 rounded-md border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} {theme::interactive::HOVER_BG} text-sm font-medium {theme::text::PRIMARY} transition-colors disabled:opacity-50 {theme::interactive::FOCUS_RING}",
                                                         disabled: !allow_mutations,
                                                         onclick: {
                                                             let cve_id = group.cve_id.clone();
@@ -395,7 +399,7 @@ pub fn CvesTab(
                                                 } else {
                                                     div { class: "space-y-2",
                                                         select {
-                                                            class: "w-full px-3 py-2 rounded-lg border border-slate-700 bg-slate-900 text-sm text-white focus:outline-none focus:ring-2 focus:ring-blue-600/60",
+                                                            class: "{theme::interactive::INPUT} w-full",
                                                             value: draft_category.read().clone().unwrap_or_else(|| "".to_string()),
                                                             onchange: move |evt| {
                                                                 let value = evt.value();
@@ -420,17 +424,17 @@ pub fn CvesTab(
                                                         }
 
                                                         textarea {
-                                                            class: "w-full px-3 py-2 rounded-lg border border-slate-700 bg-slate-900 text-sm text-white min-h-[100px] focus:outline-none focus:ring-2 focus:ring-blue-600/60",
+                                                            class: "{theme::interactive::INPUT} w-full min-h-[100px]",
                                                             placeholder: "Document risk acceptance / mitigation rationale",
                                                             value: draft_reason.read().clone(),
                                                             oninput: move |evt| draft_reason.set(evt.value()),
                                                         }
 
-                                                        div { class: "text-xs text-slate-500", "This note is persisted per system + CVE for audit review." }
+                                                        div { class: "text-xs {theme::text::MUTED}", "This note is persisted per system + CVE for audit review." }
 
                                                         div { class: "flex items-center gap-2",
                                                             button {
-                                                                class: "px-3 py-2 rounded-md bg-blue-600 hover:bg-blue-500 text-sm font-semibold text-white transition-colors disabled:opacity-50",
+                                                                class: "px-3 py-2 rounded-md {theme::interactive::PRIMARY_BTN} text-sm font-semibold text-white transition-colors disabled:opacity-50 {theme::interactive::FOCUS_RING}",
                                                                 disabled: *save_in_progress.read(),
                                                                 onclick: {
                                                                     let cve_id = group.cve_id.clone();
@@ -470,7 +474,7 @@ pub fn CvesTab(
                                                                 if *save_in_progress.read() { "Saving..." } else { "Save" }
                                                             }
                                                             button {
-                                                                class: "px-3 py-2 rounded-md border border-slate-700 bg-slate-800 hover:bg-slate-700 text-sm text-white transition-colors",
+                                                                class: "px-3 py-2 rounded-md border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} {theme::interactive::HOVER_BG} text-sm {theme::text::PRIMARY} transition-colors {theme::interactive::FOCUS_RING}",
                                                                 onclick: move |_| editing_cve.set(None),
                                                                 "Cancel"
                                                             }
@@ -502,7 +506,7 @@ fn group_vulnerabilities_by_cve(vulnerabilities: &[SystemVulnerability]) -> Vec<
                 cvss_score: vuln.cvss_score,
                 description: vuln.description.clone(),
                 published_at: vuln.published_at,
-                status: vuln.status.clone(),
+                status: normalize_status(vuln.status.as_deref()),
                 package_instances: Vec::new(),
                 justification_category: vuln.justification_category.clone(),
                 justification_reason: vuln.justification_reason.clone(),
@@ -524,6 +528,8 @@ fn group_vulnerabilities_by_cve(vulnerabilities: &[SystemVulnerability]) -> Vec<
             entry.justification_category = vuln.justification_category.clone();
             entry.justification_updated_at = vuln.justification_updated_at;
         }
+
+        entry.status = reconcile_group_status(&entry.status, vuln.status.as_deref());
     }
 
     let mut groups = grouped.into_values().collect::<Vec<_>>();
@@ -542,5 +548,34 @@ fn severity_rank(severity: &CveSeverity) -> i32 {
         CveSeverity::High => 3,
         CveSeverity::Medium => 2,
         CveSeverity::Low => 1,
+    }
+}
+
+fn normalize_status(value: Option<&str>) -> String {
+    match value.unwrap_or("open") {
+        "open" => "open".to_string(),
+        "fix_available" => "fix_available".to_string(),
+        "mixed" => "mixed".to_string(),
+        other => other.trim().to_lowercase(),
+    }
+}
+
+fn reconcile_group_status(current: &str, next: Option<&str>) -> String {
+    let next_status = normalize_status(next);
+    if current == "mixed" || next_status == "mixed" {
+        return "mixed".to_string();
+    }
+    if current == next_status {
+        return current.to_string();
+    }
+    "mixed".to_string()
+}
+
+fn status_label(status: &str) -> &'static str {
+    match status {
+        "fix_available" => "Fix available",
+        "open" => "No known fix",
+        "mixed" => "Mixed package status",
+        _ => "Status unknown",
     }
 }

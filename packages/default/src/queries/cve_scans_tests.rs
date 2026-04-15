@@ -5,7 +5,8 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 
 async fn test_pool_from_env() -> PgPool {
-    let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for TASK-261 tests");
+    let db_url =
+        std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for TASK-261 tests");
 
     PgPool::connect(&db_url)
         .await

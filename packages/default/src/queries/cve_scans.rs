@@ -225,8 +225,14 @@ pub async fn save_scan_results(
     vulnix_results: &VulnixScanOutput,
     scan_duration_ms: Option<i32>,
 ) -> Result<()> {
-    save_scan_results_with_store_path_override(pool, scan_id, vulnix_results, scan_duration_ms, None)
-        .await
+    save_scan_results_with_store_path_override(
+        pool,
+        scan_id,
+        vulnix_results,
+        scan_duration_ms,
+        None,
+    )
+    .await
 }
 
 pub(crate) async fn save_scan_results_with_store_path_override(
@@ -489,10 +495,7 @@ pub async fn get_latest_scan(pool: &PgPool, derivation_id: i32) -> Result<Option
 /// 2. Counts only `package_vulnerabilities` rows joined through `scan_packages`
 ///    for that scan — scoping to the latest scan rather than all historical data.
 /// 3. Filters for high severity (CVSS 7.0 ≤ score < 9.0) and not whitelisted.
-pub async fn count_unjustified_high_cves(
-    pool: &PgPool,
-    derivation_id: i32,
-) -> Result<Option<i64>> {
+pub async fn count_unjustified_high_cves(pool: &PgPool, derivation_id: i32) -> Result<Option<i64>> {
     // First check whether any completed scan exists; if not, return None so
     // the caller can distinguish "no scan" from "scan with zero findings".
     let latest_scan_id: Option<uuid::Uuid> = sqlx::query_scalar(

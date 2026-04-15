@@ -316,10 +316,7 @@ pub async fn load_cve_policies(pool: &PgPool) -> Vec<DeploymentPolicy> {
             .filter(|p| matches!(p, DeploymentPolicy::RequireCveCheck { .. }))
             .collect(),
         Err(err) => {
-            error!(
-                "Failed to load CVE deployment policies from DB: {:#}",
-                err
-            );
+            error!("Failed to load CVE deployment policies from DB: {:#}", err);
             vec![]
         }
     }
