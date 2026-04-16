@@ -1,7 +1,7 @@
 ---
 id: TASK-273
 title: Add evaluation cancellation and history view mirroring builds UI
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-04-16 01:24'
 updated_date: '2026-04-16 02:01'
@@ -95,3 +95,9 @@ Migration `0112` merged (TASK-272 ✅). Next number: `0113`.
 
 - [ ] #13 #13 New migration does not modify any existing migration file
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: claude on reckless in ~/code/crystal-forge/TASK-273-eval-cancel-history
+<!-- SECTION:NOTES:END -->
