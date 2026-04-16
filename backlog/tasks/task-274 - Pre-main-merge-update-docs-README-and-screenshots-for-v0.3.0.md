@@ -1,9 +1,10 @@
 ---
 id: TASK-274
 title: 'Pre-main-merge: update docs, README, and screenshots for v0.3.0'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-04-16 23:53'
+updated_date: '2026-04-16 23:53'
 labels:
   - docs
   - screenshots
@@ -44,15 +45,24 @@ Before merging dev into main for v0.3.0, several docs and screenshots are stale 
 - The README dashboard screenshot (06-dashboard.png) is Mar 16 — check if current
 
 ## Acceptance Criteria
-- [ ] README v0.3.0 roadmap row shows "Done"
-- [ ] README Web UI Views table includes Evaluations row
-- [ ] docs/context.md reflects v0.3.0 current state
-- [ ] docs/specs/01-frontend-views.md includes /evaluations route and Evaluations view section
-- [ ] integration-test.js has at least 26-evaluations and 26b-evaluations-history screenshot steps
-- [ ] All new screenshot steps added to CI_FAST_STEP_NAMES if they assert TASK-273 features
-- [ ] `SQLX_OFFLINE=true cargo check` still passes after any Rust-touching changes (none expected)
+<!-- AC:BEGIN -->
+- [ ] #1 README v0.3.0 roadmap row shows "Done"
+- [ ] #2 README Web UI Views table includes Evaluations row
+- [ ] #3 docs/context.md reflects v0.3.0 current state
+- [ ] #4 docs/specs/01-frontend-views.md includes /evaluations route and Evaluations view section
+- [ ] #5 integration-test.js has at least 26-evaluations and 26b-evaluations-history screenshot steps
+- [ ] #6 All new screenshot steps added to CI_FAST_STEP_NAMES if they assert TASK-273 features
+- [ ] #7 `SQLX_OFFLINE=true cargo check` still passes after any Rust-touching changes (none expected)
 
 ## Verification
 - Tier 0: `SQLX_OFFLINE=true nix develop -c cargo check` (no Rust changes expected)
 - Manual: verify the new screenshot steps run in the integration-test.js test runner locally with node
 <!-- SECTION:DESCRIPTION:END -->
+
+<!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: claude on reckless in ~/code/crystal-forge/dev (backlog maintenance mode — docs + test only, no app code)
+<!-- SECTION:NOTES:END -->
