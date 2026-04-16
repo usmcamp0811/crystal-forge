@@ -44,7 +44,13 @@ The app uses a **sidebar navigation** pattern:
 - `/flakes` → Flakes List
 - `/environments` → Environments List
 - `/builds` → Builds Queue
-- `/admin` → Admin Console
+- `/evaluations` → Evaluations Queue & History
+- `/evaluations/:commit_id` → Evaluations (pre-selected commit)
+- `/cves` → CVE Dashboard
+- `/policies` → Deployment Policies
+- `/builders` → Builder Management
+- `/caches` → Cache Destinations
+- `/admin` → Server Management
 
 ---
 
@@ -719,6 +725,65 @@ web-ui/src/
 
 ---
 
+## Evaluations (`/evaluations`)
+
+**Route:** `/evaluations`, `/evaluations/:commit_id`
+
+**Purpose:** Monitor the NixOS flake evaluation pipeline — see what's being evaluated, cancel stuck or unwanted evaluations, and review historical eval outcomes.
+
+### Tabs
+
+#### Active Queue Tab (default)
+
+Shows commits currently in the evaluation pipeline, ordered by queue position. Each row displays:
+
+- Flake name and 8-character commit hash
+- Branch name
+- Current status chip (`pending`, `in_progress`, `cancelling`, `cancelled`)
+- Policy pass/fail counts and system count
+- **Up / Down** buttons to reprioritize pending items
+- **Cancel** button on `pending` and `in_progress` rows — disabled with spinner while request is in-flight
+- **Force Cancel** button on `cancelling` rows — skips cooperative shutdown for truly stuck evals
+
+Status transitions:
+- `pending → cancelled` immediately on cancel
+- `in_progress → cancelling` (async — eval loop detects within ~2s and kills subprocess)
+- `cancelling → cancelled` via force-cancel
+
+#### History Tab
+
+Paginated list of all completed, failed, and cancelled evaluations. Columns:
+
+| Column | Description |
+|--------|-------------|
+| Commit | 8-char hash |
+| Flake | Flake name |
+| Branch | Git branch |
+| Status | Chip: `complete`, `failed`, `cancelled` |
+| Completed | Relative time (e.g., "5m ago") |
+| Duration | Total eval time (e.g., "1m 23s") |
+| Systems | Count of NixOS configurations evaluated |
+| Actions | **Re-evaluate** button for failed/cancelled rows |
+
+**Filters:**
+- Status chips: All / Complete / Failed / Cancelled
+- Flake name text input (ILIKE match)
+- Server-side pagination (50 per page)
+
+### Evaluation Logs Panel
+
+A live WebSocket log stream for the currently selected commit, shown above the queue. Supports:
+- **Concise mode** (default): filters to high-signal lines (errors, policy results, start/finish)
+- **Verbose mode**: all raw nix-eval-jobs output
+- **Maximize**: full-screen modal for detailed inspection
+
+### Auth
+
+- Read access: viewer or above
+- Cancel / Force-Cancel: operator or admin only
+
+---
+
 ## Summary Table
 
 | Route | View | Purpose |
@@ -728,7 +793,12 @@ web-ui/src/
 | `/systems/:id` | System Detail | Manage one system |
 | `/flakes` | Flakes List | Manage flakes |
 | `/environments` | Environments List | Manage environments |
-| `/builds` | Builds | Monitor queue |
-| `/admin` | Admin | User/audit management |
-| `/login` | Login | OIDC auth |
+| `/builds` | Builds | Monitor build queue, history, cancel |
+| `/evaluations` | Evaluations | Monitor eval queue, cancel, history |
+| `/cves` | CVE Dashboard | Vulnerability scan results |
+| `/policies` | Deployment Policies | Manage deployment policy rules |
+| `/builders` | Builders | Builder node status |
+| `/caches` | Caches | Cache destination management |
+| `/admin` | Server Management | Users, OIDC, audit logs |
+| `/login` | Login | OIDC / local auth |
 | `/dev/login` | Dev Login | Local dev auth |
