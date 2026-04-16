@@ -37,7 +37,7 @@ const CVE_DASHBOARD_SUMMARY_SQL: &str = r#"
             COALESCE(SUM(p.high_cves), 0)::BIGINT                              AS high,
             COALESCE(SUM(p.medium_cves), 0)::BIGINT                            AS medium,
             COALESCE(SUM(p.low_cves), 0)::BIGINT                               AS low,
-            COUNT(*) FILTER (WHERE p.total_cves > 0)::BIGINT                   AS affected_systems,
+            (COUNT(*) FILTER (WHERE p.total_cves > 0))::BIGINT                  AS affected_systems,
             -- new CVEs in last 7 days: scalar subquery always returns one row (NULL if none)
             COALESCE((
                 SELECT COUNT(DISTINCT v.cve_id)

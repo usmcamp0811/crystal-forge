@@ -92,10 +92,10 @@ pub async fn fetch_cve_summary(pool: &PgPool) -> Result<CveSummary> {
             GROUP BY v.hostname \
          ) \
          SELECT \
-            COALESCE(SUM(critical_cves), 0), \
-            COALESCE(SUM(high_cves), 0), \
-            COALESCE(SUM(medium_cves), 0), \
-            COALESCE(SUM(low_cves), 0) \
+            COALESCE(SUM(critical_cves), 0)::BIGINT, \
+            COALESCE(SUM(high_cves), 0)::BIGINT, \
+            COALESCE(SUM(medium_cves), 0)::BIGINT, \
+            COALESCE(SUM(low_cves), 0)::BIGINT \
          FROM per_system_counts",
     )
     .fetch_one(pool)
