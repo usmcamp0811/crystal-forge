@@ -304,6 +304,56 @@ pub async fn reorder_eval_queue(ordered_commit_ids: &[i32]) -> Result<(), ApiCli
     send_empty_with_csrf("POST", &url, Some(&request)).await
 }
 
+/// Cancel an evaluation (pending → cancelled; in_progress → cancelling).
+///
+/// Returns Ok(()) on HTTP 200 (cancelled) or 202 (cancelling in progress).
+pub async fn cancel_commit_evaluation(commit_id: i32) -> Result<(), ApiClientError> {
+    let url = format!("{}/commits/{}/cancel-evaluation", base_url(), commit_id);
+    let (status, body) = send_request_with_csrf("POST", &url, None).await?;
+    if status == 200 || status == 202 {
+        Ok(())
+    } else {
+        Err(ApiClientError::Status {
+            code: status,
+            body: decode_api_error_message(&body),
+        })
+    }
+}
+
+/// Trigger manual re-evaluation for a commit (resets attempt count and re-queues).
+pub async fn re_evaluate_commit(commit_id: i32) -> Result<(), ApiClientError> {
+    let url = format!("{}/commits/{}/re-evaluate", base_url(), commit_id);
+    send_empty_with_csrf("POST", &url, None::<&()>).await
+}
+
+/// Force-cancel an evaluation stuck in 'cancelling' state.
+pub async fn force_cancel_commit_evaluation(commit_id: i32) -> Result<(), ApiClientError> {
+    let url = format!(
+        "{}/commits/{}/force-cancel-evaluation",
+        base_url(),
+        commit_id
+    );
+    send_empty_with_csrf("POST", &url, None::<&()>).await
+}
+
+/// Fetch paginated evaluation history (complete, failed, cancelled).
+pub async fn fetch_eval_history(
+    page: i64,
+    limit: i64,
+    status: Option<&str>,
+    flake: Option<&str>,
+) -> Result<EvalHistoryPage, ApiClientError> {
+    let mut params = format!("page={page}&limit={limit}");
+    if let Some(s) = status {
+        params.push_str(&format!("&status={}", encode_query_value(s)));
+    }
+    if let Some(f) = flake {
+        params.push_str(&format!("&flake={}", encode_query_value(f)));
+    }
+    let url = format!("{}/commits/eval-history?{}", base_url(), params);
+    fetch_json(&url).await
+}
+
 /// Percent-encode a query parameter value using the browser's encodeURIComponent.
 ///
 /// This ensures characters like spaces, &, #, %, +, and other reserved characters

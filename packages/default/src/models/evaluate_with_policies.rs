@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+use tokio::time::Duration;
 
 const MOCK_EVAL_TOTAL_DURATION_MS: u64 = 30_000;
 const MOCK_EVAL_MIN_PER_SYSTEM_MS: u64 = 5_000;
@@ -243,8 +244,32 @@ pub async fn evaluate_with_nix_eval_jobs(
     // Track successfully evaluated derivations with their .drv paths
     let mut evaluated_derivations: Vec<(i32, String)> = Vec::new();
 
+    // Cancellation poll interval: check the DB every 2 seconds while eval runs.
+    let mut cancel_ticker = tokio::time::interval(Duration::from_secs(2));
+    cancel_ticker.tick().await; // consume the immediate first tick
+
     loop {
         tokio::select! {
+            // Third arm: cooperative cancellation poll
+            _ = cancel_ticker.tick() => {
+                match crate::queries::commits::check_cancellation_requested(pool, commit.id).await {
+                    Ok(true) => {
+                        warn!("🚫 Cancellation requested for commit {} — killing nix-eval-jobs", commit.id);
+                        let _ = child.kill().await;
+                        // Transition cancelling → cancelled
+                        let _ = crate::queries::commits::force_cancel_commit_evaluation(pool, commit.id).await;
+                        // Run partial derivation cleanup inline (same as startup cleanup)
+                        if let Err(e) = crate::queries::commits::cleanup_partial_derivations_for_commit(pool, commit.id).await {
+                            warn!("Failed to clean up partial derivations for cancelled commit {}: {e}", commit.id);
+                        }
+                        bail!("evaluation cancelled by user request");
+                    }
+                    Ok(false) => {} // not cancelled, continue
+                    Err(e) => {
+                        warn!("Failed to check cancellation flag for commit {}: {e}", commit.id);
+                    }
+                }
+            }
             line_result = stdout_reader.next_line(), if !stdout_done => {
                 match line_result? {
                     Some(line) if !line.trim().is_empty() => {

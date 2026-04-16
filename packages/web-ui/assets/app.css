@@ -252,6 +252,12 @@ html, body {
   border-color: var(--cf-chip-slate-border);
 }
 
+.cf-chip-amber {
+  background-color: #3d2e0a;
+  border-color: #b45309;
+  color: #fde68a;
+}
+
 .cf-chip-teal {
   background-color: var(--cf-chip-teal-bg);
   border-color: var(--cf-chip-teal-border);
