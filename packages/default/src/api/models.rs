@@ -399,6 +399,57 @@ pub struct ReorderEvalQueueRequest {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Eval cancellation + history DTOs
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Outcome returned by the cancel-evaluation endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CancelEvalOutcome {
+    /// Commit was `pending` and is now immediately `cancelled`.
+    Cancelled,
+    /// Commit was `in_progress`; transitioned to `cancelling`.
+    /// The eval loop will kill the subprocess and finalise to `cancelled`.
+    CancellingInProgress,
+    /// No commit with that ID was found, or it was already terminal.
+    NotFound,
+    /// Commit was already in a terminal state (`complete`, `failed`, `cancelled`).
+    AlreadyTerminal,
+}
+
+/// A single row in the eval history list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvalHistoryItem {
+    pub commit_id: i32,
+    pub flake_id: i32,
+    pub flake_name: String,
+    pub branch: String,
+    pub commit_hash: String,
+    pub commit_message: Option<String>,
+    pub author: Option<String>,
+    pub committed_at: DateTime<Utc>,
+    pub evaluation_status: String,
+    /// When the evaluation finished (complete, failed, or cancelled).
+    pub evaluation_completed_at: Option<DateTime<Utc>>,
+    /// Elapsed milliseconds from started_at to completed_at.
+    pub evaluation_duration_ms: Option<i64>,
+    pub evaluation_error_message: Option<String>,
+    pub system_count: i64,
+    pub passed_count: i64,
+    pub policy_failed_count: i64,
+    pub eval_failed_count: i64,
+}
+
+/// Paginated response for GET /api/v1/commits/eval-history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvalHistoryPage {
+    pub total_count: i64,
+    pub page: i64,
+    pub limit: i64,
+    pub items: Vec<EvalHistoryItem>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // System DTOs — GET /api/v1/systems, GET /api/v1/systems/:id
 // ─────────────────────────────────────────────────────────────────────────────
 

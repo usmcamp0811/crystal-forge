@@ -383,12 +383,24 @@ async fn main() -> anyhow::Result<()> {
             post(commits::reorder_eval_queue),
         )
         .route(
+            "/api/v1/commits/eval-history",
+            get(commits::list_eval_history),
+        )
+        .route(
             "/api/v1/commits/:commit_id/eval/stream",
             get(commits::stream_eval_logs),
         )
         .route(
             "/api/v1/commits/:commit_id/re-evaluate",
             post(commits::re_evaluate_commit),
+        )
+        .route(
+            "/api/v1/commits/:commit_id/cancel-evaluation",
+            post(commits::cancel_commit_evaluation),
+        )
+        .route(
+            "/api/v1/commits/:commit_id/force-cancel-evaluation",
+            post(commits::force_cancel_commit_evaluation),
         )
         .route("/api/v1/admin/users", get(admin::list_users))
         .route("/api/v1/admin/users", post(admin::create_user))
