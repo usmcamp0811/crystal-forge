@@ -1068,6 +1068,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn cve_dedup_migration_0112_scopes_cve_counts_to_active_systems() {
+        let migration =
+            include_str!("../../migrations/0112_scope_cve_counts_to_active_systems.sql");
+
+        // Both views must be redefined
+        assert!(
+            migration.contains("CREATE OR REPLACE VIEW public.view_system_list AS"),
+            "0112 must redefine view_system_list"
+        );
+        assert!(
+            migration.contains("CREATE OR REPLACE VIEW public.view_system_detail AS"),
+            "0112 must redefine view_system_detail"
+        );
+
+        // The cve_counts CTE must join systems and filter is_active in both views
+        // Count occurrences: must appear at least twice (once per view)
+        let join_count = migration
+            .matches("JOIN systems s ON s.hostname = v.hostname")
+            .count();
+        assert_eq!(
+            join_count, 2,
+            "cve_counts CTE must join systems in both views (got {join_count})"
+        );
+        let active_count = migration
+            .matches("WHERE s.is_active = TRUE")
+            .count();
+        assert!(
+            active_count >= 2,
+            "cve_counts CTE must filter is_active = TRUE in both views (got {active_count})"
+        );
+
+        // Must not modify 0111 content or reference justifications table
+        assert!(
+            !migration.contains("system_cve_justifications"),
+            "0112 must not touch system_cve_justifications"
+        );
+    }
+
+
     #[tokio::test]
     #[ignore = "requires live database connection"]
     async fn cve_dedup_migration_counts_each_cve_id_once_despite_package_fanout() {
