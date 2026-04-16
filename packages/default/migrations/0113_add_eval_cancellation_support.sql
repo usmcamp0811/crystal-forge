@@ -27,11 +27,18 @@ ALTER TABLE commits
 ALTER TABLE commits
     ADD COLUMN IF NOT EXISTS cancellation_requested BOOLEAN NOT NULL DEFAULT FALSE;
 
--- Step 3: Rebuild the single-in-progress index to also cover 'cancelling'.
--- The original index (migration 0088) only covers evaluation_status = 'in_progress',
--- which prevents two concurrent evaluations. We extend it so that 'cancelling'
--- is also covered — only one commit can be in either state at a time.
+-- Step 3: Rebuild the single-in-progress index to enforce at-most-one active eval
+-- across BOTH 'in_progress' and 'cancelling' states.
+--
+-- The previous index (migration 0088) indexed ON commits (evaluation_status)
+-- WHERE evaluation_status = 'in_progress'. Uniqueness was enforced per value,
+-- so a simple IN ('in_progress','cancelling') predicate on the same column would
+-- still allow one in_progress row AND one cancelling row simultaneously.
+--
+-- Fix: index a constant expression ((1)) so the partial index contains exactly
+-- one entry whenever any qualifying row exists, regardless of which status value
+-- that row holds. This guarantees at most one row total can be in either state.
 DROP INDEX IF EXISTS idx_commits_single_in_progress;
 CREATE UNIQUE INDEX idx_commits_single_in_progress
-    ON commits (evaluation_status)
+    ON commits ((1))
     WHERE evaluation_status IN ('in_progress', 'cancelling');

@@ -593,6 +593,12 @@ pub async fn cancel_commit_evaluation(
 /// eval loop to confirm subprocess death. Use this for evals that have been
 /// stuck in 'cancelling' for longer than expected.
 ///
+/// IMPORTANT: only operates on rows in `cancelling` state. It does NOT accept
+/// `in_progress` rows to avoid orphaning a still-running nix-eval-jobs subprocess.
+/// To cancel an in_progress eval, use `cancel_commit_evaluation` first (which
+/// sets cancellation_requested and lets the loop kill the process cooperatively),
+/// then use force-cancel only if it gets stuck in `cancelling`.
+///
 /// Returns `true` if the row was updated, `false` if it was already in a
 /// different state (idempotent).
 pub async fn force_cancel_commit_evaluation(pool: &PgPool, commit_id: i32) -> Result<bool> {
@@ -603,7 +609,7 @@ pub async fn force_cancel_commit_evaluation(pool: &PgPool, commit_id: i32) -> Re
             cancellation_requested = FALSE,
             evaluation_completed_at = COALESCE(evaluation_completed_at, NOW())
         WHERE id = $1
-          AND evaluation_status IN ('cancelling', 'in_progress')
+          AND evaluation_status = 'cancelling'
         "#,
     )
     .bind(commit_id)
