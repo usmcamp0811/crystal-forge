@@ -1107,6 +1107,7 @@ mod tests {
         );
     }
 
+
     #[tokio::test]
     #[ignore = "requires live database connection"]
     async fn cve_dedup_migration_counts_each_cve_id_once_despite_package_fanout() {
