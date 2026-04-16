@@ -1,7 +1,7 @@
 ---
 id: TASK-273
 title: Add evaluation cancellation and history view mirroring builds UI
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-04-16 01:24'
 updated_date: '2026-04-16 02:01'
