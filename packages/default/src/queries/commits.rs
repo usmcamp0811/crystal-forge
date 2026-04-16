@@ -1,3 +1,4 @@
+use crate::api::models::{CancelEvalOutcome, EvalHistoryItem, EvalHistoryPage};
 use crate::models::commits::Commit;
 use crate::models::flakes::Flake;
 use anyhow::{Context, Result};
@@ -38,7 +39,7 @@ pub async fn insert_commit_with_metadata(
         next_position AS (
             SELECT COALESCE(MAX(eval_queue_position), 0) + 1 AS position
             FROM commits
-            WHERE COALESCE(evaluation_status, 'pending') IN ('pending', 'in_progress')
+            WHERE COALESCE(evaluation_status, 'pending') IN ('pending', 'in_progress', 'cancelling')
         )
         INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp, message, author, eval_queue_position)
         SELECT $1, $2, $3, $4, $5, position
@@ -191,17 +192,19 @@ pub async fn get_commit_distance_from_head(
     Ok(distance)
 }
 
-/// Reset commits stuck in 'in_progress' state (from crashed evaluations)
+/// Reset commits stuck in 'in_progress' or 'cancelling' state (from crashed evaluations).
+///
+/// NOTE: `cancelled` rows are intentionally left alone — they represent
+/// evaluations the user explicitly cancelled and should not be re-queued.
 pub async fn reset_stuck_commit_evaluations(pool: &PgPool) -> Result<()> {
-    // Reset ALL in_progress commits on startup (not just stuck ones)
-    // This ensures clean state and enforces single-eval-at-a-time invariant
     let reset = sqlx::query!(
         r#"
         UPDATE commits
-        SET 
+        SET
             evaluation_status = 'pending',
-            evaluation_started_at = NULL
-        WHERE evaluation_status = 'in_progress'
+            evaluation_started_at = NULL,
+            cancellation_requested = FALSE
+        WHERE evaluation_status IN ('in_progress', 'cancelling')
         RETURNING id, git_commit_hash
         "#
     )
@@ -210,7 +213,7 @@ pub async fn reset_stuck_commit_evaluations(pool: &PgPool) -> Result<()> {
 
     if !reset.is_empty() {
         warn!(
-            "🧹 Reset {} in-progress commit evaluations on startup",
+            "🧹 Reset {} in-progress/cancelling commit evaluations on startup",
             reset.len()
         );
         for row in &reset {
@@ -403,10 +406,11 @@ pub async fn list_eval_queue(pool: &PgPool, limit: i64) -> Result<Vec<EvalQueueR
         FROM commits c
         JOIN flakes f ON f.id = c.flake_id
         LEFT JOIN commit_artifacts_cache cac ON cac.commit_id = c.id
-        WHERE COALESCE(c.evaluation_status, 'pending') IN ('pending', 'in_progress', 'complete', 'failed')
+        WHERE COALESCE(c.evaluation_status, 'pending') IN ('pending', 'in_progress', 'cancelling', 'complete', 'failed')
         ORDER BY
             CASE
                 WHEN c.evaluation_status = 'in_progress' THEN 0
+                WHEN c.evaluation_status = 'cancelling' THEN 0
                 WHEN c.evaluation_status = 'pending' THEN 1
                 ELSE 2
             END,
@@ -517,6 +521,251 @@ fn validate_eval_queue_reorder_payload(
         missing_ids,
         extra_ids
     ))
+}
+
+/// Cancel an evaluation by commit ID.
+///
+/// - `pending → cancelled` immediately (sets cancellation_requested = FALSE)
+/// - `in_progress → cancelling` (sets cancellation_requested = TRUE so the loop kills the subprocess)
+/// - Returns `NotFound` if no matching row, `AlreadyTerminal` for complete/failed/cancelled rows.
+pub async fn cancel_commit_evaluation(
+    pool: &PgPool,
+    commit_id: i32,
+) -> Result<CancelEvalOutcome> {
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        evaluation_status: Option<String>,
+    }
+
+    let current = sqlx::query_as::<_, Row>(
+        "SELECT evaluation_status FROM commits WHERE id = $1",
+    )
+    .bind(commit_id)
+    .fetch_optional(pool)
+    .await?;
+
+    let Some(row) = current else {
+        return Ok(CancelEvalOutcome::NotFound);
+    };
+
+    match row.evaluation_status.as_deref().unwrap_or("pending") {
+        "pending" => {
+            sqlx::query(
+                r#"
+                UPDATE commits
+                SET evaluation_status = 'cancelled',
+                    cancellation_requested = FALSE,
+                    evaluation_completed_at = NOW()
+                WHERE id = $1
+                  AND COALESCE(evaluation_status, 'pending') = 'pending'
+                "#,
+            )
+            .bind(commit_id)
+            .execute(pool)
+            .await?;
+            info!("🚫 Cancelled pending evaluation for commit {commit_id}");
+            Ok(CancelEvalOutcome::Cancelled)
+        }
+        "in_progress" => {
+            sqlx::query(
+                r#"
+                UPDATE commits
+                SET evaluation_status = 'cancelling',
+                    cancellation_requested = TRUE
+                WHERE id = $1
+                  AND evaluation_status = 'in_progress'
+                "#,
+            )
+            .bind(commit_id)
+            .execute(pool)
+            .await?;
+            info!("🔄 Requested cancellation for in-progress evaluation commit {commit_id}");
+            Ok(CancelEvalOutcome::CancellingInProgress)
+        }
+        "complete" | "failed" | "cancelled" => Ok(CancelEvalOutcome::AlreadyTerminal),
+        _ => Ok(CancelEvalOutcome::NotFound),
+    }
+}
+
+/// Force-cancel an evaluation stuck in 'cancelling' state.
+///
+/// Immediately transitions `cancelling → cancelled` without waiting for the
+/// eval loop to confirm subprocess death. Use this for evals that have been
+/// stuck in 'cancelling' for longer than expected.
+///
+/// Returns `true` if the row was updated, `false` if it was already in a
+/// different state (idempotent).
+pub async fn force_cancel_commit_evaluation(pool: &PgPool, commit_id: i32) -> Result<bool> {
+    let result = sqlx::query(
+        r#"
+        UPDATE commits
+        SET evaluation_status = 'cancelled',
+            cancellation_requested = FALSE,
+            evaluation_completed_at = COALESCE(evaluation_completed_at, NOW())
+        WHERE id = $1
+          AND evaluation_status IN ('cancelling', 'in_progress')
+        "#,
+    )
+    .bind(commit_id)
+    .execute(pool)
+    .await?;
+
+    let updated = result.rows_affected() > 0;
+    if updated {
+        info!("⚡ Force-cancelled evaluation for commit {commit_id}");
+    }
+    Ok(updated)
+}
+
+/// Check whether cancellation has been requested for the given commit.
+///
+/// Called periodically from inside `evaluate_with_nix_eval_jobs` to allow
+/// cooperative cancellation without holding a lock.
+pub async fn check_cancellation_requested(pool: &PgPool, commit_id: i32) -> Result<bool> {
+    let flag: Option<bool> = sqlx::query_scalar(
+        "SELECT cancellation_requested FROM commits WHERE id = $1",
+    )
+    .bind(commit_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(flag.unwrap_or(false))
+}
+
+/// Clean up partial derivations for a specific commit.
+///
+/// Called inline after cooperative eval cancellation to remove derivation rows
+/// that were inserted mid-eval but never completed (no derivation_path).
+/// Mirrors the startup-time `cleanup_partial_derivations` but scoped to one commit.
+pub async fn cleanup_partial_derivations_for_commit(pool: &PgPool, commit_id: i32) -> Result<()> {
+    sqlx::query(
+        r#"
+        DELETE FROM derivations
+        WHERE commit_id = $1
+          AND derivation_path IS NULL
+          AND status_id IN (3, 4)
+        "#,
+    )
+    .bind(commit_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Paginated query for evaluation history (complete, failed, cancelled).
+///
+/// Results are ordered by `evaluation_completed_at DESC` so the most
+/// recently finished eval appears first.
+pub async fn list_eval_history(
+    pool: &PgPool,
+    page: i64,
+    limit: i64,
+    status_filter: Option<&str>,
+    flake_filter: Option<&str>,
+) -> Result<EvalHistoryPage> {
+    let offset = (page.max(1) - 1) * limit;
+
+    #[derive(sqlx::FromRow)]
+    struct HistoryRow {
+        commit_id: i32,
+        flake_id: i32,
+        flake_name: String,
+        branch: String,
+        commit_hash: String,
+        commit_message: Option<String>,
+        author: Option<String>,
+        committed_at: chrono::DateTime<chrono::Utc>,
+        evaluation_status: String,
+        evaluation_completed_at: Option<chrono::DateTime<chrono::Utc>>,
+        evaluation_duration_ms: Option<i64>,
+        evaluation_error_message: Option<String>,
+        system_count: i64,
+        passed_count: i64,
+        policy_failed_count: i64,
+        eval_failed_count: i64,
+        total_count: i64,
+    }
+
+    let rows = sqlx::query_as::<_, HistoryRow>(
+        r#"
+        SELECT
+            c.id                            AS commit_id,
+            c.flake_id,
+            f.name                          AS flake_name,
+            COALESCE(f.branch, 'main')      AS branch,
+            c.git_commit_hash               AS commit_hash,
+            c.message                       AS commit_message,
+            c.author,
+            c.commit_timestamp              AS committed_at,
+            c.evaluation_status,
+            c.evaluation_completed_at,
+            CASE
+                WHEN c.evaluation_started_at IS NOT NULL
+                 AND c.evaluation_completed_at IS NOT NULL
+                THEN EXTRACT(EPOCH FROM (c.evaluation_completed_at - c.evaluation_started_at))::BIGINT * 1000
+                ELSE NULL
+            END                             AS evaluation_duration_ms,
+            c.evaluation_error_message,
+            COALESCE(CARDINALITY(cac.nixos_configurations), 0)::BIGINT AS system_count,
+            COALESCE((
+                SELECT COUNT(*)::BIGINT FROM derivations d
+                WHERE d.commit_id = c.id AND d.cf_agent_enabled IS TRUE
+            ), 0)                           AS passed_count,
+            COALESCE((
+                SELECT COUNT(*)::BIGINT FROM derivations d
+                WHERE d.commit_id = c.id AND d.cf_agent_enabled IS FALSE
+            ), 0)                           AS policy_failed_count,
+            COALESCE((
+                SELECT COUNT(*)::BIGINT FROM derivations d
+                WHERE d.commit_id = c.id AND d.status_id = 6
+            ), 0)                           AS eval_failed_count,
+            COUNT(*) OVER ()                AS total_count
+        FROM commits c
+        JOIN flakes f ON f.id = c.flake_id
+        LEFT JOIN commit_artifacts_cache cac ON cac.commit_id = c.id
+        WHERE c.evaluation_status IN ('complete', 'failed', 'cancelled')
+          AND ($1::text IS NULL OR c.evaluation_status = $1)
+          AND ($2::text IS NULL OR f.name ILIKE ('%' || $2 || '%'))
+        ORDER BY c.evaluation_completed_at DESC NULLS LAST, c.id DESC
+        LIMIT $3 OFFSET $4
+        "#,
+    )
+    .bind(status_filter)
+    .bind(flake_filter)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await?;
+
+    let total_count = rows.first().map(|r| r.total_count).unwrap_or(0);
+
+    let items = rows
+        .into_iter()
+        .map(|r| EvalHistoryItem {
+            commit_id: r.commit_id,
+            flake_id: r.flake_id,
+            flake_name: r.flake_name,
+            branch: r.branch,
+            commit_hash: r.commit_hash,
+            commit_message: r.commit_message,
+            author: r.author,
+            committed_at: r.committed_at,
+            evaluation_status: r.evaluation_status,
+            evaluation_completed_at: r.evaluation_completed_at,
+            evaluation_duration_ms: r.evaluation_duration_ms,
+            evaluation_error_message: r.evaluation_error_message,
+            system_count: r.system_count,
+            passed_count: r.passed_count,
+            policy_failed_count: r.policy_failed_count,
+            eval_failed_count: r.eval_failed_count,
+        })
+        .collect();
+
+    Ok(EvalHistoryPage {
+        total_count,
+        page,
+        limit,
+        items,
+    })
 }
 
 #[cfg(test)]
