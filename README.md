@@ -3,30 +3,31 @@
 </p>
 
 <p align="center">
-  <strong>Compliance and build coordination for NixOS in regulated environments</strong>
+  <strong>Monitoring, build coordination, and compliance tooling for NixOS fleets</strong>
 </p>
 
 ---
 
-## What's New in v0.3.0 Beta
+## What's New in v0.3.0
 
-Crystal Forge now includes a **full-featured web-based dashboard** built with Dioxus, replacing the Grafana dependency for core operational features:
+Crystal Forge now has a **web-based dashboard** built with Dioxus. The UI is functional and covers the core workflows, but it's still being polished — expect rough edges. This release is aimed at homelabbers and NixOS enthusiasts who want to kick the tires, not regulated production deployments.
 
 ![Dashboard](./docs/screenshots/06-dashboard.png)
 
 ### Web UI Views
 
-| View             | Screenshot                                                | Description                                            |
-| ---------------- | --------------------------------------------------------- | ------------------------------------------------------ |
-| **Login**        | [01-login](./docs/screenshots/01-login-page.png)          | Unified login supporting OIDC, Local auth, or Dev mode |
-| **Registration** | [02-register](./docs/screenshots/02-registration.png)     | First-time admin setup flow                            |
-| **Dashboard**    | [06-dashboard](./docs/screenshots/06-dashboard.png)       | Fleet health, build queue, deployments, CVE summary    |
-| **Systems**      | [08-systems](./docs/screenshots/08-systems.png)           | Table/card toggle, filtering, status badges            |
-| **Flakes**       | [09-flakes](./docs/screenshots/09-flakes.png)             | Git commit timeline, add/remove management             |
-| **Environments** | [10-environments](./docs/screenshots/10-environments.png) | Color-coded environments with policies                 |
-| **Builds**       | [11-builds](./docs/screenshots/11-builds.png)             | Build queue, worker status, history                    |
-| **CVEs**         | [12-cves](./docs/screenshots/12-cves.png)                 | Vulnerability scanning results                         |
-| **Style Guide**  | [13-style-guide](./docs/screenshots/13-style-guide.png)   | Design system reference                                |
+| View              | Screenshot                                                  | Description                                              |
+| ----------------- | ----------------------------------------------------------- | -------------------------------------------------------- |
+| **Login**         | [01-login](./docs/screenshots/01-login-page.png)            | Unified login supporting OIDC, Local auth, or Dev mode   |
+| **Registration**  | [02-register](./docs/screenshots/02-registration.png)       | First-time admin setup flow                              |
+| **Dashboard**     | [06-dashboard](./docs/screenshots/06-dashboard.png)         | Fleet health, build queue, deployments, CVE summary      |
+| **Systems**       | [12-systems](./docs/screenshots/12-systems.png)             | Table/card toggle, filtering, status badges, CVE chips   |
+| **Flakes**        | [13-flakes](./docs/screenshots/13-flakes.png)               | Git commit timeline, add/remove management               |
+| **Environments**  | [14-environments](./docs/screenshots/14-environments.png)   | Color-coded environments with policies                   |
+| **Builds**        | [15-builds](./docs/screenshots/15-builds.png)               | Build queue, worker status, history, cancel/force-cancel |
+| **Evaluations**   | [26-evaluations](./docs/screenshots/26-evaluations.png)     | Eval queue with cancel buttons, history tab with filters |
+| **CVEs**          | [16-cves](./docs/screenshots/16-cves.png)                   | Vulnerability scanning results, severity filters         |
+| **Style Guide**   | [17-style-guide](./docs/screenshots/17-style-guide.png)     | Design system reference                                  |
 
 ### Authentication Modes
 
@@ -73,6 +74,19 @@ See the **[Onboarding Guide](./docs/onboarding-guide.md)** for a complete walkth
 - **Operator**: Can manage systems, deployments, and view all data
 - **Viewer**: Read-only access to dashboards and reports
 
+### Evaluation Cancellation & History
+
+Cancel stuck or unwanted evaluations without restarting the server:
+
+- **Cancel pending evals**: Immediately remove from the queue
+- **Cancel in-progress evals**: Cooperative cancellation — flags the running subprocess which terminates within ~2s
+- **Force-cancel**: For evals stuck in the cancelling state
+- **Eval history tab**: Paginated view of all completed, failed, and cancelled evaluations with duration, status chips, error details, and re-evaluate action
+
+### CVE Count Accuracy
+
+Evaluation CVE counts in system list, system detail, and all dashboard surfaces now reflect unique CVE IDs per system, preventing inflation from package-derivation fanout where the same CVE appeared across multiple package paths.
+
 ### Testing Infrastructure
 
 - **Web UI Integration Tests**: Playwright-based with automated screenshots
@@ -83,9 +97,9 @@ See the **[Onboarding Guide](./docs/onboarding-guide.md)** for a complete walkth
 
 ## What is Crystal Forge?
 
-Crystal Forge is a self-hosted monitoring, compliance, and build system purpose-built for NixOS fleets. It provides cryptographically-verified system state tracking, automated build coordination, CVE scanning, and policy-based deployment management—designed for organizations that need auditability and control.
+Crystal Forge is a self-hosted monitoring, compliance, and build system purpose-built for NixOS fleets. It provides cryptographically-verified system state tracking, automated build coordination, CVE scanning, and policy-based deployment management—built toward the goal of auditability and control in regulated environments.
 
-**Current Status**: v0.3.0 Beta — Web dashboard and multi-user authentication are functional. Admin console and advanced compliance features in progress.
+**Current Status**: v0.3.0 — The core backend is solid and the web UI covers the main workflows, but the UI still has rough edges and a number of planned features aren't implemented yet. Aimed at homelabbers and NixOS enthusiasts who want to run it and help shape it; the compliance and regulated-environment story is still in progress.
 
 ---
 
@@ -291,8 +305,10 @@ CRYSTAL_FORGE_OIDC_REDIRECT_URI=https://forge.example.com/api/auth/oidc/callback
 # Enter development shell
 nix develop
 
-# Start database and server
-process-compose up
+# Start core services (choose one)
+server-stack up        # Postgres + server + builder
+server-stack-mock up   # Postgres + server + mock builder/eval (fast UI testing)
+db-only up             # Postgres only
 
 # Start with local OIDC (Keycloak)
 nix run .#devScripts.oidc-stack -- up
@@ -328,8 +344,13 @@ nix build .#checks.x86_64-linux.server
 nix build .#checks.x86_64-linux.builder
 nix build .#checks.x86_64-linux.web-ui
 
-# Update screenshots
-nix build .#checks.x86_64-linux.web-ui-update
+# Refresh docs screenshots from web-ui check output
+nix build .#checks.x86_64-linux.web-ui
+cp result/screenshots/*.png docs/screenshots/
+
+# Optional: full screenshot pass (not ci_fast subset)
+CF_UI_TEST_PROFILE=full node checks/web-ui/tests/integration-test.js \
+  http://127.0.0.1:3000 docs/screenshots
 ```
 
 ---
@@ -385,14 +406,14 @@ crystal-forge.stig = {
 
 **Progress**: 40% complete (59/147 tasks done)
 
-| Version | Status      | Features                                              |
-| ------- | ----------- | ----------------------------------------------------- |
-| v0.1.0  | Done        | Core monitoring, build coordination, CVE scanning     |
-| v0.2.0  | Done        | Deployment execution, policy enforcement, generations |
-| v0.3.0  | In Progress | Web dashboard (Dioxus), OIDC auth, RBAC               |
-| v0.4.0  | Backlog     | Advanced compliance reporting                         |
-| v0.5.0  | Backlog     | Multi-tenant support                                  |
-| Future  | Backlog     | Tvix integration                                      |
+| Version | Status      | Features                                                                        |
+| ------- | ----------- | ------------------------------------------------------------------------------- |
+| v0.1.0  | Done        | Core monitoring, build coordination, CVE scanning                               |
+| v0.2.0  | Done        | Deployment execution, policy enforcement, generations                           |
+| v0.3.0  | Done        | Web UI (functional, not fully polished), OIDC auth, RBAC, eval cancel + history |
+| v0.4.0  | Backlog     | UI polish, advanced compliance reporting                                        |
+| v0.5.0  | Backlog     | Multi-tenant support                                                            |
+| Future  | Backlog     | Tvix integration                                                                |
 
 ### Active Milestones
 
