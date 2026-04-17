@@ -10,7 +10,7 @@
 
 ## What's New in v0.3.0
 
-Crystal Forge now includes a **full-featured web-based dashboard** built with Dioxus, replacing the Grafana dependency for core operational features:
+Crystal Forge now has a **web-based dashboard** built with Dioxus. The UI is functional and covers the core workflows, but it's still being polished — expect rough edges. This release is aimed at homelabbers and NixOS enthusiasts who want to kick the tires, not regulated production deployments.
 
 ![Dashboard](./docs/screenshots/06-dashboard.png)
 
@@ -99,7 +99,7 @@ Evaluation CVE counts in system list, system detail, and all dashboard surfaces 
 
 Crystal Forge is a self-hosted monitoring, compliance, and build system purpose-built for NixOS fleets. It provides cryptographically-verified system state tracking, automated build coordination, CVE scanning, and policy-based deployment management—designed for organizations that need auditability and control.
 
-**Current Status**: v0.3.0 — Web dashboard, multi-user authentication, CVE deduplication, and evaluation cancellation are complete. Advanced compliance reporting and multi-tenant support in development.
+**Current Status**: v0.3.0 — The core backend is solid and the web UI is functional, but the UI still has rough edges and a lot of features are either incomplete or missing entirely. Good for homelab use and tinkering; not yet ready for regulated or production environments.
 
 ---
 
@@ -399,14 +399,14 @@ crystal-forge.stig = {
 
 **Progress**: 40% complete (59/147 tasks done)
 
-| Version | Status  | Features                                                                   |
-| ------- | ------- | -------------------------------------------------------------------------- |
-| v0.1.0  | Done    | Core monitoring, build coordination, CVE scanning                          |
-| v0.2.0  | Done    | Deployment execution, policy enforcement, generations                      |
-| v0.3.0  | Done    | Web dashboard (Dioxus), OIDC auth, RBAC, CVE dedup, eval cancel + history  |
-| v0.4.0  | Backlog | Advanced compliance reporting                                              |
-| v0.5.0  | Backlog | Multi-tenant support                                                       |
-| Future  | Backlog | Tvix integration                                                           |
+| Version | Status      | Features                                                                        |
+| ------- | ----------- | ------------------------------------------------------------------------------- |
+| v0.1.0  | Done        | Core monitoring, build coordination, CVE scanning                               |
+| v0.2.0  | Done        | Deployment execution, policy enforcement, generations                           |
+| v0.3.0  | Done        | Web UI (functional, not fully polished), OIDC auth, RBAC, eval cancel + history |
+| v0.4.0  | Backlog     | UI polish, advanced compliance reporting                                        |
+| v0.5.0  | Backlog     | Multi-tenant support                                                            |
+| Future  | Backlog     | Tvix integration                                                                |
 
 ### Active Milestones
 

@@ -18,10 +18,11 @@ Crystal Forge operates as a distributed compliance and build system for NixOS en
 
 ### Current State
 
-- **Release v0.3.0** — production-ready for regulated NixOS fleets
+- **v0.3.0** — functional web UI, suitable for homelab and tinkering; not yet ready for regulated or production environments
 - **2600+ commits** with active development
-- **Working features**: system fingerprinting, Ed25519 auth, change detection, full web dashboard (Dioxus), OIDC/local auth, RBAC, build coordination, CVE scanning with deduplication, deployment policy enforcement, evaluation cancellation and history
-- **In development**: advanced compliance reporting, multi-tenant support
+- **Working features**: system fingerprinting, Ed25519 auth, change detection, web dashboard (Dioxus), OIDC/local auth, RBAC, build coordination, CVE scanning with deduplication, deployment policy enforcement, evaluation cancellation and history
+- **Still rough**: UI polish, several views incomplete, many planned features not yet implemented
+- **In development**: UI polish, advanced compliance reporting, multi-tenant support
 
 ### Communication Patterns
 
