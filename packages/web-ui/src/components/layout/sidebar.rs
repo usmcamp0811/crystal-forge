@@ -341,7 +341,7 @@ pub fn SidebarNav() -> Element {
                 div {
                     class: "p-4 border-t text-xs {theme::text::MUTED}",
                     style: "border-top-color: var(--cf-card-border);",
-                    "v0.1.0"
+                    "v{env!(\"CARGO_PKG_VERSION\")}"
                 }
             }
         }
@@ -642,7 +642,7 @@ pub fn MobileDrawer() -> Element {
             div {
                 class: "p-4 border-t text-xs {theme::text::MUTED}",
                 style: "border-top-color: var(--cf-card-border);",
-                "v0.1.0"
+                "v{env!(\"CARGO_PKG_VERSION\")}"
             }
         }
     }
