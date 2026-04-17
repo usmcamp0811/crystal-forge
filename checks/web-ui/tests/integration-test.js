@@ -3764,6 +3764,208 @@ const steps = [
       await page.waitForTimeout(1200);
     },
   },
+  // ── TASK-273: Evaluation cancellation and history ────────────────────────
+  {
+    name: "26-evaluations",
+    description: "Evaluations page — Active Queue tab with cancel buttons (TASK-273)",
+    action: async (page) => {
+      const evalQueueMock = {
+        active_count: 3,
+        completed_count: 12,
+        execution_mode: "standard",
+        timestamp: new Date().toISOString(),
+        items: [
+          {
+            commit_id: 1001,
+            flake_id: 1,
+            flake_name: "infrastructure",
+            branch: "main",
+            commit_hash: "a1b2c3d4e5f6a7b8",
+            commit_message: "feat: upgrade postgresql to 17.x",
+            author: "alice",
+            committed_at: new Date(Date.now() - 120000).toISOString(),
+            evaluation_status: "in_progress",
+            queue_position: 1,
+            systems: ["gray", "reckless", "butler", "chesty"],
+            system_count: 4,
+            passed_count: 2,
+            policy_failed_count: 0,
+            eval_failed_count: 0,
+          },
+          {
+            commit_id: 1002,
+            flake_id: 1,
+            flake_name: "infrastructure",
+            branch: "main",
+            commit_hash: "b2c3d4e5f6a7b8c9",
+            commit_message: "chore: update nixpkgs input",
+            author: "bob",
+            committed_at: new Date(Date.now() - 300000).toISOString(),
+            evaluation_status: "pending",
+            queue_position: 2,
+            systems: [],
+            system_count: 0,
+            passed_count: 0,
+            policy_failed_count: 0,
+            eval_failed_count: 0,
+          },
+          {
+            commit_id: 1003,
+            flake_id: 2,
+            flake_name: "workstations",
+            branch: "dev",
+            commit_hash: "c3d4e5f6a7b8c9d0",
+            commit_message: "fix: add missing font packages",
+            author: "carol",
+            committed_at: new Date(Date.now() - 600000).toISOString(),
+            evaluation_status: "cancelling",
+            queue_position: 3,
+            systems: [],
+            system_count: 0,
+            passed_count: 0,
+            policy_failed_count: 0,
+            eval_failed_count: 0,
+          },
+        ],
+      };
+
+      await page.route("**/api/v1/commits/eval-queue**", async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(evalQueueMock) });
+      });
+      await page.route("**/api/v1/commits/*/cancel-evaluation**", async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ outcome: "cancelled" }) });
+      });
+      await page.route("**/api/v1/commits/*/force-cancel-evaluation**", async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ outcome: "cancelled" }) });
+      });
+      // Mock the eval log WebSocket endpoint gracefully
+      await page.route("**/api/v1/commits/*/eval/stream**", async (route) => {
+        await route.fulfill({ status: 200, contentType: "text/plain", body: "" });
+      });
+
+      await page.goto(`${baseUrl}/evaluations`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2500);
+
+      // Assert Active Queue tab is shown with items
+      const activeQueueHeading = page.getByText(/Active Queue/i).first();
+      await activeQueueHeading.waitFor({ timeout: 5000 });
+
+      // Assert Cancel button is visible on in_progress row
+      const cancelBtn = page.getByRole("button", { name: /Cancel/i }).first();
+      await cancelBtn.waitFor({ timeout: 5000 });
+
+      // Assert Force Cancel button is visible on cancelling row
+      const forceCancelBtn = page.getByRole("button", { name: /Force Cancel/i }).first();
+      await forceCancelBtn.waitFor({ timeout: 5000 });
+
+      await page.unroute("**/api/v1/commits/eval-queue**");
+      await page.unroute("**/api/v1/commits/*/cancel-evaluation**");
+      await page.unroute("**/api/v1/commits/*/force-cancel-evaluation**");
+      await page.unroute("**/api/v1/commits/*/eval/stream**");
+    },
+  },
+  {
+    name: "26b-evaluations-history",
+    description: "Evaluations page — History tab with completed/failed/cancelled rows (TASK-273)",
+    action: async (page) => {
+      const evalQueueMock = {
+        active_count: 0,
+        completed_count: 15,
+        execution_mode: "standard",
+        timestamp: new Date().toISOString(),
+        items: [],
+      };
+
+      const evalHistoryMock = {
+        total_count: 15,
+        page: 1,
+        limit: 50,
+        items: [
+          {
+            commit_id: 999,
+            flake_id: 1,
+            flake_name: "infrastructure",
+            branch: "main",
+            commit_hash: "ff1a2b3c4d5e6f7a",
+            commit_message: "feat: upgrade postgresql to 17.x",
+            author: "alice",
+            committed_at: new Date(Date.now() - 3600000).toISOString(),
+            evaluation_status: "complete",
+            evaluation_completed_at: new Date(Date.now() - 3500000).toISOString(),
+            evaluation_duration_ms: 83000,
+            evaluation_error_message: null,
+            system_count: 9,
+            passed_count: 9,
+            policy_failed_count: 0,
+            eval_failed_count: 0,
+          },
+          {
+            commit_id: 998,
+            flake_id: 2,
+            flake_name: "workstations",
+            branch: "dev",
+            commit_hash: "ee2b3c4d5e6f7a8b",
+            commit_message: "fix: add missing font packages",
+            author: "bob",
+            committed_at: new Date(Date.now() - 7200000).toISOString(),
+            evaluation_status: "failed",
+            evaluation_completed_at: new Date(Date.now() - 7100000).toISOString(),
+            evaluation_duration_ms: 12000,
+            evaluation_error_message: "nix-eval-jobs failed with exit code: 1\nnix error: attribute 'fonts' missing",
+            system_count: 0,
+            passed_count: 0,
+            policy_failed_count: 0,
+            eval_failed_count: 3,
+          },
+          {
+            commit_id: 997,
+            flake_id: 1,
+            flake_name: "infrastructure",
+            branch: "main",
+            commit_hash: "dd3c4d5e6f7a8b9c",
+            commit_message: "chore: update nixpkgs input",
+            author: "carol",
+            committed_at: new Date(Date.now() - 10800000).toISOString(),
+            evaluation_status: "cancelled",
+            evaluation_completed_at: new Date(Date.now() - 10750000).toISOString(),
+            evaluation_duration_ms: null,
+            evaluation_error_message: null,
+            system_count: 0,
+            passed_count: 0,
+            policy_failed_count: 0,
+            eval_failed_count: 0,
+          },
+        ],
+      };
+
+      await page.route("**/api/v1/commits/eval-queue**", async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(evalQueueMock) });
+      });
+      await page.route("**/api/v1/commits/eval-history**", async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(evalHistoryMock) });
+      });
+
+      await page.goto(`${baseUrl}/evaluations`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2000);
+
+      // Click the History tab
+      const historyTab = page.getByRole("button", { name: /Eval History/i }).first();
+      await historyTab.waitFor({ timeout: 5000 });
+      await historyTab.click();
+      await page.waitForTimeout(1500);
+
+      // Assert history table is visible with status chips
+      const completeChip = page.getByText("complete").first();
+      await completeChip.waitFor({ timeout: 5000 });
+
+      // Assert Re-evaluate button appears for failed row
+      const reEvalBtn = page.getByRole("button", { name: /Re-evaluate/i }).first();
+      await reEvalBtn.waitFor({ timeout: 5000 });
+
+      await page.unroute("**/api/v1/commits/eval-queue**");
+      await page.unroute("**/api/v1/commits/eval-history**");
+    },
+  },
 ];
 
 const CI_FAST_STEP_NAMES = new Set([
@@ -3798,6 +4000,9 @@ const CI_FAST_STEP_NAMES = new Set([
   // TASK-17: CVE dashboard evidence
   "16-cves",
   "16b-cves-severity-filter",
+  // TASK-273: Evaluation cancellation + history evidence
+  "26-evaluations",
+  "26b-evaluations-history",
 ]);
 
 (async () => {
