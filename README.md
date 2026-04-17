@@ -305,8 +305,10 @@ CRYSTAL_FORGE_OIDC_REDIRECT_URI=https://forge.example.com/api/auth/oidc/callback
 # Enter development shell
 nix develop
 
-# Start database and server
-process-compose up
+# Start core services (choose one)
+server-stack up        # Postgres + server + builder
+server-stack-mock up   # Postgres + server + mock builder/eval (fast UI testing)
+db-only up             # Postgres only
 
 # Start with local OIDC (Keycloak)
 nix run .#devScripts.oidc-stack -- up
@@ -342,8 +344,13 @@ nix build .#checks.x86_64-linux.server
 nix build .#checks.x86_64-linux.builder
 nix build .#checks.x86_64-linux.web-ui
 
-# Update screenshots
-nix build .#checks.x86_64-linux.web-ui-update
+# Refresh docs screenshots from web-ui check output
+nix build .#checks.x86_64-linux.web-ui
+cp result/screenshots/*.png docs/screenshots/
+
+# Optional: full screenshot pass (not ci_fast subset)
+CF_UI_TEST_PROFILE=full node checks/web-ui/tests/integration-test.js \
+  http://127.0.0.1:3000 docs/screenshots
 ```
 
 ---
