@@ -1,507 +1,396 @@
-# Web UI Build Verification Check
+# Mega Web UI Integration Test
 #
-# Verifies the Crystal Forge web UI compiles to WASM and produces valid output,
-# then takes screenshots of every route using headless Chromium in a NixOS VM.
+# Comprehensive integration test that combines:
+# - Full stack: PostgreSQL, Crystal Forge server, gitserver
+# - Cache backends: Attic + S3/MinIO
+# - Builder service with real builds
+# - Web UI with Playwright browser tests
 #
-# Output ($out):
-#   screenshots/   — PNG screenshots of core routes and modal states
-#   result.txt     — Build verification summary
+# This consolidates what were previously 5 separate VM checks (attic_cache,
+# s3_cache, builder, and web-ui) into one comprehensive integration test,
+# significantly reducing CI time.
 #
-# Run: nix build .#checks.x86_64-linux.web-ui
-#      ls ./result/screenshots/
+# Test phases:
+# 1. Cache tests (Attic + S3)
+# 2. Builder tests
+# 3. Web UI tests (Playwright screenshots)
+#
+# Note: OIDC tests remain in the separate integration check.
+#
 { lib, pkgs, inputs, ... }:
 let
-  # Playwright screenshot script that runs inside the VM
-  # Each route includes assertions to verify the UI is rendering correctly
-  # Uses waitFor() instead of expect() since we're using playwright-core, not @playwright/test
-  screenshotScript = pkgs.writeText "screenshot.js" ''
-    const { chromium } = require('playwright');
+  testDir = ./tests;
+  CF_TEST_SERVER_PORT = 3000;
 
-    // Helper to assert element is visible
-    async function assertVisible(page, selector, description) {
-      const element = page.locator(selector);
-      const isVisible = await element.isVisible({ timeout: 5000 }).catch(() => false);
-      if (!isVisible) {
-        throw new Error('Expected "' + description + '" (' + selector + ') to be visible');
-      }
-      return true;
-    }
-
-    // Helper to assert element is NOT visible
-    async function assertNotVisible(page, selector, description) {
-      const element = page.locator(selector);
-      const isVisible = await element.isVisible().catch(() => false);
-      if (isVisible) {
-        throw new Error('Expected "' + description + '" (' + selector + ') to NOT be visible');
-      }
-      return true;
-    }
-
-    // Helper to assert text content exists
-    async function assertTextVisible(page, text, description) {
-      const element = page.locator('text=' + text);
-      const isVisible = await element.first().isVisible({ timeout: 5000 }).catch(() => false);
-      if (!isVisible) {
-        throw new Error('Expected text "' + text + '" (' + description + ') to be visible');
-      }
-      return true;
-    }
-
-    const routes = [
-      {
-        path: '/',
-        name: 'dashboard',
-        desc: 'Dashboard (fleet overview)',
-        assertions: async (page) => {
-          // Dashboard should have the app title and navigation
-          await assertTextVisible(page, 'Crystal Forge', 'App title');
-          await assertVisible(page, 'nav', 'Navigation');
-          // Dashboard should show fleet metrics
-          await assertVisible(page, "[data-testid='dashboard']", 'Dashboard container');
-          await assertTextVisible(page, 'Total Systems', 'Total Systems stat card');
-          await assertTextVisible(page, 'Healthy', 'Healthy stat card');
-          await assertVisible(page, "[data-testid='fleet-health-breakdown']", 'Fleet health breakdown');
-          await assertVisible(page, "[data-testid='cve-summary']", 'CVE summary panel');
-          await assertVisible(page, "[data-testid='deployment-status']", 'Deployment status panel');
-          await assertVisible(page, "[data-testid='build-summary-panel']", 'Build summary panel');
-          await assertVisible(page, "[data-testid='build-queue']", 'Build queue panel');
-          await assertVisible(page, "[data-testid='recent-deployments']", 'Recent deployments list');
-          // Should show actual mock data values
-          await assertTextVisible(page, '21', 'Total systems count (21)');
-          await assertTextVisible(page, 'atlas-01', 'Recent deployment hostname');
-          // Flake commit timeline
-          await assertVisible(page, "[data-testid='flake-timeline-widget']", 'Flake timeline widget');
-          await assertVisible(page, "[data-testid='timeline-legend']", 'Timeline legend');
-          await assertTextVisible(page, 'Commit Timeline', 'Timeline title');
-          await assertTextVisible(page, 'infrastructure', 'First flake name');
-        }
-      },
-      {
-        path: '/systems',
-        name: 'systems-table',
-        desc: 'Systems list (table view)',
-        assertions: async (page) => {
-          // Table view should show the systems table container
-          await assertVisible(page, "[data-testid='systems-table']", 'Systems table container');
-          // Should show at least one mock system hostname (proves data is rendered)
-          await assertTextVisible(page, 'atlas-01', 'First mock system hostname');
-          // Table toggle buttons should be visible
-          await assertVisible(page, 'button:has-text("Table")', 'Table toggle button');
-          await assertVisible(page, 'button:has-text("Cards")', 'Cards toggle button');
-        }
-      },
-      {
-        path: '/systems',
-        name: 'systems-cards',
-        desc: 'Systems list (card view)',
-        clickCards: true,
-        assertions: async (page) => {
-          // After clicking Cards, should show cards view (not table)
-          await assertVisible(page, "[data-testid='systems-cards']", 'Systems cards container');
-          // Table should NOT be visible
-          await assertNotVisible(page, "[data-testid='systems-table']", 'Systems table (should be hidden)');
-          // Should show system hostnames in cards
-          await assertTextVisible(page, 'atlas-01', 'First system in cards');
-          await assertTextVisible(page, 'luna-02', 'Second system in cards');
-        }
-      },
-      {
-        path: '/systems',
-        name: 'systems-add-modal',
-        desc: 'Systems add modal',
-        setup: async (page) => {
-          await page.getByRole('button', { name: 'Add System' }).click();
-          await page.waitForTimeout(300);
-        },
-        assertions: async (page) => {
-          await assertTextVisible(page, 'Register System', 'Add system modal title');
-          await assertTextVisible(page, 'Save System', 'Save system button');
-        }
-      },
-      {
-        path: '/systems',
-        name: 'systems-keypair-modal',
-        desc: 'Systems keypair generation modal',
-        setup: async (page) => {
-          await page.getByRole('button', { name: 'Add System' }).click();
-          await page.waitForTimeout(250);
-          await page.getByRole('button', { name: 'Generate' }).click();
-          await page.waitForTimeout(300);
-        },
-        assertions: async (page) => {
-          await assertTextVisible(page, 'Generated System Key Pair', 'Keypair modal title');
-          await assertTextVisible(page, 'Use Public Key', 'Use public key action');
-        }
-      },
-      {
-        path: '/systems',
-        name: 'systems-remove-modal',
-        desc: 'Systems remove confirmation modal',
-        setup: async (page) => {
-          await page.locator("button:has-text('Remove')").first().click();
-          await page.waitForTimeout(300);
-        },
-        assertions: async (page) => {
-          await assertTextVisible(page, 'Remove', 'Remove modal visible');
-          await assertTextVisible(page, 'Cancel', 'Cancel button visible');
-        }
-      },
-      {
-        path: '/systems/00000000-0000-0000-0000-000000000001',
-        name: 'system-detail',
-        desc: 'System detail page',
-        assertions: async (page) => {
-          await assertVisible(page, "[data-testid='system-detail']", 'System detail container');
-          await assertTextVisible(page, 'atlas-01', 'System hostname');
-          await assertTextVisible(page, 'Hardware', 'Hardware card');
-          await assertTextVisible(page, 'Network', 'Network card');
-          await assertTextVisible(page, 'Security', 'Security card');
-          await assertTextVisible(page, 'Vulnerabilities', 'Vulnerabilities card');
-          await assertTextVisible(page, 'Agent', 'Agent card');
-        }
-      },
-      {
-        path: '/flakes',
-        name: 'flakes-table',
-        desc: 'Flakes registry table view',
-        setup: async (page) => {
-          const tableToggle = page.getByRole('button', { name: 'Table' });
-          if (await tableToggle.isVisible().catch(() => false)) {
-            await tableToggle.click();
-            await page.waitForTimeout(200);
-          }
-        },
-        assertions: async (page) => {
-          await assertTextVisible(page, 'Flake Registry', 'Flakes page title');
-          await assertVisible(page, "[data-testid='flakes-table']", 'Flakes table');
-        }
-      },
-      {
-        path: '/flakes',
-        name: 'flakes-cards',
-        desc: 'Flakes registry card view',
-        clickCards: true,
-        assertions: async (page) => {
-          await assertVisible(page, "[data-testid='flakes-cards']", 'Flakes cards container');
-          await assertTextVisible(page, 'Latest Commit', 'Card section label');
-        }
-      },
-      {
-        path: '/flakes',
-        name: 'flakes-add-modal',
-        desc: 'Flakes add modal',
-        setup: async (page) => {
-          await page.getByRole('button', { name: 'Add Flake' }).click();
-          await page.waitForTimeout(300);
-        },
-        assertions: async (page) => {
-          await assertTextVisible(page, 'Register Flake', 'Add flake modal title');
-          await assertTextVisible(page, 'Save Flake', 'Save flake button');
-        }
-      },
-      {
-        path: '/flakes',
-        name: 'flakes-edit-modal',
-        desc: 'Flakes edit modal',
-        setup: async (page) => {
-          await page.locator("button:has-text('Edit')").first().click();
-          await page.waitForTimeout(300);
-        },
-        assertions: async (page) => {
-          await assertTextVisible(page, 'Edit Flake', 'Edit flake modal title');
-          await assertTextVisible(page, 'Save Changes', 'Save edits button');
-        }
-      },
-      {
-        path: '/flakes',
-        name: 'flakes-remove-modal',
-        desc: 'Flakes remove confirmation modal',
-        setup: async (page) => {
-          await page.getByRole('button', { name: 'Add Flake' }).click();
-          await page.getByPlaceholder('prod-core').fill('qa-temp');
-          await page.getByPlaceholder('https://github.com/org/repo').fill('https://github.com/example/qa-temp');
-          await page.getByRole('button', { name: 'Save Flake' }).click();
-          await page.waitForTimeout(300);
-          await page.locator("tr:has-text('qa-temp') button:has-text('Remove')").first().click();
-          await page.waitForTimeout(300);
-        },
-        assertions: async (page) => {
-          await assertTextVisible(page, 'Remove flake', 'Remove flake modal title');
-          await assertTextVisible(page, 'Related commits are deleted by cascade', 'Cascade warning');
-        }
-      },
-      {
-        path: '/environments',
-        name: 'environments-registry',
-        desc: 'Environment registry view',
-        assertions: async (page) => {
-          await assertTextVisible(page, 'Environment Registry', 'Environment registry title');
-          await assertTextVisible(page, 'Edit Environment', 'Environment edit action');
-          await assertTextVisible(page, 'Edit Requirements', 'Requirements edit action');
-        }
-      },
-      {
-        path: '/environments',
-        name: 'environments-add-modal',
-        desc: 'Environment add modal',
-        setup: async (page) => {
-          await page.getByRole('button', { name: 'Add Environment' }).click();
-          await page.waitForTimeout(300);
-        },
-        assertions: async (page) => {
-          await assertTextVisible(page, 'Create Environment', 'Create environment title');
-          await assertTextVisible(page, 'Choose Policies', 'Choose policies action');
-        }
-      },
-      {
-        path: '/environments',
-        name: 'environments-policy-picker-modal',
-        desc: 'Environment policy picker modal',
-        setup: async (page) => {
-          await page.getByRole('button', { name: 'Add Environment' }).click();
-          await page.waitForTimeout(200);
-          await page.getByRole('button', { name: 'Choose Policies' }).click();
-          await page.waitForTimeout(300);
-        },
-        assertions: async (page) => {
-          await assertTextVisible(page, 'Choose Required Policies', 'Policy picker title');
-          await assertTextVisible(page, 'Apply Policies', 'Apply policies button');
-        }
-      },
-      {
-        path: '/environments',
-        name: 'environments-edit-modal',
-        desc: 'Environment edit metadata modal',
-        setup: async (page) => {
-          await page.locator("button:has-text('Edit Environment')").first().click();
-          await page.waitForTimeout(300);
-        },
-        assertions: async (page) => {
-          await assertTextVisible(page, 'Edit Environment', 'Edit environment modal title');
-          await assertTextVisible(page, 'Save Changes', 'Save changes button');
-        }
-      },
-      {
-        path: '/environments',
-        name: 'environments-edit-requirements-modal',
-        desc: 'Environment edit requirements modal',
-        setup: async (page) => {
-          await page.locator("button:has-text('Edit Requirements')").first().click();
-          await page.waitForTimeout(300);
-        },
-        assertions: async (page) => {
-          await assertTextVisible(page, 'Save Requirements', 'Save requirements button');
-          await assertTextVisible(page, 'Required policies are hard requirements', 'Requirements help text');
-        }
-      },
-      {
-        path: '/environments',
-        name: 'environments-remove-modal',
-        desc: 'Environment remove confirmation modal',
-        setup: async (page) => {
-          await page.locator("button:has-text('Remove')").first().click();
-          await page.waitForTimeout(300);
-        },
-        assertions: async (page) => {
-          await assertTextVisible(page, 'Remove environment', 'Remove environment modal title');
-          await assertTextVisible(page, 'This deletes the environment', 'Removal warning text');
-        }
-      },
-      {
-        path: '/builds',
-        name: 'builds',
-        desc: 'Builds pipeline',
-        assertions: async (page) => {
-          // Builds page should have title
-          await assertTextVisible(page, 'Builds', 'Builds page title');
-        }
-      },
-      {
-        path: '/cves',
-        name: 'cves',
-        desc: 'CVE dashboard',
-        assertions: async (page) => {
-          // CVE page should have title (might be "CVEs" or "CVE Dashboard")
-          await assertTextVisible(page, 'CVE', 'CVE page title');
-        }
-      },
-      {
-        path: '/style-guide',
-        name: 'style-guide',
-        desc: 'Design system style guide',
-        assertions: async (page) => {
-          // Style guide should show design tokens
-          await assertTextVisible(page, 'Style Guide', 'Style Guide page title');
-        }
-      },
-      {
-        path: '/not-a-real-page',
-        name: 'not-found',
-        desc: '404 not found page',
-        assertions: async (page) => {
-          // 404 page should indicate page not found
-          const has404 = await page.locator('text=/404/').first().isVisible().catch(() => false);
-          const hasNotFound = await page.locator('text=/not found/i').first().isVisible().catch(() => false);
-          if (!has404 && !hasNotFound) {
-            throw new Error('Expected 404 or "not found" text to be visible');
-          }
-        }
-      },
-    ];
-
-    const baseUrl = process.argv[2] || 'http://127.0.0.1:8080';
-    const outputDir = process.argv[3] || '/tmp/screenshots';
-
-    (async () => {
-      const browser = await chromium.launch();
-      const results = [];
-
-      for (const route of routes) {
-        const assertions = [];
-        try {
-          const page = await browser.newPage({ viewport: { width: 1920, height: 1080 } });
-          await page.goto(baseUrl + route.path, { waitUntil: 'networkidle' });
-
-          // Wait a bit for WASM app to fully hydrate
-          await page.waitForTimeout(1000);
-
-          // For cards view, click the Cards button first
-          if (route.clickCards) {
-            await page.getByRole('button', { name: 'Cards' }).click();
-            await page.waitForTimeout(500); // Wait for animation
-          }
-
-          // Optional custom setup per route (open modals, fill forms, etc.)
-          if (route.setup) {
-            await route.setup(page);
-          }
-
-          // Run assertions to verify the page rendered correctly
-          if (route.assertions) {
-            try {
-              await route.assertions(page);
-              assertions.push('All assertions passed');
-            } catch (assertErr) {
-              assertions.push('ASSERTION FAILED: ' + assertErr.message);
-              throw assertErr;
-            }
-          }
-
-          const outputPath = outputDir + '/' + route.name + '.png';
-          await page.screenshot({ path: outputPath });
-          await page.close();
-
-          const fs = require('fs');
-          const stats = fs.statSync(outputPath);
-          results.push({ name: route.name, desc: route.desc, size: stats.size, ok: true, assertions });
-          console.log('OK: ' + route.name + '.png (' + stats.size + ' bytes) - ' + assertions.join(', '));
-        } catch (err) {
-          results.push({ name: route.name, desc: route.desc, size: 0, ok: false, error: err.message, assertions });
-          console.error('FAIL: ' + route.name + ' - ' + err.message);
-        }
-      }
-
-      await browser.close();
-
-      // Write results JSON for the test driver to read
-      const fs = require('fs');
-      fs.writeFileSync(outputDir + '/results.json', JSON.stringify(results, null, 2));
-
-      // Exit with error if any failed
-      const failCount = results.filter(r => !r.ok).length;
-      if (failCount > 0) {
-        process.exit(1);
-      }
-    })().catch((err) => {
-      console.error('Fatal error: ' + err.message);
-      process.exit(1);
-    });
+  keyPair = pkgs.runCommand "agent-keypair" { } ''
+    mkdir -p $out
+    ${pkgs.crystal-forge.default.cf-keygen}/bin/cf-keygen -f $out/agent.key
   '';
+  keyPath = pkgs.runCommand "agent.key" { } ''
+    mkdir -p $out
+    cp ${keyPair}/agent.key $out/
+  '';
+  pubPath = pkgs.runCommand "agent.pub" { } ''
+    mkdir -p $out
+    cp ${keyPair}/agent.pub $out/
+  '';
+  derivation-paths = lib.crystal-forge.derivation-paths pkgs;
+  systemBuildClosure = pkgs.closureInfo {
+    rootPaths = [
+      inputs.self.nixosConfigurations.cf-test-sys.config.system.build.toplevel
+      pkgs.crystal-forge.default
+      pkgs.path
+    ] ++ lib.crystal-forge.prefetchedPaths;
+  };
 in pkgs.testers.runNixOSTest {
-  name = "crystal-forge-web-ui-screenshots";
+  name = "crystal-forge-web-ui-mega-integration";
+
   skipLint = true;
   skipTypeCheck = true;
 
-  nodes.machine = {
-    virtualisation.memorySize = 4096;
-    virtualisation.cores = 2;
-
-    environment.systemPackages =
-      [ pkgs.chromium pkgs.nodejs pkgs.playwright-test ];
-
-    environment.variables = {
-      NODE_PATH = "${pkgs.playwright-test}/lib/node_modules";
-      PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
+  nodes = {
+    # Git server for flake testing
+    gitserver = lib.crystal-forge.makeGitServerNode {
+      inherit pkgs systemBuildClosure;
+      port = 8080;
     };
 
-    # Serve the web UI on port 8080 via a systemd service
-    systemd.services.web-ui-server = {
-      description = "Crystal Forge Web UI static server";
-      wantedBy = [ "multi-user.target" ];
-      after = [ "network.target" ];
-      serviceConfig = {
-        ExecStart = "${pkgs.crystal-forge.web-ui}/bin/crystal-forge-web-ui";
-        Restart = "always";
+    # Attic binary cache
+    atticCache = lib.crystal-forge.makeAtticCacheNode {
+      inherit lib pkgs;
+      port = 8080;
+      jwtSecretB64 = "dGVzdCBzZWNyZXQgZm9yIGF0dGljZA==";
+    };
+
+    # S3-compatible cache (MinIO)
+    s3Cache = lib.crystal-forge.makeS3CacheNode {
+      inherit lib pkgs;
+      port = 9000;
+      region = "us-east-1";
+      bucket = "nix-cache";
+    };
+
+    # Main Crystal Forge server with all services enabled
+    machine = {
+      imports = [ inputs.self.nixosModules.crystal-forge ];
+
+      virtualisation.memorySize = 20480; # 20GB for everything
+      virtualisation.cores = 4;
+      virtualisation.diskSize = 40960;
+      virtualisation.writableStore = true;
+      virtualisation.additionalPaths = [
+        systemBuildClosure
+        inputs.self.nixosConfigurations.cf-test-sys.config.system.build.toplevel.drvPath
+        inputs.nixpkgs.outPath
+      ] ++ lib.crystal-forge.prefetchedPaths;
+
+      environment.systemPackages = [
+        pkgs.chromium
+        pkgs.nodejs
+        pkgs.playwright-test
+        pkgs.curl
+        pkgs.jq
+        pkgs.git
+        pkgs.crystal-forge.default
+        pkgs.crystal-forge.default.migrate
+        pkgs.crystal-forge.cf-test-suite.runTests
+        pkgs.crystal-forge.cf-test-suite.testRunner
+      ];
+
+      environment.variables = {
+        NODE_PATH = "${pkgs.playwright-test}/lib/node_modules";
+        PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
+        TMPDIR = "/tmp";
+        TMP = "/tmp";
+        TEMP = "/tmp";
       };
-    };
 
-    networking.firewall.allowedTCPPorts = [ 8080 ];
+      environment.etc = {
+        "server.key".source = "${keyPath}/agent.key";
+        "server.pub".source = "${pubPath}/agent.pub";
+      };
+
+      networking.firewall.allowedTCPPorts = [ CF_TEST_SERVER_PORT 5432 ];
+
+      systemd.tmpfiles.rules = [
+        "d /var/lib/crystal-forge 0755 crystal-forge crystal-forge -"
+        "d /var/lib/crystal-forge/.cache 0755 crystal-forge crystal-forge -"
+        "d /var/lib/crystal-forge/.cache/nix 0755 crystal-forge crystal-forge -"
+        "Z /var/lib/crystal-forge/.cache/nix - crystal-forge crystal-forge -"
+      ];
+
+      # PostgreSQL
+      services.postgresql = {
+        enable = true;
+        settings = {
+          "listen_addresses" = lib.mkForce "*";
+          "fsync" = "off";
+          "synchronous_commit" = "off";
+          "full_page_writes" = "off";
+          "max_wal_size" = "64MB";
+          "min_wal_size" = "32MB";
+        };
+        authentication = lib.concatStringsSep "\n" [
+          "local   all   postgres   trust"
+          "local   all   all        peer"
+          "host    all   all 127.0.0.1/32 trust"
+          "host    all   all ::1/128      trust"
+          "host    all   all 10.0.2.2/32  trust"
+        ];
+      };
+
+      # Crystal Forge - starts with local auth, will switch to OIDC during test
+      services.crystal-forge = {
+        enable = true;
+        local-database = true;
+        # Builder startup tests assert INFO-level startup logs.
+        # Keep INFO here so those assertions remain observable in the mega check.
+        log_level = "info";
+
+        client = {
+          enable = true;
+          server_host = "localhost";
+          server_port = CF_TEST_SERVER_PORT;
+          private_key = "/etc/server.key";
+        };
+
+        database = {
+          host = "localhost";
+          user = "crystal_forge";
+          name = "crystal_forge";
+          port = 5432;
+        };
+
+        server = {
+          enable = true;
+          port = CF_TEST_SERVER_PORT;
+          host = "0.0.0.0";
+        };
+
+        build = {
+          enable = true;
+          offline = false;
+        };
+
+        cache = {
+          push_after_build = false;
+          push_to = null;
+        };
+
+        flakes = {
+          flake_polling_interval = "1m";
+          watched = [{
+            name = "test-flake";
+            repo_url = "http://gitserver/crystal-forge";
+            branch = "main";
+            auto_poll = true;
+            initial_commit_depth = 5;
+          }];
+        };
+
+        environments = [{
+          name = "test";
+          description = "Test environment for mega integration";
+          is_active = true;
+          risk_profile = "LOW";
+          compliance_level = "NONE";
+        }];
+
+        systems = [{
+          hostname = "mega-test-system";
+          public_key =
+            lib.strings.trim (builtins.readFile "${pubPath}/agent.pub");
+          environment = "test";
+          flake_name = "test-flake";
+        }];
+      };
+
+      systemd.services."crystal-forge-postgres-jobs".enable = lib.mkForce false;
+      systemd.timers."crystal-forge-postgres-jobs".enable = lib.mkForce false;
+
+      # Start with local auth
+      systemd.services.crystal-forge-server.environment.AUTH_MODE = "local";
+    };
   };
 
-  globalTimeout = 300; # 5 minutes
+  globalTimeout = 2400; # 40 minutes for comprehensive testing
+
+  extraPythonPackages = p: [
+    p.pytest
+    p.pytest-xdist
+    p.pytest-metadata
+    p.pytest-html
+    p.psycopg2
+    p.requests
+    pkgs.crystal-forge.cf-test-suite
+  ];
 
   testScript = ''
     import json
-    import pathlib
+    import os
+    import pytest
 
-    machine.start()
-    machine.wait_for_unit("web-ui-server.service")
-    machine.wait_for_open_port(8080)
+    os.environ["NIXOS_TEST_DRIVER"] = "1"
 
-    # Verify SPA server handles both static files and route fallback
-    machine.succeed("curl -sf http://127.0.0.1:8080/ | grep -q 'Crystal Forge'")
-    machine.succeed("curl -sf http://127.0.0.1:8080/systems | grep -q 'Crystal Forge'")
-    print("Web root is being served correctly (SPA fallback working)")
+    start_all()
 
-    # Create output directory inside VM
+    # === Infrastructure Warmup ===
+    print("=== Infrastructure Warmup ===")
+    machine.wait_for_unit("postgresql.service")
+    machine.wait_for_unit("crystal-forge-server.service")
+    machine.wait_for_unit("crystal-forge-builder.service")
+    machine.wait_for_open_port(${toString CF_TEST_SERVER_PORT})
+    machine.wait_for_open_port(5432)
+
+    from cf_test.vm_helpers import wait_for_git_server_ready
+    wait_for_git_server_ready(gitserver, timeout=120)
+
+    atticCache.wait_for_unit("atticd.service")
+    atticCache.wait_for_open_port(8080)
+
+    s3Cache.wait_for_unit("minio.service")
+    s3Cache.wait_for_open_port(9000)
+
+    # Set up test environment variables
+    main_head = "${
+      lib.strings.trim
+      (builtins.readFile (lib.crystal-forge.testFlake + "/MAIN_HEAD"))
+    }"
+
+    os.environ.update({
+      "CF_TEST_GIT_SERVER_URL": "http://gitserver/crystal-forge",
+      "CF_TEST_REAL_REPO_URL": "http://gitserver/crystal-forge",
+      "CF_TEST_REAL_COMMIT_HASH": main_head,
+      "CF_TEST_DB_HOST": "127.0.0.1",
+      "CF_TEST_DB_PORT": "5433",
+      "CF_TEST_DB_USER": "postgres",
+      "CF_TEST_DB_PASSWORD": "",
+      "CF_TEST_SERVER_HOST": "127.0.0.1",
+      "CF_TEST_SERVER_PORT": "${toString CF_TEST_SERVER_PORT}",
+      "CF_TEST_DRV": "${derivation-paths}",
+      "CF_TEST_FLAKE_NAME": "test-flake",
+    })
+
+    machine.forward_port(5433, 5432)
+    machine.forward_port(${toString CF_TEST_SERVER_PORT}, ${
+      toString CF_TEST_SERVER_PORT
+    })
+
+    import cf_test
+    cf_test._driver_machines = {
+      "machine": machine,
+      "cfServer": machine,
+      "gitserver": gitserver,
+      "atticCache": atticCache,
+      "s3Cache": s3Cache,
+    }
+
+    # === Phase 1: Attic Cache Tests ===
+    print("=== Phase 1: Attic Cache Tests ===")
+    exit_code = pytest.main([
+      "-vvvv", "--tb=short", "-x", "-s",
+      "-m", "attic_cache", "--pyargs", "cf_test",
+    ])
+    if exit_code != 0:
+      raise SystemExit(exit_code)
+
+    # === Phase 2: S3 Cache Tests ===
+    print("=== Phase 2: S3 Cache Tests ===")
+    exit_code = pytest.main([
+      "-vvvv", "--tb=short", "-x", "-s",
+      "-m", "s3cache", "--pyargs", "cf_test",
+    ])
+    if exit_code != 0:
+      raise SystemExit(exit_code)
+
+    # === Phase 3: Builder Tests ===
+    print("=== Phase 3: Builder Tests ===")
+    exit_code = pytest.main([
+      "-vvvv", "--tb=short", "-x", "-s",
+      "-m", "builder", "--pyargs", "cf_test",
+    ])
+    if exit_code != 0:
+      raise SystemExit(exit_code)
+
+    # === Phase 4: Web UI Tests (Playwright) ===
+    print("=== Phase 4: Web UI Tests (Playwright) ===")
+
+    # Verify server is responding
+    machine.succeed("curl -sf http://127.0.0.1:${
+      toString CF_TEST_SERVER_PORT
+    }/status | jq .")
+    print("Server is up and responding")
+
+    # Create output directories
     machine.succeed("mkdir -p /tmp/screenshots")
+    machine.succeed("mkdir -p /tmp/web-ui-tests")
 
-    # Copy the screenshot script into the VM and run it
-    machine.succeed("cp ${screenshotScript} /tmp/screenshot.js")
+    # Copy test files into VM
+    machine.succeed("cp -r ${testDir}/* /tmp/web-ui-tests/")
 
-    # Run Playwright to capture screenshots (allow failure, we'll check results)
-    exit_code, output = machine.execute(
-        "${pkgs.nodejs}/bin/node /tmp/screenshot.js http://127.0.0.1:8080 /tmp/screenshots 2>&1"
+    test_profile = "ci_fast"
+
+    # Run the integration test script
+    machine.succeed(
+        f"nohup env CF_UI_TEST_PROFILE={test_profile} ${pkgs.nodejs}/bin/node /tmp/web-ui-tests/integration-test.js http://127.0.0.1:${
+          toString CF_TEST_SERVER_PORT
+        } /tmp/screenshots > /tmp/web-ui-tests/integration.log 2>&1 </dev/null &"
     )
+    machine.wait_until_succeeds("test -f /tmp/screenshots/results.json", timeout=1800)
+    output = machine.succeed("cat /tmp/web-ui-tests/integration.log")
     print(output)
 
-    # Read the results
+    # Read results
     results_json = machine.succeed("cat /tmp/screenshots/results.json")
     results = json.loads(results_json)
 
-    # Copy screenshots from VM to $out/screenshots/
+    # Copy screenshots out
     for r in results:
         if r.get("ok"):
             machine.copy_from_vm(f"/tmp/screenshots/{r['name']}.png", "screenshots")
 
-    # Summary
     ok_count = sum(1 for r in results if r.get("ok"))
-    print(f"\n=== Summary ===")
+
+    print("\n=== Summary ===")
     print(f"  Screenshots: {ok_count}/{len(results)} captured")
+
     for r in results:
         status = "OK" if r.get("ok") else "FAIL"
-        size = r.get("size", 0)
-        desc = r.get("desc", "")
         error = r.get("error", "")
         if error:
-            print(f"  [{status}] {r['name']}.png - {error}")
+            print(f"  [{status}] {r['name']} - {error}")
         else:
-            print(f"  [{status}] {r['name']}.png ({size} bytes) - {desc}")
+            print(f"  [{status}] {r['name']}")
 
-    # At minimum, the build checks must pass (enforced by buildCheck dependency)
-    # Screenshots are visual artifacts for review
     if ok_count == 0:
-        raise Exception("All screenshots failed - browser may not be working")
-  '';
+        raise Exception("All screenshots failed")
 
+    # Fail if critical tests failed
+    critical_tests = [
+      "01-login-page",
+      "02-registration",
+      "05-login-submit",
+      "06-dashboard",
+      "06x-pipeline-readiness-scroll",
+      "06y-recent-deployments-scroll",
+      "06z-fleet-health-widget-assert",
+      "15-builds",
+      "11b-builds-queue-card-focus",
+      "15h-builds-completed-restart-action",
+      "12c-systems-modal-config-field",
+      "12e-systems-edit-modal",
+      "12f-systems-deploy-modal",
+      "12g-system-detail-history-logs-edit",
+      "13e-flakes-add-modal-credentials",
+      "13f-flakes-edit-modal-credentials",
+      "16-cves",
+      "16b-cves-severity-filter",
+    ]
+    failed_critical = [r['name'] for r in results if r['name'] in critical_tests and not r.get('ok')]
+    if failed_critical:
+        raise Exception(f"Critical web UI checks failed: {failed_critical}")
+
+    print("\n=== All Mega Integration Tests Passed ===")
+    print("Completed: Cache (Attic+S3), Builder, Web UI")
+  '';
 }

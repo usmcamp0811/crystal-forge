@@ -1,11 +1,14 @@
 pub mod agent_heartbeats;
 pub mod auth_identity;
+pub mod builders;
+pub mod cache_destination;
 pub mod commits;
 pub mod cve_scans;
 pub mod cves;
 pub mod deployment_policies;
 pub mod environments;
 pub mod evaluate_with_policies;
+pub mod flake_credentials;
 pub mod flakes;
 pub mod network_interfaces;
 pub mod package_vulnerabilities;

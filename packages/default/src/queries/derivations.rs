@@ -1057,6 +1057,26 @@ pub async fn mark_derivation_dry_run_complete(
     .await
 }
 
+pub async fn set_expected_store_path(
+    pool: &PgPool,
+    derivation_id: i32,
+    expected_store_path: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE derivations
+        SET expected_store_path = $2
+        WHERE id = $1
+        "#,
+    )
+    .bind(derivation_id)
+    .bind(expected_store_path)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 pub async fn mark_derivation_build_in_progress(
     pool: &PgPool,
     derivation_id: i32,
@@ -2009,4 +2029,44 @@ pub async fn cleanup_partial_derivations(pool: &PgPool) -> Result<()> {
     .await?;
 
     Ok(())
+}
+
+/// Reset all in-progress builds on startup
+/// This ensures clean state when server restarts mid-build
+pub async fn reset_stuck_builds(pool: &PgPool) -> Result<()> {
+    let reset = sqlx::query!(
+        r#"
+        UPDATE derivations
+        SET 
+            status_id = 7,  -- build-pending
+            started_at = NULL
+        WHERE status_id = 8  -- build-inprogress
+        RETURNING id, derivation_name
+        "#
+    )
+    .fetch_all(pool)
+    .await?;
+
+    if !reset.is_empty() {
+        warn!("🧹 Reset {} in-progress builds on startup", reset.len());
+        for row in &reset {
+            info!("  - Derivation {} ({})", row.id, row.derivation_name);
+        }
+    }
+
+    Ok(())
+}
+
+/// Look up a derivation ID by its built store path.
+/// Returns None if no derivation with that store path exists.
+pub async fn get_derivation_id_by_store_path(
+    pool: &PgPool,
+    store_path: &str,
+) -> Result<Option<i32>> {
+    let id =
+        sqlx::query_scalar::<_, i32>("SELECT id FROM derivations WHERE store_path = $1 LIMIT 1")
+            .bind(store_path)
+            .fetch_optional(pool)
+            .await?;
+    Ok(id)
 }

@@ -452,7 +452,7 @@ dependencies = [
 
 [[package]]
 name = "crystal-forge-ui"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "base64",
  "chrono",
@@ -460,6 +460,7 @@ dependencies = [
  "ed25519-dalek",
  "gloo-storage",
  "gloo-timers",
+ "hex",
  "js-sys",
  "serde",
  "serde_json",
@@ -1431,6 +1432,12 @@ checksum = "54b4a22553d4242c49fddb9ba998a99962b5cc6f22cb5a3482bec22522403ce4"
 dependencies = [
  "http",
 ]
+
+[[package]]
+name = "hex"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "http"

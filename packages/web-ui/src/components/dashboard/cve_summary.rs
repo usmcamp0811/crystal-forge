@@ -53,7 +53,7 @@ pub fn CveSummaryPanel(
             // Total count header
             div {
                 class: "flex items-baseline gap-2 mb-3 shrink-0",
-                span { class: "text-2xl font-bold text-white", "{total}" }
+                span { class: "text-2xl font-bold {theme::text::PRIMARY}", "{total}" }
                 span { class: "{theme::text::SECONDARY} text-sm", "vulnerabilities" }
             }
 

@@ -5,14 +5,14 @@ status: Done
 assignee:
   - KimiK2.5
 created_date: '2026-02-15 19:17'
-updated_date: '2026-02-21 03:28'
+updated_date: '2026-03-13 01:24'
 labels:
   - ui
   - dashboard
 milestone: m-6
 dependencies: []
 priority: high
-ordinal: 9000
+ordinal: 17000
 ---
 
 ## Description

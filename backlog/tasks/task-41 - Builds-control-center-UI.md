@@ -5,7 +5,7 @@ status: Done
 assignee:
   - KimiK2.5
 created_date: '2026-02-17 04:42'
-updated_date: '2026-02-21 03:28'
+updated_date: '2026-03-13 01:24'
 labels:
   - ui
   - web-ui
@@ -13,7 +13,7 @@ labels:
 milestone: m-11
 dependencies: []
 priority: high
-ordinal: 27000
+ordinal: 35000
 ---
 
 ## Description

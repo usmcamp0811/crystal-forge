@@ -4,7 +4,7 @@ use dioxus::prelude::*;
 
 use super::{
     EnvironmentItem, NewEnvironmentDraft, PolicyOption, normalize_color_hex, normalize_optional,
-    required_policy_names, validate_environment as validate_env,
+    required_policy_names,
 };
 use crate::components::layout::Card;
 use crate::theme;
@@ -15,7 +15,30 @@ pub fn validate_environment(
     existing: &[EnvironmentItem],
     policy_library: &[PolicyOption],
 ) -> Result<(), String> {
-    validate_env(draft, existing, policy_library)
+    let name = draft.name.trim();
+    if name.is_empty() {
+        return Err("Environment name is required.".to_string());
+    }
+    if existing
+        .iter()
+        .any(|item| item.name.eq_ignore_ascii_case(name))
+    {
+        return Err("Environment name already exists.".to_string());
+    }
+    if !super::looks_like_hex_color(&draft.color_hex) {
+        return Err("Environment color must be a valid hex value.".to_string());
+    }
+    if draft.required_policy_ids.is_empty() {
+        return Err("At least one required policy must be selected.".to_string());
+    }
+    if draft
+        .required_policy_ids
+        .iter()
+        .any(|id| !policy_library.iter().any(|p| p.id == *id))
+    {
+        return Err("One or more selected policies are invalid.".to_string());
+    }
+    Ok(())
 }
 
 /// Props for the add environment form.
@@ -38,6 +61,7 @@ pub fn AddEnvironmentForm(props: AddEnvironmentFormProps) -> Element {
     let on_cancel = props.on_cancel;
     let on_submit = props.on_submit;
     let on_choose_policies = props.on_choose_policies;
+    let mut show_policies_callout = use_signal(|| true);
 
     rsx! {
         Card {
@@ -92,22 +116,37 @@ pub fn AddEnvironmentForm(props: AddEnvironmentFormProps) -> Element {
                     }
 
                     div {
-                        class: "rounded-lg border {theme::surface::CARD_BORDER} bg-gray-900/50 p-4 space-y-3",
+                        class: "relative rounded-lg border {theme::surface::CARD_BORDER} bg-gray-900/50 p-4 space-y-3 overflow-visible",
                         div {
                             class: "flex items-center justify-between gap-2",
                             p { class: "text-xs uppercase tracking-wide text-gray-500", "Required Policies (all mandatory)" }
                             button {
                                 class: "text-xs text-blue-300 hover:text-blue-200 px-2 py-1 rounded hover:bg-blue-500/10 transition-colors",
-                                onclick: move |_| on_choose_policies.call(()),
+                                onclick: move |_| {
+                                    show_policies_callout.set(false);
+                                    on_choose_policies.call(())
+                                },
                                 "Choose Policies"
+                            }
+                        }
+                        if show_policies_callout() {
+                            div {
+                                "data-testid": "setup-coach-environment-policies-callout",
+                                style: "position:absolute; right:12px; top:46px; width:min(420px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                div {
+                                    style: "position:absolute; top:-6px; right:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                }
+                                p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
+                                p { style: "margin:2px 0 0 0;", "Think of policies as safety rules for this environment." }
+                                p { style: "margin:2px 0 0 0;", "If a system does not meet these rules, deployment can be blocked until it does." }
+                                p { style: "margin:2px 0 0 0;", "You can add or remove policies later for each environment." }
                             }
                         }
                         div {
                             class: "flex flex-wrap gap-2",
                             for name in required_policy_names(&draft.read().required_policy_ids, &props.policy_library) {
                                 span {
-                                    class: "inline-flex px-2 py-1 text-xs rounded border text-blue-100",
-                                    style: "background-color: #253449; border-color: #3E5B82;",
+                                    class: "inline-flex px-2 py-1 text-xs rounded border text-blue-100 cf-chip-blue",
                                     "{name}"
                                 }
                             }

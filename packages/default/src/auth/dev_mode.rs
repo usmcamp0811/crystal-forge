@@ -4,10 +4,14 @@
 //! for Admin, Operator, and Viewer roles without requiring external OIDC setup.
 
 use crate::auth::models::Role;
+use crate::auth::password::hash_password;
 use crate::models::auth_identity::{AuthRole, UserRoleAssignment};
 use crate::models::users::User;
 use crate::queries::auth_identity::{assign_role_to_user, find_user_roles};
-use crate::queries::users::{get_by_email, get_user_by_email, insert_user};
+use crate::queries::users::{
+    get_by_email, get_by_username, get_user_by_email, insert_user,
+    update_username_and_password_hash,
+};
 use anyhow::{Context, Result};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -84,6 +88,139 @@ pub fn is_valid_dev_user_email(email: &str) -> bool {
         email,
         DEV_ADMIN_EMAIL | DEV_OPERATOR_EMAIL | DEV_VIEWER_EMAIL
     )
+}
+
+/// Bootstrap OIDC group mapping for initial admin access.
+///
+/// If CRYSTAL_FORGE_OIDC_BOOTSTRAP_ADMIN_GROUP is set, this creates a mapping
+/// from that OIDC group to the Admin role. This allows you to grant initial admin
+/// access when first deploying with OIDC authentication.
+///
+/// The bootstrap mapping is created only if:
+/// 1. The environment variable is set
+/// 2. No mapping for that group name already exists
+///
+/// This is idempotent and safe to call on every startup. After the first admin
+/// logs in, they can configure additional mappings via the admin UI.
+///
+/// Example usage:
+/// ```bash
+/// # For production with Entra ID:
+/// CRYSTAL_FORGE_OIDC_BOOTSTRAP_ADMIN_GROUP=platform-admins
+///
+/// # For development with Keycloak:
+/// CRYSTAL_FORGE_OIDC_BOOTSTRAP_ADMIN_GROUP=admin
+/// ```
+pub async fn ensure_bootstrap_oidc_admin_mapping(pool: &PgPool) -> Result<()> {
+    use crate::config::OidcConfig;
+    use crate::queries::auth_identity::{count_oidc_group_mappings, create_oidc_group_mapping};
+
+    let Some(admin_group_raw) = OidcConfig::bootstrap_admin_group() else {
+        // No bootstrap group configured, skip
+        tracing::debug!(
+            "CRYSTAL_FORGE_OIDC_BOOTSTRAP_ADMIN_GROUP not set; skipping bootstrap admin mapping"
+        );
+        return Ok(());
+    };
+
+    // IMPORTANT: Normalize group name to match OIDC login flow
+    // Groups from OIDC tokens are normalized (trimmed + lowercased) before mapping,
+    // so the bootstrap mapping must use the same normalized form
+    let admin_group = admin_group_raw.trim().to_ascii_lowercase();
+
+    if admin_group.is_empty() {
+        tracing::warn!(
+            "CRYSTAL_FORGE_OIDC_BOOTSTRAP_ADMIN_GROUP is set but empty after normalization; skipping"
+        );
+        return Ok(());
+    }
+
+    tracing::info!(
+        raw_group = %admin_group_raw,
+        normalized_group = %admin_group,
+        "Checking for OIDC bootstrap admin mapping"
+    );
+
+    // Check if mapping already exists
+    let existing = count_oidc_group_mappings(pool, &admin_group)
+        .await
+        .context("Failed to check existing OIDC group mapping")?;
+
+    if existing > 0 {
+        tracing::info!(
+            group = %admin_group,
+            "Bootstrap admin mapping already exists; skipping creation"
+        );
+        return Ok(());
+    }
+
+    // Create the bootstrap admin mapping (with no environment restrictions)
+    create_oidc_group_mapping(pool, &admin_group, AuthRole::Admin, &[])
+        .await
+        .context(format!(
+            "Failed to create bootstrap OIDC admin mapping for {}",
+            admin_group
+        ))?;
+
+    tracing::info!(
+        raw_group = %admin_group_raw,
+        normalized_group = %admin_group,
+        role = "Admin",
+        "✅ Created bootstrap OIDC admin mapping"
+    );
+    tracing::info!(
+        group = %admin_group,
+        "   Users in OIDC groups matching '{}' (case-insensitive) will receive Admin role",
+        admin_group
+    );
+
+    Ok(())
+}
+
+/// Ensure a local bootstrap admin account exists and can authenticate.
+///
+/// Intended for local/mock development stacks where an operator wants a known
+/// username/password without going through the registration flow.
+pub async fn ensure_local_bootstrap_admin(
+    pool: &PgPool,
+    username: &str,
+    email: &str,
+    password: &str,
+) -> Result<()> {
+    if username.trim().is_empty() || email.trim().is_empty() || password.is_empty() {
+        return Ok(());
+    }
+
+    let user = if let Some(existing) = get_by_username(pool, username).await? {
+        existing
+    } else if let Some(existing) = get_by_email(pool, email).await? {
+        existing
+    } else {
+        insert_user(pool, email, Some("Mock Admin"))
+            .await
+            .context("Failed to insert local bootstrap admin user")?
+    };
+
+    let password_hash =
+        hash_password(password).context("Failed to hash local bootstrap password")?;
+    update_username_and_password_hash(pool, user.id, username, &password_hash)
+        .await
+        .context("Failed to set local bootstrap admin credentials")?;
+
+    let roles = find_user_roles(pool, user.id).await?;
+    if !roles.iter().any(|role| role.role == AuthRole::Admin) {
+        assign_role_to_user(pool, user.id, AuthRole::Admin, None)
+            .await
+            .context("Failed to assign admin role to local bootstrap user")?;
+    }
+
+    tracing::info!(
+        "✅ ensured local bootstrap admin user '{}' ({})",
+        username,
+        user.id
+    );
+
+    Ok(())
 }
 
 #[cfg(test)]

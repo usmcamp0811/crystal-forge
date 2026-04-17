@@ -126,10 +126,25 @@ impl ClaimExtractor {
         claims: &HashMap<String, Value>,
         claim_name: &str,
     ) -> Option<String> {
-        claims
-            .get(claim_name)
+        self.extract_claim_value(claims, claim_name)
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
+    }
+
+    fn extract_claim_value<'a>(
+        &self,
+        claims: &'a HashMap<String, Value>,
+        claim_name: &str,
+    ) -> Option<&'a Value> {
+        let mut segments = claim_name.split('.');
+        let first = segments.next()?;
+
+        let mut current = claims.get(first)?;
+        for segment in segments {
+            current = current.get(segment)?;
+        }
+
+        Some(current)
     }
 
     /// Extract roles/groups from claims.
@@ -139,7 +154,7 @@ impl ClaimExtractor {
     /// - Single string: `"admin"`
     /// - Comma-separated string: `"admin,operator"`
     fn extract_roles(&self, claims: &HashMap<String, Value>) -> Result<Vec<String>> {
-        let roles_claim = claims.get(&self.config.roles_claim);
+        let roles_claim = self.extract_claim_value(claims, &self.config.roles_claim);
 
         let roles = match roles_claim {
             Some(Value::Array(arr)) => {
@@ -152,7 +167,11 @@ impl ClaimExtractor {
             Some(Value::String(s)) => {
                 // Single string or comma-separated
                 if s.contains(',') {
-                    s.split(',').map(|s| s.trim().to_string()).collect()
+                    s.split(',')
+                        .map(str::trim)
+                        .filter(|role| !role.is_empty())
+                        .map(ToString::to_string)
+                        .collect()
                 } else {
                     vec![s.clone()]
                 }
@@ -287,5 +306,32 @@ mod tests {
         assert!(!user_info.email_verified);
         assert_eq!(user_info.display_name, None);
         assert!(user_info.roles.is_empty());
+    }
+
+    #[test]
+    fn extract_roles_from_nested_claim_path() {
+        let mut config = default_config();
+        config.roles_claim = "realm_access.roles".to_string();
+        let extractor = ClaimExtractor::new(config);
+
+        let mut claims = HashMap::new();
+        claims.insert(
+            "realm_access".to_string(),
+            json!({"roles": ["admin", "operator"]}),
+        );
+
+        let roles = extractor.extract_roles(&claims).unwrap();
+        assert_eq!(roles, vec!["admin", "operator"]);
+    }
+
+    #[test]
+    fn extract_roles_from_comma_separated_string_ignores_empty_values() {
+        let extractor = ClaimExtractor::new(default_config());
+
+        let mut claims = HashMap::new();
+        claims.insert("groups".to_string(), json!("admin, operator, ,viewer, "));
+
+        let roles = extractor.extract_roles(&claims).unwrap();
+        assert_eq!(roles, vec!["admin", "operator", "viewer"]);
     }
 }

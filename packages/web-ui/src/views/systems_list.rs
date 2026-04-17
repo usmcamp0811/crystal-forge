@@ -3,13 +3,13 @@
 use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
 use std::rc::Rc;
-use uuid::Uuid;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
 use web_sys::{Node, window};
 
+use crate::api::client::set_setup_wizard_agent_acknowledged;
 use crate::api::models::{
-    CveSummary, DeploymentStatus, FlakeSummary, HealthStatus, PipelineStage, SystemSummary,
+    DeploymentStatus, HealthStatus, SystemDetail, SystemSummary, SystemsListParams,
 };
 use crate::components::filters::{
     DeploymentFilterDropdown, EnvironmentFilterDropdown, HealthFilterDropdown, ViewMode, ViewToggle,
@@ -17,19 +17,54 @@ use crate::components::filters::{
 use crate::components::forms::{AddSystemForm, NewSystemDraft, validate_new_system};
 use crate::components::layout::Card;
 use crate::components::modals::{
-    GeneratedKeyPair, KeyPairModal, RemoveSystemDialog, generate_key_pair,
+    GeneratedKeyPair, KeyPairModal, RemoveSystemDialog, UpdatePublicKeyModal, generate_key_pair,
 };
-use crate::components::system::SystemCard;
+use crate::components::notifications::{AlertBanner, AlertSeverity};
+use crate::components::system::{DeploySystemModal, EditSystemModal, SystemCard};
 use crate::components::tables::SystemsTable;
+use crate::environments::adapter::load_environment_names_with_fallback;
 use crate::routes::Route;
+use crate::state::app_state::AppState;
+use crate::state::auth;
+use crate::systems::adapter::{
+    create_system_via_api, deactivate_system_via_api, deploy_system_via_api, fallback_flake_names,
+    fallback_systems, fetch_system_commits_via_api, load_flake_names_with_fallback,
+    load_system_detail_with_fallback, load_systems_with_fallback, update_system_public_key_via_api,
+    update_system_via_api,
+};
 use crate::theme;
-use chrono::{Duration, Utc};
+
+fn came_from_setup() -> bool {
+    if let Some(storage) = web_sys::window()
+        .and_then(|w| w.local_storage().ok())
+        .flatten()
+    {
+        let flag = storage.get_item("cf.from_setup").ok().flatten();
+        if flag.as_deref() == Some("1") {
+            let _ = storage.remove_item("cf.from_setup");
+            return true;
+        }
+    }
+    false
+}
+
+#[path = "systems_list_helpers.rs"]
+mod systems_list_helpers;
+use systems_list_helpers::{
+    matches_deployment, matches_environment, matches_health, matches_search, normalize_optional,
+    normalize_policy, prefers_view_from_query, remove_system_by_id, systems_missing_flake_count,
+    systems_missing_heartbeat_count, unique_environments, update_key_for_system,
+};
 
 const VIEW_PREF_KEY: &str = "crystal_forge.systems.view";
 
 /// Systems list with toggles and filters.
 #[component]
 pub fn SystemsListView() -> Element {
+    let nav = navigator();
+    let app_state = use_context::<Signal<AppState>>();
+    let is_admin_user = auth::is_admin(&app_state.read().auth);
+
     let stored_view = LocalStorage::get::<String>(VIEW_PREF_KEY).ok();
     let mut view_mode = use_signal(|| ViewMode::from_storage(stored_view));
     let query_view = prefers_view_from_query();
@@ -87,18 +122,98 @@ pub fn SystemsListView() -> Element {
     let mut health_filter = use_signal(Vec::<HealthStatus>::new);
     let mut deployment_filter = use_signal(Vec::<DeploymentStatus>::new);
 
-    // Data state
-    let mut systems = use_signal(mock_systems);
+    // Load real data from the backend using use_resource to prevent repeated fetches.
+    // Note: Currently loads all systems; filters applied client-side.
+    // Future improvement: pass filters to API via SystemsListParams.
+    let systems_resource = use_resource(move || async move {
+        load_systems_with_fallback(&SystemsListParams::default()).await
+    });
+
+    let environment_names_resource =
+        use_resource(move || async move { load_environment_names_with_fallback().await });
+    let flake_names_resource =
+        use_resource(move || async move { load_flake_names_with_fallback().await });
+
+    // Local mutable state for systems (allows client-side add/remove until backend supports it)
+    let mut local_systems = use_signal(fallback_systems);
+    let mut api_notice = use_signal(|| None::<String>);
+    let mut loading = use_signal(|| true);
+
+    // Sync local_systems with fetched systems when resource loads
+    // This effect runs when systems_resource changes
+    use_effect(move || {
+        if let Some(result) = &*systems_resource.read_unchecked() {
+            if result.redirect_to_login {
+                // Will be handled by early return below
+                return;
+            }
+            local_systems.set(result.systems.clone());
+            api_notice.set(result.notice.clone());
+            loading.set(false);
+        }
+    });
+
+    // Check for redirect (early return ensures no flash of fallback data)
+    let should_redirect = systems_resource
+        .read_unchecked()
+        .as_ref()
+        .map(|r| r.redirect_to_login)
+        .unwrap_or(false)
+        || flake_names_resource
+            .read_unchecked()
+            .as_ref()
+            .map(|r| r.redirect_to_login)
+            .unwrap_or(false)
+        || environment_names_resource
+            .read_unchecked()
+            .as_ref()
+            .map(|r| r.redirect_to_login)
+            .unwrap_or(false);
+
+    if should_redirect {
+        nav.push(Route::LoginView {});
+        return rsx! {
+            div {
+                class: "flex items-center justify-center py-12",
+                p { class: "{theme::text::SECONDARY}", "Redirecting to login..." }
+            }
+        };
+    }
+
     let mut show_add_form = use_signal(|| false);
     let mut add_error = use_signal(|| None::<String>);
     let mut draft = use_signal(NewSystemDraft::new);
     let mut pending_remove = use_signal(|| None::<SystemSummary>);
+    let mut pending_update_key = use_signal(|| None::<SystemSummary>);
+    let mut editing_system = use_signal(|| None::<uuid::Uuid>);
     let mut show_key_modal = use_signal(|| false);
     let mut generated_keys = use_signal(|| None::<GeneratedKeyPair>);
+    let mut update_key_error = use_signal(|| None::<String>);
+    let mut onboarding_agent_reminder = use_signal(|| None::<String>);
 
-    let current_systems = systems.read().clone();
+    // New modal state for edit and deploy
+    let mut edit_modal_system = use_signal(|| None::<SystemDetail>);
+    let mut deploy_modal_system = use_signal(|| {
+        None::<(
+            SystemDetail,
+            Vec<crate::api::models::CommitInfo>,
+            Option<String>,
+        )>
+    });
+    let mut deploy_error = use_signal(|| None::<String>);
+
+    let current_systems = local_systems.read().clone();
     let environments = unique_environments(&current_systems);
-    let registered_flakes = unique_registered_flakes();
+    let dropdown_environments = environment_names_resource
+        .read_unchecked()
+        .as_ref()
+        .map(|r| r.names.clone())
+        .unwrap_or_else(|| environments.clone());
+    let registered_flakes = flake_names_resource
+        .read_unchecked()
+        .as_ref()
+        .map(|r| r.names.clone())
+        .unwrap_or_else(fallback_flake_names);
 
     let filtered_systems: Vec<SystemSummary> = current_systems
         .into_iter()
@@ -110,10 +225,149 @@ pub fn SystemsListView() -> Element {
 
     let registered_flakes_for_submit = registered_flakes.clone();
 
+    let from_setup = use_signal(came_from_setup);
+    let mut dismiss_add_target_callout = use_signal(|| false);
+
     rsx! {
         div {
             class: "space-y-6",
             id: "{container_id}",
+
+            if from_setup() {
+                div {
+                    "data-testid": "setup-coach-systems-callout",
+                    style: "background:rgba(30,58,138,0.22); border:1px solid rgba(96,165,250,0.55); border-radius:8px; padding:12px 16px;",
+                    div {
+                        style: "display:flex; flex-direction:column; gap:6px;",
+                        p { style: "color:#dbeafe; font-size:12px; font-weight:700; margin:0; letter-spacing:0.03em; text-transform:uppercase;", "Setup Tour - Step 5 of 6" }
+                        p { style: "color:#dbeafe; font-size:14px; font-weight:600; margin:0;", "Register a system and its agent" }
+                        p { style: "color:#bfdbfe; font-size:13px; margin:0;", "Use Add System to register a machine in this fleet and connect it to environment + flake." }
+                        p { style: "color:#93c5fd; font-size:12px; margin:0;", "Agents are lightweight clients installed on systems so Crystal Forge can evaluate and apply deployments." }
+                    }
+                }
+            }
+
+            if let Some(ref reminder) = *onboarding_agent_reminder.read() {
+                div {
+                    "data-testid": "setup-coach-agent-runtime-reminder-modal",
+                    style: "position:fixed; inset:0; z-index:90; background:rgba(2,6,23,0.62); display:flex; align-items:center; justify-content:center; padding:16px;",
+                    div {
+                        style: "width:min(620px, 100%); border:2px solid rgba(59,130,246,0.75); background:linear-gradient(160deg, rgba(30,41,59,0.98), rgba(30,64,175,0.94)); border-radius:14px; box-shadow:0 18px 46px rgba(15,23,42,0.65); padding:18px 18px 16px 18px;",
+                        p { style: "margin:0; color:#bfdbfe; font-weight:800; font-size:12px; letter-spacing:0.05em; text-transform:uppercase;", "Agent activation required" }
+                        p { style: "margin:8px 0 0 0; color:#eff6ff; font-size:14px; line-height:1.45;", "{reminder}" }
+                        div {
+                            style: "margin-top:14px; display:flex; justify-content:flex-end;",
+                            button {
+                                class: "px-3 py-2 rounded-lg text-sm font-semibold text-white {theme::interactive::PRIMARY_BTN}",
+                                onclick: move |_| onboarding_agent_reminder.set(None),
+                                "Got it"
+                            }
+                        }
+                    }
+                }
+            }
+
+            // API fallback notice banner (shown when using mock data)
+            if let Some(ref notice) = *api_notice.read() {
+                div {
+                    class: "rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-4 py-3 text-sm text-yellow-300",
+                    "{notice}"
+                }
+            }
+
+            if let Some(result) = environment_names_resource.read_unchecked().as_ref() {
+                if let Some(ref notice) = result.notice {
+                    div {
+                        class: "rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-4 py-3 text-sm text-yellow-300",
+                        "{notice}"
+                    }
+                }
+            }
+
+            if let Some(result) = flake_names_resource.read_unchecked().as_ref() {
+                if let Some(ref notice) = result.notice {
+                    div {
+                        class: "rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-4 py-3 text-sm text-yellow-300",
+                        "{notice}"
+                    }
+                }
+            }
+
+            // Admin-only contextual health warnings (no agent heartbeat).
+            if is_admin_user && !*loading.read() {
+                {
+                    let systems_snap = local_systems.read();
+                    let no_flake_count = systems_missing_flake_count(&systems_snap);
+                    if no_flake_count > 0 {
+                        let suffix_s = if no_flake_count == 1 { "" } else { "s" };
+                        let suffix_v = if no_flake_count == 1 { "is" } else { "are" };
+                        let affected_hostnames: Vec<String> = systems_snap
+                            .iter()
+                            .filter(|system| system.flake_id.is_none())
+                            .map(|system| system.hostname.clone())
+                            .collect();
+                        let listed_hostnames = affected_hostnames
+                            .iter()
+                            .take(3)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        let remaining = affected_hostnames.len().saturating_sub(3);
+                        let affected_summary = if remaining > 0 {
+                            format!("{listed_hostnames} (+{remaining} more)")
+                        } else {
+                            listed_hostnames
+                        };
+                        let msg = format!(
+                            "{no_flake_count} system{suffix_s} {suffix_v} not linked to a flake and won't be included in evaluations. Affected system{suffix_s}: {affected_summary}. To resolve: click Edit on each affected system and set Flake Name."
+                        );
+                        rsx! {
+                            div {
+                                "data-testid": "systems-missing-flake-warning",
+                                AlertBanner {
+                                    severity: AlertSeverity::Warning,
+                                    message: msg,
+                                    action_label: Some("Review affected systems".to_string()),
+                                    action_url: Some("/systems".to_string()),
+                                }
+                            }
+                        }
+                    } else {
+                        rsx! {}
+                    }
+                }
+
+                {
+                    let systems_snap = local_systems.read();
+                    let no_hb_count = systems_missing_heartbeat_count(&systems_snap);
+                    if no_hb_count > 0 {
+                        let suffix_s = if no_hb_count == 1 { "" } else { "s" };
+                        let suffix_v = if no_hb_count == 1 { "has" } else { "have" };
+                        let msg = format!(
+                            "{no_hb_count} system{suffix_s} {suffix_v} no agent heartbeat on record and cannot receive deployments."
+                        );
+                        rsx! {
+                            AlertBanner {
+                                severity: AlertSeverity::Warning,
+                                message: msg,
+                            }
+                        }
+                    } else {
+                        rsx! {}
+                    }
+                }
+            }
+
+            // Loading spinner (shown during initial fetch)
+            if *loading.read() {
+                div {
+                    class: "flex items-center justify-center py-12",
+                    div {
+                        class: "animate-spin rounded-full h-8 w-8 border-b-2 border-blue-400"
+                    }
+                }
+            }
+
             header {
                 class: "flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between",
                 div {
@@ -122,14 +376,35 @@ pub fn SystemsListView() -> Element {
                 }
                 div {
                     class: "flex items-center gap-3",
-                    button {
-                        class: "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}",
-                        onclick: move |_| {
-                            let next = !*show_add_form.read();
-                            show_add_form.set(next);
-                            add_error.set(None);
-                        },
-                        if *show_add_form.read() { "Close" } else { "Add System" }
+                    div {
+                        class: "relative z-40",
+                        button {
+                            class: if from_setup() && !*show_add_form.read() {
+                                "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN} animate-pulse ring-2 ring-blue-300/70 ring-offset-2 ring-offset-slate-950"
+                            } else {
+                                "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}"
+                            },
+                            onclick: move |_| {
+                                let next = !*show_add_form.read();
+                                show_add_form.set(next);
+                                add_error.set(None);
+                                if next {
+                                    dismiss_add_target_callout.set(true);
+                                }
+                            },
+                            if *show_add_form.read() { "Close" } else { "Add System" }
+                        }
+                        if from_setup() && !*show_add_form.read() && !dismiss_add_target_callout() {
+                            div {
+                                "data-testid": "setup-coach-systems-target-callout",
+                                style: "position:absolute; z-index:70; right:0; top:calc(100% + 10px); background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; width:220px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                div {
+                                    style: "position:absolute; top:-6px; right:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                }
+                                p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
+                                p { style: "margin:2px 0 0 0;", "Click Add System to register your first managed machine." }
+                            }
+                        }
                     }
                     ViewToggle {
                         view_mode: *view_mode.read(),
@@ -141,11 +416,13 @@ pub fn SystemsListView() -> Element {
                 }
             }
 
-            // Add System Form
+            // System Form Modal
             if *show_add_form.read() {
                 AddSystemForm {
                     draft: draft,
                     error: add_error,
+                    show_onboarding_callouts: from_setup(),
+                    key_modal_open: *show_key_modal.read(),
                     on_cancel: move |_| {
                         draft.set(NewSystemDraft::new());
                         add_error.set(None);
@@ -153,39 +430,136 @@ pub fn SystemsListView() -> Element {
                     },
                     on_submit: move |_| {
                         let next = draft.read().clone();
-                        if let Err(message) = validate_new_system(&next, &systems.read(), &registered_flakes_for_submit) {
+                        if let Err(message) = validate_new_system(&next, &local_systems.read(), &registered_flakes_for_submit) {
                             add_error.set(Some(message));
                             return;
                         }
+                        let from_setup_active = from_setup();
+                        let first_system_in_setup = from_setup_active && local_systems.read().is_empty();
 
-                        let new_item = SystemSummary {
-                            id: Uuid::new_v4(),
-                            hostname: next.hostname.trim().to_string(),
-                            environment: normalize_optional(&next.environment),
-                            primary_ip: None,
-                            health_status: HealthStatus::Healthy,
-                            deployment_status: DeploymentStatus::NeverDeployed,
-                            pipeline_stage: Some(PipelineStage::ReadyForBuild),
-                            cve_counts: CveSummary { critical: 0, high: 0, medium: 0, low: 0 },
-                            nixos_version: None,
-                            last_seen: Some(Utc::now()),
-                            deployment_policy: normalize_policy(&next.deployment_policy),
-                        };
+                        // Call backend API to create the system
+                        spawn(async move {
+                            match create_system_via_api(
+                                next.hostname.trim().to_string(),
+                                normalize_optional(&next.system_configuration_name),
+                                next.public_key.clone(),
+                                normalize_optional(&next.environment),
+                                normalize_optional(&next.flake_name),
+                                normalize_policy(&next.deployment_policy),
+                            ).await {
+                                Ok(detail) => {
+                                    // Convert SystemDetail to SystemSummary for the list
+                                    let new_item = SystemSummary {
+                                        id: detail.id,
+                                        hostname: detail.hostname,
+                                        system_configuration_name: detail.system_configuration_name,
+                                        environment: detail.environment,
+                                        flake_id: detail.flake.as_ref().map(|flake| flake.id),
+                                        primary_ip: detail.network.primary_ip,
+                                        health_status: detail.health_status,
+                                        deployment_status: detail.deployment_status,
+                                        pipeline_stage: detail.pipeline_stage,
+                                        cve_counts: detail.cve_counts,
+                                        nixos_version: detail.nixos_version,
+                                        last_seen: detail.last_seen,
+                                        deployment_policy: detail.deployment_policy,
+                                    };
 
-                        let mut values = systems.read().clone();
-                        values.push(new_item);
-                        values.sort_by(|a, b| a.hostname.to_lowercase().cmp(&b.hostname.to_lowercase()));
-                        systems.set(values);
-                        draft.set(NewSystemDraft::new());
-                        add_error.set(None);
-                        show_add_form.set(false);
+                                    let mut values = local_systems.read().clone();
+                                    values.push(new_item);
+                                    values.sort_by(|a, b| a.hostname.to_lowercase().cmp(&b.hostname.to_lowercase()));
+                                    local_systems.set(values);
+                                    draft.set(NewSystemDraft::new());
+                                    add_error.set(None);
+                                    show_add_form.set(false);
+                                    if first_system_in_setup {
+                                        let _ = set_setup_wizard_agent_acknowledged(true).await;
+                                        onboarding_agent_reminder.set(Some(
+                                            "System record created. Next, ensure this host config enables the Crystal Forge agent module, apply/rebuild that config, and confirm the agent service is running before expecting heartbeats or deployment status.".to_string(),
+                                        ));
+                                    }
+                                }
+                                Err(error_message) => {
+                                    add_error.set(Some(error_message));
+                                }
+                            }
+                        });
                     },
                     on_generate_keys: move |_| {
                         generated_keys.set(Some(generate_key_pair()));
                         show_key_modal.set(true);
                     },
-                    environments: environments.clone(),
+                    environments: dropdown_environments.clone(),
                     flake_names: registered_flakes.clone(),
+                    title: "Register System".to_string(),
+                    submit_label: "Save System".to_string(),
+                }
+            }
+
+            if let Some(system_id) = *editing_system.read() {
+                AddSystemForm {
+                    draft: draft,
+                    error: add_error,
+                    show_onboarding_callouts: false,
+                    key_modal_open: *show_key_modal.read(),
+                    on_cancel: move |_| {
+                        draft.set(NewSystemDraft::new());
+                        add_error.set(None);
+                        editing_system.set(None);
+                    },
+                    on_submit: move |_| {
+                        let next = draft.read().clone();
+                        if next.hostname.trim().is_empty() {
+                            add_error.set(Some("Hostname is required.".to_string()));
+                            return;
+                        }
+                        spawn(async move {
+                            match update_system_via_api(
+                                system_id,
+                                next.hostname.trim().to_string(),
+                                normalize_optional(&next.system_configuration_name),
+                                normalize_optional(&next.environment),
+                                normalize_optional(&next.flake_name),
+                                normalize_policy(&next.deployment_policy),
+                            ).await {
+                                Ok(detail) => {
+                                    let updated = SystemSummary {
+                                        id: detail.id,
+                                        hostname: detail.hostname,
+                                        system_configuration_name: detail.system_configuration_name,
+                                        environment: detail.environment,
+                                        flake_id: detail.flake.as_ref().map(|flake| flake.id),
+                                        primary_ip: detail.network.primary_ip,
+                                        health_status: detail.health_status,
+                                        deployment_status: detail.deployment_status,
+                                        pipeline_stage: detail.pipeline_stage,
+                                        cve_counts: detail.cve_counts,
+                                        nixos_version: detail.nixos_version,
+                                        last_seen: detail.last_seen,
+                                        deployment_policy: detail.deployment_policy,
+                                    };
+                                    let mut values = local_systems.read().clone();
+                                    if let Some(item) = values.iter_mut().find(|item| item.id == system_id) {
+                                        *item = updated;
+                                    }
+                                    values.sort_by(|a, b| a.hostname.to_lowercase().cmp(&b.hostname.to_lowercase()));
+                                    local_systems.set(values);
+                                    draft.set(NewSystemDraft::new());
+                                    add_error.set(None);
+                                    editing_system.set(None);
+                                }
+                                Err(error_message) => add_error.set(Some(error_message)),
+                            }
+                        });
+                    },
+                    on_generate_keys: move |_| {
+                        generated_keys.set(Some(generate_key_pair()));
+                        show_key_modal.set(true);
+                    },
+                    environments: dropdown_environments.clone(),
+                    flake_names: registered_flakes.clone(),
+                    title: "Edit System".to_string(),
+                    submit_label: "Save Changes".to_string(),
                 }
             }
 
@@ -207,8 +581,7 @@ pub fn SystemsListView() -> Element {
 
             // Filters Bar
             div {
-                class: "relative z-[2000] grid grid-cols-1 lg:grid-cols-4 gap-4",
-                style: "position: sticky; top: 0;",
+                class: "grid grid-cols-1 lg:grid-cols-4 gap-4",
                 input {
                     class: "rounded-lg px-4 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
                     r#type: "search",
@@ -244,24 +617,69 @@ pub fn SystemsListView() -> Element {
                     class: "grid grid-cols-1 xl:grid-cols-2 gap-6",
                     "data-testid": "systems-cards",
                     for system in filtered_systems.clone() {
-                        div {
-                            class: "space-y-2",
-                            SystemCard { system: system.clone() }
-                            div {
-                                class: "px-1 flex justify-end",
-                                button {
-                                    class: "text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors",
-                                    onclick: move |_| remove_system_by_id(systems, pending_remove, system.id),
-                                    "Remove"
-                                }
-                            }
+                        SystemCard {
+                            system: system.clone(),
+                            on_remove: move |_| remove_system_by_id(local_systems, pending_remove, system.id),
+                            on_update_key: move |_| update_key_for_system(local_systems, pending_update_key, system.id),
+                            on_edit: move |_| {
+                                let mut edit_modal_system = edit_modal_system.clone();
+                                spawn(async move {
+                                    let detail = load_system_detail_with_fallback(&system.id.to_string()).await;
+                                    if let Some(detail) = detail.system {
+                                        edit_modal_system.set(Some(detail));
+                                    }
+                                });
+                            },
+                            on_deploy: move |_| {
+                                let mut deploy_modal_system = deploy_modal_system.clone();
+                                spawn(async move {
+                                    let detail = load_system_detail_with_fallback(&system.id.to_string()).await;
+                                    if let Some(detail) = detail.system {
+                                        match fetch_system_commits_via_api(system.id).await {
+                                            Ok(commits_response) => {
+                                                deploy_modal_system.set(Some((detail, commits_response.commits, commits_response.current_commit)));
+                                            }
+                                            Err(_) => {
+                                                // Fall back to showing modal with empty commits
+                                                deploy_modal_system.set(Some((detail, vec![], None)));
+                                            }
+                                        }
+                                    }
+                                });
+                            },
                         }
                     }
                 }
             } else {
                 SystemsTable {
                     systems: filtered_systems.clone(),
-                    on_remove: move |id| remove_system_by_id(systems, pending_remove, id),
+                    on_remove: move |id| remove_system_by_id(local_systems, pending_remove, id),
+                    on_update_key: move |id| update_key_for_system(local_systems, pending_update_key, id),
+                    on_edit: move |id: uuid::Uuid| {
+                        let mut edit_modal_system = edit_modal_system.clone();
+                        spawn(async move {
+                            let detail = load_system_detail_with_fallback(&id.to_string()).await;
+                            if let Some(detail) = detail.system {
+                                edit_modal_system.set(Some(detail));
+                            }
+                        });
+                    },
+                    on_deploy: move |id: uuid::Uuid| {
+                        let mut deploy_modal_system = deploy_modal_system.clone();
+                        spawn(async move {
+                            let detail = load_system_detail_with_fallback(&id.to_string()).await;
+                            if let Some(detail) = detail.system {
+                                match fetch_system_commits_via_api(id).await {
+                                    Ok(commits_response) => {
+                                        deploy_modal_system.set(Some((detail, commits_response.commits, commits_response.current_commit)));
+                                    }
+                                    Err(_) => {
+                                        deploy_modal_system.set(Some((detail, vec![], None)));
+                                    }
+                                }
+                            }
+                        });
+                    },
                 }
             }
 
@@ -271,10 +689,123 @@ pub fn SystemsListView() -> Element {
                     hostname: system.hostname.clone(),
                     on_cancel: move |_| pending_remove.set(None),
                     on_confirm: move |_| {
-                        let mut values = systems.read().clone();
-                        values.retain(|item| item.id != system.id);
-                        systems.set(values);
-                        pending_remove.set(None);
+                        let system_id = system.id;
+                        spawn(async move {
+                            match deactivate_system_via_api(system_id).await {
+                                Ok(_) => {
+                                    let mut values = local_systems.read().clone();
+                                    values.retain(|item| item.id != system_id);
+                                    local_systems.set(values);
+                                    pending_remove.set(None);
+                                }
+                                Err(error_message) => {
+                                    api_notice.set(Some(error_message));
+                                    pending_remove.set(None);
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+
+            // Update Public Key Modal
+            if let Some(system) = pending_update_key.read().clone() {
+                UpdatePublicKeyModal {
+                    system_id: system.id,
+                    hostname: system.hostname.clone(),
+                    on_cancel: move |_| {
+                        pending_update_key.set(None);
+                        update_key_error.set(None);
+                    },
+                    on_confirm: move |new_public_key| {
+                        let system_id = system.id;
+                        spawn(async move {
+                            match update_system_public_key_via_api(system_id, new_public_key).await {
+                                Ok(message) => {
+                                    // Success - close modal and maybe show a success toast
+                                    pending_update_key.set(None);
+                                    update_key_error.set(None);
+                                    // TODO: Show success toast with message
+                                }
+                                Err(error_message) => {
+                                    update_key_error.set(Some(error_message));
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+
+            // Edit System Modal
+            if let Some(detail) = edit_modal_system.read().clone() {
+                EditSystemModal {
+                    system: detail.clone(),
+                    flake_names: registered_flakes.clone(),
+                    on_close: move |_| edit_modal_system.set(None),
+                    on_save: move |request: crate::api::models::UpdateSystemRequest| {
+                        let system_id = detail.id;
+                        spawn(async move {
+                            match update_system_via_api(
+                                system_id,
+                                request.hostname,
+                                request.system_configuration_name,
+                                request.environment,
+                                request.flake_name,
+                                request.deployment_policy,
+                            ).await {
+                                Ok(updated_detail) => {
+                                    // Update local systems list
+                                    let mut values = local_systems.read().clone();
+                                    if let Some(pos) = values.iter().position(|s| s.id == system_id) {
+                                        values[pos].hostname = updated_detail.hostname.clone();
+                                        values[pos].system_configuration_name = updated_detail.system_configuration_name.clone();
+                                        values[pos].environment = updated_detail.environment.clone();
+                                        values[pos].deployment_policy = updated_detail.deployment_policy.clone();
+                                        values[pos].flake_id = updated_detail.flake.as_ref().map(|flake| flake.id);
+                                        local_systems.set(values);
+                                    }
+                                    edit_modal_system.set(None);
+                                }
+                                Err(error_message) => {
+                                    // TODO: Show error in modal
+                                    api_notice.set(Some(error_message));
+                                    edit_modal_system.set(None);
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+
+            // Deploy System Modal
+            if let Some((detail, commits, current_commit)) = deploy_modal_system.read().clone() {
+                DeploySystemModal {
+                    system_id: detail.id.to_string(),
+                    hostname: detail.hostname.clone(),
+                    deployment_policy: detail.deployment_policy.clone(),
+                    commits: commits.clone(),
+                    current_commit: current_commit.clone(),
+                    on_close: move |_| {
+                        deploy_modal_system.set(None);
+                        deploy_error.set(None);
+                    },
+                    on_deploy: move |request: crate::api::models::DeploySystemRequest| {
+                        let system_id = detail.id;
+                        spawn(async move {
+                            match deploy_system_via_api(system_id, request.commit_sha).await {
+                                Ok(message) => {
+                                    // Success - close modal
+                                    deploy_modal_system.set(None);
+                                    deploy_error.set(None);
+                                    api_notice.set(Some(message));
+                                }
+                                Err(error_message) => {
+                                    deploy_error.set(Some(error_message.clone()));
+                                    api_notice.set(Some(error_message));
+                                    deploy_modal_system.set(None);
+                                }
+                            }
+                        });
                     }
                 }
             }
@@ -282,173 +813,4 @@ pub fn SystemsListView() -> Element {
     }
 }
 
-// =============================================================================
-// Helper Functions
-// =============================================================================
-
-fn remove_system_by_id(
-    systems: Signal<Vec<SystemSummary>>,
-    mut pending_remove: Signal<Option<SystemSummary>>,
-    system_id: Uuid,
-) {
-    let target = systems
-        .read()
-        .iter()
-        .find(|item| item.id == system_id)
-        .cloned();
-    if let Some(system) = target {
-        pending_remove.set(Some(system));
-    }
-}
-
-fn normalize_optional(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
-}
-
-fn normalize_policy(value: &str) -> String {
-    let normalized = value.trim().to_lowercase();
-    if normalized.is_empty() {
-        "manual".to_string()
-    } else {
-        normalized
-    }
-}
-
-fn matches_environment(system: &SystemSummary, filters: &[String]) -> bool {
-    if filters.is_empty() {
-        return true;
-    }
-    system
-        .environment
-        .as_deref()
-        .is_some_and(|env| filters.iter().any(|f| env.eq_ignore_ascii_case(f)))
-}
-
-fn matches_health(system: &SystemSummary, filters: &[HealthStatus]) -> bool {
-    filters.is_empty() || filters.contains(&system.health_status)
-}
-
-fn matches_deployment(system: &SystemSummary, filters: &[DeploymentStatus]) -> bool {
-    filters.is_empty() || filters.contains(&system.deployment_status)
-}
-
-fn matches_search(system: &SystemSummary, search: &str) -> bool {
-    if search.is_empty() {
-        return true;
-    }
-    system
-        .hostname
-        .to_lowercase()
-        .contains(&search.to_lowercase())
-}
-
-fn unique_environments(systems: &[SystemSummary]) -> Vec<String> {
-    let mut envs: Vec<String> = systems
-        .iter()
-        .filter_map(|s| s.environment.clone())
-        .collect();
-    envs.sort();
-    envs.dedup();
-    envs
-}
-
-fn unique_registered_flakes() -> Vec<String> {
-    // TODO: Fetch from API
-    vec![
-        "infrastructure".to_string(),
-        "workstations".to_string(),
-        "edge-nodes".to_string(),
-    ]
-}
-
-fn prefers_view_from_query() -> Option<ViewMode> {
-    // TODO: Parse URL query params
-    None
-}
-
-// =============================================================================
-// Mock Data
-// =============================================================================
-
-fn mock_systems() -> Vec<SystemSummary> {
-    let now = Utc::now();
-    vec![
-        SystemSummary {
-            id: Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
-            hostname: "atlas-01".to_string(),
-            environment: Some("production".to_string()),
-            primary_ip: Some("10.0.1.10".to_string()),
-            health_status: HealthStatus::Healthy,
-            deployment_status: DeploymentStatus::UpToDate,
-            pipeline_stage: Some(PipelineStage::BuildComplete),
-            cve_counts: CveSummary {
-                critical: 0,
-                high: 2,
-                medium: 5,
-                low: 12,
-            },
-            nixos_version: Some("24.11".to_string()),
-            last_seen: Some(now - Duration::minutes(5)),
-            deployment_policy: "auto_latest".to_string(),
-        },
-        SystemSummary {
-            id: Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap(),
-            hostname: "atlas-02".to_string(),
-            environment: Some("production".to_string()),
-            primary_ip: Some("10.0.1.11".to_string()),
-            health_status: HealthStatus::Healthy,
-            deployment_status: DeploymentStatus::Behind,
-            pipeline_stage: Some(PipelineStage::ReadyForDeploy),
-            cve_counts: CveSummary {
-                critical: 1,
-                high: 3,
-                medium: 8,
-                low: 15,
-            },
-            nixos_version: Some("24.11".to_string()),
-            last_seen: Some(now - Duration::minutes(10)),
-            deployment_policy: "manual".to_string(),
-        },
-        SystemSummary {
-            id: Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap(),
-            hostname: "staging-01".to_string(),
-            environment: Some("staging".to_string()),
-            primary_ip: Some("10.0.2.10".to_string()),
-            health_status: HealthStatus::Warning,
-            deployment_status: DeploymentStatus::Behind,
-            pipeline_stage: Some(PipelineStage::ReadyForDeploy),
-            cve_counts: CveSummary {
-                critical: 0,
-                high: 0,
-                medium: 2,
-                low: 5,
-            },
-            nixos_version: Some("24.11".to_string()),
-            last_seen: Some(now - Duration::hours(1)),
-            deployment_policy: "manual".to_string(),
-        },
-        SystemSummary {
-            id: Uuid::parse_str("00000000-0000-0000-0000-000000000004").unwrap(),
-            hostname: "dev-box".to_string(),
-            environment: Some("development".to_string()),
-            primary_ip: Some("10.0.3.20".to_string()),
-            health_status: HealthStatus::Offline,
-            deployment_status: DeploymentStatus::NeverDeployed,
-            pipeline_stage: Some(PipelineStage::ReadyForBuild),
-            cve_counts: CveSummary {
-                critical: 0,
-                high: 0,
-                medium: 0,
-                low: 0,
-            },
-            nixos_version: None,
-            last_seen: Some(now - Duration::days(3)),
-            deployment_policy: "manual".to_string(),
-        },
-    ]
-}
+// Mock data has been moved to `crate::systems::adapter::fallback_systems`.

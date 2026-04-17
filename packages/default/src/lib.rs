@@ -9,7 +9,11 @@ pub mod handlers;
 pub mod log;
 pub mod models;
 pub mod queries;
+pub mod queue;
+pub mod security;
 pub mod server;
+pub mod services;
+pub mod tasks;
 pub mod vulnix;
 
 #[cfg(test)]

@@ -1,21 +1,35 @@
-use crate::api::models::FlakeRegistryItem;
+use crate::api::models::{
+    BuildStatus, CommitMetadata, FlakeCommit, FlakeRegistryItem, FlakeTimeline,
+};
 use crate::config::{FlakeConfig, WatchedFlake};
 use crate::models::flakes::Flake;
 use anyhow::Context;
 use anyhow::Result;
 use sqlx::PgPool;
 
-pub async fn insert_flake(pool: &PgPool, name: &str, repo_url: &str) -> Result<Flake> {
+pub async fn insert_flake(
+    pool: &PgPool,
+    name: &str,
+    repo_url: &str,
+    branch: &str,
+    build_scope: &str,
+) -> Result<Flake> {
     let flake = sqlx::query_as::<_, Flake>(
         "
-        INSERT INTO flakes (name, repo_url)
-        VALUES ($1, $2)
-        ON CONFLICT (repo_url) DO UPDATE SET name = EXCLUDED.name
+        INSERT INTO flakes (name, repo_url, branch, build_scope)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (repo_url) DO UPDATE SET 
+            name = EXCLUDED.name, 
+            branch = EXCLUDED.branch,
+            build_scope = EXCLUDED.build_scope,
+            deleted_at = NULL
         RETURNING *
         ",
     )
     .bind(name)
     .bind(repo_url)
+    .bind(branch)
+    .bind(build_scope)
     .fetch_one(pool)
     .await?;
 
@@ -23,27 +37,62 @@ pub async fn insert_flake(pool: &PgPool, name: &str, repo_url: &str) -> Result<F
 }
 
 pub async fn get_flake_by_name(pool: &PgPool, name: &str) -> Result<Flake> {
-    let commit = sqlx::query_as::<_, Flake>("SELECT * FROM flakes WHERE name = $1")
-        .bind(name)
-        .fetch_one(pool)
-        .await?;
+    let commit =
+        sqlx::query_as::<_, Flake>("SELECT * FROM flakes WHERE name = $1 AND deleted_at IS NULL")
+            .bind(name)
+            .fetch_one(pool)
+            .await?;
 
     Ok(commit)
 }
 
 pub async fn get_flake_by_id(pool: &PgPool, id: i32) -> Result<Flake> {
-    let commit = sqlx::query_as::<_, Flake>("SELECT * FROM flakes WHERE id = $1")
-        .bind(id)
-        .fetch_one(pool)
-        .await?;
+    let commit =
+        sqlx::query_as::<_, Flake>("SELECT * FROM flakes WHERE id = $1 AND deleted_at IS NULL")
+            .bind(id)
+            .fetch_one(pool)
+            .await?;
 
     Ok(commit)
 }
 
+pub async fn update_flake(
+    pool: &PgPool,
+    flake_id: i32,
+    name: &str,
+    repo_url: &str,
+    branch: &str,
+    build_scope: &str,
+) -> Result<Flake> {
+    let flake = sqlx::query_as::<_, Flake>(
+        r#"
+        UPDATE flakes
+        SET name = $1,
+            repo_url = $2,
+            branch = $3,
+            build_scope = $4
+        WHERE id = $5 AND deleted_at IS NULL
+        RETURNING *
+        "#,
+    )
+    .bind(name)
+    .bind(repo_url)
+    .bind(branch)
+    .bind(build_scope)
+    .bind(flake_id)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(flake)
+}
+
 pub async fn get_flake_id_by_repo_url(pool: &PgPool, repo_url: &str) -> Result<Option<i32>> {
-    let flake_id = sqlx::query_scalar!("SELECT id FROM flakes WHERE repo_url = $1", repo_url)
-        .fetch_optional(pool)
-        .await?;
+    let flake_id = sqlx::query_scalar!(
+        "SELECT id FROM flakes WHERE repo_url = $1 AND deleted_at IS NULL",
+        repo_url
+    )
+    .fetch_optional(pool)
+    .await?;
 
     Ok(flake_id)
 }
@@ -52,24 +101,38 @@ pub async fn get_all_flakes_from_db(
     pool: &PgPool,
     config: &FlakeConfig,
 ) -> Result<Vec<WatchedFlake>> {
-    let rows = sqlx::query!("SELECT name, repo_url FROM flakes")
-        .fetch_all(pool)
-        .await?;
+    let (flakes, _ids) = get_all_flakes_from_db_with_ids(pool, config).await?;
+    Ok(flakes)
+}
 
-    Ok(rows
-        .into_iter()
-        .map(|row| {
-            // Look for matching config flake to get the proper initial_commit_depth
-            let config_flake = config.watched.iter().find(|f| f.repo_url == row.repo_url);
+/// Returns both the `WatchedFlake` list and a parallel vec of database flake IDs.
+pub async fn get_all_flakes_from_db_with_ids(
+    pool: &PgPool,
+    config: &FlakeConfig,
+) -> Result<(Vec<WatchedFlake>, Vec<Option<i32>>)> {
+    // Use query_as so we don't require an updated sqlx offline cache.
+    let rows = sqlx::query_as::<_, (i32, String, String, String)>(
+        "SELECT id, name, repo_url, branch FROM flakes WHERE deleted_at IS NULL",
+    )
+    .fetch_all(pool)
+    .await?;
 
-            WatchedFlake {
-                name: row.name,
-                repo_url: row.repo_url,
-                auto_poll: true,
-                initial_commit_depth: config_flake.map(|f| f.initial_commit_depth).unwrap_or(5), // fallback to 5 for database-only flakes
-            }
-        })
-        .collect())
+    let mut flakes = Vec::with_capacity(rows.len());
+    let mut ids: Vec<Option<i32>> = Vec::with_capacity(rows.len());
+
+    for (id, name, repo_url, branch) in rows {
+        let config_flake = config.watched.iter().find(|f| f.repo_url == repo_url);
+        flakes.push(WatchedFlake {
+            name,
+            repo_url,
+            branch: Some(branch),
+            auto_poll: true,
+            initial_commit_depth: config_flake.map(|f| f.initial_commit_depth).unwrap_or(5),
+        });
+        ids.push(Some(id));
+    }
+
+    Ok((flakes, ids))
 }
 
 pub async fn find_flake_by_repo_urls(
@@ -77,12 +140,11 @@ pub async fn find_flake_by_repo_urls(
     possible_urls: &[String],
     preferred_url: &str,
 ) -> Result<Option<crate::models::flakes::Flake>> {
-    sqlx::query_as!(
-        crate::models::flakes::Flake,
+    sqlx::query_as::<_, crate::models::flakes::Flake>(
         r#"
-        SELECT id, name, repo_url
+        SELECT id, name, repo_url, branch, build_scope, deleted_at
         FROM flakes 
-        WHERE repo_url = ANY($1)
+        WHERE repo_url = ANY($1) AND deleted_at IS NULL
         ORDER BY 
             CASE 
                 WHEN repo_url = $2 THEN 1  -- Exact match first
@@ -90,25 +152,28 @@ pub async fn find_flake_by_repo_urls(
             END
         LIMIT 1
         "#,
-        possible_urls,
-        preferred_url
     )
+    .bind(possible_urls)
+    .bind(preferred_url)
     .fetch_optional(pool)
     .await
     .context("Failed to find flake by repo URLs")
 }
 
 pub async fn list_flake_registry(pool: &PgPool) -> Result<Vec<FlakeRegistryItem>> {
-    let rows = sqlx::query_as::<_, (i32, String, String, i64)>(
+    let rows = sqlx::query_as::<_, (i32, String, String, String, String, i64)>(
         r#"
         SELECT
             f.id,
             f.name,
             f.repo_url,
+            f.branch,
+            f.build_scope,
             COUNT(s.id)::bigint AS system_count
         FROM flakes f
         LEFT JOIN systems s ON s.flake_id = f.id
-        GROUP BY f.id, f.name, f.repo_url
+        WHERE f.deleted_at IS NULL
+        GROUP BY f.id, f.name, f.repo_url, f.branch, f.build_scope
         ORDER BY lower(f.name) ASC
         "#,
     )
@@ -117,12 +182,16 @@ pub async fn list_flake_registry(pool: &PgPool) -> Result<Vec<FlakeRegistryItem>
 
     Ok(rows
         .into_iter()
-        .map(|(id, name, repo_url, system_count)| FlakeRegistryItem {
-            id,
-            name,
-            repo_url,
-            system_count,
-        })
+        .map(
+            |(id, name, repo_url, branch, build_scope, system_count)| FlakeRegistryItem {
+                id,
+                name,
+                repo_url,
+                branch,
+                build_scope,
+                system_count,
+            },
+        )
         .collect())
 }
 
@@ -148,4 +217,477 @@ pub async fn delete_flake_by_id(pool: &PgPool, flake_id: i32) -> Result<u64> {
         .await?;
 
     Ok(result.rows_affected())
+}
+
+pub async fn purge_flake_commit_history(pool: &PgPool, flake_id: i32) -> Result<u64> {
+    let mut tx = pool.begin().await?;
+
+    // Clear commit-scoped caches first for deterministic cleanup.
+    sqlx::query(
+        r#"
+        DELETE FROM commit_artifacts_cache cac
+        USING commits c
+        WHERE cac.commit_id = c.id
+          AND c.flake_id = $1
+        "#,
+    )
+    .bind(flake_id)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        DELETE FROM commit_metadata_cache cmc
+        USING commits c
+        WHERE cmc.commit_id = c.id
+          AND c.flake_id = $1
+        "#,
+    )
+    .bind(flake_id)
+    .execute(&mut *tx)
+    .await?;
+
+    // Remove derivations linked to this flake's commits.
+    sqlx::query(
+        r#"
+        DELETE FROM derivations d
+        USING commits c
+        WHERE d.commit_id = c.id
+          AND c.flake_id = $1
+        "#,
+    )
+    .bind(flake_id)
+    .execute(&mut *tx)
+    .await?;
+
+    let deleted_commits = sqlx::query(
+        r#"
+        DELETE FROM commits
+        WHERE flake_id = $1
+        "#,
+    )
+    .bind(flake_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+
+    tx.commit().await?;
+    Ok(deleted_commits)
+}
+
+/// Soft delete a flake by setting deleted_at timestamp.
+/// The flake will be excluded from normal queries but retained for audit.
+pub async fn soft_delete_flake(pool: &PgPool, flake_id: i32) -> Result<u64> {
+    let result =
+        sqlx::query("UPDATE flakes SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL")
+            .bind(flake_id)
+            .execute(pool)
+            .await?;
+
+    Ok(result.rows_affected())
+}
+
+/// Check if flake has active dependencies (pending/in-progress evaluations, builds, or deployments).
+/// Returns count of blocking dependencies.
+pub async fn check_flake_dependencies(pool: &PgPool, flake_id: i32) -> Result<i64> {
+    // Check if any active systems are using this flake
+    //
+    // NOTE: The 'evaluations' and 'build_queue' tables are planned features
+    // but not yet implemented. When they are added, expand this check to include:
+    // - Active evaluations (evaluations.status IN ('pending', 'in_progress'))
+    // - Active builds (build_queue.status IN ('pending', 'in_progress'))
+    //
+    // For now, we only check for systems using the flake, which is the most
+    // critical dependency that would break if we deleted the flake.
+    let count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::bigint
+        FROM systems
+        WHERE flake_id = $1
+          AND is_active = true
+        "#,
+    )
+    .bind(flake_id)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(count)
+}
+
+/// Cascade delete a flake and all related data (evaluations, builds, deployments).
+/// This is a hard delete that permanently removes all traces.
+/// MUST be run in a transaction for safety - pass a transaction reference.
+pub async fn cascade_delete_flake(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    flake_id: i32,
+) -> Result<u64> {
+    // Note: ON DELETE CASCADE on commits FK will handle most cleanup
+    // But we explicitly delete systems first to be safe
+    sqlx::query("DELETE FROM systems WHERE flake_id = $1")
+        .bind(flake_id)
+        .execute(&mut **tx)
+        .await?;
+
+    // Delete the flake (commits, evaluations, builds cascade automatically)
+    let result = sqlx::query("DELETE FROM flakes WHERE id = $1")
+        .bind(flake_id)
+        .execute(&mut **tx)
+        .await?;
+
+    Ok(result.rows_affected())
+}
+
+/// Fetch flake timelines for dashboard view (CF system deployment counts).
+///
+/// Returns up to `max_commits_per_flake` most recent commits for each flake,
+/// showing count of Crystal Forge systems deployed at each commit.
+pub async fn fetch_dashboard_flake_timelines(
+    pool: &PgPool,
+    max_commits_per_flake: i64,
+    flake_ids: Option<&[i32]>,
+) -> Result<Vec<FlakeTimeline>> {
+    let flake_filter: Option<Vec<i32>> = flake_ids.map(|ids| ids.to_vec());
+    let flakes = sqlx::query_as::<_, (i32, String, String)>(
+        "SELECT id, name, repo_url FROM flakes WHERE deleted_at IS NULL AND ($1::int[] IS NULL OR id = ANY($1)) ORDER BY name ASC",
+    )
+    .bind(&flake_filter)
+    .fetch_all(pool)
+    .await?;
+
+    let mut timelines = Vec::new();
+
+    for (flake_id, flake_name, repo_url) in flakes {
+        let commits_rows = sqlx::query_as::<
+            _,
+            (
+                i32,
+                String,
+                chrono::DateTime<chrono::Utc>,
+                i64,
+                Vec<String>,
+                i64,
+                Option<String>,
+                Option<String>,
+            ),
+        >(
+            r#"
+            SELECT
+                c.id,
+                c.git_commit_hash,
+                c.commit_timestamp,
+                COALESCE(
+                    (
+                        SELECT COUNT(DISTINCT s.hostname)::bigint
+                        FROM view_system_deployment_status s
+                        WHERE s.current_commit_hash = c.git_commit_hash
+                    ),
+                    0
+                ) AS system_count,
+                COALESCE(
+                    (
+                        SELECT ARRAY_AGG(DISTINCT s.hostname ORDER BY s.hostname)
+                        FROM view_system_deployment_status s
+                        WHERE s.current_commit_hash = c.git_commit_hash
+                    ),
+                    ARRAY[]::text[]
+                ) AS systems,
+                (
+                    SELECT COUNT(*)::bigint
+                    FROM commits c2
+                    WHERE c2.flake_id = c.flake_id
+                    AND c2.commit_timestamp > c.commit_timestamp
+                ) AS commits_behind,
+                (
+                    SELECT
+                        CASE
+                            WHEN COUNT(*) FILTER (WHERE bj.status = 'building') > 0 THEN 'building'
+                            WHEN COUNT(*) FILTER (WHERE bj.status = 'queued') > 0 THEN 'queued'
+                            WHEN COUNT(*) FILTER (WHERE bj.status = 'failed') > 0 THEN 'failed'
+                            WHEN COUNT(*) FILTER (WHERE bj.status = 'success') > 0 THEN 'complete'
+                            ELSE NULL
+                        END
+                    FROM build_jobs bj
+                    JOIN derivations d ON d.id = bj.derivation_id
+                    WHERE d.commit_id = c.id
+                ) AS build_status,
+                (
+                    SELECT
+                        CASE
+                            WHEN COUNT(*) FILTER (WHERE d.status_id = 4) > 0 THEN 'running'
+                            WHEN COUNT(*) FILTER (WHERE d.status_id = 3) > 0 THEN 'queued'
+                            WHEN COUNT(*) FILTER (WHERE d.status_id = 6) > 0 THEN 'failed'
+                            WHEN COUNT(*) FILTER (WHERE d.status_id = 5) > 0 THEN 'complete'
+                            ELSE 'idle'
+                        END
+                    FROM derivations d
+                    WHERE d.commit_id = c.id
+                ) AS evaluation_status
+            FROM commits c
+            WHERE c.flake_id = $1
+            ORDER BY c.commit_timestamp DESC
+            LIMIT $2
+            "#,
+        )
+        .bind(flake_id)
+        .bind(max_commits_per_flake)
+        .fetch_all(pool)
+        .await?;
+
+        let commit_ids: Vec<i32> = commits_rows.iter().map(|row| row.0).collect();
+        if !commit_ids.is_empty() {
+            sqlx::query(
+                r#"
+                UPDATE commit_metadata_cache
+                SET last_accessed_at = CURRENT_TIMESTAMP
+                WHERE commit_id = ANY($1)
+                "#,
+            )
+            .bind(&commit_ids)
+            .execute(pool)
+            .await?;
+        }
+
+        let commits: Vec<FlakeCommit> = commits_rows
+            .into_iter()
+            .map(
+                |(
+                    id,
+                    hash,
+                    committed_at,
+                    system_count,
+                    systems,
+                    commits_behind,
+                    build_status,
+                    evaluation_status,
+                )| {
+                    let build_status = build_status.as_deref().map(|status| match status {
+                        "queued" => BuildStatus::Queued,
+                        "building" => BuildStatus::Building,
+                        "failed" => BuildStatus::Failed,
+                        "complete" => BuildStatus::Complete,
+                        _ => BuildStatus::Idle,
+                    });
+
+                    FlakeCommit {
+                        id,
+                        hash,
+                        message: "".to_string(),
+                        author: "".to_string(),
+                        committed_at,
+                        system_count,
+                        commits_behind,
+                        systems,
+                        system_paths: Vec::new(),
+                        build_status,
+                        evaluation_status,
+                        evaluation_error_message: None,
+                        metadata: None, // Dashboard view doesn't need metadata
+                    }
+                },
+            )
+            .collect();
+
+        timelines.push(FlakeTimeline {
+            flake_id,
+            flake_name,
+            repo_url,
+            commits,
+        });
+    }
+
+    Ok(timelines)
+}
+
+/// Fetch flake timelines for flakes view (nixosConfigurations in flake).
+///
+/// Returns up to `max_commits_per_flake` most recent commits for each flake,
+/// showing nixosConfigurations discovered at each commit from cache.
+pub async fn fetch_flake_timelines(
+    pool: &PgPool,
+    max_commits_per_flake: i64,
+    flake_ids: Option<&[i32]>,
+) -> Result<Vec<FlakeTimeline>> {
+    // First, get all flakes
+    let flake_filter: Option<Vec<i32>> = flake_ids.map(|ids| ids.to_vec());
+    let flakes = sqlx::query_as::<_, (i32, String, String)>(
+        "SELECT id, name, repo_url FROM flakes WHERE deleted_at IS NULL AND ($1::int[] IS NULL OR id = ANY($1)) ORDER BY name ASC",
+    )
+    .bind(&flake_filter)
+    .fetch_all(pool)
+    .await?;
+
+    let mut timelines = Vec::new();
+
+    for (flake_id, flake_name, repo_url) in flakes {
+        // Fetch recent commits for this flake, including systems at commit,
+        // build queue status, dry-run/eval status, and git metadata (message/author).
+        // Dedicated struct to avoid sqlx's 16-element tuple limit
+        #[derive(sqlx::FromRow)]
+        struct FlakeCommitRow {
+            id: i32,
+            git_commit_hash: String,
+            commit_timestamp: chrono::DateTime<chrono::Utc>,
+            message: Option<String>,
+            author: Option<String>,
+            system_count: i64,
+            systems: Vec<String>,
+            commits_behind: i64,
+            build_status: Option<String>,
+            evaluation_status: Option<String>,
+            evaluation_error_message: Option<String>,
+            total_systems: Option<i32>,
+            systems_passed_policy: Option<i32>,
+            systems_failed_policy_strict: Option<i32>,
+            systems_failed_policy_non_strict: Option<i32>,
+            has_nix_eval_error: Option<bool>,
+            has_policy_failures: Option<bool>,
+            all_systems_passed: Option<bool>,
+        }
+
+        let commits_rows = sqlx::query_as::<_, FlakeCommitRow>(
+            r#"
+            SELECT
+                c.id,
+                c.git_commit_hash,
+                c.commit_timestamp,
+                c.message,
+                c.author,
+                COALESCE(CARDINALITY(cac.nixos_configurations), 0)::bigint AS system_count,
+                COALESCE(
+                    cac.nixos_configurations,
+                    (
+                        SELECT COALESCE(array_agg(dn.derivation_name), ARRAY[]::text[])
+                        FROM (
+                            SELECT DISTINCT d.derivation_name
+                            FROM derivations d
+                            WHERE d.commit_id = c.id
+                                AND d.derivation_type = 'nixos'
+                            ORDER BY d.derivation_name
+                        ) dn
+                    ),
+                    ARRAY[]::text[]
+                ) AS systems,
+                (
+                    SELECT COUNT(*)::bigint
+                    FROM commits c2
+                    WHERE c2.flake_id = c.flake_id
+                    AND c2.commit_timestamp > c.commit_timestamp
+                ) AS commits_behind,
+                (
+                    SELECT
+                        CASE
+                            WHEN COUNT(*) FILTER (WHERE bj.status = 'building') > 0 THEN 'building'
+                            WHEN COUNT(*) FILTER (WHERE bj.status = 'queued') > 0 THEN 'queued'
+                            WHEN COUNT(*) FILTER (WHERE bj.status = 'failed') > 0 THEN 'failed'
+                            WHEN COUNT(*) FILTER (WHERE bj.status = 'success') > 0 THEN 'complete'
+                            ELSE NULL
+                        END
+                    FROM build_jobs bj
+                    JOIN derivations d ON d.id = bj.derivation_id
+                    WHERE d.commit_id = c.id
+                ) AS build_status,
+                c.evaluation_status,
+                c.evaluation_error_message,
+                cmc.total_systems,
+                cmc.systems_passed_policy,
+                cmc.systems_failed_policy_strict,
+                cmc.systems_failed_policy_non_strict,
+                cmc.has_nix_eval_error,
+                cmc.has_policy_failures,
+                cmc.all_systems_passed
+            FROM commits c
+            LEFT JOIN commit_artifacts_cache cac ON cac.commit_id = c.id
+            LEFT JOIN commit_metadata_cache cmc ON cmc.commit_id = c.id
+            WHERE c.flake_id = $1
+            ORDER BY c.commit_timestamp DESC
+            LIMIT $2
+            "#,
+        )
+        .bind(flake_id)
+        .bind(max_commits_per_flake)
+        .fetch_all(pool)
+        .await?;
+
+        let commit_ids: Vec<i32> = commits_rows.iter().map(|row| row.id).collect();
+        if !commit_ids.is_empty() {
+            sqlx::query(
+                r#"
+                UPDATE commit_metadata_cache
+                SET last_accessed_at = CURRENT_TIMESTAMP
+                WHERE commit_id = ANY($1)
+                "#,
+            )
+            .bind(&commit_ids)
+            .execute(pool)
+            .await?;
+        }
+
+        let commits: Vec<FlakeCommit> = commits_rows
+            .into_iter()
+            .map(|row| {
+                let build_status = row.build_status.as_deref().map(|status| match status {
+                    "queued" => BuildStatus::Queued,
+                    "building" => BuildStatus::Building,
+                    "failed" => BuildStatus::Failed,
+                    "complete" => BuildStatus::Complete,
+                    _ => BuildStatus::Idle,
+                });
+
+                let metadata = if let (
+                    Some(total_systems),
+                    Some(systems_passed_policy),
+                    Some(systems_failed_policy_strict),
+                    Some(systems_failed_policy_non_strict),
+                    Some(has_nix_eval_error),
+                    Some(has_policy_failures),
+                    Some(all_systems_passed),
+                ) = (
+                    row.total_systems,
+                    row.systems_passed_policy,
+                    row.systems_failed_policy_strict,
+                    row.systems_failed_policy_non_strict,
+                    row.has_nix_eval_error,
+                    row.has_policy_failures,
+                    row.all_systems_passed,
+                ) {
+                    Some(CommitMetadata {
+                        total_systems,
+                        systems_passed_policy,
+                        systems_failed_policy_strict,
+                        systems_failed_policy_non_strict,
+                        has_nix_eval_error,
+                        has_policy_failures,
+                        all_systems_passed,
+                    })
+                } else {
+                    None
+                };
+
+                FlakeCommit {
+                    id: row.id,
+                    hash: row.git_commit_hash,
+                    message: row.message.unwrap_or_default(),
+                    author: row.author.unwrap_or_default(),
+                    committed_at: row.commit_timestamp,
+                    system_count: row.system_count,
+                    commits_behind: row.commits_behind,
+                    systems: row.systems,
+                    system_paths: Vec::new(),
+                    build_status,
+                    evaluation_status: row.evaluation_status,
+                    evaluation_error_message: row.evaluation_error_message,
+                    metadata,
+                }
+            })
+            .collect();
+
+        timelines.push(FlakeTimeline {
+            flake_id,
+            flake_name,
+            repo_url,
+            commits,
+        });
+    }
+
+    Ok(timelines)
 }

@@ -1,0 +1,18 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "crystal-forge": {
+      "type": "local",
+      "command": ["backlog", "mcp", "start"]
+    },
+    "gitlab": {
+      "type": "remote",
+      "url": "https://gitlab.com/api/v4/mcp",
+      "enabled": true
+    },
+    "nixos": {
+      "type": "local",
+      "command": ["mcp-nixos"]
+    }
+  }
+}

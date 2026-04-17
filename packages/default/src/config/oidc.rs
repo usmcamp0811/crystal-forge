@@ -104,6 +104,35 @@ fn default_preferred_username_claim() -> String {
 }
 
 impl OidcConfig {
+    /// Determine if the application is running in a secure (HTTPS) context.
+    ///
+    /// This is used to decide whether to use `__Host-` prefixed cookies
+    /// and the `Secure` flag. In development with HTTP, we use regular cookies.
+    ///
+    /// Returns true if redirect_uri starts with "https://".
+    pub fn is_secure_context(&self) -> bool {
+        self.redirect_uri.starts_with("https://")
+    }
+
+    /// Get bootstrap admin group mapping if configured.
+    ///
+    /// This allows initial admin access setup via environment variable.
+    /// Set CRYSTAL_FORGE_OIDC_BOOTSTRAP_ADMIN_GROUP to the OIDC group name
+    /// that should be granted admin access on first startup.
+    ///
+    /// Example:
+    /// ```bash
+    /// CRYSTAL_FORGE_OIDC_BOOTSTRAP_ADMIN_GROUP=admin
+    /// CRYSTAL_FORGE_OIDC_BOOTSTRAP_ADMIN_GROUP=platform-admins
+    /// ```
+    ///
+    /// This is idempotent - if the mapping already exists, it won't be recreated.
+    /// This allows you to bootstrap the first admin user, who can then configure
+    /// additional mappings via the admin UI.
+    pub fn bootstrap_admin_group() -> Option<String> {
+        std::env::var("CRYSTAL_FORGE_OIDC_BOOTSTRAP_ADMIN_GROUP").ok()
+    }
+
     /// Load OIDC configuration from environment variables.
     ///
     /// Required environment variables:
@@ -117,6 +146,7 @@ impl OidcConfig {
     /// - CRYSTAL_FORGE_OIDC_EMAIL_CLAIM (default: "email")
     /// - CRYSTAL_FORGE_OIDC_NAME_CLAIM (default: "name")
     /// - CRYSTAL_FORGE_OIDC_ROLES_CLAIM (default: "groups")
+    /// - CRYSTAL_FORGE_OIDC_BOOTSTRAP_ADMIN_GROUP (optional initial admin group mapping)
     pub fn from_env() -> anyhow::Result<Self> {
         let issuer_url = std::env::var("CRYSTAL_FORGE_OIDC_ISSUER_URL")
             .map_err(|_| anyhow::anyhow!("CRYSTAL_FORGE_OIDC_ISSUER_URL not set"))?;
@@ -176,5 +206,28 @@ mod tests {
         assert_eq!(claims.email_claim, "email");
         assert_eq!(claims.name_claim, "name");
         assert_eq!(claims.roles_claim, "groups");
+    }
+
+    #[test]
+    fn is_secure_context_detects_https() {
+        let https_config = OidcConfig {
+            issuer_url: "https://auth.example.com".to_string(),
+            client_id: "test".to_string(),
+            client_secret: "secret".to_string(),
+            redirect_uri: "https://app.example.com/callback".to_string(),
+            scopes: default_scopes(),
+            claims: ClaimMappingConfig::default(),
+        };
+        assert!(https_config.is_secure_context());
+
+        let http_config = OidcConfig {
+            issuer_url: "http://localhost:8080".to_string(),
+            client_id: "test".to_string(),
+            client_secret: "secret".to_string(),
+            redirect_uri: "http://localhost:3445/callback".to_string(),
+            scopes: default_scopes(),
+            claims: ClaimMappingConfig::default(),
+        };
+        assert!(!http_config.is_secure_context());
     }
 }

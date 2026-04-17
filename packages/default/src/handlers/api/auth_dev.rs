@@ -3,14 +3,16 @@
 //! These endpoints are only available when AUTH_MODE=dev.
 
 use axum::Json;
-use axum::extract::State;
-use axum::http::StatusCode;
+use axum::extract::{ConnectInfo, State};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use std::net::SocketAddr;
 use tracing::error;
 
 use crate::auth::dev_mode::{find_dev_user_by_email, is_valid_dev_user_email};
+use crate::handlers::api::auth_session::establish_user_session;
 
 #[derive(Debug, Deserialize)]
 pub struct DevLoginRequest {
@@ -32,10 +34,12 @@ pub struct ApiError {
 
 /// Development mode login endpoint.
 ///
-/// Accepts a dev fixture email and returns user information.
+/// Accepts a dev fixture email, establishes a session, and returns user information.
 /// This endpoint should only be available when AUTH_MODE=dev.
 pub async fn dev_login(
     State(pool): State<PgPool>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(payload): Json<DevLoginRequest>,
 ) -> impl IntoResponse {
     if !is_valid_dev_user_email(&payload.email) {
@@ -57,15 +61,46 @@ pub async fn dev_login(
                 _ => None,
             };
 
-            (
-                StatusCode::OK,
-                Json(DevLoginResponse {
-                    user_id: user.id.to_string(),
-                    email: user.email.clone(),
-                    display_name,
-                }),
-            )
-                .into_response()
+            let user_agent = headers
+                .get(header::USER_AGENT)
+                .and_then(|v| v.to_str().ok())
+                .map(ToString::to_string);
+
+            let ip_address = Some(addr.ip().to_string());
+
+            // Establish session cookies
+            let session_cookies =
+                match establish_user_session(&pool, user.id, user_agent, ip_address).await {
+                    Ok(cookies) => cookies,
+                    Err(_) => {
+                        error!("Failed to establish session for dev user {}", user.email);
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(ApiError {
+                                error: "session_error".to_string(),
+                                message: "Failed to create session".to_string(),
+                            }),
+                        )
+                            .into_response();
+                    }
+                };
+
+            let mut response = Json(DevLoginResponse {
+                user_id: user.id.to_string(),
+                email: user.email.clone(),
+                display_name,
+            })
+            .into_response();
+
+            // Attach session cookies
+            response
+                .headers_mut()
+                .append(header::SET_COOKIE, session_cookies.session_cookie);
+            response
+                .headers_mut()
+                .append(header::SET_COOKIE, session_cookies.csrf_cookie);
+
+            response
         }
         Err(e) => {
             error!("Dev login failed: {e:#}");

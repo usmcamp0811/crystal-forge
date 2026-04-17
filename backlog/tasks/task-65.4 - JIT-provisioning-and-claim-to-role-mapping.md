@@ -5,7 +5,7 @@ status: Done
 assignee:
   - MiniMax M2.5
 created_date: ''
-updated_date: '2026-02-21 15:02'
+updated_date: '2026-03-13 01:24'
 labels:
   - security
   - auth
@@ -17,6 +17,7 @@ dependencies:
   - TASK-65.2
   - TASK-65.3
 priority: high
+ordinal: 58000
 ---
 
 ## Description
@@ -65,4 +66,6 @@ Risk Level
 Follow-up possibility: finer role granularity as a separate backlog item.
 
 LOCK: claude-sonnet-4-5 on gray in /home/mcamp/code/crystal-forge/TASK-65.4-jit-provisioning-role-mapping
+
+MR created: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/124
 <!-- SECTION:NOTES:END -->

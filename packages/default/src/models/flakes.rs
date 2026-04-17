@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
@@ -6,4 +7,7 @@ pub struct Flake {
     pub id: i32,
     pub name: String,
     pub repo_url: String,
+    pub branch: String,
+    pub build_scope: String,
+    pub deleted_at: Option<DateTime<Utc>>,
 }

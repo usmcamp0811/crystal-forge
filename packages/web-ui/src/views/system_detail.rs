@@ -15,9 +15,14 @@ use uuid::Uuid;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::{JsCast, JsValue};
 
+use crate::api::client::{
+    ApiClientError, fetch_cve_scan_status, fetch_system_cve_scan_eligibility, fetch_system_cves,
+    request_system_rollback, request_system_sync, trigger_system_cve_scan,
+};
 use crate::api::models::{
-    BuildStatus, CveSeverity, CveSummary, DeploymentLogEntry, DeploymentStatus, LogLevel,
-    PipelineStage, SystemCommitHistory, SystemDetail, SystemHardwareInfo, SystemNetworkInfo,
+    BuildStatus, CveScanEligibilityResponse, CveSeverity, CveSummary, DeploymentLogEntry,
+    DeploymentStatus, LogLevel, PipelineStage, SystemAgentEvent, SystemCommitHistory, SystemDetail,
+    SystemHardwareInfo, SystemHistoryEntry, SystemNetworkInfo, SystemRollbackRequest,
     SystemSecurityInfo, SystemVulnerability,
 };
 use crate::components::cve::CvesTab;
@@ -26,11 +31,17 @@ use crate::components::layout::Card;
 use crate::components::modals::{RollbackConfirmDialog, SyncConfirmDialog};
 use crate::components::notifications::Toast;
 use crate::components::system::{
-    AgentCard, BooleanRow, HardwareCard, InfoRow, InfoRowMono, LogLine, LogsTab, NetworkCard,
-    SecurityCard, StatusBadge, SystemInfoCard, environment_style,
+    AgentCard, BooleanRow, EditSystemModal, HardwareCard, InfoRow, InfoRowMono, LogLine, LogsTab,
+    NetworkCard, SecurityCard, StatusBadge, SystemInfoCard, environment_style,
+};
+use crate::routes::Route;
+use crate::state::{app_state::AppState, auth};
+use crate::systems::adapter::{fallback_system_detail, load_system_detail_with_fallback};
+use crate::systems::adapter::{
+    load_system_agent_events_with_fallback, load_system_history_with_fallback,
+    update_system_via_api,
 };
 use crate::theme;
-use crate::views::systems_mock::mock_system_detail_by_id;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_futures::JsFuture;
 #[cfg(target_arch = "wasm32")]
@@ -105,12 +116,18 @@ impl Tab {
 /// The system detail page, reached via `/systems/:id`.
 #[component]
 pub fn SystemDetailView(id: String) -> Element {
+    let nav = navigator();
+    let app_state = use_context::<Signal<AppState>>();
+
     // Current tab state
     let mut active_tab = use_signal(|| Tab::Overview);
+    let mut edit_modal_open = use_signal(|| false);
 
     // Confirmation dialog state for Sync
     let mut show_sync_dialog = use_signal(|| false);
     let mut sync_in_progress = use_signal(|| false);
+    let mut cve_scan_in_progress = use_signal(|| false);
+    let mut cve_scan_status_text: Signal<Option<String>> = use_signal(|| None);
 
     // Confirmation dialog state for rollback/deploying a historical commit
     let mut show_rollback_dialog = use_signal(|| false);
@@ -119,14 +136,137 @@ pub fn SystemDetailView(id: String) -> Element {
     // Toast notification state
     let mut toast_message: Signal<Option<(String, bool)>> = use_signal(|| None); // (message, is_success)
 
-    // Counter for alternating success/failure
-    let mut sync_attempt_count = use_signal(|| 0u32);
+    // System data state — use_resource keyed on id prevents repeated fetches.
+    let id_for_detail = id.clone();
+    let mut detail_resource = use_resource(move || {
+        let id = id_for_detail.clone();
+        async move { load_system_detail_with_fallback(&id).await }
+    });
 
-    // TODO: Replace with real API call using use_resource + fetch_system()
-    let system = mock_system_detail_by_id(&id).unwrap_or_else(|| fallback_system_detail());
-    let commit_history = mock_commit_history_for_system(&system);
-    let vulnerabilities = mock_vulnerabilities();
-    let deployment_logs = mock_deployment_logs();
+    let id_for_vulns = id.clone();
+    let mut vulnerabilities_resource = use_resource(move || {
+        let id = id_for_vulns.clone();
+        async move {
+            let Ok(system_id) = Uuid::parse_str(&id) else {
+                return mock_vulnerabilities();
+            };
+
+            fetch_system_cves(&system_id)
+                .await
+                .unwrap_or_else(|_| mock_vulnerabilities())
+        }
+    });
+
+    let id_for_history = id.clone();
+    let history_resource = use_resource(move || {
+        let id = id_for_history.clone();
+        async move {
+            let Ok(system_id) = Uuid::parse_str(&id) else {
+                return Vec::<SystemHistoryEntry>::new();
+            };
+
+            load_system_history_with_fallback(system_id).await.entries
+        }
+    });
+
+    let id_for_events = id.clone();
+    let agent_events_resource = use_resource(move || {
+        let id = id_for_events.clone();
+        async move {
+            let Ok(system_id) = Uuid::parse_str(&id) else {
+                return Vec::<SystemAgentEvent>::new();
+            };
+
+            load_system_agent_events_with_fallback(system_id)
+                .await
+                .entries
+        }
+    });
+
+    let id_for_scan_eligibility = id.clone();
+    let scan_eligibility_resource = use_resource(move || {
+        let id = id_for_scan_eligibility.clone();
+        async move {
+            let Ok(system_id) = Uuid::parse_str(&id) else {
+                return None;
+            };
+
+            fetch_system_cve_scan_eligibility(&system_id).await.ok()
+        }
+    });
+
+    // Derive state from resource result
+    let (system, api_notice, redirect_to_login, not_found) =
+        match &*detail_resource.read_unchecked() {
+            Some(result) => (
+                result.system.clone().unwrap_or_else(fallback_system_detail),
+                result.notice.clone(),
+                result.redirect_to_login,
+                result.system.is_none() && !result.redirect_to_login,
+            ),
+            None => (fallback_system_detail(), None, false, false),
+        };
+
+    // Redirect to login (early return matching dashboard pattern).
+    if redirect_to_login {
+        nav.push(Route::LoginView {});
+        return rsx! {
+            div {
+                class: "flex items-center justify-center py-12",
+                p { class: "{theme::text::SECONDARY}", "Redirecting to login..." }
+            }
+        };
+    }
+
+    // Not found state.
+    if not_found {
+        return rsx! {
+            div {
+                class: "space-y-4",
+                Link {
+                    to: crate::routes::Route::SystemsView {},
+                    class: "inline-flex items-center gap-1 text-sm {theme::text::SECONDARY} hover:text-white transition-colors",
+                    "← Back to Systems"
+                }
+                div {
+                    class: "rounded-lg border border-red-500/30 bg-red-500/10 px-6 py-8 text-center",
+                    p { class: "text-red-300 font-medium", "System not found" }
+                    p { class: "text-sm {theme::text::MUTED} mt-1", "No system exists with this ID." }
+                }
+            }
+        };
+    }
+
+    let history_entries = history_resource
+        .read_unchecked()
+        .clone()
+        .unwrap_or_default();
+    let commit_history = map_history_entries_to_commit_history(&history_entries);
+    let vulnerabilities = match &*vulnerabilities_resource.read_unchecked() {
+        Some(value) => value.clone(),
+        None => mock_vulnerabilities(),
+    };
+    let deployment_logs = map_agent_events_to_logs(
+        agent_events_resource
+            .read_unchecked()
+            .clone()
+            .unwrap_or_default(),
+    );
+    let scan_eligibility: Option<CveScanEligibilityResponse> = (*scan_eligibility_resource
+        .read_unchecked())
+    .clone()
+    .flatten();
+
+    let auth_context = app_state.read().auth.clone();
+    let can_mutate = auth::can_mutate_systems(&auth_context);
+    let cve_scan_eligible = scan_eligibility
+        .as_ref()
+        .map(|item| item.eligible)
+        .unwrap_or(false);
+    let cve_scan_blocked_reason = scan_eligibility
+        .as_ref()
+        .and_then(|item| item.reason.clone())
+        .unwrap_or_else(|| "CVE scan availability is still loading.".to_string());
 
     let environment = system
         .environment
@@ -157,93 +297,174 @@ pub fn SystemDetailView(id: String) -> Element {
             class: "space-y-6",
             "data-testid": "system-detail",
 
-            // Back link
-            div {
-                Link {
-                    to: crate::routes::Route::SystemsView {},
-                    class: "inline-flex items-center gap-1 text-sm {theme::text::SECONDARY} hover:text-white transition-colors",
-                    svg {
-                        class: "w-4 h-4",
-                        fill: "none",
-                        stroke: "currentColor",
-                        view_box: "0 0 24 24",
-                        path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M15 19l-7-7 7-7" }
-                    }
-                    "Back to Systems"
+            // API fallback notice banner (shown when using mock data)
+            if let Some(ref notice) = api_notice {
+                div {
+                    class: "rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-4 py-3 text-sm text-yellow-300",
+                    "{notice}"
                 }
+            }
+
+            // Back link
+            Link {
+                to: crate::routes::Route::SystemsView {},
+                class: "inline-flex items-center gap-1 text-sm {theme::text::SECONDARY} hover:text-white transition-colors",
+                svg {
+                    class: "w-4 h-4",
+                    fill: "none",
+                    stroke: "currentColor",
+                    view_box: "0 0 24 24",
+                    path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M15 19l-7-7 7-7" }
+                }
+                "Back to Systems"
             }
 
             // Page header
             header {
-                class: "flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between",
-
-                // Left side: hostname, env, status, last seen
+                class: "flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between",
                 div {
-                    class: "space-y-2",
-                    div {
-                        class: "flex items-center gap-3",
-                        div {
-                            class: "flex flex-col",
-                            h1 { class: "{theme::typography::PAGE_TITLE}", "{system.hostname}" }
-                            span {
-                                class: "text-xs {theme::text::MUTED}",
-                                "{system.id}"
-                            }
-                        }
-                        span {
-                            class: "inline-flex items-center px-3 py-1 rounded-md text-xs font-semibold uppercase tracking-wide {env_style.chip_bg} {env_style.chip_text}",
-                            "{environment}"
-                        }
+                    class: "flex items-center gap-3 flex-wrap",
+                    h1 { class: "{theme::typography::PAGE_TITLE}", "{system.hostname}" }
+                    span {
+                        class: "inline-flex items-center px-3 py-1 rounded-md text-xs font-semibold uppercase tracking-wide {env_style.chip_bg} {env_style.chip_text}",
+                        "{environment}"
                     }
-
-                    // Status row
-                    div {
-                        class: "flex flex-wrap items-center gap-3",
-                        StatusBadge {
-                            label: system.health_status.label(),
-                            color_class: system.health_status.color_class(),
-                            bg_class: system.health_status.bg_class()
-                        }
-                        StatusBadge {
-                            label: system.deployment_status.label(),
-                            color_class: system.deployment_status.color_class(),
-                            bg_class: system.deployment_status.bg_class()
-                        }
-
-                        // Last seen
-                        span {
-                            class: "text-sm {theme::text::MUTED}",
-                            "Last seen: {last_seen_text}"
-                        }
-
-                        // Current commit hash
-                        if let Some(ref store_path) = system.current_store_path {
-                            {
-                                // Extract hash from store path
-                                let hash = store_path.split('-').next().unwrap_or("").chars().skip(11).take(7).collect::<String>();
-                                rsx! {
-                                    if !hash.is_empty() {
-                                        span {
-                                            class: "font-mono text-xs px-2 py-0.5 rounded bg-gray-800 text-gray-400",
-                                            "{hash}"
-                                        }
+                    StatusBadge {
+                        label: system.health_status.label(),
+                        color_class: system.health_status.color_class(),
+                        bg_class: system.health_status.bg_class()
+                    }
+                    StatusBadge {
+                        label: system.deployment_status.label(),
+                        color_class: system.deployment_status.color_class(),
+                        bg_class: system.deployment_status.bg_class()
+                    }
+                    span {
+                        class: "text-sm {theme::text::MUTED}",
+                        "Last seen: {last_seen_text}"
+                    }
+                    if let Some(ref store_path) = system.current_store_path {
+                        {
+                            let hash = store_path.split('-').next().unwrap_or("").chars().skip(11).take(7).collect::<String>();
+                            rsx! {
+                                if !hash.is_empty() {
+                                    span {
+                                        class: "font-mono text-xs px-2 py-0.5 rounded bg-gray-800 text-gray-400",
+                                        "{hash}"
                                     }
                                 }
                             }
                         }
                     }
                 }
-
-                // Right side: Sync Now button
                 div {
                     class: "flex items-center gap-2",
                     button {
-                        class: "inline-flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm transition-all text-white border border-purple-400/40 bg-purple-600/60 hover:bg-purple-600/80 hover:border-purple-300/60 shadow-sm shadow-purple-900/30",
-                        disabled: *sync_in_progress.read(),
+                        class: "inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} {theme::text::PRIMARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors disabled:opacity-60 disabled:cursor-not-allowed",
+                        disabled: !can_mutate,
+                        onclick: move |_| edit_modal_open.set(true),
+                        if !can_mutate {
+                            "Edit (Operator/Admin required)"
+                        } else {
+                            "Edit"
+                        }
+                    }
+                    button {
+                        class: "inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING} transition-colors disabled:opacity-60 disabled:cursor-not-allowed",
+                        disabled: *cve_scan_in_progress.read() || !can_mutate || !cve_scan_eligible,
+                        title: if cve_scan_eligible {
+                            Some("Run CVE scan immediately for this system configuration")
+                        } else {
+                            Some(cve_scan_blocked_reason.as_str())
+                        },
+                        onclick: {
+                            let system_id = system.id;
+                            move |_| {
+                                if !can_mutate || !cve_scan_eligible {
+                                    return;
+                                }
+
+                                cve_scan_in_progress.set(true);
+                                cve_scan_status_text.set(Some("CVE scan queued...".to_string()));
+                                spawn(async move {
+                                    let trigger_result = trigger_system_cve_scan(&system_id).await;
+                                    match trigger_result {
+                                        Ok(triggered) => {
+                                            cve_scan_status_text
+                                                .set(Some("CVE scan running...".to_string()));
+                                            let mut terminal_status: Option<String> = None;
+
+                                            for _ in 0..25 {
+                                                match fetch_cve_scan_status(&triggered.scan_id).await {
+                                                    Ok(status) => {
+                                                        let normalized = status.status.to_lowercase();
+                                                        if normalized == "completed" {
+                                                            terminal_status = Some(format!(
+                                                                "CVE scan completed: {} vulnerabilities found",
+                                                                status.total_vulnerabilities
+                                                            ));
+                                                            break;
+                                                        }
+                                                        if normalized == "failed" {
+                                                            terminal_status = Some(
+                                                                "CVE scan failed. Check server logs for details."
+                                                                    .to_string(),
+                                                            );
+                                                            break;
+                                                        }
+                                                        cve_scan_status_text
+                                                            .set(Some("CVE scan running...".to_string()));
+                                                    }
+                                                    Err(_) => {
+                                                        terminal_status = Some(
+                                                            "Unable to poll CVE scan status."
+                                                                .to_string(),
+                                                        );
+                                                        break;
+                                                    }
+                                                }
+
+                                                use gloo_timers::future::TimeoutFuture;
+                                                TimeoutFuture::new(1500).await;
+                                            }
+
+                                            if let Some(msg) = terminal_status {
+                                                let is_success = msg.contains("completed");
+                                                toast_message.set(Some((msg.clone(), is_success)));
+                                                cve_scan_status_text.set(Some(msg));
+                                            }
+                                        }
+                                        Err(ApiClientError::Status { code: 409, body }) if body.contains("scan_ineligible") => {
+                                            let msg = "CVE scanning is not available on this node (vulnix not installed).".to_string();
+                                            toast_message.set(Some((msg.clone(), false)));
+                                            cve_scan_status_text.set(Some(msg));
+                                        }
+                                        Err(err) => {
+                                            let msg = format!("Failed to trigger CVE scan: {}", err);
+                                            toast_message.set(Some((msg.clone(), false)));
+                                            cve_scan_status_text.set(Some(msg));
+                                        }
+                                    }
+
+                                    cve_scan_in_progress.set(false);
+                                });
+                            }
+                        },
+
+                        if *cve_scan_in_progress.read() {
+                            "Scanning..."
+                        } else if !can_mutate {
+                            "Run CVE Scan (Operator/Admin required)"
+                        } else {
+                            "Run CVE Scan"
+                        }
+                    }
+                    button {
+                        class: "inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::SUCCESS_BTN} {theme::interactive::FOCUS_RING} transition-colors disabled:opacity-60 disabled:cursor-not-allowed",
+                        disabled: *sync_in_progress.read() || !can_mutate,
                         onclick: move |_| show_sync_dialog.set(true),
 
                         if *sync_in_progress.read() {
-                            // Spinner
                             svg {
                                 class: "w-4 h-4 animate-spin",
                                 fill: "none",
@@ -263,6 +484,8 @@ pub fn SystemDetailView(id: String) -> Element {
                                 }
                             }
                             "Syncing..."
+                        } else if !can_mutate {
+                            "Sync (Operator/Admin required)"
                         } else {
                             svg {
                                 class: "w-4 h-4",
@@ -280,20 +503,26 @@ pub fn SystemDetailView(id: String) -> Element {
                         }
                     }
                 }
+                if let Some(scan_status) = cve_scan_status_text() {
+                    p {
+                        class: "text-xs text-amber-200 mt-1",
+                        "{scan_status}"
+                    }
+                }
             }
 
             // Tab navigation
             div {
                 class: "border-b {theme::surface::CARD_BORDER}",
                 nav {
-                    class: "flex gap-1",
+                    class: "flex gap-1 -mb-px",
                     for tab in [Tab::Overview, Tab::History, Tab::Policy, Tab::Cves, Tab::Logs] {
                         {
                             let is_active = *active_tab.read() == tab;
                             let tab_class = if is_active {
-                                "px-4 py-2 text-sm font-medium text-white border-b-2 border-blue-500 -mb-px"
+                                "px-4 py-2 text-sm font-semibold text-cyan-300 border-b-2 border-cyan-400 bg-cyan-500/10"
                             } else {
-                                "px-4 py-2 text-sm font-medium {theme::text::SECONDARY} hover:text-white transition-colors"
+                                "px-4 py-2 text-sm font-medium {theme::text::SECONDARY} hover:text-white hover:border-cyan-500/50 transition-colors border-b-2 border-transparent"
                             };
                             rsx! {
                                 button {
@@ -301,8 +530,6 @@ pub fn SystemDetailView(id: String) -> Element {
                                     class: "{tab_class}",
                                     onclick: move |_| active_tab.set(tab),
                                     "{tab.label()}"
-
-                                    // Badge for CVE count
                                     if tab == Tab::Cves && system.cve_counts.total() > 0 {
                                         span {
                                             class: "ml-2 px-1.5 py-0.5 text-xs rounded-full bg-red-500/20 text-red-400",
@@ -327,6 +554,7 @@ pub fn SystemDetailView(id: String) -> Element {
                         HistoryTab {
                             commits: commit_history.clone(),
                             deployment_policy: system.deployment_policy.clone(),
+                            allow_mutations: can_mutate,
                             on_rollback: move |commit| {
                                 rollback_target.set(Some(commit));
                                 show_rollback_dialog.set(true);
@@ -338,8 +566,13 @@ pub fn SystemDetailView(id: String) -> Element {
                     },
                     Tab::Cves => rsx! {
                         CvesTab {
+                            system_id: system.id,
                             cve_counts: system.cve_counts.clone(),
-                            vulnerabilities: vulnerabilities.clone()
+                            vulnerabilities: vulnerabilities.clone(),
+                            allow_mutations: can_mutate,
+                            on_saved: move |_| {
+                                vulnerabilities_resource.restart();
+                            }
                         }
                     },
                     Tab::Logs => rsx! {
@@ -359,40 +592,72 @@ pub fn SystemDetailView(id: String) -> Element {
         }
 
         // Sync confirmation dialog (rendered as portal outside main content)
+        if *edit_modal_open.read() {
+            EditSystemModal {
+                system: system.clone(),
+                flake_names: system
+                    .flake
+                    .as_ref()
+                    .map(|flake| vec![flake.name.clone()])
+                    .unwrap_or_default(),
+                on_close: move |_| edit_modal_open.set(false),
+                on_save: move |request: crate::api::models::UpdateSystemRequest| {
+                    let system_id = system.id;
+                    spawn(async move {
+                        match update_system_via_api(
+                            system_id,
+                            request.hostname,
+                            request.system_configuration_name,
+                            request.environment,
+                            request.flake_name,
+                            request.deployment_policy,
+                        )
+                        .await
+                        {
+                            Ok(_) => {
+                                edit_modal_open.set(false);
+                                detail_resource.restart();
+                            }
+                            Err(error_message) => {
+                                toast_message.set(Some((error_message, false)));
+                                edit_modal_open.set(false);
+                            }
+                        }
+                    });
+                }
+            }
+        }
+
+        // Sync confirmation dialog (rendered as portal outside main content)
         if *show_sync_dialog.read() {
             SyncConfirmDialog {
                 hostname: system.hostname.clone(),
                 on_confirm: {
                     let hostname = system.hostname.clone();
-                    move |_| {
-                        show_sync_dialog.set(false);
-                        sync_in_progress.set(true);
+                        move |_| {
+                            show_sync_dialog.set(false);
+                            sync_in_progress.set(true);
 
-                        // Increment attempt counter for alternating success/failure
-                        let attempt = *sync_attempt_count.read();
-                        sync_attempt_count.set(attempt + 1);
-                        let will_succeed = attempt % 2 == 0;
+                            let hostname = hostname.clone();
+                            let system_id = system.id;
+                            let mut toast_message = toast_message.clone();
+                            spawn(async move {
+                                sync_in_progress.set(false);
 
-                        // Simulate async deployment with spawn
-                        let hostname = hostname.clone();
-                        let mut toast_message = toast_message.clone();
-                        spawn(async move {
-                            // Simulate 2-4 second build/deploy time
-                            #[cfg(target_arch = "wasm32")]
-                            {
-                                use gloo_timers::future::TimeoutFuture;
-                                TimeoutFuture::new(2500).await;
-                            }
-
-                            sync_in_progress.set(false);
-
-                            let show_toast = if will_succeed {
-                                let message = format!("Successfully synced {}", hostname);
-                                dispatch_sync_notification(message, true, toast_message.clone()).await
-                            } else {
-                                let message = format!("Failed to sync {}: Build timeout", hostname);
-                                dispatch_sync_notification(message, false, toast_message.clone()).await
-                            };
+                                let show_toast = match request_system_sync(&system_id).await {
+                                    Ok(response) => {
+                                        let message = if response.message.trim().is_empty() {
+                                            format!("Successfully synced {}", hostname)
+                                        } else {
+                                            response.message
+                                        };
+                                        dispatch_sync_notification(message, true, toast_message.clone()).await
+                                    }
+                                    Err(error) => {
+                                        let message = format!("Failed to sync {}: {}", hostname, error);
+                                        dispatch_sync_notification(message, false, toast_message.clone()).await
+                                    }
+                                };
 
                             // Auto-dismiss toast after 5 seconds (only when used)
                             if show_toast {
@@ -425,17 +690,30 @@ pub fn SystemDetailView(id: String) -> Element {
                     on_confirm: {
                         let hostname = system.hostname.clone();
                         let commit = commit.clone();
+                        let system_id = system.id;
                         let toast_message = toast_message.clone();
                         move |_| {
                             show_rollback_dialog.set(false);
-                            // TODO: Implement policy override (temporary disable or switch to manual).
-                            let message = format!(
-                                "Requested rollback of {} to {}",
-                                hostname,
-                                commit.hash.chars().take(7).collect::<String>()
-                            );
+                            let hostname = hostname.clone();
+                            let commit = commit.clone();
+                            let target_commit = commit.hash.clone();
                             spawn(async move {
-                                let _ = dispatch_sync_notification(message, true, toast_message).await;
+                                let message = match request_system_rollback(
+                                    &system_id,
+                                    &SystemRollbackRequest { target_commit },
+                                )
+                                .await
+                                {
+                                    Ok(response) if !response.message.trim().is_empty() => response.message,
+                                    Ok(_) => format!(
+                                        "Requested rollback of {} to {}",
+                                        hostname,
+                                        commit.hash.chars().take(7).collect::<String>()
+                                    ),
+                                    Err(error) => format!("Rollback request failed for {}: {}", hostname, error),
+                                };
+                                let success = !message.to_ascii_lowercase().contains("failed");
+                                let _ = dispatch_sync_notification(message, success, toast_message).await;
                             });
                         }
                     },
@@ -514,6 +792,7 @@ fn OverviewTab(system: SystemDetail) -> Element {
 fn HistoryTab(
     commits: Vec<SystemCommitHistory>,
     deployment_policy: String,
+    allow_mutations: bool,
     on_rollback: EventHandler<SystemCommitHistory>,
 ) -> Element {
     rsx! {
@@ -576,6 +855,7 @@ fn HistoryTab(
                             is_first: idx == 0,
                             is_last: idx == commits.len() - 1,
                             deployment_policy: deployment_policy.clone(),
+                            allow_mutations,
                             on_rollback: on_rollback.clone()
                         }
                     }
@@ -592,6 +872,7 @@ fn CommitTimelineNode(
     #[allow(unused)] is_first: bool,
     #[allow(unused)] is_last: bool,
     deployment_policy: String,
+    allow_mutations: bool,
     on_rollback: EventHandler<SystemCommitHistory>,
 ) -> Element {
     let mut expanded = use_signal(|| false);
@@ -758,7 +1039,7 @@ fn CommitTimelineNode(
                             }
 
                             // Rollback action (icon-only, hover)
-                            if !commit.is_current {
+                            if allow_mutations && !commit.is_current {
                                 button {
                                     class: "shrink-0 p-1 rounded text-gray-400 hover:text-white hover:bg-gray-800 transition-colors opacity-40 group-hover:opacity-100",
                                     title: "Deploy this commit (rollback)",
@@ -785,10 +1066,28 @@ fn CommitTimelineNode(
                     div {
                         class: "flex flex-wrap items-center gap-x-4 gap-y-1 text-xs {theme::text::MUTED}",
 
+                        if let Some(ref config_identity) = commit.config_identity {
+                            span {
+                                class: "inline-flex items-center gap-1 rounded bg-slate-800/70 px-1.5 py-0.5 text-slate-300",
+                                "Config"
+                                code { class: "font-mono text-slate-200", "{config_identity}" }
+                            }
+                        }
+
                         // Hash
                         code {
                             class: "font-mono bg-gray-800 px-1.5 py-0.5 rounded text-gray-400",
                             "{short_hash}"
+                        }
+
+                        if let Some(ref repo_url) = commit.flake_repo_url {
+                            a {
+                                class: "text-blue-400 hover:text-blue-300 underline",
+                                href: "{repo_url}",
+                                target: "_blank",
+                                rel: "noopener noreferrer",
+                                "Flake"
+                            }
                         }
 
                         // Author
@@ -1136,6 +1435,7 @@ struct PolicyDefinition {
     description: String,
     format: PolicyFormat,
     body: String,
+    policy_type: Option<String>,
 }
 
 fn policy_presets() -> Vec<PolicyPresetMeta> {
@@ -1320,11 +1620,9 @@ fn PolicyEditorModal(
 
     rsx! {
         div {
-            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-6",
-            style: "position: fixed; inset: 0; z-index: 50; width: 100vw; height: 100vh; backdrop-filter: blur(6px);",
+            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-6 cf-modal-overlay-z50",
             div {
-                class: "{theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-2xl p-6",
-                style: "width: 85vw; max-width: 64rem; display: flex; flex-direction: column; gap: 1.5rem; overflow: visible; align-items: stretch;",
+                class: "{theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-2xl p-6 cf-modal-panel-wide overflow-visible items-stretch",
                 div {
                     class: "flex items-center justify-between",
                     div {
@@ -1436,6 +1734,7 @@ fn PolicyEditorModal(
                                                     description: description.clone(),
                                                     format,
                                                     body: body.clone(),
+                                                    policy_type: extract_policy_type_from_body(&body),
                                                 }
                                             } else {
                                                 policy
@@ -1449,6 +1748,7 @@ fn PolicyEditorModal(
                                         description: description.clone(),
                                         format,
                                         body: body.clone(),
+                                        policy_type: extract_policy_type_from_body(&body),
                                     });
                                 }
                                 policy_library.set(library);
@@ -1474,11 +1774,9 @@ fn PolicyEditorModal(
 fn CombinedPolicyModal(text: String, on_close: EventHandler<()>) -> Element {
     rsx! {
         div {
-            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-6",
-            style: "position: fixed; inset: 0; z-index: 50; width: 100vw; height: 100vh; backdrop-filter: blur(6px);",
+            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-6 cf-modal-overlay-z50",
             div {
-                class: "{theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-2xl p-6",
-                style: "height: 70vh; width: 80vw; max-width: 72rem; display: flex; flex-direction: column; gap: 1.5rem;",
+                class: "{theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-2xl p-6 cf-modal-panel-xl",
                 div {
                     class: "flex items-center justify-between",
                     div {
@@ -1554,6 +1852,32 @@ fn build_policy_library_rows(
         .collect()
 }
 
+fn extract_policy_type_from_body(body: &str) -> Option<String> {
+    if body.contains("type = \"require_crystal_forge_agent\"") {
+        Some("require_crystal_forge_agent".to_string())
+    } else if body.contains("type = \"require_cf_agent\"") {
+        Some("require_cf_agent".to_string())
+    } else if body.contains("type = \"require_packages\"") {
+        Some("require_packages".to_string())
+    } else if body.contains("type = \"custom_check\"") {
+        Some("custom_check".to_string())
+    } else if body.contains("\"policy_type\"") {
+        // Try to extract from JSON
+        body.lines()
+            .find(|line| line.contains("\"policy_type\""))
+            .and_then(|line| {
+                line.split(':')
+                    .nth(1)?
+                    .trim()
+                    .trim_matches(|c| c == '"' || c == ',' || c == ' ')
+                    .parse()
+                    .ok()
+            })
+    } else {
+        None
+    }
+}
+
 fn initial_policy_definitions() -> Vec<PolicyDefinition> {
     policy_presets()
         .into_iter()
@@ -1562,7 +1886,8 @@ fn initial_policy_definitions() -> Vec<PolicyDefinition> {
             name: preset.title.to_string(),
             description: preset.description.to_string(),
             format: preset.format,
-            body: preset.body,
+            body: preset.body.clone(),
+            policy_type: extract_policy_type_from_body(&preset.body),
         })
         .collect()
 }
@@ -1770,74 +2095,94 @@ fn show_notification(message: &str, is_success: bool) -> Result<Notification, Js
 // Mock Data Functions
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn mock_commit_history_for_system(system: &SystemDetail) -> Vec<SystemCommitHistory> {
-    let flake_name = system.flake.as_ref().map(|flake| flake.name.as_str());
-    let timelines = crate::views::dashboard::mock_flake_timelines();
-    let Some(timeline) =
-        flake_name.and_then(|name| timelines.iter().find(|t| t.flake_name == name))
-    else {
-        return Vec::new();
-    };
+fn map_history_entries_to_commit_history(
+    entries: &[SystemHistoryEntry],
+) -> Vec<SystemCommitHistory> {
+    use std::collections::HashSet;
 
-    let mut commits: Vec<SystemCommitHistory> = timeline
-        .commits
+    let mut seen_store_paths: HashSet<String> = HashSet::new();
+
+    entries
         .iter()
-        .map(|commit| SystemCommitHistory {
-            hash: commit.hash.clone(),
-            message: commit.message.clone(),
-            author: commit.author.clone(),
-            committed_at: commit.committed_at,
-            was_deployed: false,
-            deployed_at: None,
-            is_current: false,
-            is_ready_to_deploy: false,
-            build_status: commit.build_status,
-            diff_summary: Some(diff_for_commit(&commit.hash, &commit.message)),
+        .enumerate()
+        .map(|(idx, entry)| {
+            let reverted = entry
+                .store_path
+                .as_ref()
+                .map(|path| !seen_store_paths.insert(path.clone()))
+                .unwrap_or(false);
+
+            let config_identity = entry
+                .system_configuration_name
+                .clone()
+                .or_else(|| entry.store_path.clone());
+
+            let hash = entry
+                .commit_hash
+                .clone()
+                .or_else(|| {
+                    entry.store_path.as_ref().and_then(|path| {
+                        path.split('/')
+                            .next_back()
+                            .and_then(|store_name| store_name.split('-').next())
+                            .map(|value| value.to_string())
+                    })
+                })
+                .unwrap_or_else(|| format!("state-{idx}"));
+
+            let mut status_fragments = vec![format!("Reason: {}", entry.change_reason)];
+            status_fragments.push(format!("Outcome: {}", entry.outcome));
+            if reverted {
+                status_fragments.push("Revert detected".to_string());
+            }
+
+            SystemCommitHistory {
+                hash,
+                message: config_identity
+                    .clone()
+                    .map(|value| format!("Configuration {value}"))
+                    .unwrap_or_else(|| "Configuration update".to_string()),
+                author: format!(
+                    "{} · {} · {}",
+                    entry.actor, entry.change_reason, entry.outcome
+                ),
+                committed_at: entry.timestamp,
+                was_deployed: true,
+                deployed_at: Some(entry.timestamp),
+                is_current: idx == 0,
+                is_ready_to_deploy: false,
+                build_status: None,
+                diff_summary: Some(status_fragments.join(" · ")),
+                flake_repo_url: entry.flake_repo_url.clone(),
+                config_identity,
+            }
         })
-        .collect();
+        .collect()
+}
 
-    if commits.is_empty() {
-        return commits;
-    }
+fn map_agent_events_to_logs(events: Vec<SystemAgentEvent>) -> Vec<DeploymentLogEntry> {
+    events
+        .into_iter()
+        .map(|event| {
+            let level = match event.level.to_ascii_lowercase().as_str() {
+                "error" => LogLevel::Error,
+                "warn" | "warning" => LogLevel::Warn,
+                "debug" => LogLevel::Debug,
+                _ => LogLevel::Info,
+            };
 
-    let mut current_idx: Option<usize> = match system.deployment_status {
-        DeploymentStatus::UpToDate => Some(0),
-        DeploymentStatus::Behind => Some(2.min(commits.len() - 1)),
-        DeploymentStatus::Ahead => Some(0),
-        DeploymentStatus::NeverDeployed => None,
-        DeploymentStatus::NoCommitsAvailable => return Vec::new(),
-        DeploymentStatus::Unknown => Some(1.min(commits.len() - 1)),
-    };
-
-    if system.hostname == "ws-001" {
-        current_idx = Some(3.min(commits.len().saturating_sub(1)));
-    }
-
-    if let Some(idx) = current_idx {
-        commits[idx].is_current = true;
-        commits[idx].was_deployed = true;
-        commits[idx].deployed_at = Some(commits[idx].committed_at + Duration::hours(1));
-
-        for i in (idx + 1)..commits.len() {
-            commits[i].was_deployed = true;
-            commits[i].deployed_at = Some(commits[i].committed_at + Duration::hours(1));
-        }
-    }
-
-    // Mark ready-to-deploy commit when pipeline is ready
-    if matches!(system.pipeline_stage, Some(PipelineStage::ReadyForDeploy)) {
-        let ready_idx = current_idx
-            .and_then(|idx| if idx > 0 { Some(idx - 1) } else { None })
-            .unwrap_or(0);
-        if ready_idx < commits.len() {
-            commits[ready_idx].is_ready_to_deploy = true;
-            commits[ready_idx].was_deployed = false;
-            commits[ready_idx].deployed_at = None;
-            commits[ready_idx].is_current = false;
-        }
-    }
-
-    commits
+            DeploymentLogEntry {
+                message: event.message,
+                timestamp: event.timestamp,
+                level,
+                phase: Some(if event.deployment_related {
+                    "Deployment".to_string()
+                } else {
+                    event.event_type
+                }),
+            }
+        })
+        .collect()
 }
 
 fn mock_vulnerabilities() -> Vec<SystemVulnerability> {
@@ -1850,7 +2195,12 @@ fn mock_vulnerabilities() -> Vec<SystemVulnerability> {
             package_name: "openssl".to_string(),
             installed_version: "3.0.12".to_string(),
             fixed_version: Some("3.0.13".to_string()),
+            first_seen: Some(Utc::now() - Duration::days(20)),
             published_at: Some(Utc::now() - Duration::days(30)),
+            status: Some("open".to_string()),
+            justification_category: None,
+            justification_reason: None,
+            justification_updated_at: None,
         },
         SystemVulnerability {
             cve_id: "CVE-2024-5678".to_string(),
@@ -1860,7 +2210,12 @@ fn mock_vulnerabilities() -> Vec<SystemVulnerability> {
             package_name: "curl".to_string(),
             installed_version: "8.4.0".to_string(),
             fixed_version: Some("8.5.0".to_string()),
+            first_seen: Some(Utc::now() - Duration::days(10)),
             published_at: Some(Utc::now() - Duration::days(14)),
+            status: Some("open".to_string()),
+            justification_category: None,
+            justification_reason: None,
+            justification_updated_at: None,
         },
         SystemVulnerability {
             cve_id: "CVE-2024-9012".to_string(),
@@ -1870,7 +2225,12 @@ fn mock_vulnerabilities() -> Vec<SystemVulnerability> {
             package_name: "sudo".to_string(),
             installed_version: "1.9.14".to_string(),
             fixed_version: None,
+            first_seen: Some(Utc::now() - Duration::days(5)),
             published_at: Some(Utc::now() - Duration::days(7)),
+            status: Some("open".to_string()),
+            justification_category: None,
+            justification_reason: None,
+            justification_updated_at: None,
         },
         SystemVulnerability {
             cve_id: "CVE-2024-3456".to_string(),
@@ -1880,7 +2240,12 @@ fn mock_vulnerabilities() -> Vec<SystemVulnerability> {
             package_name: "nginx".to_string(),
             installed_version: "1.24.0".to_string(),
             fixed_version: Some("1.25.0".to_string()),
+            first_seen: Some(Utc::now() - Duration::days(30)),
             published_at: Some(Utc::now() - Duration::days(45)),
+            status: Some("fixed".to_string()),
+            justification_category: None,
+            justification_reason: None,
+            justification_updated_at: None,
         },
         SystemVulnerability {
             cve_id: "CVE-2024-7890".to_string(),
@@ -1890,111 +2255,88 @@ fn mock_vulnerabilities() -> Vec<SystemVulnerability> {
             package_name: "bash".to_string(),
             installed_version: "5.2".to_string(),
             fixed_version: None,
+            first_seen: Some(Utc::now() - Duration::days(40)),
             published_at: Some(Utc::now() - Duration::days(60)),
+            status: Some("open".to_string()),
+            justification_category: None,
+            justification_reason: None,
+            justification_updated_at: None,
         },
     ]
 }
 
-fn mock_deployment_logs() -> Vec<DeploymentLogEntry> {
-    let base_time = Utc::now() - Duration::hours(1);
+// fallback_system_detail() has been moved to crate::systems::adapter
 
-    vec![
-        DeploymentLogEntry {
-            message: "Starting deployment for commit a1b2c3d".to_string(),
-            timestamp: base_time,
-            level: LogLevel::Info,
-            phase: Some("Deployment".to_string()),
-        },
-        DeploymentLogEntry {
-            message: "Fetching derivation from build cache...".to_string(),
-            timestamp: base_time + Duration::seconds(2),
-            level: LogLevel::Info,
-            phase: Some("Deployment".to_string()),
-        },
-        DeploymentLogEntry {
-            message: "Cache hit: /nix/store/abc123-nixos-system-server-01".to_string(),
-            timestamp: base_time + Duration::seconds(5),
-            level: LogLevel::Info,
-            phase: Some("Deployment".to_string()),
-        },
-        DeploymentLogEntry {
-            message: "Activating new configuration...".to_string(),
-            timestamp: base_time + Duration::seconds(8),
-            level: LogLevel::Info,
-            phase: Some("Deployment".to_string()),
-        },
-        DeploymentLogEntry {
-            message: "Restarting nginx.service".to_string(),
-            timestamp: base_time + Duration::seconds(10),
-            level: LogLevel::Info,
-            phase: Some("Deployment".to_string()),
-        },
-        DeploymentLogEntry {
-            message: "Warning: postgresql.service restart skipped (no changes)".to_string(),
-            timestamp: base_time + Duration::seconds(11),
-            level: LogLevel::Warn,
-            phase: Some("Deployment".to_string()),
-        },
-        DeploymentLogEntry {
-            message: "Setting system profile...".to_string(),
-            timestamp: base_time + Duration::seconds(13),
-            level: LogLevel::Info,
-            phase: Some("Deployment".to_string()),
-        },
-        DeploymentLogEntry {
-            message: "Deployment complete. System now running a1b2c3d".to_string(),
-            timestamp: base_time + Duration::seconds(15),
-            level: LogLevel::Info,
-            phase: Some("Deployment".to_string()),
-        },
-    ]
-}
+#[cfg(test)]
+mod tests {
+    use super::{map_agent_events_to_logs, map_history_entries_to_commit_history};
+    use crate::api::models::{SystemAgentEvent, SystemHistoryEntry};
+    use chrono::{Duration, Utc};
 
-fn fallback_system_detail() -> SystemDetail {
-    crate::views::systems_mock::mock_system_details()
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| SystemDetail {
-            id: uuid::Uuid::new_v4(),
-            hostname: "unknown".to_string(),
-            environment: None,
-            is_active: false,
-            deployment_policy: "Unknown".to_string(),
-            health_status: crate::api::models::HealthStatus::Offline,
-            deployment_status: crate::api::models::DeploymentStatus::Unknown,
-            pipeline_stage: None,
-            nixos_version: None,
-            kernel: None,
-            agent_version: None,
-            current_store_path: None,
-            hardware: SystemHardwareInfo {
-                cpu_brand: None,
-                cpu_cores: None,
-                memory_gb: None,
-                uptime_secs: None,
-                board_serial: None,
-                bios_version: None,
+    #[test]
+    fn history_mapping_marks_revert_when_store_path_reappears() {
+        let now = Utc::now();
+        let entries = vec![
+            SystemHistoryEntry {
+                timestamp: now,
+                store_path: Some("/nix/store/aaaa-system".to_string()),
+                system_configuration_name: Some("web-01".to_string()),
+                change_reason: "cf_deployment".to_string(),
+                commit_hash: Some("aaaaaaaa".to_string()),
+                flake_name: Some("infra".to_string()),
+                flake_repo_url: Some("https://example.com/infra.git".to_string()),
+                actor: "agent".to_string(),
+                outcome: "recorded".to_string(),
             },
-            network: SystemNetworkInfo {
-                primary_ip: None,
-                primary_mac: None,
-                gateway_ip: None,
+            SystemHistoryEntry {
+                timestamp: now - Duration::minutes(10),
+                store_path: Some("/nix/store/bbbb-system".to_string()),
+                system_configuration_name: Some("web-01".to_string()),
+                change_reason: "cf_deployment".to_string(),
+                commit_hash: Some("bbbbbbbb".to_string()),
+                flake_name: Some("infra".to_string()),
+                flake_repo_url: Some("https://example.com/infra.git".to_string()),
+                actor: "agent".to_string(),
+                outcome: "recorded".to_string(),
             },
-            security: SystemSecurityInfo {
-                tpm_present: None,
-                secure_boot_enabled: None,
-                fips_mode: None,
-                selinux_status: None,
+            SystemHistoryEntry {
+                timestamp: now - Duration::minutes(20),
+                store_path: Some("/nix/store/aaaa-system".to_string()),
+                system_configuration_name: Some("web-01".to_string()),
+                change_reason: "cf_deployment".to_string(),
+                commit_hash: Some("aaaaaaaa".to_string()),
+                flake_name: Some("infra".to_string()),
+                flake_repo_url: Some("https://example.com/infra.git".to_string()),
+                actor: "agent".to_string(),
+                outcome: "recorded".to_string(),
             },
-            cve_counts: CveSummary {
-                critical: 0,
-                high: 0,
-                medium: 0,
-                low: 0,
-            },
-            flake: None,
-            last_seen: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        })
+        ];
+
+        let timeline = map_history_entries_to_commit_history(&entries);
+
+        assert_eq!(timeline.len(), 3);
+        assert!(timeline[0].is_current);
+        assert!(
+            timeline[2]
+                .diff_summary
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Revert detected")
+        );
+    }
+
+    #[test]
+    fn agent_event_mapping_preserves_deployment_phase() {
+        let now = Utc::now();
+        let logs = map_agent_events_to_logs(vec![SystemAgentEvent {
+            timestamp: now,
+            level: "info".to_string(),
+            event_type: "state_change".to_string(),
+            message: "agent reported cf_deployment".to_string(),
+            deployment_related: true,
+        }]);
+
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].phase.as_deref(), Some("Deployment"));
+    }
 }

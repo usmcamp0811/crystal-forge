@@ -157,6 +157,7 @@ impl Derivation {
                 whoami.env("HOME", "/var/lib/crystal-forge");
                 whoami.env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config");
                 apply_cache_env_to_command(&mut whoami);
+                apply_cache_config_env_to_command(&mut whoami, cache_config);
                 if let Ok(out) = whoami.output().await {
                     let s = String::from_utf8_lossy(&out.stdout);
                     info!("attic whoami: {}", s.trim());
@@ -174,6 +175,7 @@ impl Derivation {
                 info_cmd.env("HOME", "/var/lib/crystal-forge");
                 info_cmd.env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config");
                 apply_cache_env_to_command(&mut info_cmd);
+                apply_cache_config_env_to_command(&mut info_cmd, cache_config);
                 if let Ok(out) = info_cmd.output().await {
                     if !out.status.success() {
                         warn!(
@@ -192,6 +194,7 @@ impl Derivation {
             cmd.env("HOME", "/var/lib/crystal-forge");
             cmd.env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config");
             apply_cache_env_to_command(&mut cmd);
+            apply_cache_config_env_to_command(&mut cmd, cache_config);
 
             let success = run_cache_command_streaming(cmd, "attic push (first attempt)").await?;
 
@@ -202,6 +205,7 @@ impl Derivation {
                 cmd_check.env("HOME", "/var/lib/crystal-forge");
                 cmd_check.env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config");
                 apply_cache_env_to_command(&mut cmd_check);
+                apply_cache_config_env_to_command(&mut cmd_check, cache_config);
                 let output = cmd_check
                     .output()
                     .await
@@ -229,6 +233,7 @@ impl Derivation {
                     cmd2.env("HOME", "/var/lib/crystal-forge");
                     cmd2.env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config");
                     apply_cache_env_to_command(&mut cmd2);
+                    apply_cache_config_env_to_command(&mut cmd2, cache_config);
                     let retry_success =
                         run_cache_command_streaming(cmd2, "attic push (retry after 401)").await?;
                     if retry_success {
@@ -259,6 +264,7 @@ impl Derivation {
             scoped.args(["--scope", "--collect", "--quiet"]);
             apply_systemd_props_for_scope(build_config, &mut scoped);
             apply_cache_env(&mut scoped);
+            apply_cache_config_env_for_scope(&mut scoped, cache_config);
             scoped
                 .arg("--")
                 .arg(&effective_command)
@@ -291,6 +297,7 @@ impl Derivation {
 
         build_config.apply_to_command(&mut cmd);
         apply_cache_env_to_command(&mut cmd);
+        apply_cache_config_env_to_command(&mut cmd, cache_config);
 
         let success = run_cache_command_streaming(cmd, &effective_command).await?;
         if !success {

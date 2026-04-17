@@ -116,9 +116,11 @@ in mkShell {
     postgresql
     sqlx-cli
     vulnix
+    nix-eval-jobs # Required for commit evaluation
     python3
     python3Packages.pytest
     run-scenario
+    pkgs.crystal-forge.devScripts.startBuilderApi
 
     # UI development tooling (Dioxus web target)
     dioxus-cli # dx CLI for Dioxus 0.7 (dev server, hot reload, bundling)
@@ -142,10 +144,12 @@ in mkShell {
 
     alias full-stack='sudo echo && nix run $PROJECT_ROOT#devScripts --'
     alias server-stack='nix run $PROJECT_ROOT#devScripts.server-only --'
+    alias server-stack-mock='nix run $PROJECT_ROOT#devScripts.server-stack-mock --'
     alias oidc-stack='nix run $PROJECT_ROOT#devScripts.oidc-stack --'
     alias db-only='nix run $PROJECT_ROOT#devScripts.db-only --'
     alias run-server='nix run $PROJECT_ROOT#devScripts.runServer --'
     alias run-agent='nix run $PROJECT_ROOT#devScripts.runAgent --'
+    alias start-builder-api='nix run $PROJECT_ROOT#devScripts.startBuilderApi --'
     alias simulate-push='nix run $PROJECT_ROOT#devScripts.simulatePush --'
     alias test-agent='nix run $PROJECT_ROOT#test-agent --'
     alias run-db-test='nix run .#cf-test-suite.runTests --'
@@ -158,7 +162,9 @@ in mkShell {
     echo "      full-stack up"
     echo "      - Launches PostgreSQL, the Crystal Forge server and agent in process-compose"
       echo "      server-stack up"
-      echo "      - Launches PostgreSQL and the Crystal Forge server in process-compose"
+      echo "      - Launches PostgreSQL, Crystal Forge server, and builder in process-compose"
+      echo "      server-stack-mock up"
+      echo "      - Launches PostgreSQL, server, and builder with mock eval/build execution"
       echo "      oidc-stack up"
       echo "      - Launches PostgreSQL, Keycloak OIDC provider, and server in OIDC mode"
       echo "      db-only up"
@@ -175,10 +181,11 @@ in mkShell {
     echo "🛠  Helpful Commands:"
     echo ""
     echo "  run-server         → Run server directly (uses packaged binary unless --dev)"
+    echo "  start-builder-api  → Prompt for builder credentials and launch API builder"
     echo "  simulate-push      → Simulate a webook push event"
     echo "  sqlx-refresh       → Drop DB and re-run sqlx prepare"
     echo "  sqlx-prepare       → Just re-run sqlx prepare"
-    echo "  run-db-test        → Run database tests against dev database (must run `server-stak up`)"
+      echo "  run-db-test        → Run database tests against dev database (must run server-stack up)"
     echo ""
       echo "🌐 UI Development:"
       echo ""

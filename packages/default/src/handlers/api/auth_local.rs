@@ -16,7 +16,10 @@ use std::net::SocketAddr;
 
 use crate::auth::password::{hash_password, verify_password};
 use crate::handlers::api::auth_session::establish_user_session;
-use crate::queries::users::{get_by_email, get_by_username, insert_user};
+use crate::queries::users::{
+    count_users, get_by_email, get_by_username, get_password_hash_by_user_id, insert_user,
+    update_username_and_password_hash,
+};
 
 /// Request payload for user registration.
 #[derive(Debug, Deserialize)]
@@ -39,6 +42,7 @@ pub struct RegisterResponse {
 /// Register a new local user.
 ///
 /// Creates a user with a hashed password for local authentication.
+/// If this is the first user in the system, they are automatically assigned Admin role.
 pub async fn register(
     State(pool): State<PgPool>,
     Json(payload): Json<RegisterRequest>,
@@ -64,6 +68,13 @@ pub async fn register(
         return Err(LocalAuthError::EmailTaken);
     }
 
+    // Check if this is the first user (initial setup)
+    let user_count = count_users(&pool)
+        .await
+        .map_err(|_| LocalAuthError::DatabaseError)?;
+
+    let is_first_user = user_count == 0;
+
     // Hash password
     let password_hash =
         hash_password(&payload.password).map_err(|_| LocalAuthError::PasswordHashingFailed)?;
@@ -83,17 +94,29 @@ pub async fn register(
 
     // Update username and password hash
     // Note: insert_user generates username from email, but we want to use the provided username
-    sqlx::query("UPDATE users SET username = $1, password_hash = $2 WHERE id = $3")
-        .bind(&payload.username)
-        .bind(&password_hash)
-        .bind(user.id)
-        .execute(&pool)
+    update_username_and_password_hash(&pool, user.id, &payload.username, &password_hash)
         .await
         .map_err(|_| LocalAuthError::DatabaseError)?;
 
     user.username = payload.username.clone();
 
-    tracing::info!("Registered new local user: {} ({})", user.email, user.id);
+    // Assign role: Admin if first user, otherwise require admin to assign roles
+    if is_first_user {
+        use crate::models::auth_identity::AuthRole;
+        use crate::queries::auth_identity::assign_role_to_user;
+
+        assign_role_to_user(&pool, user.id, AuthRole::Admin, None)
+            .await
+            .map_err(|_| LocalAuthError::DatabaseError)?;
+
+        tracing::info!(
+            "Registered FIRST local user as Admin: {} ({})",
+            user.email,
+            user.id
+        );
+    } else {
+        tracing::info!("Registered new local user: {} ({})", user.email, user.id);
+    }
 
     Ok((
         StatusCode::CREATED,
@@ -141,14 +164,15 @@ pub async fn login(
 
     let user = user.ok_or(LocalAuthError::InvalidCredentials)?;
 
+    if !user.is_active {
+        return Err(LocalAuthError::InvalidCredentials);
+    }
+
     // Get password hash
-    let password_hash =
-        sqlx::query_scalar::<_, Option<String>>("SELECT password_hash FROM users WHERE id = $1")
-            .bind(user.id)
-            .fetch_one(&pool)
-            .await
-            .map_err(|_| LocalAuthError::DatabaseError)?
-            .ok_or(LocalAuthError::InvalidCredentials)?; // No password hash means OIDC-only user
+    let password_hash = get_password_hash_by_user_id(&pool, user.id)
+        .await
+        .map_err(|_| LocalAuthError::DatabaseError)?
+        .ok_or(LocalAuthError::InvalidCredentials)?; // No password hash means OIDC-only user
 
     // Verify password
     verify_password(&payload.password, &password_hash)

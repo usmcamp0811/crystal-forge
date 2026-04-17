@@ -2,7 +2,11 @@ use crate::handlers::agent_request::{
     CFState, authenticate_agent_request, deserialize_system_state_versioned,
 };
 use crate::models::agent_heartbeats::AgentHeartbeat;
-use crate::queries::systems::get_desired_target_by_hostname;
+use crate::models::cache_destination::CacheDestination;
+use crate::queries::cache_destinations::{get_caches_for_environment, get_global_caches};
+use crate::queries::systems::{
+    deactivate_duplicate_active_systems_by_public_key, get_desired_target_by_hostname,
+};
 use crate::queries::{agent_heartbeat::insert_agent_heartbeat, system_states::insert_system_state};
 use axum::response::Response;
 use axum::{
@@ -14,11 +18,81 @@ use axum::{
 use serde::Deserialize;
 use serde::Serialize;
 use sqlx::PgPool;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
+
+#[derive(Serialize, Deserialize)]
+pub struct RuntimeCacheConfig {
+    pub cache_type: String,
+    pub cache_url: String,
+    pub cache_public_key: Option<String>,
+    pub attic_cache_name: Option<String>,
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct LogResponse {
     pub desired_target: Option<String>,
+    #[serde(default)]
+    pub runtime_caches: Vec<RuntimeCacheConfig>,
+}
+
+fn destination_to_runtime_cache(destination: CacheDestination) -> Option<RuntimeCacheConfig> {
+    let cache_url = destination.push_to?;
+    Some(RuntimeCacheConfig {
+        cache_type: destination.cache_type,
+        cache_url,
+        cache_public_key: destination.attic_public_key,
+        attic_cache_name: destination.attic_cache_name,
+    })
+}
+
+async fn load_runtime_caches_for_agent(
+    pool: &PgPool,
+    environment_id: Option<uuid::Uuid>,
+) -> Vec<RuntimeCacheConfig> {
+    let destinations = match environment_id {
+        Some(env_id) => get_caches_for_environment(pool, env_id).await,
+        None => get_global_caches(pool).await,
+    };
+
+    match destinations {
+        Ok(dests) => dests
+            .into_iter()
+            .filter_map(destination_to_runtime_cache)
+            .collect(),
+        Err(e) => {
+            debug!("❌ Failed to load runtime cache config for agent: {e:?}");
+            Vec::new()
+        }
+    }
+}
+
+/// Best-effort result handler for duplicate-active-system cleanup.
+///
+/// Returns deactivated hostnames when successful, or empty vector on error.
+fn handle_duplicate_active_system_cleanup_result(
+    current_hostname: &str,
+    result: anyhow::Result<Vec<String>>,
+) -> Vec<String> {
+    match result {
+        Ok(deactivated) if !deactivated.is_empty() => {
+            warn!(
+                current_hostname = %current_hostname,
+                duplicate_hostnames = ?deactivated,
+                "Auto-deactivated duplicate active systems sharing agent public key"
+            );
+            deactivated
+        }
+        Ok(_) => Vec::new(),
+        Err(e) => {
+            // Non-fatal: do not reject heartbeat if de-duplication fails.
+            warn!(
+                current_hostname = %current_hostname,
+                error = ?e,
+                "Failed to auto-deactivate duplicate active systems; continuing heartbeat processing"
+            );
+            Vec::new()
+        }
+    }
 }
 /// Handles the `/current-system` POST route.
 /// Verifies the body signature using headers, parses the payload, and
@@ -34,6 +108,20 @@ pub async fn log(
         Ok(req) => req,
         Err(status) => return status.into_response(),
     };
+
+    // Hotfix: if the same public key appears on multiple active hostnames,
+    // deactivate the stale duplicates and keep only the authenticated hostname active.
+    // This prevents renamed/re-joined hosts from leaving old active rows that skew health.
+    let public_key_base64 = agent_request.system.public_key.to_base64();
+    let _ = handle_duplicate_active_system_cleanup_result(
+        &agent_request.system.hostname,
+        deactivate_duplicate_active_systems_by_public_key(
+            &pool,
+            &agent_request.system.hostname,
+            &public_key_base64,
+        )
+        .await,
+    );
 
     // Try to deserialize with version detection
     let (payload, version_compatible) = match deserialize_system_state_versioned(&agent_request) {
@@ -80,7 +168,12 @@ pub async fn log(
             }
         };
 
-    let response = LogResponse { desired_target };
+    let runtime_caches =
+        load_runtime_caches_for_agent(&pool, agent_request.system.environment_id).await;
+    let response = LogResponse {
+        desired_target,
+        runtime_caches,
+    };
 
     // Return JSON response with appropriate status
     let status = if version_compatible {
@@ -90,4 +183,32 @@ pub async fn log(
     };
 
     (status, axum::Json(response)).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn handle_duplicate_cleanup_returns_deactivated_hosts_on_success() {
+        let host = "nix-builder";
+        let deactivated =
+            handle_duplicate_active_system_cleanup_result(host, Ok(vec!["base".to_string()]));
+
+        assert_eq!(deactivated, vec!["base".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn handle_duplicate_cleanup_is_non_fatal_on_error() {
+        let host = "nix-builder";
+        let deactivated = handle_duplicate_active_system_cleanup_result(
+            host,
+            Err(anyhow::anyhow!("db unavailable")),
+        );
+
+        assert!(
+            deactivated.is_empty(),
+            "cleanup errors must be non-fatal and return empty deactivation set"
+        );
+    }
 }

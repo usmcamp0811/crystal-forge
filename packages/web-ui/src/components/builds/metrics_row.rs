@@ -2,8 +2,6 @@
 
 use dioxus::prelude::*;
 
-use crate::theme;
-
 use super::helpers::BuildStatus;
 use super::helpers::WorkerItem;
 
@@ -12,7 +10,7 @@ use super::helpers::WorkerItem;
 pub fn MetricsRow(workers: Vec<WorkerItem>, builds: Vec<super::helpers::BuildItem>) -> Element {
     let building = builds
         .iter()
-        .filter(|b| matches!(b.status, BuildStatus::Building | BuildStatus::Restarting))
+        .filter(|b| matches!(b.status, BuildStatus::Building | BuildStatus::Stopping))
         .count();
     let queued = builds
         .iter()
@@ -30,14 +28,13 @@ pub fn MetricsRow(workers: Vec<WorkerItem>, builds: Vec<super::helpers::BuildIte
     rsx! {
         div {
             class: "grid grid-cols-2 md:grid-cols-4 gap-3",
-            MetricBadge { label: "Building", value: building.to_string(), bg: "#23363A", border: "#3D6870" }
-            MetricBadge { label: "Queued", value: queued.to_string(), bg: "#2E2E3F", border: "#4D4D72" }
-            MetricBadge { label: "Failed", value: failed.to_string(), bg: "#44262A", border: "#7A3D48" }
+            MetricBadge { label: "Building", value: building.to_string(), tone_class: "cf-metric-building" }
+            MetricBadge { label: "Queued", value: queued.to_string(), tone_class: "cf-metric-queued" }
+            MetricBadge { label: "Failed", value: failed.to_string(), tone_class: "cf-metric-failed" }
             MetricBadge {
                 label: "Workers",
                 value: format!("{active_workers}/{}", workers.len()),
-                bg: "#2B303B",
-                border: "#495264",
+                tone_class: "cf-metric-workers",
             }
         }
     }
@@ -45,16 +42,10 @@ pub fn MetricsRow(workers: Vec<WorkerItem>, builds: Vec<super::helpers::BuildIte
 
 /// Individual metric badge component.
 #[component]
-fn MetricBadge(
-    label: &'static str,
-    value: String,
-    bg: &'static str,
-    border: &'static str,
-) -> Element {
+fn MetricBadge(label: &'static str, value: String, tone_class: &'static str) -> Element {
     rsx! {
         div {
-            class: "rounded-lg border px-3 py-2",
-            style: "background-color: {bg}; border-color: {border};",
+            class: "rounded-lg border px-3 py-2 {tone_class}",
             p { class: "text-[10px] uppercase tracking-wide text-gray-400", "{label}" }
             p { class: "text-sm text-white font-semibold", "{value}" }
         }

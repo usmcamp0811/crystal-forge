@@ -21,7 +21,7 @@ pub fn RecentDeploymentsList(
 
     rsx! {
         div {
-            class: "flex flex-col h-full",
+            class: "flex flex-col h-full min-h-0 overflow-hidden",
             "data-testid": "recent-deployments",
 
             // Show filter indicator if filtered
@@ -46,7 +46,9 @@ pub fn RecentDeploymentsList(
 
             // Scrollable list container - prevents overflow when widget is moved
             div {
-                class: "flex-1 min-h-0 overflow-y-auto space-y-2",
+                class: "flex-1 min-h-0 overflow-y-auto space-y-2 pr-1",
+                style: "overflow-y: auto; overscroll-behavior: contain;",
+                "data-testid": "recent-deployments-scroll",
                 for deployment in deployments {
                     RecentDeploymentRow { deployment }
                 }
@@ -73,7 +75,7 @@ pub fn RecentDeploymentRow(deployment: RecentDeployment) -> Element {
 
     rsx! {
         Link {
-            class: "flex items-center justify-between p-3 rounded-lg {theme::surface::SUBTLE_BG} transition hover:bg-gray-800/80 hover:border hover:border-gray-600",
+            class: "flex items-center justify-between p-3 rounded-lg {theme::surface::SUBTLE_BG} transition {theme::interactive::HOVER_BG} hover:border {theme::surface::CARD_BORDER}",
             to: crate::routes::Route::SystemsView {},
             div {
                 class: "flex items-center gap-3 min-w-0 flex-1",
@@ -86,17 +88,17 @@ pub fn RecentDeploymentRow(deployment: RecentDeployment) -> Element {
                     class: "min-w-0 flex-1",
                     div {
                         class: "flex items-center gap-2",
-                        span { class: "text-white text-sm font-medium truncate", "{deployment.hostname}" }
-                        span { class: "text-[10px] font-mono text-gray-500", "{short_hash}" }
+                        span { class: "{theme::text::PRIMARY} text-sm font-medium truncate", "{deployment.hostname}" }
+                        span { class: "text-[10px] font-mono {theme::text::MUTED}", "{short_hash}" }
                     }
                     if let Some(ref msg) = commit_msg {
-                        p { class: "text-xs text-gray-400 truncate", "{msg}" }
+                        p { class: "text-xs {theme::text::SECONDARY} truncate", "{msg}" }
                     }
                 }
             }
             div {
                 class: "text-right shrink-0 ml-3",
-                p { class: "text-xs text-gray-400", "{time_ago}" }
+                p { class: "text-xs {theme::text::SECONDARY}", "{time_ago}" }
                 p { class: "text-[10px] uppercase tracking-wide {status_color}", "{deployment.status.label()}" }
             }
         }

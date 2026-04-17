@@ -1,15 +1,17 @@
 ---
 id: TASK-74
 title: Add runtime detection for dev mode banner visibility
-status: Backlog
+status: Done
 assignee: []
 created_date: '2026-02-20 15:05'
+updated_date: '2026-03-13 01:24'
 labels:
   - ui
   - auth
   - devex
 dependencies: []
 priority: medium
+ordinal: 70000
 ---
 
 ## Description

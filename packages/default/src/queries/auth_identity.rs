@@ -1,5 +1,6 @@
 use crate::auth::repository::normalize_tenant_discriminator;
 use crate::models::auth_identity::{AuthRole, ExternalIdentity, UserRoleAssignment, UserSession};
+use crate::models::users::User;
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use std::error::Error;
@@ -297,4 +298,217 @@ pub async fn invalidate_session_by_token_hash(
     let repo = AuthIdentityRepository::new(pool);
     repo.invalidate_session_by_token_hash(session_token_hash)
         .await
+}
+
+/// Get a session by token hash (including expired/invalidated sessions).
+pub async fn get_session_by_token_hash(
+    pool: &PgPool,
+    session_token_hash: &str,
+) -> Result<Option<UserSession>, AuthRepositoryError> {
+    let session = sqlx::query_as::<_, UserSession>(
+        "SELECT id, user_id, session_token_hash, issued_at, expires_at, last_seen_at, invalidated_at, user_agent, ip_address
+         FROM user_sessions
+         WHERE session_token_hash = $1",
+    )
+    .bind(session_token_hash)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(session)
+}
+
+/// Get all roles for a user.
+pub async fn get_user_roles(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<Vec<UserRoleAssignment>, AuthRepositoryError> {
+    find_user_roles(pool, user_id).await
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct OidcMappingMatchRow {
+    pub role: Option<AuthRole>,
+    pub environments: Vec<String>,
+}
+
+pub async fn get_user_by_id(pool: &PgPool, user_id: Uuid) -> Result<User, AuthRepositoryError> {
+    let user = sqlx::query_as::<_, User>(
+        "SELECT id, username, email, first_name, last_name, user_type, is_active, created_at, updated_at
+         FROM users WHERE id = $1",
+    )
+    .bind(user_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(user)
+}
+
+pub async fn is_user_active(pool: &PgPool, user_id: Uuid) -> Result<bool, AuthRepositoryError> {
+    let value = sqlx::query_scalar::<_, bool>("SELECT is_active FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(value.unwrap_or(false))
+}
+
+pub async fn create_user_and_bind_external_identity(
+    pool: &PgPool,
+    email: &str,
+    display_name: Option<&str>,
+    provider_key: &str,
+    subject: &str,
+    tenant_discriminator: Option<&str>,
+    claims: serde_json::Value,
+) -> Result<User, AuthRepositoryError> {
+    let mut tx = pool.begin().await?;
+
+    let user_id = Uuid::new_v4();
+    let username = email.split('@').next().unwrap_or(email);
+    let (first_name, last_name) = match display_name {
+        Some(name) => {
+            let parts: Vec<&str> = name.splitn(2, ' ').collect();
+            (
+                Some(parts[0].to_string()),
+                Some(parts.get(1).copied().unwrap_or("").to_string()),
+            )
+        }
+        None => (Some(String::new()), Some(String::new())),
+    };
+
+    sqlx::query(
+        "INSERT INTO users (id, username, first_name, last_name, email)
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(user_id)
+    .bind(username)
+    .bind(&first_name)
+    .bind(&last_name)
+    .bind(email)
+    .execute(&mut *tx)
+    .await?;
+
+    let tenant_key = normalize_tenant_discriminator(tenant_discriminator);
+    sqlx::query(
+        "INSERT INTO external_identities (user_id, provider_key, subject, tenant_discriminator, claims)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (provider_key, subject, tenant_discriminator)
+         DO UPDATE SET
+             user_id = EXCLUDED.user_id,
+             claims = EXCLUDED.claims,
+             updated_at = NOW()",
+    )
+    .bind(user_id)
+    .bind(provider_key)
+    .bind(subject)
+    .bind(&tenant_key)
+    .bind(claims)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    get_user_by_id(pool, user_id).await
+}
+
+pub async fn get_oidc_mapping_matches(
+    pool: &PgPool,
+    groups: &[String],
+) -> Result<Vec<OidcMappingMatchRow>, AuthRepositoryError> {
+    if groups.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let rows = sqlx::query_as::<_, OidcMappingMatchRow>(
+        "SELECT role, environments FROM oidc_group_mappings WHERE group_name = ANY($1)",
+    )
+    .bind(groups)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+pub async fn clear_user_role_assignments(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<(), AuthRepositoryError> {
+    sqlx::query("DELETE FROM user_role_assignments WHERE user_id = $1")
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn clear_user_environment_memberships(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<(), AuthRepositoryError> {
+    sqlx::query("DELETE FROM user_environment_memberships WHERE user_id = $1")
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn get_environment_ids_by_names(
+    pool: &PgPool,
+    names: &[String],
+) -> Result<Vec<Uuid>, AuthRepositoryError> {
+    let ids = sqlx::query_scalar::<_, Uuid>("SELECT id FROM environments WHERE name = ANY($1)")
+        .bind(names)
+        .fetch_all(pool)
+        .await?;
+    Ok(ids)
+}
+
+pub async fn insert_user_environment_membership(
+    pool: &PgPool,
+    user_id: Uuid,
+    environment_id: Uuid,
+) -> Result<(), AuthRepositoryError> {
+    sqlx::query(
+        "INSERT INTO user_environment_memberships (user_id, environment_id, assigned_by_user_id)
+         VALUES ($1, $2, NULL)",
+    )
+    .bind(user_id)
+    .bind(environment_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Check if an OIDC group mapping exists for the given group name.
+///
+/// Returns the count of existing mappings (should be 0 or 1 due to UNIQUE constraint).
+pub async fn count_oidc_group_mappings(
+    pool: &PgPool,
+    group_name: &str,
+) -> Result<i64, AuthRepositoryError> {
+    let count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM oidc_group_mappings WHERE group_name = $1",
+    )
+    .bind(group_name)
+    .fetch_one(pool)
+    .await?;
+    Ok(count)
+}
+
+/// Create an OIDC group mapping for the given group name and role.
+///
+/// This maps an OIDC provider group/role to a Crystal Forge role.
+/// Used for initial bootstrap admin mapping and admin UI management.
+pub async fn create_oidc_group_mapping(
+    pool: &PgPool,
+    group_name: &str,
+    role: AuthRole,
+    environments: &[String],
+) -> Result<(), AuthRepositoryError> {
+    sqlx::query(
+        "INSERT INTO oidc_group_mappings (group_name, role, environments)
+         VALUES ($1, $2, $3)",
+    )
+    .bind(group_name)
+    .bind(role)
+    .bind(environments)
+    .execute(pool)
+    .await?;
+    Ok(())
 }

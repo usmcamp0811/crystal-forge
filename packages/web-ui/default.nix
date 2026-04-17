@@ -16,7 +16,7 @@ let
       pkgs.openssl
       pkgs.pkg-config
       pkgs.dioxus-cli
-      pkgs.wasm-bindgen-cli
+      pkgs.wasm-bindgen-cli_0_2_108
       pkgs.tailwindcss_4
     ];
 
@@ -24,7 +24,7 @@ let
     buildPhase = ''
       export XDG_DATA_HOME=$PWD
       mkdir -p $XDG_DATA_HOME/dioxus/wasm-bindgen
-      ln -s ${pkgs.wasm-bindgen-cli}/bin/wasm-bindgen $XDG_DATA_HOME/dioxus/wasm-bindgen/wasm-bindgen-0.2.108
+      ln -s ${pkgs.wasm-bindgen-cli_0_2_108}/bin/wasm-bindgen $XDG_DATA_HOME/dioxus/wasm-bindgen/wasm-bindgen-0.2.108
 
       ${pkgs.tailwindcss_4}/bin/tailwindcss \
         -i ${./tailwind.css} \
@@ -123,14 +123,14 @@ let
       pkgs.openssl
       pkgs.pkg-config
       pkgs.dioxus-cli
-      pkgs.wasm-bindgen-cli
+      pkgs.wasm-bindgen-cli_0_2_108
     ];
 
     buildInputs = [ pkgs.openssl.dev pkgs.zlib ];
     buildPhase = ''
       export XDG_DATA_HOME=$PWD
       mkdir -p $XDG_DATA_HOME/dioxus/wasm-bindgen
-      ln -s ${pkgs.wasm-bindgen-cli}/bin/wasm-bindgen $XDG_DATA_HOME/dioxus/wasm-bindgen/wasm-bindgen-0.2.108
+      ln -s ${pkgs.wasm-bindgen-cli_0_2_108}/bin/wasm-bindgen $XDG_DATA_HOME/dioxus/wasm-bindgen/wasm-bindgen-0.2.108
 
       dx bundle --platform desktop --release
     '';
@@ -145,7 +145,7 @@ let
   dx-serve = pkgs.writeShellApplication {
     name = "dx-serve-web-ui";
     runtimeInputs =
-      [ pkgs.dioxus-cli pkgs.tailwindcss_4 pkgs.wasm-bindgen-cli ];
+      [ pkgs.dioxus-cli pkgs.tailwindcss_4 pkgs.wasm-bindgen-cli_0_2_108 ];
     text = ''
       set -euo pipefail
 
@@ -157,7 +157,7 @@ let
       # Set up XDG_DATA_HOME for dioxus wasm-bindgen lookup
       export XDG_DATA_HOME="''${XDG_DATA_HOME:-$HOME/.local/share}"
       mkdir -p "$XDG_DATA_HOME/dioxus/wasm-bindgen"
-      ln -sf "${pkgs.wasm-bindgen-cli}/bin/wasm-bindgen" "$XDG_DATA_HOME/dioxus/wasm-bindgen/wasm-bindgen-0.2.108"
+      ln -sf "${pkgs.wasm-bindgen-cli_0_2_108}/bin/wasm-bindgen" "$XDG_DATA_HOME/dioxus/wasm-bindgen/wasm-bindgen-0.2.108"
 
       mkdir -p assets
       ln -sf ../tailwind.css assets/tailwind.css

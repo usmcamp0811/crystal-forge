@@ -1,11 +1,11 @@
 ---
 id: TASK-65
 title: 'Feature: End-to-end OIDC authentication and multi-user RBAC'
-status: To Do
+status: Done
 assignee:
   - Claude Opus 4.5
 created_date: ''
-updated_date: '2026-02-20 04:27'
+updated_date: '2026-03-13 01:24'
 labels:
   - security
   - auth
@@ -25,6 +25,7 @@ dependencies:
   - TASK-65.7
   - TASK-65.8
 priority: high
+ordinal: 71000
 ---
 
 ## Description
