@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>Compliance and build coordination for NixOS in regulated environments</strong>
+  <strong>Monitoring, build coordination, and compliance tooling for NixOS fleets</strong>
 </p>
 
 ---
@@ -97,9 +97,9 @@ Evaluation CVE counts in system list, system detail, and all dashboard surfaces 
 
 ## What is Crystal Forge?
 
-Crystal Forge is a self-hosted monitoring, compliance, and build system purpose-built for NixOS fleets. It provides cryptographically-verified system state tracking, automated build coordination, CVE scanning, and policy-based deployment management—designed for organizations that need auditability and control.
+Crystal Forge is a self-hosted monitoring, compliance, and build system purpose-built for NixOS fleets. It provides cryptographically-verified system state tracking, automated build coordination, CVE scanning, and policy-based deployment management—built toward the goal of auditability and control in regulated environments.
 
-**Current Status**: v0.3.0 — The core backend is solid and the web UI is functional, but the UI still has rough edges and a lot of features are either incomplete or missing entirely. Good for homelab use and tinkering; not yet ready for regulated or production environments.
+**Current Status**: v0.3.0 — The core backend is solid and the web UI covers the main workflows, but the UI still has rough edges and a number of planned features aren't implemented yet. Aimed at homelabbers and NixOS enthusiasts who want to run it and help shape it; the compliance and regulated-environment story is still in progress.
 
 ---
 
