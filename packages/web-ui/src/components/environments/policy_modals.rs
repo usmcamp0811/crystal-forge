@@ -27,12 +27,10 @@ pub fn EditRequirementsModal(props: EditRequirementsModalProps) -> Element {
 
     rsx! {
         div {
-            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4",
-            style: "position: fixed; inset: 0; z-index: 60; width: 100vw; height: 100vh; backdrop-filter: blur(6px);",
+            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
             onclick: move |_| on_close.call(()),
             div {
-                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6 space-y-4",
-                style: "width: 100%; max-width: 44rem;",
+                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6 space-y-4 cf-modal-panel-44",
                 onclick: |evt| evt.stop_propagation(),
 
                 div {
@@ -52,7 +50,7 @@ pub fn EditRequirementsModal(props: EditRequirementsModalProps) -> Element {
                                 label {
                                     key: "{policy.id}",
                                     class: "rounded-lg border border-gray-700 px-3 py-2 flex items-start gap-3 cursor-pointer hover:bg-gray-800/60",
-                                    style: if checked { "background-color: #1F2E42; border-color: #3E5B82;" } else { "" },
+                                    class: if checked { "cf-policy-selected" } else { "" },
                                     input {
                                         r#type: "checkbox",
                                         checked,
@@ -115,12 +113,10 @@ pub fn PolicyPickerModal(props: PolicyPickerModalProps) -> Element {
 
     rsx! {
         div {
-            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4",
-            style: "position: fixed; inset: 0; z-index: 60; width: 100vw; height: 100vh; backdrop-filter: blur(6px);",
+            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
             onclick: move |_| props.on_close.call(()),
             div {
-                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6 space-y-4",
-                style: "width: 100%; max-width: 44rem;",
+                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6 space-y-4 cf-modal-panel-44",
                 onclick: |evt| evt.stop_propagation(),
 
                 h3 { class: "text-lg font-semibold text-white", "{props.title}" }
@@ -135,7 +131,7 @@ pub fn PolicyPickerModal(props: PolicyPickerModalProps) -> Element {
                                 label {
                                     key: "{policy.id}",
                                     class: "rounded-lg border border-gray-700 px-3 py-2 flex items-start gap-3 cursor-pointer hover:bg-gray-800/60",
-                                    style: if checked { "background-color: #1F2E42; border-color: #3E5B82;" } else { "" },
+                                    class: if checked { "cf-policy-selected" } else { "" },
                                     input {
                                         r#type: "checkbox",
                                         checked,

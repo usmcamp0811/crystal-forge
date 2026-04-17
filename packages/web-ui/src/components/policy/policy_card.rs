@@ -19,10 +19,59 @@ pub fn PolicyCard(
     on_delete: EventHandler<Uuid>,
 ) -> Element {
     let mut expanded = use_signal(|| false);
+    // Check if this is a core policy by examining the policy_type field
+    // instead of string matching in the body, to work correctly with both
+    // TOML and JSON formats from API
+    let is_core_policy = policy.policy_type.as_ref().map_or(false, |pt| {
+        pt == "require_cf_agent" || pt == "require_crystal_forge_agent"
+    });
 
-    let format_badge = match policy.format {
-        PolicyFormat::Toml => ("TOML", "bg-orange-500/20 text-orange-400"),
-        PolicyFormat::Json => ("JSON", "bg-blue-500/20 text-blue-400"),
+    let is_cve_policy = policy
+        .policy_type
+        .as_deref()
+        .map_or(false, |pt| pt == "require_cve_check");
+
+    let format_badge = if is_cve_policy {
+        ("CVE Gate", "bg-amber-500/20 text-amber-400")
+    } else {
+        match policy.format {
+            PolicyFormat::Toml => ("TOML", "bg-orange-500/20 text-orange-400"),
+            PolicyFormat::Json => ("JSON", "bg-blue-500/20 text-blue-400"),
+        }
+    };
+
+    // For CVE policies render a human-readable summary instead of raw JSON
+    let cve_summary: Option<String> = if is_cve_policy {
+        let config: Option<serde_json::Value> = serde_json::from_str(&policy.body)
+            .ok()
+            .and_then(|v: serde_json::Value| v.get("config").cloned().or(Some(v)));
+        config.map(|c| {
+            let mut parts = Vec::new();
+            if let Some(max_c) = c.get("max_critical").and_then(|v| v.as_u64()) {
+                parts.push(format!("critical ≤ {}", max_c));
+            }
+            if let Some(max_h) = c.get("max_high").and_then(|v| v.as_u64()) {
+                parts.push(format!("high ≤ {}", max_h));
+            }
+            if c.get("require_high_justification")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                parts.push("high requires justification".to_string());
+            }
+            let when_no_scan = c
+                .get("when_no_scan")
+                .and_then(|v| v.as_str())
+                .unwrap_or("block");
+            parts.push(format!("no-scan → {}", when_no_scan));
+            let strict = c.get("strict").and_then(|v| v.as_bool()).unwrap_or(true);
+            if !strict {
+                parts.push("warn-only".to_string());
+            }
+            parts.join(" · ")
+        })
+    } else {
+        None
     };
 
     let policy_for_edit = policy.clone();
@@ -68,19 +117,32 @@ pub fn PolicyCard(
                     class: "shrink-0 text-xs font-medium px-2 py-0.5 rounded {format_badge.1}",
                     "{format_badge.0}"
                 }
+                if is_core_policy {
+                    span {
+                        class: "shrink-0 text-xs font-medium px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-400/40",
+                        "Core · Always On"
+                    }
+                }
             }
 
-            // Code preview with syntax highlighting
+            // Code preview — CVE policies get a human-readable summary; others use syntax highlighting
             div {
                 class: "rounded-lg bg-gray-950/70 border border-gray-800 overflow-hidden mb-3",
                 div {
                     class: "p-3 overflow-x-auto",
                     style: if *expanded.read() { "max-height: 400px; overflow-y: auto;" } else { "max-height: 100px; overflow: hidden;" },
-                    pre {
-                        class: "text-xs font-mono",
-                        code {
-                            class: "hljs language-{language}",
-                            dangerous_inner_html: "{highlighted_html}"
+                    if let Some(ref summary) = cve_summary {
+                        p {
+                            class: "text-xs text-amber-300/80 font-mono",
+                            "{summary}"
+                        }
+                    } else {
+                        pre {
+                            class: "text-xs font-mono",
+                            code {
+                                class: "hljs language-{language}",
+                                dangerous_inner_html: "{highlighted_html}"
+                            }
                         }
                     }
                 }
@@ -121,17 +183,24 @@ pub fn PolicyCard(
                     class: "text-xs text-gray-500",
                     "{line_count} lines"
                 }
-                div {
-                    class: "flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity",
-                    button {
-                        class: "text-xs text-violet-400 hover:text-violet-300 px-2 py-1 rounded hover:bg-violet-500/10 transition-colors",
-                        onclick: move |_| on_edit.call(policy_for_edit.clone()),
-                        "Edit"
+                if is_core_policy {
+                    div {
+                        class: "text-xs text-emerald-300",
+                        "Protected policy"
                     }
-                    button {
-                        class: "text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors",
-                        onclick: move |_| on_delete.call(policy_id),
-                        "Delete"
+                } else {
+                    div {
+                        class: "flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity",
+                        button {
+                            class: "text-xs text-violet-400 hover:text-violet-300 px-2 py-1 rounded hover:bg-violet-500/10 transition-colors",
+                            onclick: move |_| on_edit.call(policy_for_edit.clone()),
+                            "Edit"
+                        }
+                        button {
+                            class: "text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors",
+                            onclick: move |_| on_delete.call(policy_id),
+                            "Delete"
+                        }
                     }
                 }
             }

@@ -10,7 +10,14 @@ use crate::theme;
 
 /// Card displaying a system summary.
 #[component]
-pub fn SystemCard(system: SystemSummary) -> Element {
+pub fn SystemCard(
+    system: SystemSummary,
+    on_remove: EventHandler<()>,
+    on_update_key: EventHandler<()>,
+    on_edit: EventHandler<()>,
+    on_deploy: EventHandler<()>,
+) -> Element {
+    let navigator = use_navigator();
     let environment = system
         .environment
         .clone()
@@ -23,63 +30,92 @@ pub fn SystemCard(system: SystemSummary) -> Element {
 
     let deployment_label = deployment_policy_label(&system.deployment_policy);
     let env_style = environment_style(&environment);
+    let system_id = system.id;
 
     rsx! {
-        Link {
-            to: Route::SystemDetailView { id: system.id.to_string() },
-            class: "block rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden shadow-sm hover:border-gray-600 transition",
+        div {
+            class: "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden shadow-sm",
 
             // Header section with environment tab
-            div {
-                class: "flex items-center justify-between px-6 py-4 border-b border-gray-800",
-                style: "{env_style.header_style}",
-                h3 { class: "text-lg font-semibold text-white pl-0.5", "{system.hostname}" }
-                span {
-                    class: "inline-flex items-center px-3 py-1 rounded-md text-[10px] font-semibold uppercase tracking-wide",
-                    style: "{env_style.chip_style}",
-                    "{environment}"
-                }
-            }
-
-            // Status section
-            div {
-                class: "px-6 py-3 bg-gray-800/50",
-                p { class: "text-[10px] font-semibold uppercase tracking-wider text-gray-500 mb-2", "Status" }
+            Link {
+                to: Route::SystemDetailView { id: system.id.to_string() },
+                class: "block",
                 div {
-                    class: "flex flex-wrap gap-2",
-                    StatusBadge { label: system.health_status.label(), color_class: system.health_status.color_class(), bg_class: system.health_status.bg_class() }
-                    StatusBadge { label: system.deployment_status.label(), color_class: system.deployment_status.color_class(), bg_class: system.deployment_status.bg_class() }
+                    class: "flex items-center justify-between px-6 py-4 border-b border-gray-800 hover:bg-gray-800/30 transition",
+                    style: "{env_style.header_style}",
+                    h3 { class: "text-lg font-semibold text-white pl-0.5", "{system.hostname}" }
+                    span {
+                        class: "inline-flex items-center px-3 py-1 rounded-md text-[10px] font-semibold uppercase tracking-wide",
+                        style: "{env_style.chip_style}",
+                        "{environment}"
+                    }
                 }
-            }
 
-            // Details section
-            div {
-                class: "px-6 py-3 bg-gray-900",
-                p { class: "text-[10px] font-semibold uppercase tracking-wider text-gray-500 mb-3", "Details" }
+                // Status section
                 div {
-                    class: "grid grid-cols-2 gap-3 text-sm",
+                    class: "px-6 py-3 bg-gray-800/50",
+                    p { class: "text-[10px] font-semibold uppercase tracking-wider text-gray-500 mb-2", "Status" }
                     div {
-                        span { class: "text-gray-500 text-xs block mb-0.5", "IP Address" }
-                        span { class: "font-mono text-gray-200", "{primary_ip}" }
+                        class: "flex flex-wrap gap-2",
+                        StatusBadge { label: system.health_status.label(), color_class: system.health_status.color_class(), bg_class: system.health_status.bg_class() }
+                        StatusBadge { label: system.deployment_status.label(), color_class: system.deployment_status.color_class(), bg_class: system.deployment_status.bg_class() }
                     }
+                }
+
+                // Details section
+                div {
+                    class: "px-6 py-3 bg-gray-900",
+                    p { class: "text-[10px] font-semibold uppercase tracking-wider text-gray-500 mb-3", "Details" }
                     div {
-                        span { class: "text-gray-500 text-xs block mb-0.5", "Deploy Policy" }
-                        span { class: "text-gray-300", "{deployment_label}" }
-                    }
-                    if let Some(nixos_version) = system.nixos_version {
+                        class: "grid grid-cols-2 gap-3 text-sm",
                         div {
-                            span { class: "text-gray-500 text-xs block mb-0.5", "Operating System" }
-                            span { class: "text-gray-200", "NixOS {nixos_version}" }
+                            span { class: "text-gray-500 text-xs block mb-0.5", "IP Address" }
+                            span { class: "font-mono text-gray-200", "{primary_ip}" }
+                        }
+                        div {
+                            span { class: "text-gray-500 text-xs block mb-0.5", "Deploy Policy" }
+                            span { class: "text-gray-300", "{deployment_label}" }
+                        }
+                        if let Some(nixos_version) = system.nixos_version {
+                            div {
+                                span { class: "text-gray-500 text-xs block mb-0.5", "Operating System" }
+                                span { class: "text-gray-200", "NixOS {nixos_version}" }
+                            }
                         }
                     }
                 }
+
+                // Vulnerabilities section
+                div {
+                    class: "px-6 py-3 bg-gray-800/50",
+                    p { class: "text-[10px] font-semibold uppercase tracking-wider text-gray-500 mb-3", "Vulnerabilities" }
+                    CveSummaryRow { cve_counts: system.cve_counts }
+                }
             }
 
-            // Vulnerabilities section
+            // Actions footer
             div {
-                class: "px-6 py-3 bg-gray-800/50",
-                p { class: "text-[10px] font-semibold uppercase tracking-wider text-gray-500 mb-3", "Vulnerabilities" }
-                CveSummaryRow { cve_counts: system.cve_counts }
+                class: "px-6 py-3 bg-gray-800/50 flex items-center justify-end gap-2 border-t {theme::surface::CARD_BORDER}",
+                button {
+                    class: "text-xs text-purple-400 hover:text-purple-300 px-2 py-1 rounded hover:bg-purple-500/10 transition-colors",
+                    onclick: move |_| on_deploy.call(()),
+                    "Deploy"
+                }
+                button {
+                    class: "text-xs text-emerald-400 hover:text-emerald-300 px-2 py-1 rounded hover:bg-emerald-500/10 transition-colors",
+                    onclick: move |_| on_edit.call(()),
+                    "Edit"
+                }
+                button {
+                    class: "text-xs text-blue-400 hover:text-blue-300 px-2 py-1 rounded hover:bg-blue-500/10 transition-colors",
+                    onclick: move |_| on_update_key.call(()),
+                    "Update Key"
+                }
+                button {
+                    class: "text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors",
+                    onclick: move |_| on_remove.call(()),
+                    "Remove"
+                }
             }
         }
     }

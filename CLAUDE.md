@@ -275,6 +275,9 @@ YOU MUST STOP AND REPORT.
 Verification MUST be proportional to the task.
 
 You MUST choose verification commands that are sufficient to prove the acceptance criteria, while minimizing unnecessary work.
+If you are working a UI feature you MUST capture a screenshot of the new feature in your MR; this screenshot MUST come from
+the `web-ui` check. If the check does not capture the feature the `web-ui` check must be updated to do so. If possible 
+the `web-ui` check SHOULD assert that the intended UI functionality occurs.
 
 ## TIER 0: FAST LOCAL CONFIDENCE (DEFAULT DURING IMPLEMENTATION)
 
@@ -443,7 +446,7 @@ You MUST NOT mark a task complete with failing tests.
 
 If database-backed compile checks are required:
 You MUST use the appropriate offline mode or start required services.
-
+NEVER! use "postgresql://crystal_forge@127.0.0.1:5432/crystal_forge" for testing or for running sqlx prepare!
 </CRITICAL_INSTRUCTION>
 
 ---
@@ -487,6 +490,20 @@ If schema changes require a reset and that is acceptable:
 The devshell helpers MAY be used:
 - sqlx-refresh
 - sqlx-prepare
+
+## DATABASE SAFETY GUARD (MANDATORY)
+
+`sqlx-refresh` performs destructive database operations (drop/reset). It MUST only
+be run against an isolated local development database started by this repository's
+process-compose workflow.
+
+Before running `sqlx-refresh`, agents MUST verify and state:
+- the active DATABASE_URL target is local dev-only
+- the database is not a shared integration/staging/production environment
+
+If the database target cannot be verified as isolated local dev:
+YOU MUST NOT run `sqlx-refresh`.
+Use `sqlx-prepare` (non-destructive) instead and STOP/REPORT if that is insufficient.
 
 ## STOP CONDITIONS
 
@@ -1083,6 +1100,100 @@ In this mode:
 
 If the discussion transitions into implementation:
 You MUST return to BACKLOG-FIRST EXECUTION.
+
+</CRITICAL_INSTRUCTION>
+
+---
+
+<CRITICAL_INSTRUCTION>
+
+# SHELL OUTPUT DISTILLATION RULE (MANDATORY)
+
+To reduce noisy command output and improve signal extraction, agents MUST use `distill` when reading large non-interactive shell output.
+
+## DEFAULT RULE
+
+When running commands that may produce substantial stdout/stderr, the agent SHOULD pipe the output through `distill` and ask a narrow extraction question.
+
+Examples:
+
+- `nix flake check 2>&1 | distill "output exactly 3 lines: status, first failing check, root cause"`
+- `cargo test 2>&1 | distill "list only failing tests and the first error for each"`
+- `cargo clippy --all-targets --all-features 2>&1 | distill "show only actionable warnings that block merge"`
+- `git diff origin/dev...HEAD 2>&1 | distill "summarize risky behavior changes in 5 bullets max"`
+- `journalctl -u <service> -n 400 2>&1 | distill "give only the repeated error pattern and likely root cause"`
+
+## PROMPTING REQUIREMENT
+
+When using `distill`, the agent MUST use constrained prompts that request compact structured output.
+
+Preferred prompt patterns:
+
+- `answer in 2 lines`
+- `output only`
+- `one sentence only`
+- `exactly 3 lines: status, failing item, root cause`
+- `return JSON with ...`
+
+Agents MUST prefer extraction prompts over open-ended explanation prompts.
+
+## REQUIRED USE CASES
+
+Agents SHOULD use `distill` for:
+
+- `nix build`, `nix flake check`, `nixos-rebuild`, and other verbose Nix commands
+- compiler output
+- test output
+- lint output
+- long logs
+- large diffs
+- audit and scan output
+- search output such as `rg` when answering targeted codebase questions
+
+## DO NOT USE DISTILL WHEN
+
+Agents MUST NOT use `distill` when exact raw output is required, including:
+
+- commands whose exact output must be copied verbatim
+- interactive or TUI commands
+- commands producing machine-readable output that will be parsed directly
+- cases where truncation or summarization could hide required evidence
+- pre-flight proof commands whose full raw output must be pasted exactly
+
+Examples that MUST remain raw:
+
+- `pwd`
+- `git rev-parse --abbrev-ref HEAD`
+- `git rev-parse --show-toplevel`
+- `git status --porcelain`
+- `git worktree list`
+
+## VERIFICATION AND HONESTY REQUIREMENT
+
+`distill` is a lossy summarizer.
+Agents MUST treat it as a reading aid, not as proof that a command succeeded.
+
+If a command is used for mandatory verification, the agent MUST still determine the real exit status of the underlying command.
+The agent MUST NOT claim success based only on a `distill` summary.
+
+If there is any ambiguity, the agent MUST inspect the raw output or rerun the command without `distill`.
+
+## FAILURE HANDLING
+
+If `distill` is unavailable, misconfigured, or appears to pass input through unchanged, the agent MUST:
+
+1. Report that `distill` is not functioning correctly
+2. Fall back to raw command inspection
+3. Continue work without fabricating summarized results
+
+Agents MUST NOT pretend that `distill` produced a valid summary if it did not.
+
+## MODEL SELECTION GUIDANCE
+
+For general shell summarization, prefer a fast general-purpose local model.
+For code-heavy output, a code-oriented model MAY be used.
+
+The repository or user may define the preferred `distill` model separately.
 
 </CRITICAL_INSTRUCTION>
 

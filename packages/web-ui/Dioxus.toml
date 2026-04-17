@@ -14,3 +14,7 @@ style = []
 
 [web.resource.dev]
 style = []
+
+# Note: Proxy configuration is not supported in Dioxus 0.7.3
+# Instead, the API client (src/api/client.rs) detects dev server ports
+# and automatically redirects to http://localhost:3000 for the backend

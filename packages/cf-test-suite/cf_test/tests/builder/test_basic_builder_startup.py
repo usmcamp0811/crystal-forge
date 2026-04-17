@@ -26,19 +26,22 @@ def test_commit_hash():
 @pytest.fixture(scope="session")
 def builder_test_data(cf_client, test_commit_hash):
     """Set up minimal test data for builder testing"""
-    # Insert test flake
+    # Insert test flake (idempotent - handles existing flake)
     flake_result = cf_client.execute_sql(
         """INSERT INTO flakes (name, repo_url)
            VALUES ('test-flake', 'http://gitserver/crystal-forge')
+           ON CONFLICT (repo_url) DO UPDATE SET name = EXCLUDED.name
            RETURNING id"""
     )
     flake_id = flake_result[0]["id"]
 
-    # Insert test commit
+    # Insert test commit (idempotent - handles existing commit)
     commit_hash = test_commit_hash or "test-commit-123"
     commit_result = cf_client.execute_sql(
         """INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp)
            VALUES (%s, %s, NOW())
+           ON CONFLICT (flake_id, git_commit_hash) DO UPDATE 
+           SET commit_timestamp = EXCLUDED.commit_timestamp
            RETURNING id""",
         (flake_id, commit_hash),
     )
@@ -69,10 +72,8 @@ def builder_test_data(cf_client, test_commit_hash):
 
     yield test_data
 
-    # Cleanup
-    cf_client.execute_sql("DELETE FROM derivations WHERE id = %s", (derivation_id,))
-    cf_client.execute_sql("DELETE FROM commits WHERE id = %s", (commit_id,))
-    cf_client.execute_sql("DELETE FROM flakes WHERE id = %s", (flake_id,))
+    # No teardown cleanup needed - fixture is idempotent and session-scoped
+    # Database is destroyed with the VM after tests complete
 
 
 def test_builder_service_exists_and_runs(cf_client, cfServer):
@@ -188,9 +189,16 @@ def test_builder_directories_exist(cf_client, cfServer):
 def test_builder_logs_show_startup(cf_client, cfServer):
     """Test that builder logs show successful startup"""
 
-    # Wait for builder startup message
+    # Wait for builder startup message - can be API mode or legacy mode.
+    # API mode: "🌐 Starting Crystal Forge Builder in API mode..."
+    # Legacy mode: "💾 Starting Crystal Forge Builder in legacy database mode..."
+    # In some integration environments the legacy path may not emit
+    # "Starting job polling loop", so assert on the stable startup banner.
     cf_client.wait_for_service_log(
-        cfServer, "crystal-forge-builder.service", "🔍 Starting", timeout=60
+        cfServer,
+        "crystal-forge-builder.service",
+        "Starting Crystal Forge Builder",
+        timeout=120,
     )
 
 

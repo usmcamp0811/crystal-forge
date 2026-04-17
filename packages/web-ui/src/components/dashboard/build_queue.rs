@@ -13,7 +13,7 @@ pub fn BuildQueuePanel(
     queue: BuildQueueSummary,
     #[props(default)] flake_filter: Option<String>,
 ) -> Element {
-    let total_active = queue.building_count + queue.queued_count;
+    let _total_active = queue.building_count + queue.queued_count;
     let mut active_items: Vec<BuildQueueItem> = queue
         .items
         .iter()
@@ -29,10 +29,7 @@ pub fn BuildQueuePanel(
         }
     });
 
-    let max_items = if flake_filter.is_some() { 4 } else { 5 };
-    let total_items = active_items.len();
-    let filtered_items: Vec<BuildQueueItem> = active_items.into_iter().take(max_items).collect();
-    let remaining_count = total_items.saturating_sub(filtered_items.len());
+    let filtered_items: Vec<BuildQueueItem> = active_items;
 
     let mut queued_rank = 0;
     let ordered_rows: Vec<(BuildQueueItem, Option<String>)> = filtered_items
@@ -54,7 +51,7 @@ pub fn BuildQueuePanel(
 
     rsx! {
         div {
-            class: "flex flex-col h-full",
+            class: "flex flex-col h-full min-h-0 overflow-hidden",
             "data-testid": "build-queue",
 
             if let Some(ref flake_name) = flake_filter {
@@ -79,28 +76,24 @@ pub fn BuildQueuePanel(
             div {
                 class: "flex items-center justify-between mb-3",
                 div {
-                    class: "text-xs text-gray-400 uppercase tracking-wide",
+                    class: "text-xs {theme::text::SECONDARY} uppercase tracking-wide",
                     "Build queue"
                 }
                 div {
-                    class: "text-[10px] text-gray-500",
+                    class: "text-[10px] {theme::text::MUTED}",
                     "Ordered by next build"
                 }
             }
 
             if ordered_rows.is_empty() {
-                p { class: "text-sm text-gray-400", "No builds running or queued." }
+                p { class: "text-sm {theme::text::SECONDARY}", "No builds running or queued." }
             } else {
                 div {
-                    class: "flex-1 min-h-0 overflow-hidden space-y-2",
+                    class: "flex-1 min-h-0 overflow-y-auto space-y-2 pr-1",
+                    style: "overflow-y: auto; overscroll-behavior: contain;",
+                    "data-testid": "build-queue-scroll",
                     for (item, label) in ordered_rows {
                         BuildQueueRow { item, position_label: label }
-                    }
-                }
-                if remaining_count > 0 {
-                    p {
-                        class: "text-[10px] text-gray-500 mt-2",
-                        "+{remaining_count} more builds queued"
                     }
                 }
             }
@@ -117,16 +110,24 @@ pub fn BuildQueueRow(
     let status_class = match item.status {
         BuildStatus::Building => "text-cyan-400",
         BuildStatus::Queued => "text-blue-400",
+        BuildStatus::Cancelling => "text-orange-400",
+        BuildStatus::Cancelled => "text-gray-500",
         BuildStatus::Complete => "text-emerald-400",
         BuildStatus::Failed => "text-red-400",
         BuildStatus::Idle => "text-gray-400",
+        BuildStatus::Cancelling => "text-orange-400",
+        BuildStatus::Cancelled => "text-gray-500",
     };
     let status_dot_color = match item.status {
         BuildStatus::Building => "#42ff65",
         BuildStatus::Queued => "#e57c00",
+        BuildStatus::Cancelling => "#fb923c",
+        BuildStatus::Cancelled => "#6b7280",
         BuildStatus::Complete => "#10b981",
         BuildStatus::Failed => "#ef4444",
         BuildStatus::Idle => "#6b7280",
+        BuildStatus::Cancelling => "#fb923c",
+        BuildStatus::Cancelled => "#6b7280",
     };
     let status_label = item.status.label();
     let short_hash = item.commit_hash.chars().take(7).collect::<String>();
@@ -134,7 +135,7 @@ pub fn BuildQueueRow(
 
     rsx! {
         Link {
-            class: "flex items-center justify-between p-3 rounded-lg {theme::surface::SUBTLE_BG} transition hover:bg-gray-800/80 hover:border hover:border-gray-600",
+            class: "flex items-center justify-between p-3 rounded-lg {theme::surface::SUBTLE_BG} transition {theme::interactive::HOVER_BG} hover:border {theme::surface::CARD_BORDER}",
             to: crate::routes::Route::BuildsView {},
             div {
                 class: "flex items-center gap-3 min-w-0 flex-1",
@@ -147,18 +148,18 @@ pub fn BuildQueueRow(
                     class: "min-w-0 flex-1",
                     div {
                         class: "flex items-center gap-2",
-                        span { class: "text-white text-sm font-medium truncate", "{item.hostname}" }
-                        span { class: "text-[10px] font-mono text-gray-500", "{short_hash}" }
+                        span { class: "{theme::text::PRIMARY} text-sm font-medium truncate", "{item.hostname}" }
+                        span { class: "text-[10px] font-mono {theme::text::MUTED}", "{short_hash}" }
                     }
                     if let Some(ref msg) = item.commit_message {
-                        p { class: "text-xs text-gray-400 truncate", "{msg}" }
+                        p { class: "text-xs {theme::text::SECONDARY} truncate", "{msg}" }
                     }
                 }
             }
             div {
                 class: "text-right shrink-0 ml-3",
                 if let Some(ref elapsed) = elapsed {
-                    p { class: "text-xs text-white font-semibold tabular-nums", "{elapsed}" }
+                    p { class: "text-xs {theme::text::PRIMARY} font-semibold tabular-nums", "{elapsed}" }
                 }
                 if let Some(ref label) = position_label {
                     p { class: "text-[10px] uppercase tracking-wide {status_class}", "{label}" }

@@ -1,0 +1,95 @@
+---
+id: TASK-182
+title: Encrypt cache credentials at rest and require strict cache auth fields
+status: Done
+assignee: []
+created_date: '2026-03-11 12:47'
+updated_date: '2026-03-13 01:24'
+labels:
+  - security
+  - cache
+  - backend
+  - web-ui
+dependencies: []
+priority: high
+ordinal: 93000
+---
+
+## Description
+
+<!-- SECTION:DESCRIPTION:BEGIN -->
+Problem Statement:
+Cache destination credentials are currently persisted as plaintext database fields, which is an unacceptable security risk. In addition, Attic token and key S3 auth fields must be treated as required for configured authenticated destinations.
+
+Goal:
+Implement encryption at rest for cache credential fields and enforce required credential semantics consistently in backend validation and web UI behavior.
+
+Non-Goals:
+- External secret manager integration.
+- Rotating previously issued credentials outside this feature scope.
+- Broader auth refactors unrelated to cache destination credential storage.
+
+Architectural Constraints:
+- Keep encryption/decryption logic out of UI; backend/domain/infrastructure layers own secret handling.
+- Preserve existing API boundaries and admin authorization requirements.
+- Avoid introducing global mutable state.
+
+Verification Plan:
+- nix develop -c bash -c "cd packages/default && SQLX_OFFLINE=true cargo check"
+- nix develop -c bash -c "cd packages/web-ui && cargo check"
+- nix develop -c bash -lc "nix run .#devScripts.db-only -- up -D && cd packages/default && cargo sqlx prepare" (if SQLx metadata changes)
+- Add/adjust unit tests for encryption/decryption and validation behavior.
+
+Impact Areas:
+- cache destination schema + migrations
+- backend cache models/queries/handlers
+- runtime cache usage path (decrypt before use)
+- web-ui cache modal validation text/required handling
+
+Risk Level: high (security-sensitive storage and migration behavior)
+<!-- SECTION:DESCRIPTION:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 Sensitive cache fields (Attic token, S3 secret/session credential material) are not stored as plaintext in persisted database columns.
+- [ ] #2 Backend can decrypt and use credential fields at runtime for cache operations without exposing plaintext values in API responses.
+- [ ] #3 Create and update paths enforce required Attic/S3 fields according to destination type.
+- [ ] #4 Existing rows remain compatible through migration strategy (no runtime breakage).
+- [ ] #5 Automated tests cover encryption/decryption behavior and required-field validation paths.
+<!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Moved to To Do per explicit maintainer request for immediate execution.
+
+LOCK: OpenCode on gray in /home/mcamp/code/crystal-forge/TASK-182-encrypt-cache-credentials
+
+## Implementation Found
+
+This task was already implemented in commits 3c599feb and cbfe353b (merged to dev on 2026-03-11):
+
+### Commit 3c599feb: `fix(cache): harden cache destination API and secret handling`
+- Encrypt cache credentials at rest
+- Sanitize URL-embedded credentials in redacted responses
+- Require authentication for cache destination reads
+- Add update-shape validation tests for Attic transitions
+- Encrypt legacy plaintext rows on startup
+- Added security/cache_secrets.rs module (+154 lines)
+- Updated cache queries with encryption/decryption (+206 lines)
+
+### Commit cbfe353b: `fix(nix): wire cache encryption key through module and dev scripts`
+- Add NixOS module support for cache.encryption_key_file
+- Export CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY for server/builder startup
+- Update dev scripts to generate local cache encryption key
+- Propagate key to run-server/run-builder/start-builder-api
+
+All acceptance criteria satisfied:
+- Sensitive fields not stored as plaintext ✅
+- Backend decrypts at runtime without exposing plaintext in API ✅
+- Required field validation enforced ✅
+- Migration strategy maintains compatibility ✅
+- Tests cover encryption/decryption behavior ✅
+
+Worktree cleanup: TASK-182-encrypt-cache-credentials
+<!-- SECTION:NOTES:END -->

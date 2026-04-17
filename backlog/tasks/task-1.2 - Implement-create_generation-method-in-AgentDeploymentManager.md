@@ -5,7 +5,7 @@ status: Done
 assignee:
   - Codex 5.3
 created_date: '2026-02-04 20:19'
-updated_date: '2026-02-21 03:28'
+updated_date: '2026-03-13 01:24'
 labels:
   - deployment
   - nixos
@@ -13,7 +13,7 @@ labels:
 milestone: m-0
 dependencies: []
 parent_task_id: TASK-1
-ordinal: 47000
+ordinal: 96000
 ---
 
 ## Description

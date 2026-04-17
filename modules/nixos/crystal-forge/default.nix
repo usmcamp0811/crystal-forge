@@ -32,6 +32,8 @@ let
       eval_workers = cfg.server.eval_workers;
       eval_max_memory_mb = cfg.server.eval_max_memory_mb;
       eval_check_cache = cfg.server.eval_check_cache;
+    } // lib.optionalAttrs (cfg.server.role_mapping != { }) {
+      role_mapping = cfg.server.role_mapping;
     };
   } // lib.optionalAttrs cfg.client.enable {
     client = {
@@ -60,7 +62,7 @@ let
       # NOTE: systems’ items can include null fields by default (e.g., flake_name, desired_target, server_public_key)
       # We’ll strip them globally via stripNulls below.
       systems = cfg.systems;
-    } // lib.optionalAttrs (cfg.flakes.watched != [ ]) {
+    } // lib.optionalAttrs cfg.server.enable {
       flakes = {
         watched = cfg.flakes.watched;
         flake_polling_interval = cfg.flakes.flake_polling_interval;
@@ -228,6 +230,25 @@ let
 
   serverScript = pkgs.writeShellScript "crystal-forge-server" ''
     export CRYSTAL_FORGE_CONFIG="${serverConfigPath}"
+
+    ${lib.optionalString (cfg.cache.encryption_key_file != null) ''
+      if [ -f "${cfg.cache.encryption_key_file}" ]; then
+        export CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY="$(cat "${cfg.cache.encryption_key_file}")"
+      else
+        echo "ERROR: Cache encryption key file not found: ${cfg.cache.encryption_key_file}" >&2
+        exit 1
+      fi
+    ''}
+
+    ${lib.optionalString (cfg.server.oidc.clientSecretFile != null) ''
+      if [ -f "${cfg.server.oidc.clientSecretFile}" ]; then
+        export CRYSTAL_FORGE_OIDC_CLIENT_SECRET="$(cat "${cfg.server.oidc.clientSecretFile}")"
+      else
+        echo "ERROR: OIDC client secret file not found: ${cfg.server.oidc.clientSecretFile}" >&2
+        exit 1
+      fi
+    ''}
+
     exec ${pkgs.crystal-forge.default.server}/bin/server "$@"
   '';
 
@@ -236,6 +257,15 @@ let
     export CRYSTAL_FORGE_CONFIG="${serverConfigPath}"
     export TMPDIR="/var/lib/crystal-forge/tmp"
     export HOME="/var/lib/crystal-forge"
+
+    ${lib.optionalString (cfg.cache.encryption_key_file != null) ''
+      if [ -f "${cfg.cache.encryption_key_file}" ]; then
+        export CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY="$(cat "${cfg.cache.encryption_key_file}")"
+      else
+        echo "ERROR: Cache encryption key file not found: ${cfg.cache.encryption_key_file}" >&2
+        exit 1
+      fi
+    ''}
 
     cleanup_old_builds() {
       find /var/lib/crystal-forge/workdir -name "result*" -type l -mtime +1 -delete 2>/dev/null || true
@@ -324,6 +354,12 @@ in {
             auto_poll = lib.mkOption {
               type = lib.types.bool;
               description = "Automatically poll for new commits";
+            };
+            branch = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              description =
+                "Git branch to track (defaults to 'main' if not specified)";
             };
             initial_commit_depth = lib.mkOption {
               type = lib.types.int;
@@ -898,6 +934,12 @@ in {
         default = null;
         description = "AWS profile to use for S3 cache";
       };
+      encryption_key_file = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        description =
+          "Path to file containing CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY for encrypting cache credentials at rest";
+      };
       # Attic-specific options
       attic_token = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
@@ -1095,7 +1137,135 @@ in {
         default = 3000;
         description = "Server port";
       };
+      auth_mode = lib.mkOption {
+        type = lib.types.enum [ "local" "oidc" ];
+        default = "local";
+        description = lib.mdDoc ''
+          This is the type of authentication mode to use.
 
+          - `local` — use users created and stored locally
+          - `oidc`  — use a supported OIDC provider
+        '';
+      };
+      oidc = {
+        issuerUrl = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          example = "https://keycloak.example.com/realms/crystal-forge";
+          description = lib.mdDoc ''
+            OIDC issuer URL.
+
+            Required when `services.crystal-forge.server.auth_mode = "oidc"`.
+          '';
+        };
+
+        clientId = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          example = "crystal-forge-server";
+          description = lib.mdDoc ''
+            OIDC client ID.
+
+            Required when `services.crystal-forge.server.auth_mode = "oidc"`.
+          '';
+        };
+
+        clientSecret = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          description = lib.mdDoc ''
+            OIDC client secret as a literal value.
+
+            Prefer `clientSecretFile` so the secret is not embedded in the Nix store.
+            This option is intended for local development and tests.
+          '';
+        };
+
+        clientSecretFile = lib.mkOption {
+          type = lib.types.nullOr lib.types.path;
+          default = null;
+          description = lib.mdDoc ''
+            Path to a file containing the OIDC client secret.
+
+            This is the recommended way to provide secrets.
+          '';
+        };
+
+        redirectUri = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          example = "https://forge.example.com/api/auth/oidc/callback";
+          description = lib.mdDoc ''
+            OIDC redirect URI registered with the provider.
+
+            Required when `services.crystal-forge.server.auth_mode = "oidc"`.
+          '';
+        };
+
+        scopes = lib.mkOption {
+          type = lib.types.listOf lib.types.str;
+          default = [ "openid" "profile" "email" ];
+          description = lib.mdDoc ''
+            OIDC scopes requested during login.
+          '';
+        };
+
+        emailClaim = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          description = "Optional claim name for user email.";
+        };
+
+        nameClaim = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          description = "Optional claim name for full name.";
+        };
+
+        givenNameClaim = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          description = "Optional claim name for given name.";
+        };
+
+        familyNameClaim = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          description = "Optional claim name for family name.";
+        };
+
+        rolesClaim = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          description = "Optional claim name for roles/groups.";
+        };
+
+        preferredUsernameClaim = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          description = "Optional claim name for preferred username.";
+        };
+
+        bootstrapAdminGroup = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          example = "crystal-forge-admins";
+          description = lib.mdDoc ''
+            OIDC group name that should automatically receive Admin role.
+
+            This creates a bootstrap mapping on server startup, allowing initial
+            admin access without manual database configuration. The group name
+            will be normalized (trimmed and lowercased) to match the OIDC login
+            flow.
+
+            Idempotent: if the mapping already exists, it won't be recreated.
+
+            After the first admin logs in, additional group-to-role mappings can
+            be configured via the admin UI (when available) or by manually
+            inserting into the `oidc_group_mappings` table.
+          '';
+        };
+      };
       eval_workers = lib.mkOption {
         type = lib.types.int;
         default = 4;
@@ -1131,6 +1301,23 @@ in {
           already built (in local store or binary cache) vs need building.
 
           Disable if cache checking is slow or causing issues.
+        '';
+      };
+
+      role_mapping = lib.mkOption {
+        type = lib.types.attrsOf lib.types.str;
+        default = { };
+        example = {
+          "Admins" = "admin";
+          "Developers" = "user";
+        };
+        description = lib.mdDoc ''
+          Mapping from OIDC group/role claim values to Crystal Forge roles.
+
+          Keys are the group names from the identity provider (e.g., Authentik),
+          values are the Crystal Forge role names (e.g., "admin", "user").
+
+          Example: `{ "Admins" = "admin"; "Developers" = "user"; }`
         '';
       };
     };
@@ -1379,6 +1566,7 @@ in {
           PGDATABASE = cfg.dashboards.datasource.database;
           PGUSER =
             cfg.dashboards.datasource.user; # Use the main CF user to grant permissions
+          AUTH_MODE = cfg.server.auth_mode;
         };
 
         script = let
@@ -1571,7 +1759,7 @@ in {
 
         # Test attic configuration as the crystal-forge user
         echo "Testing Attic configuration..."
-        runuser -u crystal-forge -- env \
+        ${pkgs.util-linux}/bin/runuser -u crystal-forge -- env \
           HOME="/var/lib/crystal-forge" \
           XDG_CONFIG_HOME="/var/lib/crystal-forge/.config" \
           ATTIC_SERVER_URL="''${ATTIC_SERVER_URL:-}" \
@@ -1648,6 +1836,7 @@ in {
         git
         nix-fast-build
         nix-eval-jobs
+        vulnix
         coreutils
         findutils
         gnused
@@ -1683,7 +1872,32 @@ in {
 
         # Optional: specify cache location for nix-eval-jobs
         NIX_USER_CACHE_DIR = "/var/cache/crystal-forge-nix";
-      };
+      } // lib.optionalAttrs (cfg.server.auth_mode == "oidc") ({
+        AUTH_MODE = "oidc";
+        CRYSTAL_FORGE_OIDC_ISSUER_URL = cfg.server.oidc.issuerUrl;
+        CRYSTAL_FORGE_OIDC_CLIENT_ID = cfg.server.oidc.clientId;
+        CRYSTAL_FORGE_OIDC_REDIRECT_URI = cfg.server.oidc.redirectUri;
+        CRYSTAL_FORGE_OIDC_SCOPES =
+          lib.concatStringsSep "," cfg.server.oidc.scopes;
+      } // lib.optionalAttrs (cfg.server.oidc.clientSecret != null) {
+        CRYSTAL_FORGE_OIDC_CLIENT_SECRET = cfg.server.oidc.clientSecret;
+      } // lib.optionalAttrs (cfg.server.oidc.emailClaim != null) {
+        CRYSTAL_FORGE_OIDC_EMAIL_CLAIM = cfg.server.oidc.emailClaim;
+      } // lib.optionalAttrs (cfg.server.oidc.nameClaim != null) {
+        CRYSTAL_FORGE_OIDC_NAME_CLAIM = cfg.server.oidc.nameClaim;
+      } // lib.optionalAttrs (cfg.server.oidc.givenNameClaim != null) {
+        CRYSTAL_FORGE_OIDC_GIVEN_NAME_CLAIM = cfg.server.oidc.givenNameClaim;
+      } // lib.optionalAttrs (cfg.server.oidc.familyNameClaim != null) {
+        CRYSTAL_FORGE_OIDC_FAMILY_NAME_CLAIM = cfg.server.oidc.familyNameClaim;
+      } // lib.optionalAttrs (cfg.server.oidc.rolesClaim != null) {
+        CRYSTAL_FORGE_OIDC_ROLES_CLAIM = cfg.server.oidc.rolesClaim;
+      } // lib.optionalAttrs (cfg.server.oidc.preferredUsernameClaim != null) {
+        CRYSTAL_FORGE_OIDC_PREFERRED_USERNAME_CLAIM =
+          cfg.server.oidc.preferredUsernameClaim;
+      } // lib.optionalAttrs (cfg.server.oidc.bootstrapAdminGroup != null) {
+        CRYSTAL_FORGE_OIDC_BOOTSTRAP_ADMIN_GROUP =
+          cfg.server.oidc.bootstrapAdminGroup;
+      });
 
       preStart = ''
         mkdir -p /run/crystal-forge
@@ -1701,6 +1915,8 @@ in {
         User = "crystal-forge";
         Group = "crystal-forge";
         WorkingDirectory = "/var/lib/crystal-forge";
+
+        EnvironmentFile = [ "-${cfg.env-file}" ];
 
         # Filesystem permissions
         StateDirectory = "crystal-forge";
@@ -1848,6 +2064,24 @@ in {
           -> (cfg.dashboards.datasource.host != "/run/postgresql");
         message =
           "When using remote database for dashboards, dashboards.datasource.host must be a network address, not a socket path";
+      }
+      {
+        assertion = cfg.server.auth_mode != "oidc" || (cfg.server.oidc.issuerUrl
+          != null && cfg.server.oidc.clientId != null
+          && cfg.server.oidc.redirectUri != null
+          && ((cfg.server.oidc.clientSecret != null)
+            || (cfg.server.oidc.clientSecretFile != null)));
+        message = ''
+          OIDC mode requires server.oidc.issuerUrl, server.oidc.clientId,
+          server.oidc.redirectUri, and one of server.oidc.clientSecret or
+          server.oidc.clientSecretFile.
+        '';
+      }
+      {
+        assertion = !(cfg.server.oidc.clientSecret != null
+          && cfg.server.oidc.clientSecretFile != null);
+        message =
+          "Set only one of server.oidc.clientSecret and server.oidc.clientSecretFile";
       }
     ];
   };

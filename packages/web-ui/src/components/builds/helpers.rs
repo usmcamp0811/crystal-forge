@@ -1,10 +1,31 @@
 //! Shared types and helper functions for build components.
 
+use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
 use std::rc::Rc;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
 use web_sys::{Node, window};
+
+/// Extract the system name from a full flake attribute path or hostname.
+///
+/// Examples:
+/// - `git+https://...#nixosConfigurations.test.gray` → `gray`
+/// - `git+https://...#nixosConfigurations.gray` → `gray`
+/// - `gray` → `gray`
+pub fn extract_system_name(hostname: &str) -> &str {
+    // If there's a # (flake attribute path), extract everything after it
+    if let Some(attr_path) = hostname.split('#').nth(1) {
+        // Split by dots and take the last segment (the actual system name)
+        // Examples:
+        //   nixosConfigurations.test.gray -> gray
+        //   nixosConfigurations.gray -> gray
+        attr_path.split('.').last().unwrap_or(attr_path)
+    } else {
+        // No flake path, just return the hostname as-is
+        hostname
+    }
+}
 
 /// Worker status enum.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,11 +50,11 @@ impl WorkerStatus {
 pub enum BuildStatus {
     Queued,
     Building,
+    /// Cancel requested; builder is stopping the nix process.
     Stopping,
-    Restarting,
     Failed,
     Complete,
-    Canceled,
+    Cancelled,
 }
 
 impl BuildStatus {
@@ -42,10 +63,9 @@ impl BuildStatus {
             BuildStatus::Queued => "queued",
             BuildStatus::Building => "building",
             BuildStatus::Stopping => "stopping",
-            BuildStatus::Restarting => "restarting",
             BuildStatus::Failed => "failed",
             BuildStatus::Complete => "complete",
-            BuildStatus::Canceled => "canceled",
+            BuildStatus::Cancelled => "cancelled",
         }
     }
 }
@@ -90,6 +110,7 @@ impl WorkerAction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BuildAction {
     Stop,
+    ForceCancel,
     Restart,
     RunNext,
 }
@@ -97,8 +118,8 @@ pub enum BuildAction {
 /// Worker item struct.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorkerItem {
-    pub id: &'static str,
-    pub name: &'static str,
+    pub id: String,
+    pub name: String,
     pub active_slots: usize,
     pub total_slots: usize,
     pub queue_depth: usize,
@@ -115,16 +136,23 @@ impl WorkerItem {
 #[derive(Clone, Debug, PartialEq)]
 pub struct BuildItem {
     pub id: i32,
-    pub hostname: &'static str,
-    pub flake: &'static str,
-    pub commit: &'static str,
-    pub branch: &'static str,
-    pub worker_id: &'static str,
-    pub queued_for: &'static str,
-    pub runtime: Option<&'static str>,
-    pub started_by: &'static str,
+    pub job_id: Option<uuid::Uuid>,
+    pub system_id: Option<uuid::Uuid>,
+    pub hostname: String,
+    pub environment: Option<String>,
+    pub flake: String,
+    pub commit: String,
+    pub branch: String,
+    pub worker_id: String,
+    pub queued_for: String,
+    pub runtime: Option<String>,
+    pub duration_secs: Option<i64>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub started_by: String,
+    /// Stored build logs (available for completed/failed jobs from API).
+    pub logs: Option<String>,
     pub status: BuildStatus,
-    pub summary: &'static str,
+    pub summary: String,
 }
 
 impl BuildItem {
@@ -154,7 +182,7 @@ pub struct BuildArtifact {
 pub enum PendingAction {
     Queue(QueueAction),
     Worker {
-        worker_id: &'static str,
+        worker_id: String,
         action: WorkerAction,
     },
     Build {
@@ -165,56 +193,31 @@ pub enum PendingAction {
 
 // Styling helper functions
 
-pub fn worker_status_style(status: WorkerStatus) -> &'static str {
+pub fn worker_status_class(status: WorkerStatus) -> &'static str {
     match status {
-        WorkerStatus::Running => {
-            "background-color: #1E3A2E; border-color: #2F6B4A; color: #D8FBE8;"
-        }
-        WorkerStatus::Paused => "background-color: #2B303B; border-color: #495264; color: #E5E7EB;",
-        WorkerStatus::Draining => {
-            "background-color: #4A3B22; border-color: #8C6A2F; color: #FDE8C6;"
-        }
+        WorkerStatus::Running => "cf-worker-status-running",
+        WorkerStatus::Paused => "cf-worker-status-paused",
+        WorkerStatus::Draining => "cf-worker-status-draining",
     }
 }
 
-pub fn build_status_badge_style(status: BuildStatus) -> &'static str {
+pub fn build_status_badge_class(status: BuildStatus) -> &'static str {
     match status {
-        BuildStatus::Queued => "background-color: #2E2E3F; border-color: #4D4D72; color: #D9D9FF;",
-        BuildStatus::Building => {
-            "background-color: #23363A; border-color: #3D6870; color: #D9F6F9;"
-        }
-        BuildStatus::Stopping => {
-            "background-color: #4A3B22; border-color: #8C6A2F; color: #FDE8C6;"
-        }
-        BuildStatus::Restarting => {
-            "background-color: #2E2A49; border-color: #675CAD; color: #E4DFFF;"
-        }
-        BuildStatus::Failed => "background-color: #44262A; border-color: #7A3D48; color: #FFDCE1;",
-        BuildStatus::Complete => {
-            "background-color: #1E3A2E; border-color: #2F6B4A; color: #D8FBE8;"
-        }
-        BuildStatus::Canceled => {
-            "background-color: #2B303B; border-color: #495264; color: #E5E7EB;"
-        }
+        BuildStatus::Queued => "cf-build-status-queued",
+        BuildStatus::Building => "cf-build-status-building",
+        BuildStatus::Stopping => "cf-build-status-stopping",
+        BuildStatus::Failed => "cf-build-status-failed",
+        BuildStatus::Complete => "cf-build-status-complete",
+        BuildStatus::Cancelled => "cf-build-status-canceled",
     }
 }
 
-pub fn event_level_style(level: &str) -> &'static str {
+pub fn event_level_class(level: &str) -> &'static str {
     match level {
-        "error" => "background-color: #44262A; border-color: #7A3D48; color: #FFDCE1;",
-        "warn" => "background-color: #4A3B22; border-color: #8C6A2F; color: #FDE8C6;",
-        _ => "background-color: #2B303B; border-color: #495264; color: #E5E7EB;",
-    }
-}
-
-pub fn queue_sort_rank(status: BuildStatus) -> i32 {
-    match status {
-        BuildStatus::Building | BuildStatus::Restarting => 0,
-        BuildStatus::Queued => 1,
-        BuildStatus::Stopping => 2,
-        BuildStatus::Failed => 3,
-        BuildStatus::Complete => 4,
-        BuildStatus::Canceled => 5,
+        "error" => "cf-event-level-error",
+        "warn" => "cf-event-level-warn",
+        "info" => "cf-event-level-info",
+        _ => "cf-event-level-default",
     }
 }
 
@@ -222,18 +225,33 @@ pub fn short_commit(commit: &str) -> String {
     commit.chars().take(7).collect()
 }
 
-pub fn queue_row_style(selected: bool, status: BuildStatus) -> String {
-    let border = if selected { "#6D8FBA" } else { "#374151" };
-    let bg = match status {
-        BuildStatus::Building | BuildStatus::Restarting => "#1C2B3E",
-        BuildStatus::Queued => "#242C3A",
-        BuildStatus::Stopping => "#3C2F20",
-        BuildStatus::Failed => "#3B232A",
-        BuildStatus::Complete => "#1E362E",
-        BuildStatus::Canceled => "#2C313A",
-    };
+/// Sort rank for queue ordering: lower = displayed first.
+pub fn queue_sort_rank(status: BuildStatus) -> i32 {
+    match status {
+        BuildStatus::Building => 0,
+        BuildStatus::Stopping => 1,
+        BuildStatus::Queued => 2,
+        BuildStatus::Failed => 3,
+        BuildStatus::Complete => 4,
+        BuildStatus::Cancelled => 5,
+    }
+}
 
-    format!("background-color: {bg}; border-color: {border};")
+pub fn queue_row_style(selected: bool, status: BuildStatus) -> String {
+    let row_status = match status {
+        BuildStatus::Building => "cf-queue-row-building",
+        BuildStatus::Queued => "cf-queue-row-queued",
+        BuildStatus::Stopping => "cf-queue-row-stopping",
+        BuildStatus::Failed => "cf-queue-row-failed",
+        BuildStatus::Complete => "cf-queue-row-complete",
+        BuildStatus::Cancelled => "cf-queue-row-canceled",
+    };
+    let selected_class = if selected {
+        "cf-queue-row-selected"
+    } else {
+        "cf-queue-row"
+    };
+    format!("{selected_class} {row_status}")
 }
 
 // Action application functions
@@ -274,22 +292,28 @@ pub fn apply_action(
             let mut next_builds = builds.read().clone();
             match action {
                 BuildAction::Stop => {
+                    // Optimistic UI: show Stopping immediately; server will confirm.
                     if let Some(target) = next_builds.iter_mut().find(|b| b.id == build_id) {
                         target.status = BuildStatus::Stopping;
                     }
                     if let Some(target) = next_builds.iter_mut().find(|b| b.id == build_id) {
-                        target.status = BuildStatus::Canceled;
+                        target.status = BuildStatus::Cancelled;
                     }
                     note.set(Some(format!("Stopped build #{build_id}")));
                 }
-                BuildAction::Restart => {
+                BuildAction::ForceCancel => {
+                    // Optimistic UI: show Cancelled immediately; server will confirm.
                     if let Some(target) = next_builds.iter_mut().find(|b| b.id == build_id) {
-                        target.status = BuildStatus::Restarting;
-                        target.runtime = Some("00:00");
-                        target.queued_for = "restarting";
+                        target.status = BuildStatus::Cancelled;
                     }
+                    note.set(Some(format!("Force-cancelled build #{build_id}")));
+                }
+                BuildAction::Restart => {
+                    // Optimistic UI: show Queued immediately; server will confirm.
                     if let Some(target) = next_builds.iter_mut().find(|b| b.id == build_id) {
                         target.status = BuildStatus::Building;
+                        target.runtime = Some("00:00".to_string());
+                        target.queued_for = "restarting".to_string();
                     }
                     note.set(Some(format!("Restarted build #{build_id}")));
                 }
@@ -324,16 +348,16 @@ pub fn selected_build_data(selected_id: Option<i32>, builds: &[BuildItem]) -> Op
 pub fn mock_workers() -> Vec<WorkerItem> {
     vec![
         WorkerItem {
-            id: "worker-a",
-            name: "worker-a",
+            id: "worker-a".to_string(),
+            name: "worker-a".to_string(),
             active_slots: 2,
             total_slots: 4,
             queue_depth: 6,
             status: WorkerStatus::Running,
         },
         WorkerItem {
-            id: "worker-b",
-            name: "worker-b",
+            id: "worker-b".to_string(),
+            name: "worker-b".to_string(),
             active_slots: 3,
             total_slots: 4,
             queue_depth: 4,
@@ -346,55 +370,80 @@ pub fn mock_builds() -> Vec<BuildItem> {
     vec![
         BuildItem {
             id: 1,
-            hostname: "atlas-01",
-            flake: "campground",
-            commit: "a38f45fba91d4b0a5d80840c09b0910c70fa013e",
-            branch: "main",
-            worker_id: "worker-a",
-            queued_for: "queued 00:58 ago",
-            runtime: Some("02:13"),
-            started_by: "mcamp",
+            job_id: None,
+            system_id: None,
+            hostname: "atlas-01".to_string(),
+            environment: Some("production".to_string()),
+            flake: "campground".to_string(),
+            commit: "a38f45fba91d4b0a5d80840c09b0910c70fa013e".to_string(),
+            branch: "main".to_string(),
+            worker_id: "worker-a".to_string(),
+            queued_for: "queued 00:58 ago".to_string(),
+            runtime: Some("02:13".to_string()),
+            duration_secs: Some(133),
+            completed_at: None,
+            started_by: "mcamp".to_string(),
+            logs: None,
             status: BuildStatus::Building,
-            summary: "nix build .#nixosConfigurations.atlas-01.config.system.build.toplevel",
+            summary: "nix build .#nixosConfigurations.atlas-01.config.system.build.toplevel"
+                .to_string(),
         },
         BuildItem {
             id: 2,
-            hostname: "luna-02",
-            flake: "campground",
-            commit: "75c2fbf719ac2654af9f1dc4b773f502f9db515e",
-            branch: "main",
-            worker_id: "worker-b",
-            queued_for: "queued 01:32 ago",
+            job_id: None,
+            system_id: None,
+            hostname: "luna-02".to_string(),
+            environment: Some("staging".to_string()),
+            flake: "campground".to_string(),
+            commit: "75c2fbf719ac2654af9f1dc4b773f502f9db515e".to_string(),
+            branch: "main".to_string(),
+            worker_id: "worker-b".to_string(),
+            queued_for: "queued 01:32 ago".to_string(),
             runtime: None,
-            started_by: "scheduler",
+            duration_secs: None,
+            completed_at: None,
+            started_by: "scheduler".to_string(),
+            logs: None,
             status: BuildStatus::Queued,
-            summary: "waiting for free worker slot",
+            summary: "waiting for free worker slot".to_string(),
         },
         BuildItem {
             id: 3,
-            hostname: "gray",
-            flake: "campground",
-            commit: "4144fdc0312734c62bc5f4f9f48f5a87e4b3a85f",
-            branch: "main",
-            worker_id: "worker-a",
-            queued_for: "queued 00:29 ago",
+            job_id: None,
+            system_id: None,
+            hostname: "gray".to_string(),
+            environment: Some("dev".to_string()),
+            flake: "campground".to_string(),
+            commit: "4144fdc0312734c62bc5f4f9f48f5a87e4b3a85f".to_string(),
+            branch: "main".to_string(),
+            worker_id: "worker-a".to_string(),
+            queued_for: "queued 00:29 ago".to_string(),
             runtime: None,
-            started_by: "scheduler",
+            duration_secs: None,
+            completed_at: None,
+            started_by: "scheduler".to_string(),
+            logs: None,
             status: BuildStatus::Queued,
-            summary: "waiting for free worker slot",
+            summary: "waiting for free worker slot".to_string(),
         },
         BuildItem {
             id: 4,
-            hostname: "reckless",
-            flake: "campground",
-            commit: "9cc53a8f1792043b1f7868ecf5ff312ad67553de",
-            branch: "release/2026-02",
-            worker_id: "worker-b",
-            queued_for: "queued 06:11 ago",
-            runtime: Some("04:22"),
-            started_by: "mcamp",
+            job_id: None,
+            system_id: None,
+            hostname: "reckless".to_string(),
+            environment: Some("production".to_string()),
+            flake: "campground".to_string(),
+            commit: "9cc53a8f1792043b1f7868ecf5ff312ad67553de".to_string(),
+            branch: "release/2026-02".to_string(),
+            worker_id: "worker-b".to_string(),
+            queued_for: "queued 06:11 ago".to_string(),
+            runtime: Some("04:22".to_string()),
+            duration_secs: Some(262),
+            completed_at: None,
+            started_by: "mcamp".to_string(),
+            logs: None,
             status: BuildStatus::Failed,
-            summary: "dependency graph diverged on nixpkgs input",
+            summary: "dependency graph diverged on nixpkgs input".to_string(),
         },
     ]
 }

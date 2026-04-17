@@ -10,6 +10,8 @@ use ed25519_dalek::Verifier;
 use sqlx::PgPool;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
+use uuid::Uuid;
 
 #[derive(Debug)]
 pub struct VerifiedAgentRequest {
@@ -124,15 +126,40 @@ pub async fn authenticate_agent_request(
     authenticate_agent_request_with_lookup(headers, body, pool).await
 }
 
+use crate::config::ServerConfig;
+use crate::queue::QueueNotifier;
+
 /// Shared server state containing authorized signing keys for current-system auth
 #[derive(Clone)]
 pub struct CFState {
     pub pool: PgPool,
+    pub server_config: ServerConfig,
+    pub queue_notifier: Arc<QueueNotifier>,
+    pub eval_log_channels: Arc<
+        tokio::sync::Mutex<std::collections::HashMap<i32, tokio::sync::broadcast::Sender<String>>>,
+    >,
+    pub eval_log_history: Arc<tokio::sync::Mutex<std::collections::HashMap<i32, Vec<String>>>>,
+    pub build_log_channels: Arc<
+        tokio::sync::Mutex<std::collections::HashMap<Uuid, tokio::sync::broadcast::Sender<String>>>,
+    >,
+    pub build_log_history: Arc<tokio::sync::Mutex<std::collections::HashMap<Uuid, Vec<String>>>>,
 }
 
 impl CFState {
-    pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+    pub fn new(
+        pool: PgPool,
+        server_config: ServerConfig,
+        queue_notifier: Arc<QueueNotifier>,
+    ) -> Self {
+        Self {
+            pool,
+            server_config,
+            queue_notifier,
+            eval_log_channels: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            eval_log_history: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            build_log_channels: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            build_log_history: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        }
     }
 
     pub fn pool(&self) -> &PgPool {
@@ -143,6 +170,12 @@ impl CFState {
 impl FromRef<CFState> for PgPool {
     fn from_ref(state: &CFState) -> PgPool {
         state.pool.clone()
+    }
+}
+
+impl FromRef<CFState> for ServerConfig {
+    fn from_ref(state: &CFState) -> ServerConfig {
+        state.server_config.clone()
     }
 }
 
@@ -238,6 +271,7 @@ mod tests {
             public_key,
             flake_id: Some(1),
             derivation: "/nix/store/test-system".to_string(),
+            system_configuration_name: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
             desired_target: None,

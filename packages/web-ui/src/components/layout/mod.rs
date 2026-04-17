@@ -8,6 +8,6 @@ pub mod topbar;
 
 pub use app_shell::AppShell;
 pub use card::Card;
-pub use dev_banner::DevModeBanner;
-pub use sidebar::SidebarNav;
+pub use dev_banner::{BannerPlacement, DevModeBanner};
+pub use sidebar::{MobileDrawer, SidebarContext, SidebarEdgeToggle, SidebarNav};
 pub use topbar::TopBar;

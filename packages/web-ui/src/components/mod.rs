@@ -22,17 +22,20 @@
 //! - `policy` - Policy management components
 
 // Domain-specific component modules
+pub mod builders;
 pub mod builds;
 pub mod charts;
 pub mod cve;
 pub mod dashboard;
 pub mod diff;
 pub mod environments;
+pub mod eval_log_modal;
 pub mod filters;
 pub mod flake;
 pub mod forms;
 pub mod modals;
 pub mod notifications;
+pub mod onboarding;
 pub mod policy;
 pub mod system;
 pub mod tables;
@@ -46,8 +49,9 @@ pub mod widget_grid;
 
 // Re-exports for convenience
 pub use charts::{DonutArc, DonutChartWithLegend, DonutSegment};
-pub use cve::{CveSeverityRow, CvesTab, VulnerabilityRow};
+pub use cve::CvesTab;
 pub use diff::DiffViewer;
+pub use eval_log_modal::EvalLogModal;
 pub use filters::{
     DeploymentFilterDropdown, EnvironmentFilterDropdown, HealthFilterDropdown, MultiSelectDropdown,
     ViewToggle,
@@ -56,6 +60,7 @@ pub use layout::{AppShell, Card, SidebarNav, TopBar};
 pub use loading::{ErrorMessage, LoadingSpinner};
 pub use modals::{ConfirmDialog, RollbackConfirmDialog, SyncConfirmDialog};
 pub use notifications::Toast;
+pub use onboarding::OnboardingCoachPanel;
 pub use stat_card::StatCard;
 pub use status_badge::{DeploymentBadge, HealthBadge};
 pub use system::{

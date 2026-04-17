@@ -2,6 +2,8 @@
 
 use dioxus::prelude::*;
 
+use crate::theme;
+
 /// Position and size of a widget in the grid.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct WidgetLayout {
@@ -94,16 +96,16 @@ pub fn GridWidget(props: GridWidgetProps) -> Element {
         ""
     };
     let drop_class = if is_drop_target {
-        "ring-2 ring-blue-400 ring-offset-2 ring-offset-gray-900 scale-[1.02] bg-blue-900/20"
+        "ring-2 ring-blue-400 ring-offset-2 scale-[1.02] bg-blue-900/20"
     } else if is_invalid_drop_target {
-        "ring-2 ring-red-400 ring-offset-2 ring-offset-gray-900 bg-red-900/20"
+        "ring-2 ring-red-400 ring-offset-2 bg-red-900/20"
     } else {
         ""
     };
 
     rsx! {
         div {
-            class: "bg-gray-800 border border-gray-700 rounded-xl overflow-hidden transition-all duration-150 {drag_class} {drop_class}",
+            class: "{theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl overflow-hidden transition-all duration-150 {drag_class} {drop_class}",
             style: "grid-column: {grid_col}; grid-row: {grid_row};",
             "data-widget-id": "{id}",
             draggable: "true",
@@ -147,7 +149,7 @@ pub fn GridWidget(props: GridWidgetProps) -> Element {
 
             // Header with drag handle
             div {
-                class: "flex items-center gap-2 px-3 py-1.5 bg-gray-800/50 border-b border-gray-700 cursor-grab active:cursor-grabbing",
+                class: "flex items-center gap-2 px-3 py-1.5 {theme::surface::SUBTLE_BG} border-b {theme::surface::CARD_BORDER} cursor-grab active:cursor-grabbing",
 
                 // Drag handle icon (6-dot grip)
                 svg {
@@ -163,14 +165,14 @@ pub fn GridWidget(props: GridWidgetProps) -> Element {
                     circle { cx: "6", cy: "10", r: "1.2", fill: "#6b7280" }
                 }
                 h3 {
-                    class: "text-white font-semibold text-sm whitespace-nowrap",
+                    class: "{theme::text::PRIMARY} font-semibold text-sm whitespace-nowrap",
                     "{title}"
                 }
             }
 
             // Widget content
             div {
-                class: "p-4 h-full",
+                class: "p-4 h-full min-h-0 overflow-hidden",
                 {children}
             }
         }

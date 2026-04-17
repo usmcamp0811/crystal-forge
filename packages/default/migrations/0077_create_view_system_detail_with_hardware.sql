@@ -1,0 +1,195 @@
+-- Create comprehensive system detail view with hardware info and change detection
+-- This view provides all information needed for the System Detail API endpoint.
+
+CREATE OR REPLACE VIEW public.view_system_detail AS
+WITH latest_system_state AS (
+    -- Get the most recent system state for each system
+    SELECT DISTINCT ON (s.id)
+        s.id AS system_id,
+        ss.id AS system_state_id,
+        ss.store_path,
+        ss.os,
+        ss.kernel,
+        ss.nixos_version,
+        ss.cpu_brand,
+        ss.cpu_cores,
+        ss.memory_gb,
+        ss.uptime_secs,
+        ss.board_serial,
+        ss.chassis_serial,
+        ss.bios_version,
+        ss.cpu_microcode,
+        ss.primary_ip_address,
+        ss.primary_mac_address,
+        ss.gateway_ip,
+        ss.network_interfaces,
+        ss.tpm_present,
+        ss.secure_boot_enabled,
+        ss.fips_mode,
+        ss.selinux_status,
+        ss.agent_version,
+        ss.agent_build_hash,
+        ss.timestamp AS last_seen
+    FROM systems s
+    LEFT JOIN system_states ss ON ss.hostname = s.hostname
+    ORDER BY s.id, ss.timestamp DESC
+),
+latest_heartbeat AS (
+    -- Get the most recent heartbeat timestamp per system
+    SELECT DISTINCT ON (s.id)
+        s.id AS system_id,
+        ah.timestamp AS heartbeat_timestamp,
+        ah.agent_version AS heartbeat_agent_version
+    FROM systems s
+    LEFT JOIN system_states ss ON ss.hostname = s.hostname
+    LEFT JOIN agent_heartbeats ah ON ah.system_state_id = ss.id
+    ORDER BY s.id, ah.timestamp DESC
+),
+hardware_change_detection AS (
+    -- Detect hardware changes by comparing current state with historical states
+    SELECT
+        s.id AS system_id,
+        -- Check if hardware changed in the past 24 hours
+        EXISTS (
+            SELECT 1
+            FROM system_states ss_recent
+            WHERE ss_recent.hostname = s.hostname
+              AND ss_recent.timestamp >= NOW() - INTERVAL '24 hours'
+              AND (
+                  ss_recent.cpu_brand IS DISTINCT FROM lss.cpu_brand
+                  OR ss_recent.cpu_cores IS DISTINCT FROM lss.cpu_cores
+                  OR ss_recent.memory_gb IS DISTINCT FROM lss.memory_gb
+                  OR ss_recent.board_serial IS DISTINCT FROM lss.board_serial
+                  OR ss_recent.chassis_serial IS DISTINCT FROM lss.chassis_serial
+                  OR ss_recent.bios_version IS DISTINCT FROM lss.bios_version
+              )
+        ) AS hardware_changed_24h,
+        -- Check if hardware ever changed (comparing to earliest state)
+        EXISTS (
+            SELECT 1
+            FROM (
+                SELECT DISTINCT ON (ss_history.hostname)
+                    ss_history.cpu_brand,
+                    ss_history.cpu_cores,
+                    ss_history.memory_gb,
+                    ss_history.board_serial,
+                    ss_history.chassis_serial,
+                    ss_history.bios_version
+                FROM system_states ss_history
+                WHERE ss_history.hostname = s.hostname
+                ORDER BY ss_history.hostname, ss_history.timestamp ASC
+            ) first_state
+            WHERE (
+                first_state.cpu_brand IS DISTINCT FROM lss.cpu_brand
+                OR first_state.cpu_cores IS DISTINCT FROM lss.cpu_cores
+                OR first_state.memory_gb IS DISTINCT FROM lss.memory_gb
+                OR first_state.board_serial IS DISTINCT FROM lss.board_serial
+                OR first_state.chassis_serial IS DISTINCT FROM lss.chassis_serial
+                OR first_state.bios_version IS DISTINCT FROM lss.bios_version
+            )
+        ) AS hardware_ever_changed
+    FROM systems s
+    LEFT JOIN latest_system_state lss ON lss.system_id = s.id
+),
+deployment_info AS (
+    -- Get deployment status information
+    SELECT
+        hostname,
+        deployment_status,
+        current_store_path,
+        status_description
+    FROM view_system_deployment_status
+),
+flake_info AS (
+    -- Get flake information for the system
+    SELECT
+        s.id AS system_id,
+        f.id AS flake_id,
+        f.name AS flake_name,
+        f.repo_url AS flake_repo_url,
+        (
+            SELECT c.git_commit_hash
+            FROM commits c
+            WHERE c.flake_id = f.id
+            ORDER BY c.commit_timestamp DESC
+            LIMIT 1
+        ) AS latest_commit
+    FROM systems s
+    LEFT JOIN flakes f ON f.id = s.flake_id
+)
+SELECT
+    s.id,
+    s.hostname,
+    e.name AS environment,
+    s.is_active,
+    s.deployment_policy,
+    -- Health status derived from heartbeat recency
+    CASE
+        WHEN lh.heartbeat_timestamp IS NULL THEN 'offline'
+        WHEN lh.heartbeat_timestamp < NOW() - INTERVAL '4 hours' THEN 'offline'
+        WHEN lh.heartbeat_timestamp < NOW() - INTERVAL '1 hour' THEN 'critical'
+        WHEN lh.heartbeat_timestamp < NOW() - INTERVAL '15 minutes' THEN 'warning'
+        ELSE 'healthy'
+    END AS health_status,
+    -- Deployment status from existing view
+    COALESCE(di.deployment_status, 'unknown') AS deployment_status,
+    -- Pipeline stage (placeholder for now - could be enhanced with build status)
+    CASE
+        WHEN s.flake_id IS NULL THEN 'unknown'
+        WHEN lss.store_path IS NULL THEN 'ready_for_build'
+        ELSE 'build_complete'
+    END AS pipeline_stage,
+    -- System info
+    lss.nixos_version,
+    lss.kernel,
+    lss.agent_version,
+    lss.store_path AS current_store_path,
+    -- Hardware info (NULL when no heartbeat received yet)
+    lss.cpu_brand,
+    lss.cpu_cores,
+    lss.memory_gb,
+    lss.uptime_secs,
+    lss.board_serial,
+    lss.bios_version,
+    -- Network info
+    lss.primary_ip_address,
+    lss.primary_mac_address,
+    lss.gateway_ip,
+    -- Security info
+    lss.tpm_present,
+    lss.secure_boot_enabled,
+    lss.fips_mode,
+    lss.selinux_status,
+    -- Hardware change flags
+    hcd.hardware_changed_24h,
+    hcd.hardware_ever_changed,
+    -- CVE counts (placeholder - could join with cve_scans table)
+    0::integer AS critical_cve_count,
+    0::integer AS high_cve_count,
+    0::integer AS medium_cve_count,
+    0::integer AS low_cve_count,
+    -- Flake info
+    fi.flake_id,
+    fi.flake_name,
+    fi.flake_repo_url,
+    fi.latest_commit AS flake_latest_commit,
+    -- Timestamps
+    GREATEST(
+        COALESCE(lh.heartbeat_timestamp, '1970-01-01'::timestamptz),
+        COALESCE(lss.last_seen, '1970-01-01'::timestamptz)
+    ) AS last_seen,
+    s.created_at,
+    s.updated_at
+FROM systems s
+LEFT JOIN environments e ON e.id = s.environment_id
+LEFT JOIN latest_system_state lss ON lss.system_id = s.id
+LEFT JOIN latest_heartbeat lh ON lh.system_id = s.id
+LEFT JOIN hardware_change_detection hcd ON hcd.system_id = s.id
+LEFT JOIN deployment_info di ON di.hostname = s.hostname
+LEFT JOIN flake_info fi ON fi.system_id = s.id;
+
+-- Create a comment explaining the view
+COMMENT ON VIEW public.view_system_detail IS 
+'Comprehensive system detail view with hardware information and change detection.
+Includes hardware_changed_24h and hardware_ever_changed flags for tracking hardware drift.
+Returns NULL for hardware fields when no agent heartbeat has been received yet.';

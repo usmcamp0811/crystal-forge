@@ -1,14 +1,14 @@
 ---
 id: TASK-61
 title: 'Sprint grooming: make selected micro-sprint tasks sprint-ready'
-status: Review
+status: Done
 assignee: []
 created_date: '2026-02-19 03:54'
-updated_date: '2026-02-21 03:28'
+updated_date: '2026-03-13 01:24'
 labels: []
 dependencies: []
 priority: high
-ordinal: 3000
+ordinal: 63000
 ---
 
 ## Description

@@ -1,5 +1,5 @@
 use crate::config::{CacheType, deployment::DeploymentConfig};
-use crate::handlers::agent::heartbeat::LogResponse;
+use crate::handlers::agent::heartbeat::{LogResponse, RuntimeCacheConfig};
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::process::Command;
@@ -78,6 +78,7 @@ pub struct AgentDeploymentManager {
     config: DeploymentConfig,
     current_target: Option<String>,
     deployment_lock: Arc<Semaphore>,
+    runtime_caches: Vec<RuntimeCacheConfig>,
 }
 
 impl AgentDeploymentManager {
@@ -86,7 +87,36 @@ impl AgentDeploymentManager {
             config,
             current_target: None,
             deployment_lock: Arc::new(Semaphore::new(1)),
+            runtime_caches: Vec::new(),
         }
+    }
+
+    fn effective_runtime_cache(
+        &self,
+    ) -> Option<(String, CacheType, Option<String>, Option<String>)> {
+        if let Some(cache) = self.runtime_caches.first() {
+            let cache_type = match cache.cache_type.as_str() {
+                "Attic" => CacheType::Attic,
+                "S3" => CacheType::S3,
+                "Http" => CacheType::Http,
+                _ => CacheType::Nix,
+            };
+            return Some((
+                cache.cache_url.clone(),
+                cache_type,
+                cache.cache_public_key.clone(),
+                cache.attic_cache_name.clone(),
+            ));
+        }
+
+        self.config.cache_url.as_ref().map(|cache_url| {
+            (
+                cache_url.clone(),
+                self.config.cache_type.clone(),
+                self.config.cache_public_key.clone(),
+                self.config.attic_cache_name.clone(),
+            )
+        })
     }
 
     /// Read the actual current system from /run/current-system
@@ -107,6 +137,8 @@ impl AgentDeploymentManager {
         response: LogResponse,
     ) -> Result<DeploymentResult> {
         debug!("Processing heartbeat response");
+
+        self.runtime_caches = response.runtime_caches;
 
         let Some(desired_target) = response.desired_target else {
             debug!("No desired target in heartbeat response");
@@ -151,8 +183,10 @@ impl AgentDeploymentManager {
 
         let is_store_path = target.starts_with("/nix/store/");
 
+        let effective_cache = self.effective_runtime_cache();
+
         // Store paths REQUIRE cache to be configured
-        if is_store_path && self.config.cache_url.is_none() {
+        if is_store_path && effective_cache.is_none() {
             anyhow::bail!(
                 "Cannot deploy store path without cache configured. Target: {}",
                 target
@@ -163,8 +197,18 @@ impl AgentDeploymentManager {
 
         let result = if is_store_path {
             // Store paths: deploy from cache
-            let cache_url = self.config.cache_url.as_ref().unwrap(); // Safe because we checked above
-            self.deploy_store_path_from_cache(target, cache_url).await?
+            let Some((cache_url, cache_type, cache_public_key, attic_cache_name)) = effective_cache
+            else {
+                anyhow::bail!("Store path deployment requested without effective cache config");
+            };
+            self.deploy_store_path_from_cache(
+                target,
+                &cache_url,
+                &cache_type,
+                cache_public_key.as_deref(),
+                attic_cache_name.as_deref(),
+            )
+            .await?
         } else {
             anyhow::bail!(
                 "This is not a store path we don't know how to handle it! Target: {}",
@@ -184,10 +228,19 @@ impl AgentDeploymentManager {
         &self,
         store_path: &str,
         cache_url: &str,
+        cache_type: &CacheType,
+        cache_public_key: Option<&str>,
+        attic_cache_name: Option<&str>,
     ) -> Result<DeploymentResult> {
         info!("Deploying store path from cache: {}", store_path);
-        info!("Cache type: {:?}", self.config.cache_type);
+        info!("Cache type: {:?}", cache_type);
         info!("Cache URL: {}", cache_url);
+        if let Some(pk) = cache_public_key {
+            info!("Using runtime cache public key: {}", pk);
+        }
+        if let Some(name) = attic_cache_name {
+            info!("Using runtime attic cache name: {}", name);
+        }
 
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
@@ -199,8 +252,13 @@ impl AgentDeploymentManager {
 
         // Step 1: Copy from cache with retry logic
         info!("Starting cache copy with retry logic...");
-        self.copy_from_cache_with_retry(&binary_cache_url, store_path)
-            .await?;
+        self.copy_from_cache_with_retry(
+            &binary_cache_url,
+            store_path,
+            cache_type,
+            cache_public_key,
+        )
+        .await?;
 
         // Step 2: Activate the configuration using systemd-run
         info!("Activating configuration via systemd-run...");
@@ -210,7 +268,13 @@ impl AgentDeploymentManager {
         Ok(DeploymentResult::Started { unit_name })
     }
 
-    async fn copy_from_cache_with_retry(&self, cache_url: &str, store_path: &str) -> Result<()> {
+    async fn copy_from_cache_with_retry(
+        &self,
+        cache_url: &str,
+        store_path: &str,
+        cache_type: &CacheType,
+        cache_public_key: Option<&str>,
+    ) -> Result<()> {
         const MAX_RETRIES: u32 = 3;
         const BASE_RETRY_DELAY: Duration = Duration::from_secs(5);
 
@@ -222,7 +286,13 @@ impl AgentDeploymentManager {
             let use_refresh = attempt == 2;
 
             match self
-                .copy_from_cache(cache_url, store_path, use_refresh)
+                .copy_from_cache(
+                    cache_url,
+                    store_path,
+                    use_refresh,
+                    cache_type,
+                    cache_public_key,
+                )
                 .await
             {
                 Ok(()) => {
@@ -297,6 +367,8 @@ impl AgentDeploymentManager {
         cache_url: &str,
         store_path: &str,
         refresh: bool,
+        cache_type: &CacheType,
+        cache_public_key: Option<&str>,
     ) -> Result<()> {
         use std::process::Stdio;
         use tokio::io::{AsyncBufReadExt, BufReader};
@@ -317,12 +389,20 @@ impl AgentDeploymentManager {
         }
 
         // Disable HTTP/2 for Attic to avoid framing errors
-        if matches!(self.config.cache_type, CacheType::Attic) {
+        if matches!(cache_type, CacheType::Attic) {
             debug!("Disabling HTTP/2 for Attic cache");
             copy_args.extend(vec![
                 "--option".to_string(),
                 "http2".to_string(),
                 "false".to_string(),
+            ]);
+        }
+
+        if let Some(public_key) = cache_public_key {
+            copy_args.extend(vec![
+                "--option".to_string(),
+                "trusted-public-keys".to_string(),
+                public_key.to_string(),
             ]);
         }
 

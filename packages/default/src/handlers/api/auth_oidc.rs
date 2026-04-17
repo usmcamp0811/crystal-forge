@@ -17,17 +17,22 @@ use openidconnect::{
 };
 use serde::Deserialize;
 use sqlx::PgPool;
+use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::auth::oidc::{
     ClaimExtractor, JwksCache, JwtValidator, OidcProviderMetadata, OidcSession, OidcSessionStore,
 };
-use crate::auth::repository::normalize_tenant_discriminator;
 use crate::config::OidcConfig;
 use crate::handlers::api::auth_session::establish_user_session;
 use crate::models::auth_identity::AuthRole;
-use crate::queries::auth_identity::{AuthIdentityRepository, sync_user_role};
+use crate::queries::auth_identity::{
+    AuthIdentityRepository, OidcMappingMatchRow, assign_role_to_user,
+    clear_user_environment_memberships, clear_user_role_assignments,
+    create_user_and_bind_external_identity, get_environment_ids_by_names, get_oidc_mapping_matches,
+    get_user_by_id, get_user_roles, insert_user_environment_membership,
+};
 
 /// Shared OIDC client state.
 #[derive(Clone)]
@@ -113,10 +118,8 @@ pub async fn oidc_login(
 
     // SECURITY: Bind state to browser session via secure cookie
     // This prevents login CSRF and account confusion attacks
-    let cookie = format!(
-        "__Host-oidc-state={}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=600",
-        state_value
-    );
+    let is_secure = oidc_state.config.is_secure_context();
+    let cookie = create_oidc_state_cookie(&state_value, is_secure);
 
     // Return redirect with Set-Cookie header
     Response::builder()
@@ -164,26 +167,31 @@ pub async fn oidc_callback(
         return Err(OidcError::ProviderError { error, description });
     }
 
-    // SECURITY: Validate state parameter matches session cookie
+    // SECURITY: Validate state parameter matches session cookie (defense-in-depth)
     // This binds the OAuth2 flow to the browser session, preventing:
     // - Login CSRF attacks (attacker can't force victim to use attacker's account)
     // - Account confusion (multiple concurrent logins don't mix state)
-    let cookie_state = extract_oidc_state_cookie(&headers).ok_or_else(|| {
-        tracing::error!("Missing or invalid __Host-oidc-state cookie");
-        OidcError::MissingStateCookie
-    })?;
-
-    if cookie_state != params.state {
-        // Don't log raw state tokens (sensitive values)
-        tracing::error!(
-            "State mismatch: cookie_len={} param_len={} match=false",
-            cookie_state.len(),
-            params.state.len()
+    //
+    // NOTE: In HTTP dev environments with SameSite=Lax, browsers may not send cookies
+    // on cross-origin redirects (OAuth callback from Keycloak). In these cases, we rely
+    // solely on the server-side session store validation (below) which is still secure.
+    if let Some(cookie_state) = extract_oidc_state_cookie(&headers) {
+        if cookie_state != params.state {
+            // Don't log raw state tokens (sensitive values)
+            tracing::error!(
+                "State mismatch: cookie_len={} param_len={} match=false",
+                cookie_state.len(),
+                params.state.len()
+            );
+            return Err(OidcError::StateMismatch);
+        }
+        tracing::debug!("State cookie validated successfully");
+    } else {
+        tracing::warn!(
+            "OIDC state cookie not present (likely cross-origin redirect in HTTP dev mode); \
+             relying on server-side session store validation"
         );
-        return Err(OidcError::StateMismatch);
     }
-
-    tracing::debug!("State cookie validated successfully");
 
     // Validate CSRF state token and retrieve session
     let session = oidc_state
@@ -353,15 +361,7 @@ pub async fn oidc_callback(
                 identity.user_id
             );
 
-            // Load user by ID (not email - email may have changed at provider)
-            sqlx::query_as::<_, crate::models::users::User>(
-                "SELECT id, username, email, first_name, last_name, created_at, updated_at, password_hash
-                 FROM users WHERE id = $1"
-            )
-            .bind(identity.user_id)
-            .fetch_one(&pool)
-            .await
-            .map_err(|e| {
+            get_user_by_id(&pool, identity.user_id).await.map_err(|e| {
                 tracing::error!("Failed to load user for identity: {}", e);
                 OidcError::DatabaseError
             })?
@@ -370,94 +370,31 @@ pub async fn oidc_callback(
             // New OIDC identity - create user and bind identity atomically
             tracing::info!("New OIDC identity, creating user: email={}", email);
 
-            // Use transaction to ensure user creation + identity binding are atomic
-            // If either fails, both roll back (prevents orphaned users or identities)
-            let mut tx = pool.begin().await.map_err(|e| {
-                tracing::error!("Failed to start transaction: {}", e);
-                OidcError::DatabaseError
-            })?;
-
-            // Create user within transaction (inline to use tx executor)
-            let user_id = uuid::Uuid::new_v4();
-            let username = email.split('@').next().unwrap_or(email);
-            let (first_name, last_name) = match user_info.display_name.as_deref() {
-                Some(name) => {
-                    let parts: Vec<&str> = name.splitn(2, ' ').collect();
-                    (
-                        Some(parts[0].to_string()),
-                        parts.get(1).map(|s| s.to_string()),
-                    )
-                }
-                None => (None, None),
-            };
-
-            sqlx::query(
-                "INSERT INTO users (id, username, first_name, last_name, email)
-                 VALUES ($1, $2, $3, $4, $5)",
-            )
-            .bind(user_id)
-            .bind(username)
-            .bind(&first_name)
-            .bind(&last_name)
-            .bind(email)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to create user in transaction: {}", e);
-                OidcError::DatabaseError
-            })?;
-
-            // Bind OIDC identity to user within same transaction
-            let tenant_key = normalize_tenant_discriminator(tenant_discriminator);
             let claims_json = serde_json::to_value(&user_info.custom_claims)
                 .unwrap_or_else(|_| serde_json::json!({}));
-
-            sqlx::query(
-                "INSERT INTO external_identities (user_id, provider_key, subject, tenant_discriminator, claims)
-                 VALUES ($1, $2, $3, $4, $5)
-                 ON CONFLICT (provider_key, subject, tenant_discriminator)
-                 DO UPDATE SET
-                     user_id = EXCLUDED.user_id,
-                     claims = EXCLUDED.claims,
-                     updated_at = NOW()"
+            let created = create_user_and_bind_external_identity(
+                &pool,
+                email,
+                user_info.display_name.as_deref(),
+                provider_key,
+                subject,
+                tenant_discriminator,
+                claims_json,
             )
-            .bind(user_id)
-            .bind(provider_key)
-            .bind(subject)
-            .bind(&tenant_key)
-            .bind(claims_json)
-            .execute(&mut *tx)
             .await
             .map_err(|e| {
-                tracing::error!("Failed to create external identity binding: {}", e);
-                OidcError::DatabaseError
-            })?;
-
-            // Commit transaction (both user + identity created atomically)
-            tx.commit().await.map_err(|e| {
-                tracing::error!("Failed to commit user creation transaction: {}", e);
+                tracing::error!("Failed to create user/identity binding: {}", e);
                 OidcError::DatabaseError
             })?;
 
             tracing::info!(
                 "Created user + OIDC identity binding atomically: user_id={} provider={} subject={}",
-                user_id,
+                created.id,
                 provider_key,
                 subject
             );
 
-            // Load the created user
-            sqlx::query_as::<_, crate::models::users::User>(
-                "SELECT id, username, email, first_name, last_name, created_at, updated_at, password_hash
-                 FROM users WHERE id = $1"
-            )
-            .bind(user_id)
-            .fetch_one(&pool)
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to load created user: {}", e);
-                OidcError::DatabaseError
-            })?
+            created
         }
     };
 
@@ -468,26 +405,200 @@ pub async fn oidc_callback(
 
     let ip_address = Some(addr.ip().to_string());
 
-    let mapped_role = map_oidc_roles_to_auth_role(&user_info.roles).ok_or_else(|| {
-        tracing::error!(
-            "OIDC user {} has no mappable roles in claims {:?}",
-            user.id,
-            user_info.roles
-        );
-        OidcError::RoleAssignmentFailed
-    })?;
+    // Extract and normalize OIDC groups from user claims
+    let groups = normalize_oidc_groups(&user_info.roles);
 
-    sync_user_role(&pool, user.id, mapped_role)
+    tracing::info!(
+        user_id = %user.id,
+        email = %user.email,
+        groups_raw_count = user_info.roles.len(),
+        groups_normalized_count = groups.len(),
+        "OIDC groups extracted from ID token"
+    );
+
+    if groups.is_empty() {
+        tracing::warn!(
+            user_id = %user.id,
+            email = %user.email,
+            "No groups found in OIDC token claims - user may not receive appropriate role"
+        );
+    } else {
+        tracing::debug!(
+            user_id = %user.id,
+            email = %user.email,
+            groups = ?groups,
+            "Normalized OIDC groups for mapping"
+        );
+    }
+
+    let mapping_rows = get_oidc_mapping_matches(&pool, &groups)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to synchronize OIDC role for {}: {}", user.id, e);
+            tracing::error!("Failed to load OIDC group mappings: {}", e);
             OidcError::DatabaseError
         })?;
+
+    tracing::info!(
+        user_id = %user.id,
+        email = %user.email,
+        matched_mappings = mapping_rows.len(),
+        "OIDC group mappings queried from database"
+    );
+
+    if !groups.is_empty() && mapping_rows.is_empty() {
+        tracing::warn!(
+            user_id = %user.id,
+            email = %user.email,
+            groups = ?groups,
+            "User has OIDC groups but no matching group-to-role mappings found in database"
+        );
+    }
+
+    let mapped_role = derive_highest_role(mapping_rows.iter().filter_map(|row| row.role));
+    let mapped_environments = collect_mapped_environments(&mapping_rows);
+
+    tracing::info!(
+        user_id = %user.id,
+        email = %user.email,
+        mapped_role = ?mapped_role,
+        mapped_environments_count = mapped_environments.len(),
+        "OIDC group-to-role mapping derived"
+    );
+
+    let existing_roles = get_user_roles(&pool, user.id).await.map_err(|e| {
+        tracing::error!("Failed to check user roles: {}", e);
+        OidcError::DatabaseError
+    })?;
+
+    if let Some(role) = mapped_role {
+        tracing::info!(
+            user_id = %user.id,
+            email = %user.email,
+            role = ?role,
+            "Assigning OIDC-mapped role to user"
+        );
+
+        clear_user_role_assignments(&pool, user.id)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to reset user role assignments: {}", e);
+                OidcError::DatabaseError
+            })?;
+
+        assign_role_to_user(&pool, user.id, role, None)
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    user_id = %user.id,
+                    email = %user.email,
+                    role = ?role,
+                    error = %e,
+                    "Failed to assign mapped role"
+                );
+                OidcError::DatabaseError
+            })?;
+
+        tracing::info!(
+            user_id = %user.id,
+            email = %user.email,
+            role = ?role,
+            "✅ Successfully assigned OIDC-mapped role"
+        );
+    } else if existing_roles.is_empty() {
+        tracing::info!(
+            user_id = %user.id,
+            email = %user.email,
+            "No OIDC role mapping found and user has no existing roles; assigning default Viewer role"
+        );
+
+        assign_role_to_user(&pool, user.id, AuthRole::Viewer, None)
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    user_id = %user.id,
+                    email = %user.email,
+                    error = %e,
+                    "Failed to assign default Viewer role"
+                );
+                OidcError::DatabaseError
+            })?;
+
+        tracing::info!(
+            user_id = %user.id,
+            email = %user.email,
+            "✅ Assigned default Viewer role"
+        );
+    } else {
+        tracing::info!(
+            user_id = %user.id,
+            email = %user.email,
+            existing_roles = ?existing_roles,
+            "No OIDC role mapping found; preserving existing roles"
+        );
+    }
+
+    let mut apply_environment_mappings = false;
+    let mut resolved_environment_ids = Vec::new();
+
+    if !mapping_rows.is_empty() && !mapped_environments.is_empty() {
+        let environment_ids = get_environment_ids_by_names(&pool, &mapped_environments)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to resolve mapped environments: {}", e);
+                OidcError::DatabaseError
+            })?;
+
+        match evaluate_environment_mapping_apply(
+            mapping_rows.len(),
+            mapped_environments.len(),
+            environment_ids.len(),
+        ) {
+            EnvironmentMappingApply::Apply => {
+                apply_environment_mappings = true;
+                resolved_environment_ids = environment_ids;
+            }
+            EnvironmentMappingApply::SkipNoMappings
+            | EnvironmentMappingApply::SkipNoMappedEnvironments => {}
+            EnvironmentMappingApply::SkipUnknownMappedEnvironments => {
+                tracing::warn!(
+                    "OIDC mapped environments include unknown names; preserving existing memberships for user_id={}",
+                    user.id
+                );
+            }
+        }
+    }
+
+    if apply_environment_mappings {
+        clear_user_environment_memberships(&pool, user.id)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to reset environment memberships: {}", e);
+                OidcError::DatabaseError
+            })?;
+
+        for environment_id in resolved_environment_ids {
+            insert_user_environment_membership(&pool, user.id, environment_id)
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to assign mapped environment: {}", e);
+                    OidcError::DatabaseError
+                })?;
+        }
+    } else if mapping_rows.is_empty() {
+        tracing::debug!(
+            "No OIDC mappings matched groups; preserving existing environment memberships for user_id={}",
+            user.id
+        );
+    } else if mapped_environments.is_empty() {
+        tracing::warn!(
+            "OIDC mappings resolved without environments; preserving existing memberships for user_id={}",
+            user.id
+        );
+    }
 
     let session_cookies = establish_user_session(&pool, user.id, user_agent, ip_address)
         .await
         .map_err(|_| OidcError::SessionCreationFailed)?;
-
     // TODO: Update external_identity claims on each login (keep profile fresh)
 
     tracing::info!(
@@ -503,11 +614,10 @@ pub async fn oidc_callback(
         .body(axum::body::Body::empty())
         .unwrap();
 
+    let is_secure = oidc_state.config.is_secure_context();
     response.headers_mut().append(
         header::SET_COOKIE,
-        HeaderValue::from_static(
-            "__Host-oidc-state=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT",
-        ),
+        HeaderValue::from_static(delete_oidc_state_cookie(is_secure)),
     );
     response
         .headers_mut()
@@ -519,19 +629,141 @@ pub async fn oidc_callback(
     Ok(response)
 }
 
-/// Extract OIDC state from __Host-oidc-state cookie.
+fn derive_highest_role(roles: impl Iterator<Item = AuthRole>) -> Option<AuthRole> {
+    let mut has_operator = false;
+    let mut has_viewer = false;
+    for role in roles {
+        match role {
+            AuthRole::Admin => return Some(AuthRole::Admin),
+            AuthRole::Operator => has_operator = true,
+            AuthRole::Viewer => has_viewer = true,
+        }
+    }
+
+    if has_operator {
+        Some(AuthRole::Operator)
+    } else if has_viewer {
+        Some(AuthRole::Viewer)
+    } else {
+        None
+    }
+}
+
+fn normalize_oidc_groups(values: &[String]) -> Vec<String> {
+    values
+        .iter()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+fn collect_mapped_environments(rows: &[OidcMappingMatchRow]) -> Vec<String> {
+    rows.iter()
+        .flat_map(|row| row.environments.iter())
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnvironmentMappingApply {
+    Apply,
+    SkipNoMappings,
+    SkipNoMappedEnvironments,
+    SkipUnknownMappedEnvironments,
+}
+
+fn evaluate_environment_mapping_apply(
+    mapping_row_count: usize,
+    mapped_environment_count: usize,
+    resolved_environment_count: usize,
+) -> EnvironmentMappingApply {
+    if mapping_row_count == 0 {
+        return EnvironmentMappingApply::SkipNoMappings;
+    }
+
+    if mapped_environment_count == 0 {
+        return EnvironmentMappingApply::SkipNoMappedEnvironments;
+    }
+
+    if resolved_environment_count != mapped_environment_count {
+        return EnvironmentMappingApply::SkipUnknownMappedEnvironments;
+    }
+
+    EnvironmentMappingApply::Apply
+}
+
+/// Generate the OIDC state cookie name based on security context.
+///
+/// In production (HTTPS), uses `__Host-oidc-state` prefix for enhanced security.
+/// In development (HTTP), uses `oidc-state` to avoid browser rejection.
+fn oidc_state_cookie_name(is_secure: bool) -> &'static str {
+    if is_secure {
+        "__Host-oidc-state"
+    } else {
+        "oidc-state"
+    }
+}
+
+/// Create an OIDC state cookie string with appropriate security attributes.
+///
+/// **Security Note**: In production (HTTPS), uses:
+/// - `__Host-` prefix (requires HTTPS, Path=/, no Domain)
+/// - `Secure` flag
+/// - `HttpOnly` flag
+/// - `SameSite=None` (allows cross-origin OAuth redirects)
+///
+/// In development (HTTP), uses:
+/// - Regular cookie name without `__Host-` prefix
+/// - No `Secure` flag (browsers reject Secure cookies on HTTP)
+/// - No `SameSite` attribute (SameSite=None requires Secure)
+///
+/// Note: The cookie is defense-in-depth. Primary CSRF protection comes from
+/// server-side session store validation.
+fn create_oidc_state_cookie(state_value: &str, is_secure: bool) -> String {
+    let cookie_name = oidc_state_cookie_name(is_secure);
+    if is_secure {
+        // Production HTTPS: Use SameSite=None to allow OAuth redirects from IdP
+        format!(
+            "{}={}; Path=/; Secure; HttpOnly; SameSite=None; Max-Age=600",
+            cookie_name, state_value
+        )
+    } else {
+        // Development HTTP: Omit SameSite (defaults to Lax behavior, but not enforced)
+        // SameSite=None requires Secure flag, which we can't use on HTTP
+        format!(
+            "{}={}; Path=/; HttpOnly; Max-Age=600",
+            cookie_name, state_value
+        )
+    }
+}
+
+/// Create a cookie deletion string for the OIDC state cookie.
+fn delete_oidc_state_cookie(is_secure: bool) -> &'static str {
+    if is_secure {
+        "__Host-oidc-state=; Path=/; Secure; HttpOnly; SameSite=None; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT"
+    } else {
+        "oidc-state=; Path=/; HttpOnly; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT"
+    }
+}
+
+/// Extract OIDC state from cookie (tries both secure and non-secure names).
 fn extract_oidc_state_cookie(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get(header::COOKIE)?
-        .to_str()
-        .ok()?
-        .split(';')
-        .find_map(|cookie| {
-            let cookie = cookie.trim();
-            cookie
-                .strip_prefix("__Host-oidc-state=")
-                .map(|v| v.to_string())
-        })
+    let cookie_header = headers.get(header::COOKIE)?.to_str().ok()?;
+
+    // Try both cookie names (secure and non-secure)
+    for prefix in ["__Host-oidc-state=", "oidc-state="] {
+        if let Some(value) = cookie_header
+            .split(';')
+            .find_map(|cookie| cookie.trim().strip_prefix(prefix).map(|v| v.to_string()))
+        {
+            return Some(value);
+        }
+    }
+
+    None
 }
 
 /// OIDC error responses.
@@ -628,48 +860,142 @@ impl IntoResponse for OidcError {
     }
 }
 
-fn map_oidc_roles_to_auth_role(roles: &[String]) -> Option<AuthRole> {
-    let normalized = roles
-        .iter()
-        .map(|r| r.trim().to_ascii_lowercase())
-        .collect::<Vec<_>>();
-
-    if normalized.iter().any(|r| r == "admin") {
-        return Some(AuthRole::Admin);
-    }
-    if normalized.iter().any(|r| r == "operator") {
-        return Some(AuthRole::Operator);
-    }
-    if normalized.iter().any(|r| r == "viewer") {
-        return Some(AuthRole::Viewer);
-    }
-
-    None
-}
-
 #[cfg(test)]
 mod tests {
-    use super::map_oidc_roles_to_auth_role;
-    use crate::models::auth_identity::AuthRole;
+    use super::*;
 
     #[test]
-    fn map_roles_uses_admin_precedence() {
-        let roles = vec!["viewer".to_string(), "admin".to_string()];
-        assert_eq!(map_oidc_roles_to_auth_role(&roles), Some(AuthRole::Admin));
+    fn derive_highest_role_prefers_admin_then_operator_then_viewer() {
+        assert_eq!(
+            derive_highest_role(vec![AuthRole::Viewer, AuthRole::Operator].into_iter()),
+            Some(AuthRole::Operator)
+        );
+        assert_eq!(
+            derive_highest_role(vec![AuthRole::Viewer, AuthRole::Admin].into_iter()),
+            Some(AuthRole::Admin)
+        );
+        assert_eq!(derive_highest_role(vec![].into_iter()), None);
     }
 
     #[test]
-    fn map_roles_trims_and_normalizes_case() {
-        let roles = vec!["  OpErAtOr  ".to_string()];
+    fn normalize_oidc_groups_trims_and_lowercases() {
+        let groups = normalize_oidc_groups(&[
+            " Team-Admins ".to_string(),
+            "".to_string(),
+            "Platform/Ops".to_string(),
+        ]);
+
         assert_eq!(
-            map_oidc_roles_to_auth_role(&roles),
-            Some(AuthRole::Operator)
+            groups,
+            vec!["team-admins".to_string(), "platform/ops".to_string()]
         );
     }
 
     #[test]
-    fn map_roles_returns_none_when_unmapped() {
-        let roles = vec!["team-a".to_string(), "team-b".to_string()];
-        assert_eq!(map_oidc_roles_to_auth_role(&roles), None);
+    fn collect_mapped_environments_deduplicates_normalized_values() {
+        let rows = vec![
+            OidcMappingMatchRow {
+                role: Some(AuthRole::Viewer),
+                environments: vec!["Prod".to_string(), " staging ".to_string()],
+            },
+            OidcMappingMatchRow {
+                role: None,
+                environments: vec!["prod".to_string(), "".to_string()],
+            },
+        ];
+
+        let environments = collect_mapped_environments(&rows);
+        assert_eq!(
+            environments,
+            vec!["prod".to_string(), "staging".to_string()]
+        );
+    }
+
+    #[test]
+    fn environment_mapping_apply_requires_actionable_and_resolved_mappings() {
+        assert_eq!(
+            evaluate_environment_mapping_apply(0, 2, 2),
+            EnvironmentMappingApply::SkipNoMappings
+        );
+        assert_eq!(
+            evaluate_environment_mapping_apply(2, 0, 0),
+            EnvironmentMappingApply::SkipNoMappedEnvironments
+        );
+        assert_eq!(
+            evaluate_environment_mapping_apply(2, 2, 1),
+            EnvironmentMappingApply::SkipUnknownMappedEnvironments
+        );
+        assert_eq!(
+            evaluate_environment_mapping_apply(2, 2, 2),
+            EnvironmentMappingApply::Apply
+        );
+    }
+
+    #[test]
+    fn oidc_state_cookie_uses_host_prefix_in_secure_context() {
+        assert_eq!(oidc_state_cookie_name(true), "__Host-oidc-state");
+        assert_eq!(oidc_state_cookie_name(false), "oidc-state");
+    }
+
+    #[test]
+    fn oidc_state_cookie_includes_secure_flag_in_secure_context() {
+        let secure_cookie = create_oidc_state_cookie("test-state", true);
+        assert!(secure_cookie.contains("__Host-oidc-state="));
+        assert!(secure_cookie.contains("Secure"));
+        assert!(secure_cookie.contains("HttpOnly"));
+        assert!(secure_cookie.contains("SameSite=None"));
+    }
+
+    #[test]
+    fn oidc_state_cookie_omits_secure_and_samesite_in_insecure_context() {
+        let insecure_cookie = create_oidc_state_cookie("test-state", false);
+        assert!(insecure_cookie.contains("oidc-state="));
+        assert!(!insecure_cookie.contains("__Host-"));
+        assert!(!insecure_cookie.contains("Secure"));
+        assert!(insecure_cookie.contains("HttpOnly"));
+        assert!(!insecure_cookie.contains("SameSite"));
+    }
+
+    #[test]
+    fn delete_oidc_state_cookie_matches_context() {
+        let secure_delete = delete_oidc_state_cookie(true);
+        assert!(secure_delete.contains("__Host-oidc-state="));
+        assert!(secure_delete.contains("Max-Age=0"));
+
+        let insecure_delete = delete_oidc_state_cookie(false);
+        assert!(insecure_delete.contains("oidc-state="));
+        assert!(!insecure_delete.contains("__Host-"));
+        assert!(insecure_delete.contains("Max-Age=0"));
+    }
+
+    #[test]
+    fn extract_oidc_state_cookie_handles_both_formats() {
+        use axum::http::HeaderMap;
+
+        // Test secure cookie
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static("__Host-oidc-state=secure-value; other=cookie"),
+        );
+        assert_eq!(
+            extract_oidc_state_cookie(&headers),
+            Some("secure-value".to_string())
+        );
+
+        // Test non-secure cookie
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static("oidc-state=insecure-value; other=cookie"),
+        );
+        assert_eq!(
+            extract_oidc_state_cookie(&headers),
+            Some("insecure-value".to_string())
+        );
+
+        // Test missing cookie
+        let headers = HeaderMap::new();
+        assert_eq!(extract_oidc_state_cookie(&headers), None);
     }
 }

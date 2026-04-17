@@ -30,6 +30,12 @@ pub fn SystemsTable(
     systems: Vec<SystemSummary>,
     /// Called when user clicks remove on a system
     on_remove: EventHandler<Uuid>,
+    /// Called when user clicks update key on a system
+    on_update_key: EventHandler<Uuid>,
+    /// Called when user clicks edit on a system
+    on_edit: EventHandler<Uuid>,
+    /// Called when user clicks deploy on a system
+    on_deploy: EventHandler<Uuid>,
 ) -> Element {
     let navigator = use_navigator();
     let mut sort_column = use_signal(|| None::<SystemsSortColumn>);
@@ -85,112 +91,137 @@ pub fn SystemsTable(
     let current_dir = *sort_direction.read();
 
     rsx! {
-        crate::components::layout::Card {
-            title: Some("Fleet Systems".to_string()),
-            children: rsx! {
-                div {
-                    class: "overflow-x-auto",
-                    "data-testid": "systems-table",
-                    table {
-                        class: "w-full",
-                        thead {
-                            class: "{theme::surface::SUBTLE_BG}",
-                            tr {
-                                SortableHeader {
-                                    label: "Hostname",
-                                    column: SystemsSortColumn::Hostname,
-                                    current_col: current_col,
-                                    current_dir: current_dir,
-                                    on_sort: move |(col, dir)| {
-                                        sort_column.set(Some(col));
-                                        sort_direction.set(dir);
-                                    }
+        div {
+            class: "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden shadow-sm bg-gray-900/60",
+            div {
+                class: "overflow-x-auto",
+                "data-testid": "systems-table",
+                table {
+                    class: "w-full",
+                    thead {
+                        class: "{theme::surface::SUBTLE_BG}",
+                        tr {
+                            SortableHeader {
+                                label: "Hostname",
+                                column: SystemsSortColumn::Hostname,
+                                current_col: current_col,
+                                current_dir: current_dir,
+                                on_sort: move |(col, dir)| {
+                                    sort_column.set(Some(col));
+                                    sort_direction.set(dir);
                                 }
-                                SortableHeader {
-                                    label: "IP",
-                                    column: SystemsSortColumn::Ip,
-                                    current_col: current_col,
-                                    current_dir: current_dir,
-                                    on_sort: move |(col, dir)| {
-                                        sort_column.set(Some(col));
-                                        sort_direction.set(dir);
-                                    }
-                                }
-                                SortableHeader {
-                                    label: "Environment",
-                                    column: SystemsSortColumn::Environment,
-                                    current_col: current_col,
-                                    current_dir: current_dir,
-                                    on_sort: move |(col, dir)| {
-                                        sort_column.set(Some(col));
-                                        sort_direction.set(dir);
-                                    }
-                                }
-                                SortableHeader {
-                                    label: "Health",
-                                    column: SystemsSortColumn::Health,
-                                    current_col: current_col,
-                                    current_dir: current_dir,
-                                    on_sort: move |(col, dir)| {
-                                        sort_column.set(Some(col));
-                                        sort_direction.set(dir);
-                                    }
-                                }
-                                SortableHeader {
-                                    label: "Deployment",
-                                    column: SystemsSortColumn::Deployment,
-                                    current_col: current_col,
-                                    current_dir: current_dir,
-                                    on_sort: move |(col, dir)| {
-                                        sort_column.set(Some(col));
-                                        sort_direction.set(dir);
-                                    }
-                                }
-                                SortableHeader {
-                                    label: "CVEs",
-                                    column: SystemsSortColumn::Cves,
-                                    current_col: current_col,
-                                    current_dir: current_dir,
-                                    on_sort: move |(col, dir)| {
-                                        sort_column.set(Some(col));
-                                        sort_direction.set(dir);
-                                    }
-                                }
-                                th { class: "px-4 py-3 text-right text-xs font-medium text-gray-400 uppercase tracking-wider", "Actions" }
                             }
+                            SortableHeader {
+                                label: "IP",
+                                column: SystemsSortColumn::Ip,
+                                current_col: current_col,
+                                current_dir: current_dir,
+                                on_sort: move |(col, dir)| {
+                                    sort_column.set(Some(col));
+                                    sort_direction.set(dir);
+                                }
+                            }
+                            SortableHeader {
+                                label: "Environment",
+                                column: SystemsSortColumn::Environment,
+                                current_col: current_col,
+                                current_dir: current_dir,
+                                on_sort: move |(col, dir)| {
+                                    sort_column.set(Some(col));
+                                    sort_direction.set(dir);
+                                }
+                            }
+                            SortableHeader {
+                                label: "Health",
+                                column: SystemsSortColumn::Health,
+                                current_col: current_col,
+                                current_dir: current_dir,
+                                on_sort: move |(col, dir)| {
+                                    sort_column.set(Some(col));
+                                    sort_direction.set(dir);
+                                }
+                            }
+                            SortableHeader {
+                                label: "Deployment",
+                                column: SystemsSortColumn::Deployment,
+                                current_col: current_col,
+                                current_dir: current_dir,
+                                on_sort: move |(col, dir)| {
+                                    sort_column.set(Some(col));
+                                    sort_direction.set(dir);
+                                }
+                            }
+                            SortableHeader {
+                                label: "CVEs",
+                                column: SystemsSortColumn::Cves,
+                                current_col: current_col,
+                                current_dir: current_dir,
+                                on_sort: move |(col, dir)| {
+                                    sort_column.set(Some(col));
+                                    sort_direction.set(dir);
+                                }
+                            }
+                            th { class: "px-4 py-3 text-right text-xs font-medium text-gray-400 uppercase tracking-wider", "Actions" }
                         }
-                        tbody {
-                            class: "divide-y {theme::surface::DIVIDER}",
-                            for system in sorted_systems {
-                                tr {
-                                    class: "hover:bg-gray-900/60 transition cursor-pointer",
-                                    onclick: move |_| {
-                                        navigator.push(Route::SystemDetailView { id: system.id.to_string() });
-                                    },
-                                    td { class: "{theme::spacing::TABLE_CELL} text-sm text-white", "{system.hostname}" }
-                                    td {
-                                        class: "{theme::spacing::TABLE_CELL} text-sm text-gray-300 font-mono",
-                                        "{ip_label(&system)}"
-                                    }
-                                    td { class: "{theme::spacing::TABLE_CELL} text-sm {theme::text::SECONDARY}", "{environment_label(&system)}" }
-                                    td { class: "{theme::spacing::TABLE_CELL}",
-                                        span { class: "text-xs {system.health_status.color_class()}", "{system.health_status.label()}" }
-                                    }
-                                    td { class: "{theme::spacing::TABLE_CELL}",
-                                        span { class: "text-xs {system.deployment_status.color_class()}", "{system.deployment_status.label()}" }
-                                    }
-                                    td { class: "{theme::spacing::TABLE_CELL} text-xs",
-                                        span { class: "{theme::cve::CRITICAL_TEXT} font-semibold", "{system.cve_counts.critical}" }
-                                        span { class: "text-gray-500", " C  " }
-                                        span { class: "{theme::cve::HIGH_TEXT} font-semibold", "{system.cve_counts.high}" }
-                                        span { class: "text-gray-500", " H  " }
-                                        span { class: "{theme::cve::MEDIUM_TEXT} font-semibold", "{system.cve_counts.medium}" }
-                                        span { class: "text-gray-500", " M  " }
-                                        span { class: "{theme::cve::LOW_TEXT} font-semibold", "{system.cve_counts.low}" }
-                                        span { class: "text-gray-500", " L" }
-                                    }
-                                    td {
-                                        class: "{theme::spacing::TABLE_CELL} text-right",
+                    }
+                    tbody {
+                        class: "divide-y {theme::surface::DIVIDER}",
+                        for system in sorted_systems {
+                            tr {
+                                class: "hover:bg-gray-800/40 transition cursor-pointer",
+                                onclick: move |_| {
+                                    navigator.push(Route::SystemDetailView { id: system.id.to_string() });
+                                },
+                                td { class: "{theme::spacing::TABLE_CELL} text-sm text-white", "{system.hostname}" }
+                                td {
+                                    class: "{theme::spacing::TABLE_CELL} text-sm text-gray-300 font-mono",
+                                    "{ip_label(&system)}"
+                                }
+                                td { class: "{theme::spacing::TABLE_CELL} text-sm {theme::text::SECONDARY}", "{environment_label(&system)}" }
+                                td { class: "{theme::spacing::TABLE_CELL}",
+                                    span { class: "text-xs {system.health_status.color_class()}", "{system.health_status.label()}" }
+                                }
+                                td { class: "{theme::spacing::TABLE_CELL}",
+                                    span { class: "text-xs {system.deployment_status.color_class()}", "{system.deployment_status.label()}" }
+                                }
+                                td { class: "{theme::spacing::TABLE_CELL} text-xs",
+                                    span { class: "{theme::cve::CRITICAL_TEXT} font-semibold", "{system.cve_counts.critical}" }
+                                    span { class: "text-gray-500", " C  " }
+                                    span { class: "{theme::cve::HIGH_TEXT} font-semibold", "{system.cve_counts.high}" }
+                                    span { class: "text-gray-500", " H  " }
+                                    span { class: "{theme::cve::MEDIUM_TEXT} font-semibold", "{system.cve_counts.medium}" }
+                                    span { class: "text-gray-500", " M  " }
+                                    span { class: "{theme::cve::LOW_TEXT} font-semibold", "{system.cve_counts.low}" }
+                                    span { class: "text-gray-500", " L" }
+                                }
+                                td {
+                                    class: "{theme::spacing::TABLE_CELL} text-right",
+                                    div {
+                                        class: "flex gap-2 justify-end",
+                                        button {
+                                            class: "text-xs text-purple-400 hover:text-purple-300 px-2 py-1 rounded hover:bg-purple-500/10 transition-colors",
+                                            onclick: move |evt| {
+                                                evt.stop_propagation();
+                                                on_deploy.call(system.id);
+                                            },
+                                            "Deploy"
+                                        }
+                                        button {
+                                            class: "text-xs text-emerald-400 hover:text-emerald-300 px-2 py-1 rounded hover:bg-emerald-500/10 transition-colors",
+                                            onclick: move |evt| {
+                                                evt.stop_propagation();
+                                                on_edit.call(system.id);
+                                            },
+                                            "Edit"
+                                        }
+                                        button {
+                                            class: "text-xs text-blue-400 hover:text-blue-300 px-2 py-1 rounded hover:bg-blue-500/10 transition-colors",
+                                            onclick: move |evt| {
+                                                evt.stop_propagation();
+                                                on_update_key.call(system.id);
+                                            },
+                                            "Update Key"
+                                        }
                                         button {
                                             class: "text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors",
                                             onclick: move |evt| {

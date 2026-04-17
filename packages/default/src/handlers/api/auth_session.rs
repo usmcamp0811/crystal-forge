@@ -63,9 +63,10 @@ pub async fn logout(
 ) -> Result<impl IntoResponse, SessionError> {
     // Only validate CSRF if a session cookie exists
     // This makes logout idempotent - clients can call it even when already logged out
-    if let Some(session_token) = extract_cookie(&headers, SESSION_COOKIE_NAME) {
+    if extract_cookie(&headers, SESSION_COOKIE_NAME).is_some() {
         validate_csrf(&headers)?;
 
+        let session_token = extract_cookie(&headers, SESSION_COOKIE_NAME).unwrap();
         let session_hash = hash_token(&session_token);
         invalidate_session_by_token_hash(&pool, &session_hash)
             .await

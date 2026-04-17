@@ -5,7 +5,7 @@ status: Done
 assignee:
   - KimiK2.5
 created_date: '2026-02-18 02:47'
-updated_date: '2026-02-21 03:28'
+updated_date: '2026-03-13 01:24'
 labels:
   - refactoring
   - web-ui
@@ -13,7 +13,7 @@ labels:
 milestone: m-9
 dependencies: []
 priority: low
-ordinal: 22000
+ordinal: 30000
 ---
 
 ## Description

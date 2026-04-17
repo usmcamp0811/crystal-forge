@@ -1,0 +1,108 @@
+---
+id: TASK-65.5
+title: API authorization enforcement and machine-auth carve-outs
+status: Done
+assignee:
+  - Claude Opus 4.5
+created_date: ''
+updated_date: '2026-02-23 03:15'
+labels:
+  - security
+  - authz
+  - rbac
+  - api
+milestone: m-14
+dependencies:
+  - TASK-65.3
+  - TASK-65.4
+priority: high
+ordinal: 56000
+---
+
+## Description
+
+<!-- SECTION:DESCRIPTION:BEGIN -->
+Problem
+Without API-level authorization enforcement, UI-only guards are insufficient and insecure.
+
+Goal
+Enforce Admin, Operator, and Viewer authorization server-side for user APIs while preserving existing key-auth behavior for `/api/agent/**` endpoints.
+
+Non-Goals
+- Replacing machine key-auth with user OIDC.
+- Endpoint behavior changes unrelated to authz policy.
+
+Architectural Constraints
+- Authorization policy lives in backend middleware or service layer.
+- No business logic in UI views.
+- Machine-auth and user-auth paths must remain explicit and separate.
+
+Verification Plan
+- `nix develop -c cargo test --package default auth::authorization_matrix`
+- `nix develop -c cargo test --package default handlers::agent_auth_regression`
+- `nix develop -c cargo clippy -- -D warnings`
+- Manual: validate role-specific API behavior and validate agent heartbeat without user session.
+
+Impact Areas
+- API, Domain, Infrastructure, Security
+
+Risk Level
+- High
+<!-- SECTION:DESCRIPTION:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 User API routes require valid user session and role checks
+- [ ] #2 Permission matrix is implemented for Admin, Operator, and Viewer
+- [ ] #3 All `/api/agent/**` routes remain accessible with existing key-auth
+- [ ] #4 Regression tests verify heartbeat, state, and reporting paths remain operational
+- [ ] #5 Denied actions return consistent authorization errors
+<!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Role matrix baseline: Admin (full config plus user and role management), Operator (systems/build/deploy, no auth settings), Viewer (read-only).
+
+LOCK: Claude Opus 4.5 on reckless in ~/code/crystal-forge/TASK-65.5-api-authz-enforcement
+
+MR branch pushed: TASK-65.5-api-authz-enforcement
+MR URL: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/new?merge_request%5Bsource_branch%5D=TASK-65.5-api-authz-enforcement
+
+Implementation complete:
+- Authorization extractors created with role hierarchy
+- All user API endpoints protected
+- Agent endpoints preserved (signature auth)
+- Unit tests passing
+- Code formatted and linted
+
+Pending:
+- Manual testing with dev-mode fixtures
+- Integration testing with OIDC
+- Merge approval
+
+Code review feedback addressed (commit b5f9c48):
+✅ Structured JSON error responses for auth failures
+✅ Idempotent logout (no CSRF required when no session exists)
+✅ Renamed is_authenticated() to has_any_role() for clarity
+✅ Type-safe CSRF_HEADER_NAME using HeaderName
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/125
+
+MR description completed and ready for review.
+
+Complete MR template filled with:
+✅ Comprehensive summary and problem statement
+✅ Implementation overview with architectural decisions
+✅ Cookie-based session management details
+✅ Role-based authorization extractor documentation
+✅ API usage examples with curl commands
+✅ Security considerations and improvements
+✅ Performance impact analysis
+✅ Breaking changes documentation
+✅ Manual testing scenarios documented
+✅ Reviewer guidance with review order
+
+The MR description is saved in /tmp/mr-description.md and ready to paste into:
+https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/125
+<!-- SECTION:NOTES:END -->

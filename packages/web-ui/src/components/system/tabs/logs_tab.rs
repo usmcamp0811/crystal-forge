@@ -17,7 +17,7 @@ pub fn LogsTab(logs: Vec<DeploymentLogEntry>) -> Element {
                 class: "pt-6 text-center py-12",
                 p {
                     class: "{theme::text::SECONDARY}",
-                    "No deployment logs available."
+                    "No agent events available."
                 }
             }
         };
@@ -38,7 +38,7 @@ pub fn LogsTab(logs: Vec<DeploymentLogEntry>) -> Element {
                 class: "flex items-center justify-between mb-4",
                 h3 {
                     class: "{theme::typography::SECTION_TITLE} text-white",
-                    "Recent Deployment"
+                    "Agent Events"
                 }
                 // TODO: Add link to full logs view
                 button {

@@ -1,0 +1,1742 @@
+//! Database queries for builder management.
+
+use anyhow::{Context, Result, bail};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use ed25519_dalek::{SigningKey, VerifyingKey};
+use rand::rngs::OsRng;
+use sqlx::PgPool;
+use tracing::info;
+use uuid::Uuid;
+
+use crate::models::builders::{
+    BuildJob, Builder, BuilderEnvironmentAssignment, BuilderMetrics, BuilderStatus, BuilderSummary,
+    BuilderWithEnvironments, CreateBuilderRequest, ReportMetricsRequest, UpdateBuilderRequest,
+};
+use crate::models::public_key::PublicKey;
+
+/// Generate a cryptographically correct Ed25519 keypair
+/// Returns (public_key_base64, private_key_base64)
+///
+/// SECURITY: Public key is derived from private key (not generated independently)
+pub fn generate_ed25519_keypair() -> Result<(String, String)> {
+    // Generate signing (private) key from secure random source
+    let signing_key = SigningKey::generate(&mut OsRng);
+
+    // CRITICAL: Derive verifying (public) key from signing key
+    // This ensures cryptographic correspondence between private and public keys
+    let verifying_key: VerifyingKey = signing_key.verifying_key();
+
+    // Encode to base64 for storage/transport
+    let public_key_base64 = BASE64.encode(verifying_key.as_bytes());
+    let private_key_base64 = BASE64.encode(signing_key.to_bytes());
+
+    Ok((public_key_base64, private_key_base64))
+}
+
+/// Create a new builder (returns builder and optionally generated private key)
+///
+/// If `public_key` is provided in request, it is validated and used.
+/// If `public_key` is None, a proper Ed25519 keypair is generated server-side.
+///
+/// Returns: (Builder, Option<private_key_base64>)
+/// - private_key is Some(...) only when generated server-side
+/// - private_key is returned ONCE and never stored
+pub async fn create_builder(
+    pool: &PgPool,
+    request: &CreateBuilderRequest,
+) -> Result<(Builder, Option<String>)> {
+    let (public_key_str, private_key_option) = match &request.public_key {
+        Some(pk) => {
+            // Client provided public key - validate it
+            let public_key =
+                PublicKey::from_base64(pk, &request.name).context("Invalid public key format")?;
+            (public_key.to_base64(), None)
+        }
+        None => {
+            // No public key provided - generate proper Ed25519 keypair server-side
+            let (public_key_base64, private_key_base64) =
+                generate_ed25519_keypair().context("Failed to generate Ed25519 keypair")?;
+            (public_key_base64, Some(private_key_base64))
+        }
+    };
+
+    let max_concurrent_jobs = request.max_concurrent_jobs.unwrap_or(1);
+
+    let builder = sqlx::query_as::<_, Builder>(
+        r#"
+        INSERT INTO builders (name, public_key, max_cpu_cores, max_memory_mb, max_concurrent_jobs, status)
+        VALUES ($1, $2, $3, $4, $5, 'inactive')
+        RETURNING *
+        "#
+    )
+    .bind(&request.name)
+    .bind(public_key_str)
+    .bind(request.max_cpu_cores)
+    .bind(request.max_memory_mb)
+    .bind(max_concurrent_jobs)
+    .fetch_one(pool)
+    .await
+    .context("Failed to create builder")?;
+
+    // Create environment assignments if provided
+    if !request.environment_ids.is_empty() {
+        for env_id in &request.environment_ids {
+            assign_builder_to_environment(pool, &builder.id, env_id).await?;
+        }
+    }
+
+    Ok((builder, private_key_option))
+}
+
+/// Get a builder by ID
+pub async fn get_builder_by_id(pool: &PgPool, builder_id: &Uuid) -> Result<Option<Builder>> {
+    let builder = sqlx::query_as::<_, Builder>("SELECT * FROM builders WHERE id = $1")
+        .bind(builder_id)
+        .fetch_optional(pool)
+        .await
+        .context("Failed to fetch builder by ID")?;
+
+    Ok(builder)
+}
+
+/// Get a builder with its environment assignments
+pub async fn get_builder_with_environments(
+    pool: &PgPool,
+    builder_id: &Uuid,
+) -> Result<Option<BuilderWithEnvironments>> {
+    let builder = match get_builder_by_id(pool, builder_id).await? {
+        Some(b) => b,
+        None => return Ok(None),
+    };
+
+    let env_ids = get_builder_environment_ids(pool, builder_id).await?;
+
+    Ok(Some(BuilderWithEnvironments {
+        builder,
+        assigned_environment_ids: env_ids,
+    }))
+}
+
+/// List all builders with summary information
+pub async fn list_builders(pool: &PgPool) -> Result<Vec<BuilderSummary>> {
+    let builders = sqlx::query_as::<_, BuilderSummary>(
+        r#"
+        SELECT
+            b.id,
+            b.name,
+            b.status,
+            b.max_cpu_cores,
+            b.max_memory_mb,
+            b.max_concurrent_jobs,
+            b.last_heartbeat_at,
+            COALESCE(COUNT(DISTINCT bea.id), 0)::int as assigned_environment_count,
+            COALESCE(COUNT(DISTINCT CASE WHEN bj.status = 'building' AND bj.builder_id = b.id THEN bj.id END), 0)::int as active_jobs,
+            -- Count queued jobs eligible for this builder (matching environments or no environment)
+            COALESCE((
+                SELECT COUNT(DISTINCT qj.id)
+                FROM build_jobs qj
+                WHERE qj.status = 'queued'
+                  AND (
+                    qj.environment_id IS NULL
+                    OR qj.environment_id IN (SELECT environment_id FROM builder_environment_assignments WHERE builder_id = b.id)
+                  )
+            ), 0)::int as queued_jobs
+        FROM builders b
+        LEFT JOIN builder_environment_assignments bea ON bea.builder_id = b.id
+        LEFT JOIN build_jobs bj ON bj.builder_id = b.id AND bj.status = 'building'
+        GROUP BY b.id, b.name, b.status, b.max_cpu_cores, b.max_memory_mb, b.max_concurrent_jobs, b.last_heartbeat_at
+        ORDER BY b.created_at DESC
+        "#
+    )
+    .fetch_all(pool)
+    .await
+    .context("Failed to list builders")?;
+
+    Ok(builders)
+}
+
+/// Update a builder
+pub async fn update_builder(
+    pool: &PgPool,
+    builder_id: &Uuid,
+    request: &UpdateBuilderRequest,
+) -> Result<Builder> {
+    // Build dynamic update query based on what fields are provided
+    let mut query = String::from("UPDATE builders SET updated_at = now()");
+    let mut param_count = 1;
+
+    if request.name.is_some() {
+        param_count += 1;
+        query.push_str(&format!(", name = ${}", param_count));
+    }
+    if request.status.is_some() {
+        param_count += 1;
+        query.push_str(&format!(", status = ${}", param_count));
+    }
+    if request.max_cpu_cores.is_some() {
+        param_count += 1;
+        query.push_str(&format!(", max_cpu_cores = ${}", param_count));
+    }
+    if request.max_memory_mb.is_some() {
+        param_count += 1;
+        query.push_str(&format!(", max_memory_mb = ${}", param_count));
+    }
+    if request.max_concurrent_jobs.is_some() {
+        param_count += 1;
+        query.push_str(&format!(", max_concurrent_jobs = ${}", param_count));
+    }
+
+    query.push_str(" WHERE id = $1 RETURNING id, name, public_key, status, max_cpu_cores, max_memory_mb, max_concurrent_jobs, last_heartbeat_at, created_at, updated_at");
+
+    let mut query_builder = sqlx::query_as::<_, Builder>(&query).bind(builder_id);
+
+    if let Some(ref name) = request.name {
+        query_builder = query_builder.bind(name);
+    }
+    if let Some(ref status) = request.status {
+        query_builder = query_builder.bind(status.to_string());
+    }
+    if let Some(cpu) = request.max_cpu_cores {
+        query_builder = query_builder.bind(cpu);
+    }
+    if let Some(mem) = request.max_memory_mb {
+        query_builder = query_builder.bind(mem);
+    }
+    if let Some(jobs) = request.max_concurrent_jobs {
+        query_builder = query_builder.bind(jobs);
+    }
+
+    let builder = query_builder
+        .fetch_one(pool)
+        .await
+        .context("Failed to update builder")?;
+
+    Ok(builder)
+}
+
+/// Update builder public key
+pub async fn update_builder_public_key(
+    pool: &PgPool,
+    builder_id: &Uuid,
+    public_key_base64: &str,
+    builder_name: &str,
+) -> Result<Builder> {
+    let public_key = PublicKey::from_base64(public_key_base64, builder_name)
+        .context("Invalid public key format")?;
+
+    let builder = sqlx::query_as::<_, Builder>(
+        r#"
+        UPDATE builders
+        SET public_key = $2, updated_at = now()
+        WHERE id = $1
+        RETURNING
+            id,
+            name,
+            public_key,
+            status,
+            max_cpu_cores,
+            max_memory_mb,
+            max_concurrent_jobs,
+            last_heartbeat_at,
+            created_at,
+            updated_at
+        "#,
+    )
+    .bind(builder_id)
+    .bind(public_key.to_base64())
+    .fetch_one(pool)
+    .await
+    .context("Failed to update builder public key")?;
+
+    Ok(builder)
+}
+
+/// Deactivate a builder (soft delete)
+pub async fn deactivate_builder(pool: &PgPool, builder_id: &Uuid) -> Result<Builder> {
+    let builder = sqlx::query_as::<_, Builder>(
+        r#"
+        UPDATE builders
+        SET status = 'inactive', updated_at = now()
+        WHERE id = $1
+        RETURNING
+            id,
+            name,
+            public_key,
+            status,
+            max_cpu_cores,
+            max_memory_mb,
+            max_concurrent_jobs,
+            last_heartbeat_at,
+            created_at,
+            updated_at
+        "#,
+    )
+    .bind(builder_id)
+    .fetch_one(pool)
+    .await
+    .context("Failed to deactivate builder")?;
+
+    Ok(builder)
+}
+
+/// Permanently delete a builder (hard delete)
+pub async fn delete_builder(pool: &PgPool, builder_id: &Uuid) -> Result<()> {
+    let result = sqlx::query(
+        r#"
+        DELETE FROM builders
+        WHERE id = $1
+        "#,
+    )
+    .bind(builder_id)
+    .execute(pool)
+    .await
+    .context("Failed to delete builder")?;
+
+    if result.rows_affected() == 0 {
+        bail!("Builder not found");
+    }
+
+    Ok(())
+}
+
+/// Update builder heartbeat timestamp
+pub async fn update_builder_heartbeat(pool: &PgPool, builder_id: &Uuid) -> Result<()> {
+    sqlx::query!(
+        r#"
+        UPDATE builders
+        SET last_heartbeat_at = now(), status = 'active', updated_at = now()
+        WHERE id = $1
+        "#,
+        builder_id
+    )
+    .execute(pool)
+    .await
+    .context("Failed to update builder heartbeat")?;
+
+    Ok(())
+}
+
+/// Record builder metrics
+pub async fn record_builder_metrics(
+    pool: &PgPool,
+    builder_id: &Uuid,
+    metrics: &ReportMetricsRequest,
+) -> Result<()> {
+    sqlx::query!(
+        r#"
+        INSERT INTO builder_metrics (
+            builder_id,
+            cpu_usage_percent,
+            memory_usage_mb,
+            system_cpu_usage_percent,
+            system_memory_total_mb,
+            system_memory_used_mb
+        )
+        VALUES ($1, $2, $3, $4, $5, $6)
+        "#,
+        builder_id,
+        metrics.cpu_usage_percent,
+        metrics.memory_usage_mb,
+        metrics.system_cpu_usage_percent,
+        metrics.system_memory_total_mb,
+        metrics.system_memory_used_mb
+    )
+    .execute(pool)
+    .await
+    .context("Failed to record builder metrics")?;
+
+    Ok(())
+}
+
+/// Get recent metrics for a builder
+pub async fn get_builder_metrics(
+    pool: &PgPool,
+    builder_id: &Uuid,
+    limit: i64,
+) -> Result<Vec<BuilderMetrics>> {
+    let metrics = sqlx::query_as!(
+        BuilderMetrics,
+        r#"
+        SELECT
+            id,
+            builder_id,
+            timestamp,
+            cpu_usage_percent,
+            memory_usage_mb,
+            system_cpu_usage_percent,
+            system_memory_total_mb,
+            system_memory_used_mb
+        FROM builder_metrics
+        WHERE builder_id = $1
+        ORDER BY timestamp DESC
+        LIMIT $2
+        "#,
+        builder_id,
+        limit
+    )
+    .fetch_all(pool)
+    .await
+    .context("Failed to fetch builder metrics")?;
+
+    Ok(metrics)
+}
+
+/// Assign a builder to an environment
+pub async fn assign_builder_to_environment(
+    pool: &PgPool,
+    builder_id: &Uuid,
+    environment_id: &Uuid,
+) -> Result<BuilderEnvironmentAssignment> {
+    let assignment = sqlx::query_as!(
+        BuilderEnvironmentAssignment,
+        r#"
+        INSERT INTO builder_environment_assignments (builder_id, environment_id)
+        VALUES ($1, $2)
+        ON CONFLICT (builder_id, environment_id) DO NOTHING
+        RETURNING id, builder_id, environment_id, created_at
+        "#,
+        builder_id,
+        environment_id
+    )
+    .fetch_one(pool)
+    .await
+    .context("Failed to assign builder to environment")?;
+
+    Ok(assignment)
+}
+
+/// Remove a builder from an environment
+pub async fn remove_builder_from_environment(
+    pool: &PgPool,
+    builder_id: &Uuid,
+    environment_id: &Uuid,
+) -> Result<()> {
+    sqlx::query!(
+        r#"
+        DELETE FROM builder_environment_assignments
+        WHERE builder_id = $1 AND environment_id = $2
+        "#,
+        builder_id,
+        environment_id
+    )
+    .execute(pool)
+    .await
+    .context("Failed to remove builder from environment")?;
+
+    Ok(())
+}
+
+/// Get all environment IDs assigned to a builder (returns empty vec for wildcard builders)
+pub async fn get_builder_environment_ids(pool: &PgPool, builder_id: &Uuid) -> Result<Vec<Uuid>> {
+    let env_ids = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT environment_id
+        FROM builder_environment_assignments
+        WHERE builder_id = $1
+        ORDER BY created_at ASC
+        "#,
+    )
+    .bind(builder_id)
+    .fetch_all(pool)
+    .await
+    .context("Failed to fetch builder environment assignments")?;
+
+    Ok(env_ids)
+}
+
+/// Update all environment assignments for a builder (replace existing)
+pub async fn update_builder_environments(
+    pool: &PgPool,
+    builder_id: &Uuid,
+    environment_ids: &[Uuid],
+) -> Result<()> {
+    // Start a transaction
+    let mut tx = pool.begin().await?;
+
+    // Remove all existing assignments
+    sqlx::query!(
+        r#"
+        DELETE FROM builder_environment_assignments
+        WHERE builder_id = $1
+        "#,
+        builder_id
+    )
+    .execute(&mut *tx)
+    .await
+    .context("Failed to clear existing environment assignments")?;
+
+    // Add new assignments
+    for env_id in environment_ids {
+        sqlx::query!(
+            r#"
+            INSERT INTO builder_environment_assignments (builder_id, environment_id)
+            VALUES ($1, $2)
+            "#,
+            builder_id,
+            env_id
+        )
+        .execute(&mut *tx)
+        .await
+        .context("Failed to create environment assignment")?;
+    }
+
+    tx.commit().await?;
+
+    Ok(())
+}
+
+/// Mark builders as offline if they haven't sent heartbeat within timeout
+pub async fn mark_stale_builders_offline(pool: &PgPool, timeout_seconds: i64) -> Result<i64> {
+    let result = sqlx::query!(
+        r#"
+        UPDATE builders
+        SET status = 'offline', updated_at = now()
+        WHERE status = 'active'
+          AND last_heartbeat_at < now() - ($1 || ' seconds')::interval
+        "#,
+        timeout_seconds.to_string()
+    )
+    .execute(pool)
+    .await
+    .context("Failed to mark stale builders offline")?;
+
+    Ok(result.rows_affected() as i64)
+}
+
+// =============================================================================
+// BUILD JOB QUERIES (Work Queue Operations)
+// =============================================================================
+
+/// Get the number of active (building) jobs for a builder
+pub async fn count_active_jobs_for_builder(pool: &PgPool, builder_id: &Uuid) -> Result<i64> {
+    let count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)
+        FROM build_jobs
+        WHERE builder_id = $1 AND status = 'building'
+        "#,
+    )
+    .bind(builder_id)
+    .fetch_one(pool)
+    .await
+    .context("Failed to count active jobs for builder")?;
+
+    Ok(count)
+}
+
+/// Get the next queued job for a builder based on environment assignments
+/// Returns None if no jobs available
+/// If builder has no environment assignments, returns jobs from any environment (wildcard)
+pub async fn get_next_queued_job(
+    pool: &PgPool,
+    environment_ids: &[Uuid],
+) -> Result<Option<BuildJob>> {
+    let job = if environment_ids.is_empty() {
+        // Wildcard: builder can pick up jobs from any environment
+        sqlx::query_as::<_, BuildJob>(
+            r#"
+            SELECT *
+            FROM build_jobs
+            WHERE status = 'queued'
+            ORDER BY
+                priority_weight DESC,
+                (
+                    SELECT c.commit_timestamp
+                    FROM derivations d
+                    LEFT JOIN commits c ON c.id = d.commit_id
+                    WHERE d.id = build_jobs.derivation_id
+                ) DESC NULLS LAST,
+                created_at ASC
+            LIMIT 1
+            FOR UPDATE SKIP LOCKED
+            "#,
+        )
+        .fetch_optional(pool)
+        .await
+        .context("Failed to fetch next queued job (wildcard)")?
+    } else {
+        // Filtered: only jobs matching builder's environment assignments
+        sqlx::query_as::<_, BuildJob>(
+            r#"
+            SELECT *
+            FROM build_jobs
+            WHERE status = 'queued'
+              AND (environment_id = ANY($1) OR environment_id IS NULL)
+            ORDER BY
+                priority_weight DESC,
+                (
+                    SELECT c.commit_timestamp
+                    FROM derivations d
+                    LEFT JOIN commits c ON c.id = d.commit_id
+                    WHERE d.id = build_jobs.derivation_id
+                ) DESC NULLS LAST,
+                created_at ASC
+            LIMIT 1
+            FOR UPDATE SKIP LOCKED
+            "#,
+        )
+        .bind(environment_ids)
+        .fetch_optional(pool)
+        .await
+        .context("Failed to fetch next queued job (filtered)")?
+    };
+
+    Ok(job)
+}
+
+/// Atomically claim the next job for a builder (race-free concurrency enforcement)
+///
+/// This function ensures concurrency limits are enforced correctly by:
+/// 1. Starting a transaction
+/// 2. Counting active jobs WITH row-level lock
+/// 3. Checking against max_concurrent_jobs limit
+/// 4. Claiming next available job (if under limit)
+/// 5. Committing transaction (making count+claim atomic)
+///
+/// This prevents race conditions where multiple concurrent claim attempts
+/// could exceed the builder's max_concurrent_jobs limit.
+///
+/// TASK-147: Make builder concurrency limit enforcement race-free
+pub async fn claim_next_job_atomic(
+    pool: &PgPool,
+    builder_id: &Uuid,
+    max_concurrent_jobs: i32,
+    environment_ids: &[Uuid],
+) -> Result<Option<BuildJob>> {
+    // Start transaction for atomic count + claim
+    let mut tx = pool.begin().await.context("Failed to begin transaction")?;
+
+    // 1. Count active jobs for this builder
+    // Note: We don't use FOR UPDATE here because it doesn't work with COUNT(*).
+    // The atomicity is ensured by the transaction and FOR UPDATE SKIP LOCKED on the job claim.
+    let active_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+        FROM build_jobs
+        WHERE builder_id = $1 AND status = 'building'
+        "#,
+    )
+    .bind(builder_id)
+    .fetch_one(&mut *tx)
+    .await
+    .context("Failed to count active jobs in transaction")?;
+
+    // 2. Check limit BEFORE querying for next job
+    if active_count >= max_concurrent_jobs as i64 {
+        // Builder at capacity - rollback and return None
+        tx.rollback()
+            .await
+            .context("Failed to rollback transaction")?;
+        return Ok(None);
+    }
+
+    // 3. Claim next available job with FOR UPDATE SKIP LOCKED
+    // This atomically finds and locks the next job in priority order
+    let job = if environment_ids.is_empty() {
+        // Wildcard: builder can claim jobs from any environment
+        sqlx::query_as::<_, BuildJob>(
+            r#"
+            UPDATE build_jobs
+            SET builder_id = $1,
+                status = 'building',
+                started_at = NOW(),
+                updated_at = NOW()
+            WHERE id = (
+                SELECT id
+                FROM build_jobs
+                WHERE status = 'queued'
+                ORDER BY
+                    priority_weight DESC,
+                    (
+                        SELECT c.commit_timestamp
+                        FROM derivations d
+                        LEFT JOIN commits c ON c.id = d.commit_id
+                        WHERE d.id = build_jobs.derivation_id
+                    ) DESC NULLS LAST,
+                    created_at ASC
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+            )
+            RETURNING *
+            "#,
+        )
+        .bind(builder_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .context("Failed to claim job (wildcard) in transaction")?
+    } else {
+        // Filtered: only jobs matching builder's environment assignments
+        sqlx::query_as::<_, BuildJob>(
+            r#"
+            UPDATE build_jobs
+            SET builder_id = $1,
+                status = 'building',
+                started_at = NOW(),
+                updated_at = NOW()
+            WHERE id = (
+                SELECT id
+                FROM build_jobs
+                WHERE status = 'queued'
+                  AND (environment_id = ANY($2) OR environment_id IS NULL)
+                ORDER BY
+                    priority_weight DESC,
+                    (
+                        SELECT c.commit_timestamp
+                        FROM derivations d
+                        LEFT JOIN commits c ON c.id = d.commit_id
+                        WHERE d.id = build_jobs.derivation_id
+                    ) DESC NULLS LAST,
+                    created_at ASC
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+            )
+            RETURNING *
+            "#,
+        )
+        .bind(builder_id)
+        .bind(environment_ids)
+        .fetch_optional(&mut *tx)
+        .await
+        .context("Failed to claim job (filtered) in transaction")?
+    };
+
+    // 4. Commit transaction (makes count check + job assignment atomic)
+    tx.commit().await.context("Failed to commit transaction")?;
+
+    Ok(job)
+}
+
+/// Assign a job to a builder and mark it as building
+pub async fn assign_job_to_builder(
+    pool: &PgPool,
+    job_id: &Uuid,
+    builder_id: &Uuid,
+) -> Result<BuildJob> {
+    let job = sqlx::query_as::<_, BuildJob>(
+        r#"
+        UPDATE build_jobs
+        SET builder_id = $2,
+            status = 'building',
+            started_at = now(),
+            updated_at = now()
+        WHERE id = $1
+        RETURNING *
+        "#,
+    )
+    .bind(job_id)
+    .bind(builder_id)
+    .fetch_one(pool)
+    .await
+    .context("Failed to assign job to builder")?;
+
+    Ok(job)
+}
+
+/// Mark a job as successfully completed
+pub async fn mark_job_complete(pool: &PgPool, job_id: &Uuid) -> Result<BuildJob> {
+    let job = sqlx::query_as::<_, BuildJob>(
+        r#"
+        UPDATE build_jobs
+        SET status = 'success',
+            completed_at = now(),
+            updated_at = now()
+        WHERE id = $1
+        RETURNING *
+        "#,
+    )
+    .bind(job_id)
+    .fetch_one(pool)
+    .await
+    .context("Failed to mark job as complete")?;
+
+    Ok(job)
+}
+
+/// Append logs to a job
+pub async fn append_job_logs(pool: &PgPool, job_id: &Uuid, new_logs: &str) -> Result<()> {
+    append_job_logs_with_limits(pool, job_id, new_logs, 10 * 1024 * 1024).await
+}
+
+/// Append logs to a job with safety limits.
+///
+/// Enforces:
+/// - job must be in queued/building status
+/// - total log bytes must not exceed max_total_log_bytes
+pub async fn append_job_logs_with_limits(
+    pool: &PgPool,
+    job_id: &Uuid,
+    new_logs: &str,
+    max_total_log_bytes: usize,
+) -> Result<()> {
+    let updated = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        UPDATE build_jobs
+        SET logs = COALESCE(logs, '') || $2,
+            updated_at = now()
+        WHERE id = $1
+          AND status IN ('queued', 'building')
+          AND OCTET_LENGTH(COALESCE(logs, '')) + OCTET_LENGTH($2) <= $3
+        RETURNING id
+        "#,
+    )
+    .bind(job_id)
+    .bind(new_logs)
+    .bind(max_total_log_bytes as i64)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to append job logs with limits")?;
+
+    if updated.is_some() {
+        return Ok(());
+    }
+
+    // Diagnose why update failed (status/limit/not-found) for precise error handling.
+    let diagnostics = sqlx::query_as::<_, (String, Option<i64>)>(
+        r#"
+        SELECT status, OCTET_LENGTH(COALESCE(logs, ''))
+        FROM build_jobs
+        WHERE id = $1
+        "#,
+    )
+    .bind(job_id)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to diagnose append log failure")?;
+
+    match diagnostics {
+        None => bail!("job_not_found"),
+        Some((status, current_len_opt)) => {
+            if status != "queued" && status != "building" {
+                bail!("invalid_job_status:{status}");
+            }
+
+            let current_len = current_len_opt.unwrap_or(0) as usize;
+            if current_len.saturating_add(new_logs.len()) > max_total_log_bytes {
+                bail!("log_size_limit_exceeded");
+            }
+
+            bail!("append_log_failed_unknown");
+        }
+    }
+}
+
+/// Clear old logs for completed/failed jobs according to retention policy.
+/// Returns number of rows updated for (success_logs_cleared, failed_logs_cleared).
+pub async fn cleanup_expired_build_logs(
+    pool: &PgPool,
+    success_retention_days: i32,
+    failed_retention_days: i32,
+) -> Result<(u64, u64)> {
+    let success_result = sqlx::query(
+        r#"
+        UPDATE build_jobs
+        SET logs = NULL,
+            updated_at = now()
+        WHERE status = 'success'
+          AND completed_at IS NOT NULL
+          AND completed_at < now() - ($1::text || ' days')::interval
+          AND logs IS NOT NULL
+        "#,
+    )
+    .bind(success_retention_days.to_string())
+    .execute(pool)
+    .await
+    .context("Failed to clean up successful build logs")?;
+
+    let failed_result = sqlx::query(
+        r#"
+        UPDATE build_jobs
+        SET logs = NULL,
+            updated_at = now()
+        WHERE status = 'failed'
+          AND completed_at IS NOT NULL
+          AND completed_at < now() - ($1::text || ' days')::interval
+          AND logs IS NOT NULL
+        "#,
+    )
+    .bind(failed_retention_days.to_string())
+    .execute(pool)
+    .await
+    .context("Failed to clean up failed build logs")?;
+
+    Ok((
+        success_result.rows_affected(),
+        failed_result.rows_affected(),
+    ))
+}
+
+/// Get a build job by ID
+pub async fn get_build_job_by_id(pool: &PgPool, job_id: &Uuid) -> Result<Option<BuildJob>> {
+    let job = sqlx::query_as::<_, BuildJob>(
+        r#"
+        SELECT *
+        FROM build_jobs
+        WHERE id = $1
+        "#,
+    )
+    .bind(job_id)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to fetch build job by ID")?;
+
+    Ok(job)
+}
+
+/// Increase priority of a queued build job so it runs next.
+pub async fn prioritize_build_job(pool: &PgPool, job_id: &Uuid) -> Result<()> {
+    let result = sqlx::query(
+        r#"
+        UPDATE build_jobs
+        SET
+            priority_weight = (
+                SELECT COALESCE(MAX(priority_weight), 1.0) + 1.0
+                FROM build_jobs
+                WHERE status = 'queued'
+            ),
+            updated_at = now()
+        WHERE id = $1
+          AND status = 'queued'
+        "#,
+    )
+    .bind(job_id)
+    .execute(pool)
+    .await
+    .context("Failed to prioritize build job")?;
+
+    if result.rows_affected() == 0 {
+        bail!("Queued build job not found");
+    }
+
+    Ok(())
+}
+
+/// Mark a job as failed with retry logic
+/// If retry_count < max_retries, re-queue the job with incremented retry_count
+/// Otherwise, mark as permanently failed
+pub async fn mark_job_failed_with_retry(
+    pool: &PgPool,
+    job_id: &Uuid,
+    error_message: Option<&str>,
+) -> Result<BuildJob> {
+    // First, get the current job state
+    let job = get_build_job_by_id(pool, job_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Job not found"))?;
+
+    if job.retry_count < job.max_retries {
+        // Re-queue the job with incremented retry count
+        // Slightly reduce priority weight on retry (newer commits stay higher priority)
+        let new_priority = job.priority_weight * 0.95;
+
+        let updated_job = sqlx::query_as::<_, BuildJob>(
+            r#"
+            UPDATE build_jobs
+            SET status = 'queued',
+                retry_count = retry_count + 1,
+                priority_weight = $2,
+                builder_id = NULL,
+                started_at = NULL,
+                created_at = now(),
+                updated_at = now()
+            WHERE id = $1
+            RETURNING *
+            "#,
+        )
+        .bind(job_id)
+        .bind(new_priority)
+        .fetch_one(pool)
+        .await
+        .context("Failed to re-queue job for retry")?;
+
+        Ok(updated_job)
+    } else {
+        // Permanently failed - exceeded max retries
+        let failed_job = sqlx::query_as::<_, BuildJob>(
+            r#"
+            UPDATE build_jobs
+            SET status = 'failed',
+                completed_at = now(),
+                updated_at = now()
+            WHERE id = $1
+            RETURNING *
+            "#,
+        )
+        .bind(job_id)
+        .fetch_one(pool)
+        .await
+        .context("Failed to mark job as permanently failed")?;
+
+        Ok(failed_job)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cancel / requeue lifecycle
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Return the raw status string of a build job, or `None` if the job does not
+/// exist.  Used by the builder to poll for external cancellation.
+pub async fn get_build_job_status(pool: &PgPool, job_id: &Uuid) -> Result<Option<String>> {
+    let row = sqlx::query_scalar::<_, String>(r#"SELECT status FROM build_jobs WHERE id = $1"#)
+        .bind(job_id)
+        .fetch_optional(pool)
+        .await
+        .context("Failed to fetch build job status")?;
+    Ok(row)
+}
+
+/// Cancel a build job.
+///
+/// * Queued jobs → immediately `cancelled` (with `completed_at = now()`).
+/// * Building jobs → `cancelling` (builder detects this on next heartbeat and
+///   calls `finalize_cancelled_job` once the nix process has stopped).
+///
+/// Returns the updated `BuildJob`, or an error if the transition is illegal.
+pub async fn cancel_build_job(pool: &PgPool, job_id: &Uuid) -> Result<BuildJob> {
+    let job = get_build_job_by_id(pool, job_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Build job not found"))?;
+
+    let (new_status, set_completed_at) = match job.status.as_str() {
+        "queued" => ("cancelled", true),
+        "building" => ("cancelling", false),
+        "cancelling" => bail!("Build job is already being cancelled"),
+        "cancelled" => bail!("Build job is already cancelled"),
+        "success" => bail!("Cannot cancel a completed build"),
+        "failed" => bail!("Cannot cancel a failed build"),
+        other => bail!("Cannot cancel build in status: {}", other),
+    };
+
+    let updated = sqlx::query_as::<_, BuildJob>(
+        r#"
+        UPDATE build_jobs
+        SET status       = $2,
+            completed_at = CASE WHEN $3 THEN now() ELSE completed_at END,
+            updated_at   = now()
+        WHERE id = $1
+        RETURNING *
+        "#,
+    )
+    .bind(job_id)
+    .bind(new_status)
+    .bind(set_completed_at)
+    .fetch_one(pool)
+    .await
+    .context("Failed to cancel build job")?;
+
+    Ok(updated)
+}
+
+/// Force-cancel a build job stuck in the `cancelling` state.
+///
+/// This is a manual recovery operation for builds that:
+/// - Have been stuck in `cancelling` for an extended period
+/// - Failed to complete graceful shutdown (builder crashed/disconnected)
+/// - Need immediate termination without waiting for builder confirmation
+///
+/// Transitions:
+/// * `cancelling` → `cancelled` (sets completed_at = now())
+/// * Already `cancelled` → returns error (idempotent behavior not desired for force operations)
+///
+/// Returns the updated `BuildJob`, or an error if the transition is illegal.
+pub async fn force_cancel_build_job(pool: &PgPool, job_id: &Uuid) -> Result<BuildJob> {
+    // Atomic transition guard: only force-cancel while state is still
+    // `cancelling`.
+    let updated = sqlx::query_as::<_, BuildJob>(
+        r#"
+        UPDATE build_jobs
+        SET status       = 'cancelled',
+            completed_at = now(),
+            updated_at   = now()
+        WHERE id = $1
+          AND status = 'cancelling'
+        RETURNING *
+        "#,
+    )
+    .bind(job_id)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to force-cancel build job")?;
+
+    if let Some(updated) = updated {
+        info!("Force-cancelled job {} → 'cancelled'", job_id);
+        return Ok(updated);
+    }
+
+    let current_status = get_build_job_status(pool, job_id).await?;
+    match current_status.as_deref() {
+        None => bail!("Build job not found"),
+        Some("queued") => bail!("Cannot force-cancel a queued job; use regular cancel instead"),
+        Some("building") => {
+            bail!("Cannot force-cancel a building job; use regular cancel to enter stopping state")
+        }
+        Some("cancelled") => bail!("Build job is already cancelled"),
+        Some("success") => bail!("Cannot force-cancel a completed build"),
+        Some("failed") => bail!("Cannot force-cancel a failed build"),
+        Some(status) => bail!(
+            "Build is no longer force-cancellable (current status: {})",
+            status
+        ),
+    }
+}
+
+/// Transition a job from `cancelling` → `cancelled` with a `completed_at`
+/// timestamp.  Called by the builder after it has killed the nix process and
+/// flushed any final logs.
+///
+/// Idempotent: if the job is already `cancelled` the update matches 0 rows and
+/// we return the existing row unchanged rather than an error.
+pub async fn finalize_cancelled_job(pool: &PgPool, job_id: &Uuid) -> Result<BuildJob> {
+    let job = sqlx::query_as::<_, BuildJob>(
+        r#"
+        UPDATE build_jobs
+        SET status       = 'cancelled',
+            completed_at = now(),
+            updated_at   = now()
+        WHERE id = $1
+          AND status IN ('cancelling', 'cancelled')
+        RETURNING *
+        "#,
+    )
+    .bind(job_id)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to finalize cancelled job")?
+    .ok_or_else(|| anyhow::anyhow!("Build job not found or not in a cancellable state"))?;
+
+    Ok(job)
+}
+
+/// Reset a `cancelled` (or `failed`) job back to `queued` in-place, reusing
+/// the existing `build_jobs` row.  This avoids the `NOT EXISTS` duplicate guard
+/// that would block a fresh `INSERT` for the same derivation.
+///
+/// Priority is reset to the job's original `priority_weight` (stored on the
+/// row).  `retry_count`, `builder_id`, `started_at`, and `completed_at` are
+/// all cleared so the job enters the queue as if freshly created.
+pub async fn requeue_cancelled_job(pool: &PgPool, job_id: &Uuid) -> Result<BuildJob> {
+    let updated = sqlx::query_as::<_, BuildJob>(
+        r#"
+        UPDATE build_jobs
+        SET status       = 'queued',
+            builder_id   = NULL,
+            started_at   = NULL,
+            completed_at = NULL,
+            retry_count  = 0,
+            updated_at   = now()
+        WHERE id = $1
+          AND status IN ('cancelled', 'failed')
+        RETURNING *
+        "#,
+    )
+    .bind(job_id)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to requeue build job")?
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "Build job not found or not in a requeue-eligible status (cancelled/failed)"
+        )
+    })?;
+
+    Ok(updated)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::db::test_pool;
+    use base64::Engine;
+    use chrono::{Duration, Utc};
+    use sqlx::postgres::PgPoolOptions;
+
+    async fn queue_test_pool() -> PgPool {
+        PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@127.0.0.1/cf_test")
+            .expect("lazy queue test pool should construct")
+    }
+
+    async fn create_active_test_builder(pool: &PgPool, name: &str) -> Builder {
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+        let verifying_key = signing_key.verifying_key();
+        let public_key_base64 =
+            base64::engine::general_purpose::STANDARD.encode(verifying_key.to_bytes());
+
+        let request = CreateBuilderRequest {
+            name: name.to_string(),
+            public_key: Some(public_key_base64),
+            max_cpu_cores: None,
+            max_memory_mb: None,
+            max_concurrent_jobs: Some(4),
+            environment_ids: vec![],
+        };
+
+        let (builder, _private_key) = create_builder(pool, &request)
+            .await
+            .expect("Failed to create test builder");
+
+        sqlx::query("UPDATE builders SET status = 'active' WHERE id = $1")
+            .bind(builder.id)
+            .execute(pool)
+            .await
+            .expect("Failed to activate test builder");
+
+        get_builder_by_id(pool, &builder.id)
+            .await
+            .expect("Failed to fetch test builder")
+            .expect("Test builder not found")
+    }
+
+    async fn create_queued_job(
+        pool: &PgPool,
+        repo_url: &str,
+        flake_name: &str,
+        commit_hash: &str,
+        commit_timestamp: chrono::DateTime<chrono::Utc>,
+        derivation_name: &str,
+        priority_weight: f64,
+        created_at: chrono::DateTime<chrono::Utc>,
+    ) -> Uuid {
+        crate::queries::flakes::insert_flake(pool, flake_name, repo_url, "main", "all")
+            .await
+            .expect("Failed to insert flake");
+
+        crate::queries::commits::insert_commit_with_metadata(
+            pool,
+            commit_hash,
+            repo_url,
+            commit_timestamp,
+            Some("test commit"),
+            Some("test"),
+        )
+        .await
+        .expect("Failed to insert commit");
+
+        let commit = crate::queries::commits::get_commit_by_hash(pool, commit_hash)
+            .await
+            .expect("Failed to fetch commit");
+
+        let derivation = crate::queries::derivations::insert_derivation_with_target(
+            pool,
+            Some(&commit),
+            derivation_name,
+            "nixos",
+            Some("test-host"),
+            Some(true),
+        )
+        .await
+        .expect("Failed to insert derivation");
+
+        sqlx::query_scalar::<_, Uuid>(
+            r#"
+            INSERT INTO build_jobs (derivation_id, status, priority_weight, created_at)
+            VALUES ($1, 'queued', $2, $3)
+            RETURNING id
+            "#,
+        )
+        .bind(derivation.id)
+        .bind(priority_weight)
+        .bind(created_at)
+        .fetch_one(pool)
+        .await
+        .expect("Failed to insert queued build job")
+    }
+
+    async fn set_build_job_status(pool: &PgPool, job_id: Uuid, status: &str) {
+        sqlx::query(
+            r#"
+            UPDATE build_jobs
+            SET status = $2,
+                updated_at = now(),
+                started_at = CASE WHEN $2 IN ('building', 'cancelling') THEN COALESCE(started_at, now()) ELSE started_at END,
+                completed_at = CASE WHEN $2 IN ('success', 'failed', 'cancelled') THEN now() ELSE NULL END
+            WHERE id = $1
+            "#,
+        )
+        .bind(job_id)
+        .bind(status)
+        .execute(pool)
+        .await
+        .expect("Failed to update test job status");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_dashboard_queue_matches_next_claim_order_for_queued_items() {
+        let pool = queue_test_pool().await;
+        let now = Utc::now();
+
+        let _job_low_priority = create_queued_job(
+            &pool,
+            "https://example.com/order-a.git",
+            "order-a",
+            "a0000001",
+            now - Duration::minutes(10),
+            "order-a-system",
+            5.0,
+            now - Duration::minutes(5),
+        )
+        .await;
+
+        let expected_first = create_queued_job(
+            &pool,
+            "https://example.com/order-b.git",
+            "order-b",
+            "b0000001",
+            now,
+            "order-b-system",
+            10.0,
+            now - Duration::minutes(3),
+        )
+        .await;
+
+        let _same_priority_older_commit = create_queued_job(
+            &pool,
+            "https://example.com/order-c.git",
+            "order-c",
+            "c0000001",
+            now - Duration::minutes(30),
+            "order-c-system",
+            10.0,
+            now - Duration::minutes(1),
+        )
+        .await;
+
+        let queue = crate::queries::dashboard::fetch_build_queue(&pool, 50)
+            .await
+            .expect("Failed to fetch dashboard queue");
+        let first_in_queue = queue
+            .items
+            .iter()
+            .find_map(|item| item.job_id)
+            .expect("Expected queued jobs in dashboard queue");
+
+        assert_eq!(first_in_queue, expected_first);
+
+        let builder = create_active_test_builder(&pool, "order-match-builder").await;
+        let claimed = claim_next_job_atomic(&pool, &builder.id, builder.max_concurrent_jobs, &[])
+            .await
+            .expect("Failed to claim next job")
+            .expect("Expected a queued job to be claimed");
+
+        assert_eq!(claimed.id, first_in_queue);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_prioritize_updates_dashboard_order_and_claim_order() {
+        let pool = queue_test_pool().await;
+        let now = Utc::now();
+
+        let first = create_queued_job(
+            &pool,
+            "https://example.com/prio-a.git",
+            "prio-a",
+            "d0000001",
+            now,
+            "prio-a-system",
+            10.0,
+            now - Duration::minutes(5),
+        )
+        .await;
+
+        let second = create_queued_job(
+            &pool,
+            "https://example.com/prio-b.git",
+            "prio-b",
+            "e0000001",
+            now,
+            "prio-b-system",
+            10.0,
+            now - Duration::minutes(1),
+        )
+        .await;
+
+        let before = crate::queries::dashboard::fetch_build_queue(&pool, 50)
+            .await
+            .expect("Failed to fetch queue before prioritize");
+        let first_before = before
+            .items
+            .iter()
+            .find_map(|item| item.job_id)
+            .expect("Expected queued jobs before prioritize");
+        assert_eq!(first_before, first);
+
+        prioritize_build_job(&pool, &second)
+            .await
+            .expect("Failed to prioritize second job");
+
+        let after = crate::queries::dashboard::fetch_build_queue(&pool, 50)
+            .await
+            .expect("Failed to fetch queue after prioritize");
+        let first_after = after
+            .items
+            .iter()
+            .find_map(|item| item.job_id)
+            .expect("Expected queued jobs after prioritize");
+        assert_eq!(first_after, second);
+
+        let builder = create_active_test_builder(&pool, "prioritize-order-builder").await;
+        let claimed = claim_next_job_atomic(&pool, &builder.id, builder.max_concurrent_jobs, &[])
+            .await
+            .expect("Failed to claim after prioritize")
+            .expect("Expected a queued job after prioritize");
+        assert_eq!(claimed.id, second);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_concurrent_claims_take_top_two_without_duplicates() {
+        let pool = queue_test_pool().await;
+        let now = Utc::now();
+
+        let expected_first = create_queued_job(
+            &pool,
+            "https://example.com/conc-a.git",
+            "conc-a",
+            "f0000001",
+            now,
+            "conc-a-system",
+            30.0,
+            now - Duration::minutes(3),
+        )
+        .await;
+
+        let expected_second = create_queued_job(
+            &pool,
+            "https://example.com/conc-b.git",
+            "conc-b",
+            "f0000002",
+            now,
+            "conc-b-system",
+            20.0,
+            now - Duration::minutes(2),
+        )
+        .await;
+
+        let _remaining = create_queued_job(
+            &pool,
+            "https://example.com/conc-c.git",
+            "conc-c",
+            "f0000003",
+            now,
+            "conc-c-system",
+            10.0,
+            now - Duration::minutes(1),
+        )
+        .await;
+
+        let builder_a = create_active_test_builder(&pool, "concurrent-builder-a").await;
+        let builder_b = create_active_test_builder(&pool, "concurrent-builder-b").await;
+
+        let (claimed_a, claimed_b) = tokio::join!(
+            claim_next_job_atomic(&pool, &builder_a.id, builder_a.max_concurrent_jobs, &[]),
+            claim_next_job_atomic(&pool, &builder_b.id, builder_b.max_concurrent_jobs, &[])
+        );
+
+        let claimed_a = claimed_a
+            .expect("claim A failed")
+            .expect("claim A expected a job");
+        let claimed_b = claimed_b
+            .expect("claim B failed")
+            .expect("claim B expected a job");
+
+        assert_ne!(
+            claimed_a.id, claimed_b.id,
+            "Concurrent claims must not duplicate jobs"
+        );
+
+        let claimed_ids: std::collections::HashSet<Uuid> =
+            [claimed_a.id, claimed_b.id].into_iter().collect();
+        let expected_ids: std::collections::HashSet<Uuid> =
+            [expected_first, expected_second].into_iter().collect();
+
+        assert_eq!(claimed_ids, expected_ids);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_create_and_get_builder() {
+        let pool = test_pool().await;
+
+        // Generate a test keypair
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+        let verifying_key = signing_key.verifying_key();
+        let public_key_base64 =
+            base64::engine::general_purpose::STANDARD.encode(verifying_key.to_bytes());
+
+        let request = CreateBuilderRequest {
+            name: "test-builder".to_string(),
+            public_key: Some(public_key_base64),
+            max_cpu_cores: Some(4),
+            max_memory_mb: Some(8192),
+            max_concurrent_jobs: Some(2),
+            environment_ids: vec![],
+        };
+
+        let (builder, _private_key) = create_builder(&pool, &request)
+            .await
+            .expect("Failed to create builder");
+
+        assert_eq!(builder.name, "test-builder");
+        assert_eq!(builder.max_cpu_cores, Some(4));
+        assert_eq!(builder.max_concurrent_jobs, 2);
+        assert_eq!(builder.status, BuilderStatus::Inactive);
+
+        // Get builder back
+        let fetched = get_builder_by_id(&pool, &builder.id)
+            .await
+            .expect("Failed to fetch builder")
+            .expect("Builder not found");
+
+        assert_eq!(fetched.id, builder.id);
+        assert_eq!(fetched.name, builder.name);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_builder_heartbeat() {
+        let pool = test_pool().await;
+
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+        let verifying_key = signing_key.verifying_key();
+        let public_key_base64 =
+            base64::engine::general_purpose::STANDARD.encode(verifying_key.to_bytes());
+
+        let request = CreateBuilderRequest {
+            name: "heartbeat-test".to_string(),
+            public_key: Some(public_key_base64),
+            max_cpu_cores: None,
+            max_memory_mb: None,
+            max_concurrent_jobs: None,
+            environment_ids: vec![],
+        };
+
+        let (builder, _private_key) = create_builder(&pool, &request)
+            .await
+            .expect("Failed to create builder");
+
+        assert_eq!(builder.status, BuilderStatus::Inactive);
+        assert!(builder.last_heartbeat_at.is_none());
+
+        // Update heartbeat
+        update_builder_heartbeat(&pool, &builder.id)
+            .await
+            .expect("Failed to update heartbeat");
+
+        // Fetch and verify
+        let updated = get_builder_by_id(&pool, &builder.id)
+            .await
+            .expect("Failed to fetch builder")
+            .expect("Builder not found");
+
+        assert_eq!(updated.status, BuilderStatus::Active);
+        assert!(updated.last_heartbeat_at.is_some());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_create_builder_invalid_public_key_base64() {
+        let pool = test_pool().await;
+
+        // Invalid base64 string
+        let request = CreateBuilderRequest {
+            name: "invalid-key-builder".to_string(),
+            public_key: Some("not-valid-base64!!!".to_string()),
+            max_cpu_cores: None,
+            max_memory_mb: None,
+            max_concurrent_jobs: None,
+            environment_ids: vec![],
+        };
+
+        let result = create_builder(&pool, &request).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Failed to decode base64")
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_create_builder_invalid_public_key_length() {
+        let pool = test_pool().await;
+
+        // Valid base64 but wrong length (16 bytes instead of 32)
+        let wrong_length_key = base64::engine::general_purpose::STANDARD.encode(vec![0u8; 16]);
+
+        let request = CreateBuilderRequest {
+            name: "wrong-length-builder".to_string(),
+            public_key: Some(wrong_length_key),
+            max_cpu_cores: None,
+            max_memory_mb: None,
+            max_concurrent_jobs: None,
+            environment_ids: vec![],
+        };
+
+        let result = create_builder(&pool, &request).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must be exactly 32 bytes")
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_create_builder_empty_public_key() {
+        let pool = test_pool().await;
+
+        let request = CreateBuilderRequest {
+            name: "empty-key-builder".to_string(),
+            public_key: Some("".to_string()),
+            max_cpu_cores: None,
+            max_memory_mb: None,
+            max_concurrent_jobs: None,
+            environment_ids: vec![],
+        };
+
+        let result = create_builder(&pool, &request).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Public key cannot be empty")
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_force_cancel_transition_from_cancelling() {
+        let pool = test_pool().await;
+        let now = Utc::now();
+
+        let job_id = create_queued_job(
+            &pool,
+            "https://example.com/force-cancel-cancelling.git",
+            "force-cancel-cancelling",
+            "fcancelcancelling000000000000000000000001",
+            now,
+            "drv-force-cancel-cancelling",
+            1.0,
+            now,
+        )
+        .await;
+
+        set_build_job_status(&pool, job_id, "cancelling").await;
+
+        let updated = force_cancel_build_job(&pool, &job_id)
+            .await
+            .expect("force-cancel from cancelling should succeed");
+
+        assert_eq!(updated.status, "cancelled");
+        assert!(updated.completed_at.is_some());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_force_cancel_rejects_building_status() {
+        let pool = test_pool().await;
+        let now = Utc::now();
+
+        let job_id = create_queued_job(
+            &pool,
+            "https://example.com/force-cancel-building.git",
+            "force-cancel-building",
+            "fcancelbuilding000000000000000000000001",
+            now,
+            "drv-force-cancel-building",
+            1.0,
+            now,
+        )
+        .await;
+
+        set_build_job_status(&pool, job_id, "building").await;
+
+        let err = force_cancel_build_job(&pool, &job_id)
+            .await
+            .expect_err("force-cancel should reject building status");
+
+        assert!(
+            err.to_string()
+                .contains("Cannot force-cancel a building job; use regular cancel")
+        );
+
+        let status_after = get_build_job_status(&pool, &job_id)
+            .await
+            .expect("status lookup should succeed")
+            .expect("job should exist");
+        assert_eq!(status_after, "building");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_force_cancel_rejects_terminal_status() {
+        let pool = test_pool().await;
+        let now = Utc::now();
+
+        let job_id = create_queued_job(
+            &pool,
+            "https://example.com/force-cancel-terminal.git",
+            "force-cancel-terminal",
+            "fcancelterminal000000000000000000000001",
+            now,
+            "drv-force-cancel-terminal",
+            1.0,
+            now,
+        )
+        .await;
+
+        set_build_job_status(&pool, job_id, "failed").await;
+
+        let err = force_cancel_build_job(&pool, &job_id)
+            .await
+            .expect_err("force-cancel should fail for terminal status");
+
+        assert!(
+            err.to_string()
+                .contains("Cannot force-cancel a failed build")
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_force_cancel_race_safe_does_not_overwrite_terminal_status() {
+        let pool = test_pool().await;
+        let now = Utc::now();
+
+        let job_id = create_queued_job(
+            &pool,
+            "https://example.com/force-cancel-race-safe.git",
+            "force-cancel-race-safe",
+            "fcancelracesafe000000000000000000000001",
+            now,
+            "drv-force-cancel-race-safe",
+            1.0,
+            now,
+        )
+        .await;
+
+        // Simulate another worker finishing the job before force-cancel applies.
+        set_build_job_status(&pool, job_id, "success").await;
+
+        let err = force_cancel_build_job(&pool, &job_id)
+            .await
+            .expect_err("force-cancel should fail when job is no longer cancellable");
+        assert!(
+            err.to_string()
+                .contains("Cannot force-cancel a completed build")
+        );
+
+        let final_status = get_build_job_status(&pool, &job_id)
+            .await
+            .expect("status lookup should succeed")
+            .expect("job should still exist");
+        assert_eq!(final_status, "success");
+    }
+}

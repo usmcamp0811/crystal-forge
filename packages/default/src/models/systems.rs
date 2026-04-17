@@ -50,6 +50,7 @@ pub struct System {
     pub public_key: PublicKey,
     pub flake_id: Option<i32>,
     pub derivation: String,
+    pub system_configuration_name: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub desired_target: Option<String>,
@@ -66,6 +67,7 @@ impl System {
         is_active: bool,
         public_key_base64: String, // Fixed parameter name
         flake_id: Option<i32>,
+        system_configuration_name: Option<String>,
         desired_target: Option<String>,
         deployment_policy: String,
     ) -> Result<Self> {
@@ -80,6 +82,7 @@ impl System {
             public_key,
             flake_id,
             derivation: "".into(), // leave empty; DB or later logic sets it
+            system_configuration_name,
             created_at: chrono::Utc::now(), // placeholder; overwritten by DB
             updated_at: chrono::Utc::now(), // placeholder; overwritten by DB
             desired_target,
@@ -101,6 +104,13 @@ impl System {
     /// Check if the system has a desired derivation set
     pub fn has_pending_deployment(&self) -> bool {
         self.desired_target.is_some()
+    }
+
+    pub fn configuration_name(&self) -> &str {
+        self.system_configuration_name
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(&self.hostname)
     }
 
     /// Check if the system is configured for automatic deployments

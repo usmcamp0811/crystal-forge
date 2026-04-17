@@ -293,6 +293,16 @@ mod tests {
     }
 
     #[test]
+    fn test_admin_passes_operator_guard_semantics() {
+        let admin_user = AuthenticatedUser {
+            user_id: Uuid::new_v4(),
+            roles: vec![AuthRole::Admin],
+        };
+
+        assert!(admin_user.is_operator_or_higher());
+    }
+
+    #[test]
     fn test_has_any_role_false_for_empty_roles() {
         let user = AuthenticatedUser {
             user_id: Uuid::new_v4(),

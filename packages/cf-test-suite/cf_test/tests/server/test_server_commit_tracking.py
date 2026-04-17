@@ -102,10 +102,10 @@ def test_branch_specific_flake_initialization(
     branch_repo_url = f"http://gitserver/crystal-forge{repo_url_suffix}"
     flake_name = f"crystal-forge-{branch_name.replace('/', '-')}"
 
-    # Insert the branch-specific flake into the database
+    # Insert the branch-specific flake into the database with explicit branch
     cf_client.execute_sql(
-        "INSERT INTO flakes (name, repo_url) VALUES (%s, %s) ON CONFLICT (repo_url) DO NOTHING",
-        (flake_name, branch_repo_url),
+        "INSERT INTO flakes (name, repo_url, branch) VALUES (%s, %s, %s) ON CONFLICT (repo_url) DO NOTHING",
+        (flake_name, branch_repo_url, branch_name),
     )
 
     # Get the flake ID
@@ -222,10 +222,10 @@ def test_branch_polling_picks_up_new_commit(cf_client, server, gitserver):
     branch_name = "development"
     repo_url = f"http://gitserver/crystal-forge?ref={branch_name}"
 
-    # Ensure the branch flake exists (idempotent)
+    # Ensure the branch flake exists (idempotent) with explicit branch
     cf_client.execute_sql(
-        "INSERT INTO flakes (name, repo_url) VALUES (%s, %s) ON CONFLICT (repo_url) DO NOTHING",
-        (f"crystal-forge-{branch_name}", repo_url),
+        "INSERT INTO flakes (name, repo_url, branch) VALUES (%s, %s, %s) ON CONFLICT (repo_url) DO NOTHING",
+        (f"crystal-forge-{branch_name}", repo_url, branch_name),
     )
 
     # Resolve flake_id
@@ -325,7 +325,10 @@ def test_branch_polling_picks_up_new_commit(cf_client, server, gitserver):
 def test_webhook_and_commit_ingest(cf_client, server, smoke_data):
     """Test webhook processing and commit ingestion"""
     # Send webhook
-    cf_client.send_webhook(server, C.API_PORT, smoke_data.webhook_payload)
+    # Use configured test server port (integration check runs API on 8000).
+    cf_client.send_webhook(
+        server, cf_client.config.server_port, smoke_data.webhook_payload
+    )
 
     # Wait for webhook processing
     cf_client.wait_for_service_log(

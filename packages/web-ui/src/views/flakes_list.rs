@@ -12,16 +12,66 @@ use wasm_bindgen::JsCast;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsValue;
 use wasm_bindgen::prelude::Closure;
+#[cfg(target_arch = "wasm32")]
+use web_sys::console;
 use web_sys::{Node, window};
 
-use crate::api::client::{create_flake, delete_flake, fetch_flakes};
-use crate::api::models::{CreateFlakeRequest, FlakeRegistryItem};
+use crate::api::client::{
+    ApiClientError, accept_flake_history_rewrite, create_flake, delete_flake,
+    delete_flake_credentials, fetch_commit_diff, fetch_cve_scan_status, fetch_flake_credentials,
+    fetch_flake_timelines, fetch_flake_timelines_for_ids, fetch_flakes, put_flake_credentials,
+    request_sync_all_flakes, request_sync_flake, trigger_flake_config_cve_scan, update_flake,
+};
+use crate::api::models::{
+    BuildStatus as ApiBuildStatus, CreateFlakeCredentialRequest, CreateFlakeRequest,
+    FlakeCommitSystemPath, FlakeRegistryItem, FlakeTimeline, UpdateFlakeRequest,
+};
 use crate::components::layout::Card;
+use crate::components::notifications::{AlertBanner, AlertSeverity};
+use crate::routes::Route;
+use crate::state::app_state::AppState;
+use crate::state::auth;
 use crate::theme;
 use crate::views::systems_mock::mock_system_details;
 
+fn came_from_setup() -> bool {
+    if let Some(storage) = web_sys::window()
+        .and_then(|w| w.local_storage().ok())
+        .flatten()
+    {
+        let flag = storage.get_item("cf.from_setup").ok().flatten();
+        if flag.as_deref() == Some("1") {
+            let _ = storage.remove_item("cf.from_setup");
+            return true;
+        }
+    }
+    false
+}
+
 const VIEW_PREF_KEY: &str = "crystal_forge.flakes.view";
-const FLAKE_TABLE_SCHEMA_NOTE: &str = "flakes(name, repo_url UNIQUE)";
+const FLAKE_TABLE_SCHEMA_NOTE: &str = "flakes(name, repo_url UNIQUE, branch)";
+const INITIAL_TIMELINE_FLAKES: usize = 1;
+const TIMELINE_BATCH_SIZE: usize = 2;
+const MAX_SYSTEM_CHIPS_RENDER: usize = 24;
+const MAX_SYSTEMS_STORED_PER_COMMIT: usize = 120;
+const MAX_SYSTEM_LABEL_CHARS: usize = 96;
+const MAX_WS_STREAM_SYSTEMS: usize = 80;
+
+fn preview_systems(systems: &[String]) -> &[String] {
+    let end = systems.len().min(MAX_SYSTEM_CHIPS_RENDER);
+    &systems[..end]
+}
+
+fn truncate_system_label(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let mut iter = trimmed.chars();
+    let short: String = iter.by_ref().take(MAX_SYSTEM_LABEL_CHARS).collect();
+    if iter.next().is_some() {
+        format!("{short}...")
+    } else {
+        short
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FlakesViewMode {
@@ -121,6 +171,8 @@ struct FlakeListItem {
     id: i32,
     name: String,
     repo_url: String,
+    branch: String,
+    build_scope: String,
     latest_commit: Option<String>,
     system_count: usize,
     environments: Vec<String>,
@@ -133,6 +185,8 @@ impl FlakeListItem {
             id: item.id,
             name: item.name,
             repo_url: item.repo_url,
+            branch: item.branch,
+            build_scope: item.build_scope,
             latest_commit: None,
             system_count: item.system_count.max(0) as usize,
             environments: Vec::new(),
@@ -143,6 +197,7 @@ impl FlakeListItem {
 
 #[derive(Clone, Debug, PartialEq)]
 struct FlakeHistoryCommit {
+    id: i32,
     hash: String,
     message: String,
     author: String,
@@ -151,6 +206,12 @@ struct FlakeHistoryCommit {
     insertions: usize,
     deletions: usize,
     diff: String,
+    systems: Vec<String>,
+    system_paths: Vec<FlakeCommitSystemPath>,
+    total_system_count: usize,
+    build_status: Option<ApiBuildStatus>,
+    evaluation_status: Option<String>,
+    evaluation_error_message: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -175,6 +236,12 @@ struct RenderedDiffLine {
 struct NewFlakeDraft {
     name: String,
     repo_url: String,
+    branch: String,
+    build_scope: String,
+    credential_type: String,
+    credential_username: String,
+    credential_secret: String,
+    credential_ssh_username: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -182,11 +249,24 @@ struct EditFlakeDraft {
     id: i32,
     name: String,
     repo_url: String,
+    branch: String,
+    build_scope: String,
+    credential_type: String,
+    credential_username: String,
+    credential_secret: String,
+    credential_ssh_username: String,
+    has_existing_secret: bool,
 }
 
 /// Flakes list with toggles and filters.
 #[component]
 pub fn FlakesListView() -> Element {
+    let app_state = use_context::<Signal<AppState>>();
+    let is_admin_user = auth::is_admin(&app_state.read().auth);
+
+    // Shared config health (admin only) — used for flake eval error banner.
+    let config_health = app_state.read().config_health.clone();
+
     let stored_view = LocalStorage::get::<String>(VIEW_PREF_KEY).ok();
     let mut view_mode = use_signal(|| FlakesViewMode::from_storage(stored_view));
     let query_view = prefers_view_from_query();
@@ -245,19 +325,29 @@ pub fn FlakesListView() -> Element {
     let mut flakes = use_signal(mock_flakes);
     let loading_flakes = use_signal(|| true);
     let server_notice = use_signal(|| None::<String>);
+    let mut flake_timelines = use_signal(Vec::<FlakeTimeline>::new);
     let mut show_add_form = use_signal(|| false);
     let mut add_error = use_signal(|| None::<String>);
     let mut draft = use_signal(|| NewFlakeDraft {
         name: String::new(),
         repo_url: String::new(),
+        branch: String::new(),
+        build_scope: "cf_systems_only".to_string(),
+        credential_type: "none".to_string(),
+        credential_username: String::new(),
+        credential_secret: String::new(),
+        credential_ssh_username: String::new(),
     });
     let mut pending_remove = use_signal(|| None::<FlakeListItem>);
     let mut editing_flake = use_signal(|| None::<EditFlakeDraft>);
     let mut edit_error = use_signal(|| None::<String>);
-    let selected_history_flake = use_signal(|| None::<i32>);
-    let selected_history_commit = use_signal(|| None::<String>);
+    let mut refreshing_flake = use_signal(|| None::<i32>);
+    let mut selected_history_flake = use_signal(|| None::<i32>);
+    let mut selected_history_commit = use_signal(|| None::<String>);
     let mut sync_note = use_signal(|| None::<String>);
     let mut last_manual_sync = use_signal(|| None::<DateTime<Utc>>);
+    let mut rewrite_prompt = use_signal(|| None::<(i32, String, String)>);
+    let mut cve_scan_status = use_signal(HashMap::<String, String>::new);
 
     let current_flakes = flakes.read().clone();
     let environments = unique_environments(&current_flakes);
@@ -315,10 +405,94 @@ pub fn FlakesListView() -> Element {
         });
     }
 
+    // Load flake timelines
+    {
+        let mut flake_timelines = flake_timelines.clone();
+        let flakes = flakes.clone();
+        use_effect(move || {
+            let flake_ids: Vec<i32> = flakes.read().iter().map(|flake| flake.id).collect();
+            spawn(async move {
+                if flake_ids.is_empty() {
+                    flake_timelines.set(Vec::new());
+                    return;
+                }
+
+                let initial_ids: Vec<i32> = flake_ids
+                    .iter()
+                    .take(INITIAL_TIMELINE_FLAKES)
+                    .copied()
+                    .collect();
+
+                let mut merged_timelines = Vec::new();
+
+                if !initial_ids.is_empty() {
+                    match fetch_flake_timelines_for_ids(&initial_ids).await {
+                        Ok(timelines) => {
+                            merged_timelines = merge_flake_timeline_batches(
+                                merged_timelines,
+                                timelines,
+                                &flake_ids,
+                            );
+                            flake_timelines.set(merged_timelines.clone());
+                        }
+                        Err(_error) => {
+                            // Fallback to full fetch if subset request fails for any reason.
+                            match fetch_flake_timelines().await {
+                                Ok(timelines) => {
+                                    flake_timelines.set(timelines);
+                                }
+                                Err(_) => {
+                                    flake_timelines.set(Vec::new());
+                                }
+                            }
+                            return;
+                        }
+                    }
+                }
+
+                let remaining_ids: Vec<i32> = flake_ids
+                    .iter()
+                    .skip(INITIAL_TIMELINE_FLAKES)
+                    .copied()
+                    .collect();
+
+                for chunk in remaining_ids.chunks(TIMELINE_BATCH_SIZE) {
+                    match fetch_flake_timelines_for_ids(chunk).await {
+                        Ok(timelines) => {
+                            merged_timelines = merge_flake_timeline_batches(
+                                merged_timelines,
+                                timelines,
+                                &flake_ids,
+                            );
+                            flake_timelines.set(merged_timelines.clone());
+                        }
+                        Err(_) => {
+                            // Keep already-loaded timelines if a later batch fails.
+                        }
+                    }
+                }
+            });
+        });
+    }
+
+    let from_setup = use_signal(came_from_setup);
+    let mut dismiss_add_target_callout = use_signal(|| false);
+
     rsx! {
         div {
             class: "space-y-6",
             id: "{container_id}",
+
+            if from_setup() {
+                div {
+                    "data-testid": "setup-coach-flakes-callout",
+                    style: "background:rgba(30,58,138,0.22); border:1px solid rgba(96,165,250,0.55); border-radius:8px; padding:12px 16px;",
+                    p { style: "color:#dbeafe; font-size:12px; font-weight:700; margin:0; letter-spacing:0.03em; text-transform:uppercase;", "Setup Tour - Step 2 of 6" }
+                    p { style: "color:#dbeafe; font-size:14px; font-weight:600; margin:4px 0 0 0;", "Register a flake source" }
+                    p { style: "color:#bfdbfe; font-size:13px; margin:4px 0 0 0;", "Use Add Flake to track the repo and branch your systems should deploy." }
+                }
+            }
+
             header {
                 class: "flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between",
                 div {
@@ -328,32 +502,131 @@ pub fn FlakesListView() -> Element {
                 div {
                     class: "flex items-center gap-3",
                     button {
-                        class: "px-3 py-2 rounded-lg text-sm font-medium border border-blue-500/50 text-blue-200 hover:text-white hover:bg-blue-500/20 transition-colors",
+                        class: "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::DANGER_BTN} {theme::interactive::FOCUS_RING}",
                         onclick: move |_| {
-                            let mut next = flakes.read().clone();
-                            let changed = sync_flake_registry(&mut next);
-                            flakes.set(next);
-                            let now = Utc::now();
-                            last_manual_sync.set(Some(now));
-                            sync_note.set(Some(format!(
-                                "Polled {} flakes from source ({} updated).",
-                                flakes.read().len(),
-                                changed
-                            )));
+                            let selected_flake_id = *selected_history_flake.read();
+                            let mut flakes_signal = flakes.clone();
+                            let mut timelines_signal = flake_timelines.clone();
+                            let mut selected_history_commit = selected_history_commit.clone();
+                            let mut last_manual_sync = last_manual_sync.clone();
+                            let mut sync_note = sync_note.clone();
+                            let mut rewrite_prompt = rewrite_prompt.clone();
+                            let flakes_snapshot = flakes.read().clone();
+                            spawn(async move {
+                                let sync_result = if let Some(flake_id) = selected_flake_id {
+                                    request_sync_flake(flake_id).await
+                                } else {
+                                    request_sync_all_flakes().await
+                                };
+
+                                match sync_result {
+                                    Ok(response) => {
+                                        let mut refresh_warning = false;
+                                        match fetch_flakes().await {
+                                            Ok(items) => {
+                                                flakes_signal.set(
+                                                    items
+                                                        .into_iter()
+                                                        .map(FlakeListItem::from_registry)
+                                                        .collect(),
+                                                );
+                                            }
+                                            Err(_) => {
+                                                refresh_warning = true;
+                                            }
+                                        }
+
+                                        match fetch_flake_timelines().await {
+                                            Ok(timelines) => {
+                                                timelines_signal.set(timelines);
+                                                selected_history_commit.set(None);
+                                            }
+                                            Err(_) => {
+                                                refresh_warning = true;
+                                            }
+                                        }
+                                        last_manual_sync.set(Some(Utc::now()));
+                                        let message = if refresh_warning {
+                                            format!(
+                                                "{} UI refresh was partial; reload if data looks stale.",
+                                                response.message
+                                            )
+                                        } else {
+                                            response.message
+                                        };
+                                        sync_note.set(Some(message));
+                                    }
+                                    Err(error) => {
+                                        if let Some((flake_id, detail)) =
+                                            extract_history_rewrite_conflict(&error, selected_flake_id)
+                                        {
+                                            let flake_name = flakes_snapshot
+                                                .iter()
+                                                .find(|f| f.id == flake_id)
+                                                .map(|f| f.name.clone())
+                                                .unwrap_or_else(|| format!("flake #{flake_id}"));
+                                            rewrite_prompt.set(Some((flake_id, flake_name, detail)));
+                                            sync_note.set(Some(
+                                                "Sync blocked: git history rewrite detected. Review and accept rewrite to continue.".to_string(),
+                                            ));
+                                            return;
+                                        }
+
+                                        #[cfg(target_arch = "wasm32")]
+                                        web_sys::console::error_1(
+                                            &format!(
+                                                "[CF] sync request failed for selected_flake_id={:?}: {}",
+                                                selected_flake_id, error
+                                            )
+                                            .into(),
+                                        );
+
+                                        sync_note.set(Some(format!(
+                                            "Sync failed for {}: {}",
+                                            selected_flake_id
+                                                .map(|id| format!("flake #{id}"))
+                                                .unwrap_or_else(|| "all flakes".to_string()),
+                                            error
+                                        )));
+                                        return;
+                                    }
+                                }
+                            });
                         },
                         "Sync from Source"
                     }
-                    button {
-                        class: "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}",
-                        onclick: move |_| {
-                            let next = !*show_add_form.read();
-                            show_add_form.set(next);
-                            add_error.set(None);
-                        },
-                        if *show_add_form.read() {
-                            "Close"
-                        } else {
-                            "Add Flake"
+                    div {
+                        class: "relative z-[2101]",
+                        button {
+                            class: if from_setup() && !*show_add_form.read() {
+                                "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN} animate-pulse ring-2 ring-blue-300/70 ring-offset-2 ring-offset-slate-950"
+                            } else {
+                                "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}"
+                            },
+                            onclick: move |_| {
+                                let next = !*show_add_form.read();
+                                show_add_form.set(next);
+                                add_error.set(None);
+                                if next {
+                                    dismiss_add_target_callout.set(true);
+                                }
+                            },
+                            if *show_add_form.read() {
+                                "Close"
+                            } else {
+                                "Add Flake"
+                            }
+                        }
+                        if from_setup() && !*show_add_form.read() && !dismiss_add_target_callout() {
+                            div {
+                                "data-testid": "setup-coach-flakes-target-callout",
+                                style: "position:absolute; z-index:2200; right:0; top:calc(100% + 10px); background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; width:220px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                div {
+                                    style: "position:absolute; top:-6px; right:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                }
+                                p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
+                                p { style: "margin:2px 0 0 0;", "Click Add Flake to register your source repository." }
+                            }
                         }
                     }
                     ViewToggle {
@@ -368,8 +641,7 @@ pub fn FlakesListView() -> Element {
 
             if let Some(note) = sync_note.read().clone() {
                 p {
-                    class: "text-xs px-3 py-2 rounded-lg border text-blue-100",
-                    style: "background-color: #23354B; border-color: #406084;",
+                    class: "text-xs px-3 py-2 rounded-lg border text-blue-100 cf-chip-info",
                     "{note}"
                 }
             } else if let Some(sync_ts) = sync_timestamp {
@@ -381,9 +653,20 @@ pub fn FlakesListView() -> Element {
 
             if let Some(message) = server_notice.read().clone() {
                 p {
-                    class: "text-xs px-3 py-2 rounded-lg border text-amber-100",
-                    style: "background-color: #493E26; border-color: #8C7041;",
+                    class: "text-xs px-3 py-2 rounded-lg border text-amber-100 cf-chip-warning",
                     "{message}"
+                }
+            }
+
+            // Admin-only: warn when any flake has eval errors on its latest commit.
+            if is_admin_user {
+                if let Some(ref health) = config_health {
+                    if health.checks.iter().any(|c| c.id == "flake_eval_errors" && !c.passed) {
+                        AlertBanner {
+                            severity: AlertSeverity::Warning,
+                            message: "One or more flakes have evaluation errors on their latest commit. Check flake configuration and commit history.".to_string(),
+                        }
+                    }
                 }
             }
 
@@ -391,10 +674,17 @@ pub fn FlakesListView() -> Element {
                 AddFlakeForm {
                     draft: draft,
                     error: add_error,
+                    show_onboarding_callouts: from_setup(),
                     on_cancel: move |_| {
                         draft.set(NewFlakeDraft {
                             name: String::new(),
                             repo_url: String::new(),
+                            branch: String::new(),
+                            build_scope: "cf_systems_only".to_string(),
+                            credential_type: "none".to_string(),
+                            credential_username: String::new(),
+                            credential_secret: String::new(),
+                            credential_ssh_username: String::new(),
                         });
                         add_error.set(None);
                         show_add_form.set(false);
@@ -415,10 +705,16 @@ pub fn FlakesListView() -> Element {
                             let request = CreateFlakeRequest {
                                 name: next.name.trim().to_string(),
                                 repo_url: next.repo_url.trim().to_string(),
+                                branch: normalize_optional_branch(&next.branch),
+                                build_scope: Some(next.build_scope.clone()),
                             };
 
                             match create_flake(&request).await {
                                 Ok(created) => {
+                                    if let Err(error) = save_flake_credentials(created.id, &next).await {
+                                        add_error.set(Some(error));
+                                        return;
+                                    }
                                     let mut values = flakes.read().clone();
                                     values.push(FlakeListItem::from_registry(created));
                                     values
@@ -427,6 +723,12 @@ pub fn FlakesListView() -> Element {
                                     draft.set(NewFlakeDraft {
                                         name: String::new(),
                                         repo_url: String::new(),
+                                        branch: String::new(),
+                                        build_scope: "cf_systems_only".to_string(),
+                                        credential_type: "none".to_string(),
+                                        credential_username: String::new(),
+                                        credential_secret: String::new(),
+                                        credential_ssh_username: String::new(),
                                     });
                                     add_error.set(None);
                                     server_notice.set(None);
@@ -471,16 +773,28 @@ pub fn FlakesListView() -> Element {
                     for flake in filtered_flakes.clone() {
                         FlakeCard {
                             flake,
+                            selected_history_flake_id: *selected_history_flake.read(),
+                            on_select_history_flake: move |id| {
+                                selected_history_flake.set(Some(id));
+                                selected_history_commit.set(None);
+                            },
                             on_remove: move |id| remove_flake_by_id(flakes, pending_remove, id),
                             on_edit: move |id| start_edit_flake(flakes, editing_flake, edit_error, id),
+                            on_refresh: move |id| refresh_flake_by_id(id, refreshing_flake, sync_note),
                         }
                     }
                 }
             } else {
                 FlakesTable {
                     flakes: filtered_flakes.clone(),
+                    selected_history_flake_id: *selected_history_flake.read(),
+                    on_select_history_flake: move |id| {
+                        selected_history_flake.set(Some(id));
+                        selected_history_commit.set(None);
+                    },
                     on_remove: move |id| remove_flake_by_id(flakes, pending_remove, id),
                     on_edit: move |id| start_edit_flake(flakes, editing_flake, edit_error, id),
+                    on_refresh: move |id| refresh_flake_by_id(id, refreshing_flake, sync_note),
                 }
             }
 
@@ -488,6 +802,8 @@ pub fn FlakesListView() -> Element {
                 flakes: filtered_flakes.clone(),
                 selected_flake_id: selected_history_flake,
                 selected_commit_hash: selected_history_commit,
+                timelines: flake_timelines.read().clone(),
+                cve_scan_status: cve_scan_status,
             }
 
             if let Some(editing) = editing_flake.read().clone() {
@@ -508,15 +824,44 @@ pub fn FlakesListView() -> Element {
                             return;
                         }
 
-                        let mut values = flakes.read().clone();
-                        if let Some(target) = values.iter_mut().find(|item| item.id == next.id) {
-                            target.name = next.name.trim().to_string();
-                            target.repo_url = next.repo_url.trim().to_string();
-                        }
-                        values.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-                        flakes.set(values);
-                        editing_flake.set(None);
-                        edit_error.set(None);
+                        let mut flakes = flakes.clone();
+                        let mut editing_flake = editing_flake.clone();
+                        let mut edit_error = edit_error.clone();
+                        let mut server_notice = server_notice.clone();
+                        spawn(async move {
+                            let request = UpdateFlakeRequest {
+                                name: next.name.trim().to_string(),
+                                repo_url: next.repo_url.trim().to_string(),
+                                branch: normalize_optional_branch(&next.branch),
+                                build_scope: Some(next.build_scope.clone()),
+                            };
+
+                            match update_flake(next.id, &request).await {
+                                Ok(updated) => {
+                                    if let Err(error) = save_flake_credentials(updated.id, &next).await {
+                                        edit_error.set(Some(error));
+                                        return;
+                                    }
+                                    let mut values = flakes.read().clone();
+                                    if let Some(target) = values.iter_mut().find(|item| item.id == updated.id)
+                                    {
+                                        target.name = updated.name;
+                                        target.repo_url = updated.repo_url;
+                                        target.branch = updated.branch;
+                                        target.build_scope = updated.build_scope;
+                                        target.system_count = updated.system_count.max(0) as usize;
+                                    }
+                                    values.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                                    flakes.set(values);
+                                    editing_flake.set(None);
+                                    edit_error.set(None);
+                                    server_notice.set(None);
+                                }
+                                Err(error) => {
+                                    edit_error.set(Some(error.to_string()));
+                                }
+                            }
+                        });
                     }
                 }
             }
@@ -526,13 +871,13 @@ pub fn FlakesListView() -> Element {
                     flake_name: flake.name.clone(),
                     system_count: flake.system_count,
                     on_cancel: move |_| pending_remove.set(None),
-                    on_confirm: move |_| {
+                    on_confirm: move |(hard, cascade)| {
                         let mut flakes = flakes.clone();
                         let mut pending_remove = pending_remove.clone();
                         let mut server_notice = server_notice.clone();
                         let remove_id = flake.id;
                         spawn(async move {
-                            match delete_flake(remove_id).await {
+                            match delete_flake(remove_id, hard, cascade).await {
                                 Ok(()) => {
                                     let mut values = flakes.read().clone();
                                     values.retain(|item| item.id != remove_id);
@@ -546,6 +891,49 @@ pub fn FlakesListView() -> Element {
                             }
                         });
                     }
+                }
+            }
+
+            if let Some((flake_id, flake_name, detail)) = rewrite_prompt.read().clone() {
+                HistoryRewriteDialog {
+                    flake_name: flake_name.clone(),
+                    detail,
+                    on_cancel: move |_| rewrite_prompt.set(None),
+                    on_accept: move |_| {
+                        let flake_name_for_error = flake_name.clone();
+                        let mut rewrite_prompt = rewrite_prompt.clone();
+                        let mut sync_note = sync_note.clone();
+                        let mut last_manual_sync = last_manual_sync.clone();
+                        let mut flakes_signal = flakes.clone();
+                        let mut timelines_signal = flake_timelines.clone();
+                        spawn(async move {
+                            match accept_flake_history_rewrite(flake_id).await {
+                                Ok(response) => {
+                                    rewrite_prompt.set(None);
+                                    sync_note.set(Some(response.message));
+                                    last_manual_sync.set(Some(Utc::now()));
+
+                                    if let Ok(items) = fetch_flakes().await {
+                                        flakes_signal.set(
+                                            items
+                                                .into_iter()
+                                                .map(FlakeListItem::from_registry)
+                                                .collect(),
+                                        );
+                                    }
+
+                                    if let Ok(timelines) = fetch_flake_timelines().await {
+                                        timelines_signal.set(timelines);
+                                    }
+                                }
+                                Err(error) => {
+                                    sync_note.set(Some(format!(
+                                        "Failed to accept rewrite for {flake_name_for_error}: {error}"
+                                    )));
+                                }
+                            }
+                        });
+                    },
                 }
             }
         }
@@ -614,8 +1002,11 @@ fn FiltersBar(
 #[component]
 fn FlakesTable(
     flakes: Vec<FlakeListItem>,
+    selected_history_flake_id: Option<i32>,
+    on_select_history_flake: EventHandler<i32>,
     on_remove: EventHandler<i32>,
     on_edit: EventHandler<i32>,
+    on_refresh: EventHandler<i32>,
 ) -> Element {
     let sort_column = use_signal(|| None::<SortColumn>);
     let sort_direction = use_signal(|| SortDirection::Asc);
@@ -707,33 +1098,62 @@ fn FlakesTable(
                     tbody {
                         class: "divide-y {theme::surface::DIVIDER}",
                         for flake in sorted_flakes {
-                            tr {
-                                class: "hover:bg-gray-800/40 transition",
-                                td { class: "{theme::spacing::TABLE_CELL} text-sm text-white", "{flake.name}" }
-                                td { class: "{theme::spacing::TABLE_CELL} text-sm text-gray-300 font-mono", "{flake.repo_url}" }
-                                td { class: "{theme::spacing::TABLE_CELL} text-sm text-gray-200", "{flake.system_count}" }
-                                td { class: "{theme::spacing::TABLE_CELL} text-sm {theme::text::SECONDARY}", "{environments_label(&flake)}" }
-                                td { class: "{theme::spacing::TABLE_CELL} text-sm text-gray-300 font-mono", "{latest_commit_label(&flake)}" }
-                                td {
-                                    class: "{theme::spacing::TABLE_CELL} text-right",
-                                    div {
-                                        class: "inline-flex items-center gap-2",
-                                        button {
-                                            class: "text-xs px-2 py-1 rounded transition-colors",
-                                            style: "color: #D6C3E8;",
-                                            onclick: move |_| on_edit.call(flake.id),
-                                            "Edit"
-                                        }
-                                        if flake.system_count > 0 {
-                                            span {
-                                                class: "text-xs text-gray-500",
-                                                "In Use"
-                                            }
+                            {
+                                let is_selected = selected_history_flake_id == Some(flake.id);
+                                rsx! {
+                                    tr {
+                                        key: "{flake.id}",
+                                        class: if is_selected {
+                                            "cursor-pointer"
                                         } else {
-                                            button {
-                                                class: "text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors",
-                                                onclick: move |_| on_remove.call(flake.id),
-                                                "Remove"
+                                            "hover:bg-gray-800/40 cursor-pointer"
+                                        },
+                                        style: if is_selected {
+                                            "background-color: rgba(130, 105, 155, 0.32);"
+                                        } else {
+                                            "background-color: transparent;"
+                                        },
+                                        onclick: move |_| on_select_history_flake.call(flake.id),
+                                        td { class: "{theme::spacing::TABLE_CELL} text-sm text-white", "{flake.name}" }
+                                        td {
+                                            class: "{theme::spacing::TABLE_CELL} text-sm text-gray-300",
+                                            div {
+                                                class: "space-y-1",
+                                                p { class: "font-mono", "{flake.repo_url}" }
+                                                p { class: "text-[11px] text-sky-300 font-mono", "branch: {flake.branch}" }
+                                            }
+                                        }
+                                        td { class: "{theme::spacing::TABLE_CELL} text-sm text-gray-200", "{flake.system_count}" }
+                                        td { class: "{theme::spacing::TABLE_CELL} text-sm {theme::text::SECONDARY}", "{environments_label(&flake)}" }
+                                        td { class: "{theme::spacing::TABLE_CELL} text-sm text-gray-300 font-mono", "{latest_commit_label(&flake)}" }
+                                        td {
+                                            class: "{theme::spacing::TABLE_CELL} text-right",
+                                            div {
+                                                class: "inline-flex items-center gap-2",
+                                                button {
+                                                    class: "text-xs px-2 py-1 rounded transition-colors cf-action-link",
+                                                    onclick: move |evt| {
+                                                        evt.stop_propagation();
+                                                        on_edit.call(flake.id)
+                                                    },
+                                                    "Edit"
+                                                }
+                                                button {
+                                                    class: "text-xs text-blue-400 hover:text-blue-300 px-2 py-1 rounded hover:bg-blue-500/10 transition-colors",
+                                                    onclick: move |evt| {
+                                                        evt.stop_propagation();
+                                                        on_refresh.call(flake.id)
+                                                    },
+                                                    "🔄"
+                                                }
+                                                button {
+                                                    class: "text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors",
+                                                    onclick: move |evt| {
+                                                        evt.stop_propagation();
+                                                        on_remove.call(flake.id)
+                                                    },
+                                                    "Remove"
+                                                }
                                             }
                                         }
                                     }
@@ -750,20 +1170,30 @@ fn FlakesTable(
 #[component]
 fn FlakeCard(
     flake: FlakeListItem,
+    selected_history_flake_id: Option<i32>,
+    on_select_history_flake: EventHandler<i32>,
     on_remove: EventHandler<i32>,
     on_edit: EventHandler<i32>,
+    on_refresh: EventHandler<i32>,
 ) -> Element {
     let latest_commit = latest_commit_label(&flake);
+    let is_selected = selected_history_flake_id == Some(flake.id);
 
     rsx! {
         div {
-            class: "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden shadow-sm",
+            class: if is_selected {
+                "rounded-xl border border-blue-400/70 overflow-hidden shadow-sm ring-2 ring-blue-400/40 cursor-pointer"
+            } else {
+                "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden shadow-sm cursor-pointer"
+            },
+            onclick: move |_| on_select_history_flake.call(flake.id),
             div {
                 class: "px-6 py-4 border-b border-gray-800 flex items-center justify-between",
                 style: "background: linear-gradient(135deg, rgba(130, 105, 155, 0.42) 0%, rgba(17, 24, 39, 0.92) 100%);",
                 div {
                     h3 { class: "text-lg font-semibold text-white", "{flake.name}" }
                     p { class: "text-xs text-gray-300 mt-1 font-mono", "{flake.repo_url}" }
+                    p { class: "text-[11px] text-sky-300 mt-1 font-mono", "branch: {flake.branch}" }
                 }
             }
             div {
@@ -771,13 +1201,11 @@ fn FlakeCard(
                 div {
                     class: "flex flex-wrap items-center gap-2 text-xs",
                     span {
-                        class: "inline-flex px-2 py-1 rounded border text-gray-100",
-                        style: "background-color: #2B303B; border-color: #495264;",
+                        class: "inline-flex px-2 py-1 rounded border text-gray-100 cf-chip-slate",
                         "{flake.system_count} systems"
                     }
                     span {
-                        class: "inline-flex px-2 py-1 rounded border text-gray-100",
-                        style: "background-color: #23363A; border-color: #3D6870;",
+                        class: "inline-flex px-2 py-1 rounded border text-gray-100 cf-chip-teal",
                         "{flake.environments.len()} environments"
                     }
                 }
@@ -792,8 +1220,7 @@ fn FlakeCard(
                     } else {
                         for env in flake.environments.clone() {
                             span {
-                                class: "inline-flex px-2 py-1 text-xs rounded border text-blue-100",
-                                style: "background-color: #253449; border-color: #3E5B82;",
+                                class: "inline-flex px-2 py-1 text-xs rounded border text-blue-100 cf-chip-blue",
                                 "{env}"
                             }
                         }
@@ -811,9 +1238,11 @@ fn FlakeCard(
                     div {
                         class: "inline-flex items-center gap-2",
                         button {
-                            class: "text-xs px-2 py-1 rounded transition-colors",
-                            style: "color: #D6C3E8;",
-                            onclick: move |_| on_edit.call(flake.id),
+                            class: "text-xs px-2 py-1 rounded transition-colors cf-action-link",
+                            onclick: move |evt| {
+                                evt.stop_propagation();
+                                on_edit.call(flake.id)
+                            },
                             "Edit"
                         }
                         span {
@@ -825,14 +1254,27 @@ fn FlakeCard(
                     div {
                         class: "inline-flex items-center gap-2",
                         button {
-                            class: "text-xs px-2 py-1 rounded transition-colors",
-                            style: "color: #D6C3E8;",
-                            onclick: move |_| on_edit.call(flake.id),
+                            class: "text-xs px-2 py-1 rounded transition-colors cf-action-link",
+                            onclick: move |evt| {
+                                evt.stop_propagation();
+                                on_edit.call(flake.id)
+                            },
                             "Edit"
                         }
                         button {
+                            class: "text-xs text-blue-400 hover:text-blue-300 px-2 py-1 rounded hover:bg-blue-500/10 transition-colors",
+                            onclick: move |evt| {
+                                evt.stop_propagation();
+                                on_refresh.call(flake.id)
+                            },
+                            "🔄 Refresh"
+                        }
+                        button {
                             class: "text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors",
-                            onclick: move |_| on_remove.call(flake.id),
+                            onclick: move |evt| {
+                                evt.stop_propagation();
+                                on_remove.call(flake.id)
+                            },
                             "Remove"
                         }
                     }
@@ -847,8 +1289,39 @@ fn FlakeHistoryExplorer(
     flakes: Vec<FlakeListItem>,
     selected_flake_id: Signal<Option<i32>>,
     selected_commit_hash: Signal<Option<String>>,
+    timelines: Vec<FlakeTimeline>,
+    cve_scan_status: Signal<HashMap<String, String>>,
 ) -> Element {
-    let history = mock_flake_history();
+    use crate::hooks::websocket::{SystemEvalStatus, use_websocket_eval_stream};
+    let navigator = use_navigator();
+
+    let fallback_flake_id = flakes.first().map(|flake| flake.id).unwrap_or(0);
+    let active_flake_id = (*selected_flake_id.read()).unwrap_or(fallback_flake_id);
+
+    // Cache for loaded commit diffs
+    let loaded_diffs = use_signal(|| HashMap::<(i32, String), String>::new());
+    // Track current active commit hash to force re-render when diff loads
+    let current_commit_key = use_signal(|| (0i32, String::new()));
+
+    // Build only the active flake's commits for this render.
+    // Keep this non-memoized so newly fetched timeline props are reflected immediately.
+    let commits_vec = build_flake_commits(&timelines, active_flake_id);
+
+    // Only stream eval updates after an explicit commit selection.
+    // Auto-subscribing to the newest commit can flood the client on busy instances.
+    let active_commit_for_ws = selected_commit_hash
+        .read()
+        .as_ref()
+        .and_then(|hash| commits_vec.iter().find(|commit| &commit.hash == hash))
+        .filter(|commit| commit.total_system_count <= MAX_WS_STREAM_SYSTEMS)
+        .cloned();
+
+    // Connect to WebSocket for active commit's eval status (MUST be unconditional hook call)
+    let commit_id_str = active_commit_for_ws
+        .as_ref()
+        .map(|c| c.id.to_string())
+        .unwrap_or_else(|| "0".to_string());
+    let (_logs, system_status, _conn_state, _reconnect) = use_websocket_eval_stream(&commit_id_str);
 
     if flakes.is_empty() {
         return rsx! {
@@ -861,24 +1334,108 @@ fn FlakeHistoryExplorer(
         };
     }
 
-    let active_flake_id = selected_flake_id
-        .read()
-        .to_owned()
-        .unwrap_or_else(|| flakes[0].id);
     let active_flake = flakes
         .iter()
         .find(|flake| flake.id == active_flake_id)
         .cloned()
         .unwrap_or_else(|| flakes[0].clone());
-    let commits = history.get(&active_flake.id).cloned().unwrap_or_default();
 
     let active_commit = selected_commit_hash
         .read()
         .as_ref()
-        .and_then(|hash| commits.iter().find(|commit| &commit.hash == hash))
+        .and_then(|hash| commits_vec.iter().find(|commit| &commit.hash == hash))
         .map(|commit| commit.clone())
-        .or_else(|| commits.first().cloned());
+        .or_else(|| commits_vec.first().cloned());
+
+    // Load diff for the active commit if not already loaded
+    // We read the signal INSIDE use_effect so it tracks the dependency
+    {
+        let loaded_diffs = loaded_diffs.clone();
+        let current_key = current_commit_key.clone();
+
+        use_effect(move || {
+            // Read signals inside the effect so it re-runs when they change
+            let selected_hash = selected_commit_hash.read().clone();
+            let flake_id = active_flake.id;
+
+            if let Some(commit_hash) = &selected_hash {
+                let key = (flake_id, commit_hash.clone());
+                let already_loaded = loaded_diffs.read().contains_key(&key);
+
+                #[cfg(target_arch = "wasm32")]
+                console::log_1(
+                    &format!(
+                        "Effect running - hash: {}, loaded: {}",
+                        &commit_hash[..7.min(commit_hash.len())],
+                        already_loaded
+                    )
+                    .into(),
+                );
+
+                if !already_loaded {
+                    let commit_hash = commit_hash.clone();
+                    let flake_id = flake_id;
+                    let mut loaded_diffs_inner = loaded_diffs.clone();
+                    let mut current_key_inner = current_key.clone();
+
+                    #[cfg(target_arch = "wasm32")]
+                    console::log_1(
+                        &format!(
+                            "Fetching diff for {}...",
+                            &commit_hash[..7.min(commit_hash.len())]
+                        )
+                        .into(),
+                    );
+
+                    spawn(async move {
+                        match fetch_commit_diff(flake_id, &commit_hash).await {
+                            Ok(response) => {
+                                #[cfg(target_arch = "wasm32")]
+                                console::log_1(
+                                    &format!("Diff loaded! {} bytes", response.diff.len()).into(),
+                                );
+                                loaded_diffs_inner
+                                    .write()
+                                    .insert(key.clone(), response.diff);
+                                current_key_inner.set(key);
+                            }
+                            Err(e) => {
+                                #[cfg(target_arch = "wasm32")]
+                                console::log_1(&format!("Error: {}", e).into());
+                                loaded_diffs_inner.write().insert(
+                                    key.clone(),
+                                    format!("Error loading diff: {}\n\nCommit: {}", e, commit_hash),
+                                );
+                                current_key_inner.set(key);
+                            }
+                        }
+                    });
+                }
+            }
+        });
+    }
+
+    // Update active_commit with loaded diff if available
+    let active_commit = if let Some(commit) = active_commit.clone() {
+        let key = (active_flake.id, commit.hash.clone());
+        if let Some(diff) = loaded_diffs.read().get(&key) {
+            let mut commit = commit;
+            commit.diff = diff.clone();
+            // Calculate stats from the diff
+            let (files_changed, insertions, deletions) = diff_stats(&commit.diff);
+            commit.files_changed = files_changed;
+            commit.insertions = insertions;
+            commit.deletions = deletions;
+            Some(commit)
+        } else {
+            Some(commit)
+        }
+    } else {
+        None
+    };
+
     let active_repo = active_flake.repo_url.clone();
+    let history_title = format!("Git Commit History - {}", active_flake.name);
     let flake_sync_label = active_flake
         .last_synced_at
         .format("%Y-%m-%d %H:%M UTC")
@@ -886,33 +1443,7 @@ fn FlakeHistoryExplorer(
 
     rsx! {
         Card {
-            title: Some("Git Commit History".to_string()),
-            header_actions: Some(rsx! {
-                div {
-                    class: "flex items-center gap-2",
-                    label {
-                        class: "text-xs {theme::text::MUTED}",
-                        "Flake"
-                    }
-                    select {
-                        class: "rounded-md px-2 py-1 text-xs {theme::interactive::INPUT}",
-                        value: "{active_flake.id}",
-                        onchange: move |evt| {
-                            if let Ok(id) = evt.value().parse::<i32>() {
-                                selected_flake_id.set(Some(id));
-                                selected_commit_hash.set(None);
-                            }
-                        },
-                        for flake in flakes.iter() {
-                            option {
-                                key: "{flake.id}",
-                                value: "{flake.id}",
-                                "{flake.name}"
-                            }
-                        }
-                    }
-                }
-            }),
+            title: Some(history_title),
             children: rsx! {
                 div {
                     class: "space-y-3",
@@ -923,15 +1454,14 @@ fn FlakeHistoryExplorer(
                     div {
                         class: "cf-flakes-history-split",
                         div {
-                            class: "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden",
-                            style: "background: linear-gradient(180deg, #131B29 0%, #0F141D 100%);",
+                            class: "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden cf-history-timeline-bg",
                             div {
                                 class: "px-3 py-2 border-b {theme::surface::CARD_BORDER} text-xs uppercase tracking-wide text-gray-400",
                                 "Timeline"
                             }
                             div {
                                 class: "max-h-[68vh] overflow-y-auto",
-                                if commits.is_empty() {
+                                if commits_vec.is_empty() {
                                     p { class: "p-4 text-sm {theme::text::SECONDARY}", "No commits available." }
                                 } else {
                                     div {
@@ -942,14 +1472,16 @@ fn FlakeHistoryExplorer(
                                         }
                                         div {
                                             class: "space-y-3 relative",
-                                            for commit in commits.iter() {
+                                            for commit in commits_vec.iter() {
                                                 {
+                                                    let commit_id_for_modal = commit.id;
                                                     let is_active = active_commit
                                                         .as_ref()
                                                         .map(|value| value.hash == commit.hash)
                                                         .unwrap_or(false);
                                                     let short_hash = commit.hash.chars().take(7).collect::<String>();
                                                     let commit_time = commit.committed_at.format("%b %d %H:%M").to_string();
+                                                    let (message_title, message_secondary) = commit_message_lines(&commit.message, 120);
                                                     let commit_for_select = commit.hash.clone();
                                                     let commit_card_style = if is_active {
                                                         "background-color: #1B2940; border-color: #7C67A4;"
@@ -1009,22 +1541,60 @@ fn FlakeHistoryExplorer(
                                                                 class: "w-full justify-self-start rounded-xl border px-4 py-3 text-left transition",
                                                                 style: "{commit_card_style}",
                                                                 onclick: move |_| selected_commit_hash.set(Some(commit_for_select.clone())),
-                                                                p { class: "text-sm text-white font-semibold text-left truncate", style: "text-align: left;", "{commit.message}" }
+                                                                p {
+                                                                    class: "text-sm text-white font-semibold text-left leading-snug break-words",
+                                                                    style: "text-align: left; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;",
+                                                                    "{message_title}"
+                                                                }
+                                                                if let Some(secondary) = message_secondary {
+                                                                    p {
+                                                                        class: "mt-1 text-xs text-gray-300 leading-snug break-words",
+                                                                        style: "display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden;",
+                                                                        "{secondary}"
+                                                                    }
+                                                                }
                                                                 div {
                                                                     class: "mt-2 flex flex-wrap items-center gap-2 text-[10px]",
                                                                     span {
-                                                                        class: "inline-flex items-center px-2.5 py-1 rounded border font-mono leading-none",
-                                                                        style: "background-color: rgba(130, 105, 155, 0.22); border-color: #82699B; color: #E5D8F3;",
+                                                                        class: "inline-flex items-center px-2.5 py-1 rounded border font-mono leading-none cf-chip-violet",
                                                                         "{short_hash}"
                                                                     }
                                                                     span {
-                                                                        class: "inline-flex items-center px-2.5 py-1 rounded border text-gray-100 leading-none",
-                                                                        style: "background-color: #2B303B; border-color: #495264;",
+                                                                        class: "inline-flex items-center px-2.5 py-1 rounded border text-gray-100 leading-none cf-chip-slate",
                                                                         "{commit.author}"
+                                                                    }
+                                                                    if commit.evaluation_error_message.is_some() {
+                                                                        span {
+                                                                            class: "px-1.5 py-0.5 rounded bg-red-500/30 text-red-300 text-[10px]",
+                                                                            title: "This commit has evaluation errors",
+                                                                            "❌ eval error"
+                                                                        }
                                                                     }
                                                                     span {
                                                                         class: "text-[10px] text-gray-400",
                                                                         "{commit_time}"
+                                                                    }
+                                                                    button {
+                                                                        class: "px-2 py-1 rounded border text-[10px] hover:opacity-80 transition-opacity cursor-pointer",
+                                                                        style: "{eval_badge_style(commit.evaluation_status.as_deref())}",
+                                                                        title: "Open Evaluations view",
+                                                                        onclick: move |evt| {
+                                                                            evt.stop_propagation();
+                                                                            navigator.push(Route::EvaluationsCommitView { commit_id: commit_id_for_modal });
+                                                                        },
+                                                                        "eval: {eval_badge_label(commit.evaluation_status.as_deref())}"
+                                                                    }
+                                                                    if let Some(build_status) = commit.build_status.clone() {
+                                                                        button {
+                                                                            class: "px-2 py-1 rounded border text-[10px]",
+                                                                            style: "{build_badge_style(&build_status)}",
+                                                                            title: "Open Builds view",
+                                                                            onclick: move |evt| {
+                                                                                evt.stop_propagation();
+                                                                                navigator.push(Route::BuildsView {});
+                                                                            },
+                                                                            "build: {build_badge_label(&build_status)}"
+                                                                        }
                                                                     }
                                                                 }
                                                             }
@@ -1041,24 +1611,240 @@ fn FlakeHistoryExplorer(
                         div {
                             class: "rounded-xl border {theme::surface::CARD_BORDER} bg-gray-900/50 overflow-hidden",
                             if let Some(commit) = active_commit {
+                                {
+                                    let (message_title, message_secondary) =
+                                        commit_message_lines(&commit.message, 160);
+                                    rsx! {
+                                        div {
+                                            class: "px-4 py-3 border-b {theme::surface::CARD_BORDER} space-y-2",
+                                            p {
+                                                class: "text-base text-white font-semibold text-left leading-snug whitespace-pre-wrap break-words",
+                                                "{message_title}"
+                                            }
+                                            if let Some(secondary) = message_secondary {
+                                                p {
+                                                    class: "text-sm text-gray-300 text-left leading-snug whitespace-pre-wrap break-words",
+                                                    "{secondary}"
+                                                }
+                                            }
+                                            div {
+                                                class: "flex flex-wrap items-center gap-2 text-xs",
+                                                span {
+                                                    class: "font-mono px-2.5 py-1 rounded border cf-chip-violet",
+                                                    "{commit.hash}"
+                                                }
+                                                span { class: "px-2.5 py-1 rounded bg-gray-800 text-gray-300", "{commit.author}" }
+                                                span {
+                                                    class: "px-2 py-1 rounded bg-gray-800 text-gray-300",
+                                                    {commit.committed_at.format("%Y-%m-%d %H:%M UTC").to_string()}
+                                                }
+                                                span { class: "px-2 py-1 rounded bg-blue-500/20 text-blue-200", "{commit.files_changed} files" }
+                                                span { class: "px-2 py-1 rounded bg-emerald-500/20 text-emerald-200", "+{commit.insertions}" }
+                                                span { class: "px-2 py-1 rounded bg-red-500/20 text-red-200", "-{commit.deletions}" }
+                                                span {
+                                                    class: "px-2 py-1 rounded border",
+                                                    style: "{eval_badge_style(commit.evaluation_status.as_deref())}",
+                                                    title: "Open Evaluations view",
+                                                    onclick: move |_| {
+                                                        navigator.push(Route::EvaluationsCommitView { commit_id: commit.id });
+                                                    },
+                                                    "eval: {eval_badge_label(commit.evaluation_status.as_deref())}"
+                                                }
+                                                if let Some(build_status) = commit.build_status.clone() {
+                                                    button {
+                                                        class: "px-2 py-1 rounded border",
+                                                        style: "{build_badge_style(&build_status)}",
+                                                        title: "Open Builds view",
+                                                        onclick: move |_| {
+                                                            navigator.push(Route::BuildsView {});
+                                                        },
+                                                        "build: {build_badge_label(&build_status)}"
+                                                    }
+                                                }
+                                                span { class: "px-2 py-1 rounded bg-slate-700/70 text-slate-200", "{commit.total_system_count} configs" }
+                                            }
+                                            // Show evaluation error message if present
+                                            if let Some(error_msg) = commit.evaluation_error_message.as_ref() {
+                                                div {
+                                                    class: "mt-3 px-3 py-2 rounded border border-red-500/50 bg-red-900/20",
+                                                    p {
+                                                        class: "text-xs font-semibold text-red-300 mb-1",
+                                                        "❌ Evaluation Error"
+                                                    }
+                                                    pre {
+                                                        class: "text-xs text-red-200 font-mono whitespace-pre-wrap break-words max-h-48 overflow-y-auto",
+                                                        "{error_msg}"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                                 div {
-                                    class: "px-4 py-3 border-b {theme::surface::CARD_BORDER} space-y-2",
-                                    p { class: "text-base text-white font-semibold text-left", "{commit.message}" }
-                                    div {
-                                        class: "flex flex-wrap items-center gap-2 text-xs",
-                                        span {
-                                            class: "font-mono px-2.5 py-1 rounded border",
-                                            style: "background-color: rgba(130, 105, 155, 0.22); border-color: #82699B; color: #E5D8F3;",
-                                            "{commit.hash}"
+                                    class: "px-4 pb-4 space-y-2",
+                                    p { class: "text-xs uppercase tracking-wide text-gray-400", "nixosConfigurations at this commit" }
+                                    {
+                                        let visible_configs: Vec<String> = if commit.systems.is_empty() {
+                                            commit
+                                                .system_paths
+                                                .iter()
+                                                .map(|detail| detail.config_name.clone())
+                                                .take(MAX_SYSTEMS_STORED_PER_COMMIT)
+                                                .collect()
+                                        } else {
+                                            commit.systems.clone()
+                                        };
+                                        rsx! {
+                                    if visible_configs.is_empty() {
+                                        p { class: "text-sm text-gray-500", "No nixosConfigurations discovered for this commit." }
+                                    } else {
+                                        div {
+                                            class: "space-y-2",
+                                            for (idx, config_name) in preview_systems(&visible_configs).iter().enumerate() {
+                                                {
+                                                    let status = system_status.read().get(config_name).cloned();
+                                                    let chip_style = system_chip_style(status.as_ref());
+                                                    let chip_class = if status == Some(SystemEvalStatus::Evaluating) {
+                                                        "px-2 py-1 rounded border text-xs font-mono animate-pulse"
+                                                    } else {
+                                                        "px-2 py-1 rounded border text-xs font-mono"
+                                                    };
+                                                    let path_detail = commit
+                                                        .system_paths
+                                                        .iter()
+                                                        .find(|path| path.config_name == *config_name || format!("{} [CF system]", path.config_name) == *config_name)
+                                                        .cloned();
+                                                    rsx! {
+                                                        div {
+                                                            key: "{idx}-{config_name}",
+                                                            class: "rounded border border-slate-700/70 bg-slate-900/40 p-2 space-y-1",
+                                                            div { class: "flex flex-wrap items-center gap-2",
+                                                                span {
+                                                                    class: "{chip_class}",
+                                                                    style: "{chip_style}",
+                                                                    "{truncate_system_label(config_name)}"
+                                                                }
+                                                                if let Some(detail) = path_detail.as_ref() {
+                                                                    if detail.is_cf_system {
+                                                                        span { class: "text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-200 border border-blue-500/40", "CF system" }
+                                                                    }
+
+                                                                    {
+                                                                        let scan_key = format!("{}::{}", active_flake_id, detail.config_name);
+                                                                        let current_scan_status = cve_scan_status.read().get(&scan_key).cloned();
+                                                                        let disabled_reason = detail.cve_scan_blocked_reason.clone().unwrap_or_else(|| "CVE scan eligibility unavailable".to_string());
+                                                                        let can_trigger_scan = detail.cve_scan_eligible;
+                                                                        rsx! {
+                                                                            button {
+                                                                                class: "text-[10px] uppercase tracking-wide px-2 py-1 rounded border border-amber-500/50 bg-amber-500/10 text-amber-200 hover:bg-amber-500/20 disabled:opacity-60 disabled:cursor-not-allowed",
+                                                                                disabled: !can_trigger_scan,
+                                                                                title: if can_trigger_scan {
+                                                                                    Some("Run CVE scan immediately")
+                                                                                } else {
+                                                                                    Some(disabled_reason.as_str())
+                                                                                },
+                                                                                onclick: {
+                                                                                    let config_name = detail.config_name.clone();
+                                                                                    move |_| {
+                                                                                        if !can_trigger_scan {
+                                                                                            return;
+                                                                                        }
+
+                                                                                        let key = format!("{}::{}", active_flake_id, config_name.clone());
+                                                                                        let request_config_name = config_name.clone();
+                                                                                        cve_scan_status.write().insert(key.clone(), "queued".to_string());
+
+                                                                                        spawn(async move {
+                                                                                            match trigger_flake_config_cve_scan(active_flake_id, &request_config_name).await {
+                                                                                                Ok(triggered) => {
+                                                                                                    cve_scan_status.write().insert(key.clone(), "running".to_string());
+                                                                                                    for _ in 0..25 {
+                                                                                                        match fetch_cve_scan_status(&triggered.scan_id).await {
+                                                                                                            Ok(status) => {
+                                                                                                                let normalized = status.status.to_lowercase();
+                                                                                                                if normalized == "completed" {
+                                                                                                                    cve_scan_status.write().insert(key.clone(), "completed".to_string());
+                                                                                                                    break;
+                                                                                                                }
+                                                                                                                if normalized == "failed" {
+                                                                                                                    cve_scan_status.write().insert(key.clone(), "failed".to_string());
+                                                                                                                    break;
+                                                                                                                }
+                                                                                                                cve_scan_status.write().insert(key.clone(), "running".to_string());
+                                                                                                            }
+                                                                                                            Err(_) => {
+                                                                                                                cve_scan_status.write().insert(key.clone(), "status_error".to_string());
+                                                                                                                break;
+                                                                                                            }
+                                                                                                        }
+
+                                                                                                        use gloo_timers::future::TimeoutFuture;
+                                                                                                        TimeoutFuture::new(1500).await;
+                                                                                                    }
+                                                                                                }
+                                                                                                Err(_) => {
+                                                                                                    cve_scan_status.write().insert(key.clone(), "trigger_failed".to_string());
+                                                                                                }
+                                                                                            }
+                                                                                        });
+                                                                                    }
+                                                                                },
+                                                                                "Run CVE Scan"
+                                                                            }
+                                                                            if let Some(scan_state) = current_scan_status {
+                                                                                span {
+                                                                                    class: "text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-200 border border-slate-600",
+                                                                                    "scan: {scan_state}"
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                            if let Some(detail) = path_detail {
+                                                                p { class: "text-[11px] text-slate-300 break-all",
+                                                                    span { class: "text-slate-500", "expected path: " }
+                                                                    {detail.expected_store_path.unwrap_or_else(|| "unavailable".to_string())}
+                                                                }
+                                                                if detail.mapped_host_count > 1 {
+                                                                    p { class: "text-[11px] text-blue-200",
+                                                                        "{detail.mapped_host_count} mapped hosts; showing most recent host report."
+                                                                    }
+                                                                }
+                                                                p { class: "text-[11px] text-slate-300 break-all",
+                                                                    span { class: "text-slate-500", "current path" }
+                                                                    if let Some(hostname) = detail.cf_hostname.as_ref() {
+                                                                        span { class: "text-slate-500", " ({hostname}): " }
+                                                                    } else {
+                                                                        span { class: "text-slate-500", ": " }
+                                                                    }
+                                                                    {detail.current_store_path.unwrap_or_else(|| "not reported".to_string())}
+                                                                }
+                                                            } else {
+                                                                p { class: "text-[11px] text-slate-400", "path details unavailable" }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         }
-                                        span { class: "px-2.5 py-1 rounded bg-gray-800 text-gray-300", "{commit.author}" }
-                                        span {
-                                            class: "px-2 py-1 rounded bg-gray-800 text-gray-300",
-                                            {commit.committed_at.format("%Y-%m-%d %H:%M UTC").to_string()}
+                                        if commit.total_system_count > visible_configs.len() {
+                                            p {
+                                                class: "text-xs text-amber-300",
+                                                "Showing {visible_configs.len()} of {commit.total_system_count} configurations to keep the UI responsive."
+                                            }
+                                        } else if commit.total_system_count > MAX_SYSTEM_CHIPS_RENDER {
+                                            p {
+                                                class: "text-xs text-amber-300",
+                                                "Showing first {MAX_SYSTEM_CHIPS_RENDER} of {commit.total_system_count} configurations to keep the UI responsive."
+                                            }
                                         }
-                                        span { class: "px-2 py-1 rounded bg-blue-500/20 text-blue-200", "{commit.files_changed} files" }
-                                        span { class: "px-2 py-1 rounded bg-emerald-500/20 text-emerald-200", "+{commit.insertions}" }
-                                        span { class: "px-2 py-1 rounded bg-red-500/20 text-red-200", "-{commit.deletions}" }
+                                        p {
+                                            class: "text-xs text-slate-400",
+                                            "Expected path comes from commit derivation data; current path is host-scoped and shown for the selected mapped CF host (most recent report when multiple hosts share the config)."
+                                        }
+                                    }
+                                        }
                                     }
                                 }
                                 div {
@@ -1080,6 +1866,16 @@ fn FlakeHistoryExplorer(
 
 #[component]
 fn FriendlyDiffViewer(diff: String) -> Element {
+    // Show loading message if diff is empty
+    if diff.is_empty() {
+        return rsx! {
+            div {
+                class: "text-sm text-gray-400 p-4 text-center",
+                "Loading diff..."
+            }
+        };
+    }
+
     let parsed_files = parse_unified_diff(&diff);
     if parsed_files.is_empty() {
         return rsx! {
@@ -1090,44 +1886,138 @@ fn FriendlyDiffViewer(diff: String) -> Element {
         };
     }
 
+    let mut selected_file_index = use_signal(|| 0usize);
+    let mut show_file_list = use_signal(|| true);
+    let file_count = parsed_files.len();
+    let is_file_list_open = *show_file_list.read();
+    let active_index = (*selected_file_index.read()).min(file_count.saturating_sub(1));
+    let active_file = parsed_files.get(active_index).cloned();
+    let (total_insertions, total_deletions) = parsed_files
+        .iter()
+        .map(diff_file_stats)
+        .fold((0usize, 0usize), |(ia, da), (ib, db)| (ia + ib, da + db));
+
     rsx! {
         div {
             class: "space-y-4",
-            for file in parsed_files {
+            tabindex: "0",
+            onkeydown: move |evt| {
+                let key = evt.key();
+                if file_count == 0 {
+                    return;
+                }
+                if key == Key::ArrowDown {
+                    evt.prevent_default();
+                    let next = ((*selected_file_index.read()) + 1).min(file_count - 1);
+                    selected_file_index.set(next);
+                } else if key == Key::ArrowUp {
+                    evt.prevent_default();
+                    let next = (*selected_file_index.read()).saturating_sub(1);
+                    selected_file_index.set(next);
+                }
+            },
+            div {
+                class: "rounded-lg border border-gray-700 bg-gray-900/70",
                 div {
-                    key: "{file.new_path}",
-                    class: "rounded-lg border border-gray-700 overflow-hidden",
+                    class: "px-3 py-2 border-b border-gray-700 flex items-center justify-between gap-3",
                     div {
-                        class: "px-3 py-2 border-b border-gray-700 bg-gray-900 flex items-center justify-between gap-2",
-                        p { class: "text-xs font-mono text-gray-300 truncate", "{file.old_path} -> {file.new_path}" }
-                        span { class: "text-[10px] uppercase tracking-wide text-gray-500", "{file.language}" }
+                        class: "flex flex-wrap items-center gap-2 text-xs",
+                        span { class: "px-2 py-1 rounded bg-blue-500/20 text-blue-200", "{file_count} files changed" }
+                        span { class: "px-2 py-1 rounded bg-emerald-500/20 text-emerald-200", "+{total_insertions}" }
+                        span { class: "px-2 py-1 rounded bg-red-500/20 text-red-200", "-{total_deletions}" }
                     }
+                    button {
+                        class: "text-xs px-2 py-1 rounded border border-gray-600 text-gray-300 hover:bg-gray-800",
+                        onclick: move |_| show_file_list.set(!is_file_list_open),
+                        if is_file_list_open { "Hide files" } else { "Show files" }
+                    }
+                }
+                if is_file_list_open {
                     div {
-                        class: "bg-gray-950",
-                        for line in file.lines {
-                            div {
-                                class: "grid",
-                                style: "grid-template-columns: 3.2rem 3.2rem 1.5rem minmax(0, 1fr);",
-                                class: "{line.class_name}",
-                                div { class: "px-2 py-0.5 text-[10px] text-gray-500 text-right border-r border-gray-800", "{line.old_number.map(|value| value.to_string()).unwrap_or_default()}" }
-                                div { class: "px-2 py-0.5 text-[10px] text-gray-500 text-right border-r border-gray-800", "{line.new_number.map(|value| value.to_string()).unwrap_or_default()}" }
-                                div { class: "px-1 py-0.5 text-[11px] text-gray-400 border-r border-gray-800", "{line.prefix}" }
-                                div {
-                                    class: if line.is_hunk_header {
-                                        "px-2 py-0.5 text-[11px] font-mono text-sky-300"
-                                    } else {
-                                        "px-2 py-0.5 text-[11px] font-mono text-gray-200 hljs language-{file.language}"
-                                    },
-                                    if line.is_hunk_header {
-                                        "{line.content}"
-                                    } else {
-                                        span { dangerous_inner_html: "{highlight_diff_fragment(file.language, &line.content)}" }
+                        class: "max-h-52 overflow-y-auto divide-y divide-gray-800",
+                        for (idx, file) in parsed_files.iter().enumerate() {
+                            {
+                                let (insertions, deletions) = diff_file_stats(file);
+                                let file_label = diff_file_label(file);
+                                let is_active = idx == active_index;
+                                rsx! {
+                                    button {
+                                        key: "{file.old_path}->{file.new_path}",
+                                        class: if is_active {
+                                            "w-full text-left px-3 py-2 border-l-2 border-violet-300"
+                                        } else {
+                                            "w-full text-left px-3 py-2 border-l-2 border-transparent hover:bg-gray-800/70"
+                                        },
+                                        style: if is_active {
+                                            "background-color: rgba(130, 105, 155, 0.28);"
+                                        } else {
+                                            "background-color: transparent;"
+                                        },
+                                        onclick: move |_| selected_file_index.set(idx),
+                                        div {
+                                            class: "flex items-center justify-between gap-2",
+                                            p { class: "text-xs font-mono text-gray-200 truncate", "{file_label}" }
+                                            div {
+                                                class: "flex items-center gap-2 text-[11px]",
+                                                span { class: "text-emerald-300", "+{insertions}" }
+                                                span { class: "text-red-300", "-{deletions}" }
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
                     }
                 }
+            }
+
+            if let Some(file) = active_file {
+                {
+                    let file_label = diff_file_label(&file);
+                    let (insertions, deletions) = diff_file_stats(&file);
+                    rsx! {
+                        div {
+                            class: "rounded-lg border border-gray-700 overflow-hidden",
+                            div {
+                                class: "px-3 py-2 border-b border-gray-700 bg-gray-900 flex items-center justify-between gap-2",
+                                p { class: "text-xs font-mono text-gray-300 truncate", "{file_label}" }
+                                div {
+                                    class: "flex items-center gap-2",
+                                    span { class: "text-[10px] uppercase tracking-wide text-gray-500", "{file.language}" }
+                                    span { class: "text-[10px] text-emerald-300", "+{insertions}" }
+                                    span { class: "text-[10px] text-red-300", "-{deletions}" }
+                                }
+                            }
+                            div {
+                                class: "bg-gray-950",
+                                for line in file.lines {
+                                    div {
+                                        class: "grid",
+                                        style: "grid-template-columns: 3.2rem 3.2rem 1.5rem minmax(0, 1fr);",
+                                        class: "{line.class_name}",
+                                        div { class: "px-2 py-0.5 text-[10px] text-gray-500 text-right border-r border-gray-800", "{line.old_number.map(|value| value.to_string()).unwrap_or_default()}" }
+                                        div { class: "px-2 py-0.5 text-[10px] text-gray-500 text-right border-r border-gray-800", "{line.new_number.map(|value| value.to_string()).unwrap_or_default()}" }
+                                        div { class: "px-1 py-0.5 text-[11px] text-gray-400 border-r border-gray-800", "{line.prefix}" }
+                                        div {
+                                            class: if line.is_hunk_header {
+                                                "px-2 py-0.5 text-[11px] font-mono text-sky-300"
+                                            } else {
+                                                "px-2 py-0.5 text-[11px] font-mono text-gray-200 hljs language-{file.language}"
+                                            },
+                                            if line.is_hunk_header {
+                                                "{line.content}"
+                                            } else {
+                                                span { dangerous_inner_html: "{highlight_diff_fragment(file.language, &line.content)}" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                p { class: "text-sm text-gray-400", "No file diff selected." }
             }
         }
     }
@@ -1137,13 +2027,22 @@ fn FriendlyDiffViewer(diff: String) -> Element {
 fn AddFlakeForm(
     draft: Signal<NewFlakeDraft>,
     error: Signal<Option<String>>,
+    show_onboarding_callouts: bool,
     on_submit: EventHandler<()>,
     on_cancel: EventHandler<()>,
 ) -> Element {
+    let mut show_name_callout = use_signal(|| show_onboarding_callouts);
+    let mut show_repo_callout = use_signal(|| show_onboarding_callouts);
+    let mut show_branch_callout = use_signal(|| show_onboarding_callouts);
+
     rsx! {
-        Card {
-            title: Some("Register Flake".to_string()),
-            children: rsx! {
+        div {
+            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
+            onclick: move |_| on_cancel.call(()),
+            div {
+                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6 cf-modal-panel-44",
+                onclick: |evt| evt.stop_propagation(),
+                h3 { class: "text-lg font-semibold text-white mb-1", "Register Flake" }
                 div {
                     class: "space-y-4",
                     p {
@@ -1153,31 +2052,128 @@ fn AddFlakeForm(
                     div {
                         class: "grid grid-cols-1 md:grid-cols-2 gap-4",
                         label {
-                            class: "space-y-2",
+                            class: "relative block space-y-2 overflow-visible",
                             span { class: "text-xs uppercase tracking-wide text-gray-500", "Flake Name" }
                             input {
                                 class: "w-full rounded-lg px-3 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
                                 value: "{draft.read().name}",
                                 placeholder: "prod-core",
+                                onfocus: move |_| show_name_callout.set(false),
                                 oninput: move |evt| {
                                     let mut next = draft.read().clone();
                                     next.name = evt.value();
                                     draft.set(next);
+                                    show_name_callout.set(false);
                                 },
+                            }
+                            if show_name_callout() && draft.read().name.trim().is_empty() {
+                                div {
+                                    "data-testid": "setup-coach-flake-field-name",
+                                    style: "position:absolute; left:0; top:calc(100% + 8px); width:min(340px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                    div {
+                                        style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                    }
+                                    p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
+                                    p { style: "margin:2px 0 0 0;", "Use a stable name admins will recognize (for example: prod-core or edge-fleet)." }
+                                }
                             }
                         }
                         label {
-                            class: "space-y-2",
+                            class: "relative block space-y-2 overflow-visible",
                             span { class: "text-xs uppercase tracking-wide text-gray-500", "Repository URL" }
                             input {
                                 class: "w-full rounded-lg px-3 py-2 text-sm font-mono {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
                                 value: "{draft.read().repo_url}",
                                 placeholder: "https://github.com/org/repo",
+                                onfocus: move |_| show_repo_callout.set(false),
                                 oninput: move |evt| {
                                     let mut next = draft.read().clone();
                                     next.repo_url = evt.value();
                                     draft.set(next);
+                                    show_repo_callout.set(false);
                                 },
+                            }
+                            if show_repo_callout()
+                                && !draft.read().name.trim().is_empty()
+                                && draft.read().repo_url.trim().is_empty()
+                            {
+                                div {
+                                    "data-testid": "setup-coach-flake-field-repo",
+                                    style: "position:absolute; left:0; top:calc(100% + 8px); width:min(340px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                    div {
+                                        style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                    }
+                                    p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
+                                    p { style: "margin:2px 0 0 0;", "Point to the Git repository that contains your flake outputs for systems to deploy." }
+                                }
+                            }
+                        }
+                        label {
+                            class: "relative block space-y-2 overflow-visible",
+                            span { class: "text-xs uppercase tracking-wide text-gray-500", "Branch (optional)" }
+                            input {
+                                class: "w-full rounded-lg px-3 py-2 text-sm font-mono {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
+                                value: "{draft.read().branch}",
+                                placeholder: "main",
+                                onfocus: move |_| show_branch_callout.set(false),
+                                oninput: move |evt| {
+                                    let mut next = draft.read().clone();
+                                    next.branch = evt.value();
+                                    draft.set(next);
+                                    show_branch_callout.set(false);
+                                },
+                            }
+                            if show_branch_callout()
+                                && !draft.read().name.trim().is_empty()
+                                && !draft.read().repo_url.trim().is_empty()
+                                && draft.read().branch.trim().is_empty()
+                            {
+                                div {
+                                    "data-testid": "setup-coach-flake-field-branch",
+                                    style: "position:absolute; left:0; top:calc(100% + 8px); width:min(340px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
+                                    div {
+                                        style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
+                                    }
+                                    p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
+                                    p { style: "margin:2px 0 0 0;", "Optional: pick a branch if deployments should track something other than the repo default." }
+                                }
+                            }
+                        }
+                        label {
+                            class: "space-y-2 block md:col-span-2",
+                            span { class: "text-xs uppercase tracking-wide text-gray-500", "Build Scope" }
+                            select {
+                                class: "w-full rounded-lg px-3 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
+                                value: "{draft.read().build_scope}",
+                                onchange: move |evt| {
+                                    let mut next = draft.read().clone();
+                                    next.build_scope = evt.value();
+                                    draft.set(next);
+                                },
+                                option { value: "cf_systems_only", "Only Crystal Forge systems" }
+                                option { value: "all_configs", "All nixosConfigurations in flake" }
+                            }
+                            p {
+                                class: "text-xs {theme::text::SECONDARY}",
+                                "Choose whether Crystal Forge should only build configurations mapped to managed systems or every configuration exported by the flake."
+                            }
+                        }
+                        FlakeCredentialFields {
+                            credential_type: draft.read().credential_type.clone(),
+                            credential_username: draft.read().credential_username.clone(),
+                            credential_secret: draft.read().credential_secret.clone(),
+                            credential_ssh_username: draft.read().credential_ssh_username.clone(),
+                            has_existing_secret: false,
+                            on_change: move |(field, value): (String, String)| {
+                                let mut next = draft.read().clone();
+                                match field.as_str() {
+                                    "credential_type" => next.credential_type = value,
+                                    "credential_username" => next.credential_username = value,
+                                    "credential_secret" => next.credential_secret = value,
+                                    "credential_ssh_username" => next.credential_ssh_username = value,
+                                    _ => {}
+                                }
+                                draft.set(next);
                             }
                         }
                     }
@@ -1207,46 +2203,230 @@ fn AddFlakeForm(
 fn RemoveFlakeDialog(
     flake_name: String,
     system_count: usize,
-    on_confirm: EventHandler<()>,
+    on_confirm: EventHandler<(bool, bool)>, // (hard_delete, cascade)
     on_cancel: EventHandler<()>,
 ) -> Element {
-    let warning = if system_count == 0 {
-        "This removes the flake from the registry. Related commits are deleted by cascade."
-            .to_string()
+    let mut hard_delete = use_signal(|| false);
+    let mut cascade = use_signal(|| false);
+    let mut confirm_text = use_signal(|| String::new());
+    let mut deleting = use_signal(|| false);
+
+    let has_dependencies = system_count > 0;
+    let needs_cascade = has_dependencies && !cascade();
+    let needs_hard_confirm = hard_delete();
+    let can_proceed = if needs_hard_confirm {
+        confirm_text() == "DELETE"
     } else {
-        format!("This flake is linked to {system_count} systems and cannot be removed.")
+        true
     };
 
     rsx! {
         div {
-            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4",
-            style: "position: fixed; inset: 0; z-index: 60; width: 100vw; height: 100vh; backdrop-filter: blur(6px);",
-            onclick: move |_| on_cancel.call(()),
+            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
+            onclick: move |_| {
+                if !deleting() {
+                    on_cancel.call(())
+                }
+            },
             div {
-                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6",
-                style: "width: 100%; max-width: 30rem;",
+                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6 cf-modal-panel-34",
                 onclick: |evt| evt.stop_propagation(),
+
+                // Header
                 h3 {
                     class: "text-lg font-semibold text-white mb-2",
-                    "Remove flake {flake_name}?"
+                    "Delete flake {flake_name}?"
                 }
-                p {
-                    class: "text-sm {theme::text::SECONDARY} mb-6",
-                    "{warning}"
+
+                // Warning message
+                if has_dependencies {
+                    div {
+                        class: "mb-4 p-3 rounded-lg bg-amber-500/10 border border-amber-500/30",
+                        div {
+                            class: "flex items-start gap-2",
+                            svg {
+                                class: "w-5 h-5 text-amber-400 shrink-0 mt-0.5",
+                                fill: "none",
+                                stroke: "currentColor",
+                                view_box: "0 0 24 24",
+                                path {
+                                    stroke_linecap: "round",
+                                    stroke_linejoin: "round",
+                                    stroke_width: "2",
+                                    d: "M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
+                                }
+                            }
+                            div {
+                                p {
+                                    class: "text-sm font-medium text-amber-200",
+                                    "This flake is linked to {system_count} system(s)"
+                                }
+                                p {
+                                    class: "text-xs text-amber-300/80 mt-1",
+                                    "Enable cascade delete to remove all related evaluations, builds, and deployments"
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    p {
+                        class: "text-sm {theme::text::SECONDARY} mb-4",
+                        "This will soft-delete the flake (can be recovered). Related commits are retained."
+                    }
                 }
+
+                // Delete options
+                div {
+                    class: "space-y-3 mb-6",
+
+                    // Cascade checkbox (only if has dependencies)
+                    if has_dependencies {
+                        label {
+                            class: "flex items-start gap-3 cursor-pointer",
+                            input {
+                                r#type: "checkbox",
+                                class: "mt-1 w-4 h-4 rounded border-gray-600 bg-gray-800 text-violet-500 focus:ring-violet-500 focus:ring-offset-gray-900",
+                                checked: cascade(),
+                                onchange: move |evt| cascade.set(evt.checked())
+                            }
+                            div {
+                                span {
+                                    class: "text-sm font-medium text-gray-200",
+                                    "Also delete all evaluations, builds, and deployments (cascade)"
+                                }
+                                p {
+                                    class: "text-xs text-gray-400 mt-0.5",
+                                    "This will permanently remove all related data"
+                                }
+                            }
+                        }
+                    }
+
+                    // Hard delete checkbox
+                    label {
+                        class: "flex items-start gap-3 cursor-pointer",
+                        input {
+                            r#type: "checkbox",
+                            class: "mt-1 w-4 h-4 rounded border-gray-600 bg-gray-800 text-red-500 focus:ring-red-500 focus:ring-offset-gray-900",
+                            checked: hard_delete(),
+                            onchange: move |evt| {
+                                hard_delete.set(evt.checked());
+                                if !evt.checked() {
+                                    confirm_text.set(String::new());
+                                }
+                            }
+                        }
+                        div {
+                            span {
+                                class: "text-sm font-medium text-gray-200",
+                                "Permanently delete (hard delete)"
+                            }
+                            p {
+                                class: "text-xs text-gray-400 mt-0.5",
+                                "Cannot be undone. Default is soft delete (recoverable)"
+                            }
+                        }
+                    }
+                }
+
+                // Hard delete confirmation input
+                if hard_delete() {
+                    div {
+                        class: "mb-6 p-4 rounded-lg bg-red-500/10 border border-red-500/30",
+                        p {
+                            class: "text-sm font-medium text-red-200 mb-2",
+                            "⚠️ This will PERMANENTLY delete \"{flake_name}\" and cannot be undone."
+                        }
+                        p {
+                            class: "text-xs text-red-300/80 mb-3",
+                            "Type DELETE to confirm:"
+                        }
+                        input {
+                            class: "w-full rounded-lg px-3 py-2 text-sm font-mono bg-gray-800 border border-gray-600 focus:border-red-500 focus:ring-1 focus:ring-red-500 text-white",
+                            r#type: "text",
+                            placeholder: "DELETE",
+                            value: "{confirm_text()}",
+                            oninput: move |evt| confirm_text.set(evt.value())
+                        }
+                    }
+                }
+
+                // Buttons
                 div {
                     class: "flex gap-3",
                     button {
                         class: "flex-1 px-4 py-2 rounded-lg font-medium text-sm transition-colors bg-gray-700 hover:bg-gray-600 text-white",
+                        disabled: deleting(),
                         onclick: move |_| on_cancel.call(()),
                         "Cancel"
                     }
-                    if system_count == 0 {
-                        button {
-                            class: "flex-1 px-4 py-2 rounded-lg font-medium text-sm transition-colors bg-red-500 hover:bg-red-400 text-white",
-                            onclick: move |_| on_confirm.call(()),
-                            "Remove"
+                    button {
+                        class: "flex-1 px-4 py-2 rounded-lg font-medium text-sm transition-colors",
+                        class: if can_proceed && !needs_cascade && !deleting() {
+                            "bg-red-500 hover:bg-red-400 text-white"
+                        } else {
+                            "bg-gray-600 text-gray-400 cursor-not-allowed"
+                        },
+                        disabled: !can_proceed || needs_cascade || deleting(),
+                        onclick: move |_| {
+                            deleting.set(true);
+                            on_confirm.call((hard_delete(), cascade()));
+                        },
+                        if deleting() {
+                            "Deleting..."
+                        } else if needs_cascade {
+                            "Enable cascade to proceed"
+                        } else if needs_hard_confirm && !can_proceed {
+                            "Type DELETE to confirm"
+                        } else {
+                            "Delete Flake"
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn HistoryRewriteDialog(
+    flake_name: String,
+    detail: String,
+    on_cancel: EventHandler<MouseEvent>,
+    on_accept: EventHandler<MouseEvent>,
+) -> Element {
+    rsx! {
+        div {
+            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
+            div {
+                class: "relative {theme::surface::CARD_BG} rounded-xl border {theme::surface::CARD_BORDER} shadow-2xl p-6 cf-modal-panel-34 max-w-2xl w-full",
+                h3 {
+                    class: "text-lg font-semibold {theme::text::PRIMARY}",
+                    "History Rewrite Detected"
+                }
+                p {
+                    class: "mt-2 text-sm {theme::text::SECONDARY}",
+                    "{flake_name} has diverged from stored commit lineage."
+                }
+                p {
+                    class: "mt-2 text-sm {theme::text::SECONDARY}",
+                    "Accepting rewrite will clear this flake's stored commit history and resync from current branch HEAD."
+                }
+                div {
+                    class: "mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200 font-mono break-words",
+                    "{detail}"
+                }
+                div {
+                    class: "mt-6 flex items-center justify-end gap-3",
+                    button {
+                        class: "px-3 py-2 rounded-lg text-sm font-medium {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
+                        onclick: move |evt| on_cancel.call(evt),
+                        "Cancel"
+                    }
+                    button {
+                        class: "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING}",
+                        onclick: move |evt| on_accept.call(evt),
+                        "Accept rewrite and resync"
                     }
                 }
             }
@@ -1264,15 +2444,16 @@ fn EditFlakeDialog(
 ) -> Element {
     let draft_for_name = draft.clone();
     let draft_for_repo = draft.clone();
+    let draft_for_branch = draft.clone();
+    let draft_for_build_scope = draft.clone();
+    let draft_for_credentials = draft.clone();
 
     rsx! {
         div {
-            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4",
-            style: "position: fixed; inset: 0; z-index: 60; width: 100vw; height: 100vh; backdrop-filter: blur(6px);",
+            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
             onclick: move |_| on_cancel.call(()),
             div {
-                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6",
-                style: "width: 100%; max-width: 34rem;",
+                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6 cf-modal-panel-44",
                 onclick: |evt| evt.stop_propagation(),
                 h3 {
                     class: "text-lg font-semibold text-white mb-2",
@@ -1310,6 +2491,57 @@ fn EditFlakeDialog(
                             }
                         }
                     }
+                    label {
+                        class: "space-y-2 block",
+                        span { class: "text-xs uppercase tracking-wide text-gray-500", "Branch (optional)" }
+                        input {
+                            class: "w-full rounded-lg px-3 py-2 text-sm font-mono {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
+                            value: "{draft.branch}",
+                            placeholder: "main",
+                            oninput: move |evt| {
+                                let mut next = draft_for_branch.clone();
+                                next.branch = evt.value();
+                                on_change.call(next);
+                            }
+                        }
+                    }
+                    label {
+                        class: "space-y-2 block",
+                        span { class: "text-xs uppercase tracking-wide text-gray-500", "Build Scope" }
+                        select {
+                            class: "w-full rounded-lg px-3 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
+                            value: "{draft.build_scope}",
+                            onchange: move |evt| {
+                                let mut next = draft_for_build_scope.clone();
+                                next.build_scope = evt.value();
+                                on_change.call(next);
+                            },
+                            option { value: "cf_systems_only", "Only Crystal Forge systems" }
+                            option { value: "all_configs", "All nixosConfigurations in flake" }
+                        }
+                        p {
+                            class: "text-xs {theme::text::SECONDARY}",
+                            "Use all configurations when you want Crystal Forge to evaluate every exported system, even if it is not registered yet."
+                        }
+                    }
+                    FlakeCredentialFields {
+                        credential_type: draft.credential_type.clone(),
+                        credential_username: draft.credential_username.clone(),
+                        credential_secret: draft.credential_secret.clone(),
+                        credential_ssh_username: draft.credential_ssh_username.clone(),
+                        has_existing_secret: draft.has_existing_secret,
+                        on_change: move |(field, value): (String, String)| {
+                            let mut next = draft_for_credentials.clone();
+                            match field.as_str() {
+                                "credential_type" => next.credential_type = value,
+                                "credential_username" => next.credential_username = value,
+                                "credential_secret" => next.credential_secret = value,
+                                "credential_ssh_username" => next.credential_ssh_username = value,
+                                _ => {}
+                            }
+                            on_change.call(next);
+                        }
+                    }
                     if let Some(message) = error.read().clone() {
                         p { class: "text-sm text-red-300", "{message}" }
                     }
@@ -1325,6 +2557,79 @@ fn EditFlakeDialog(
                         class: "flex-1 px-4 py-2 rounded-lg font-medium text-sm text-white {theme::interactive::PRIMARY_BTN}",
                         onclick: move |_| on_submit.call(()),
                         "Save Changes"
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn FlakeCredentialFields(
+    credential_type: String,
+    credential_username: String,
+    credential_secret: String,
+    credential_ssh_username: String,
+    has_existing_secret: bool,
+    on_change: EventHandler<(String, String)>,
+) -> Element {
+    rsx! {
+        div {
+            class: "rounded-lg border border-gray-700/80 bg-gray-950/40 p-4 space-y-3",
+            h4 { class: "text-sm font-semibold text-white", "Credentials" }
+            p {
+                class: "text-xs {theme::text::SECONDARY}",
+                "Configure repository access for private flakes. PAT, SSH key, and username/password are supported."
+            }
+            label {
+                class: "space-y-2 block",
+                span { class: "text-xs uppercase tracking-wide text-gray-500", "Authentication Type" }
+                select {
+                    class: "w-full rounded-lg px-3 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
+                    value: "{credential_type}",
+                    onchange: move |evt| on_change.call(("credential_type".to_string(), evt.value())),
+                    option { value: "none", "No credentials" }
+                    option { value: "pat", "Personal access token" }
+                    option { value: "ssh_key", "SSH private key" }
+                    option { value: "username_password", "Username and password" }
+                }
+            }
+            if credential_type == "username_password" || credential_type == "pat" {
+                label {
+                    class: "space-y-2 block",
+                    span { class: "text-xs uppercase tracking-wide text-gray-500", if credential_type == "pat" { "Token Username (optional)" } else { "Username" } }
+                    input {
+                        class: "w-full rounded-lg px-3 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
+                        value: "{credential_username}",
+                        placeholder: if credential_type == "pat" { "oauth2 or git" } else { "username" },
+                        oninput: move |evt| on_change.call(("credential_username".to_string(), evt.value())),
+                    }
+                }
+            }
+            if credential_type == "ssh_key" {
+                label {
+                    class: "space-y-2 block",
+                    span { class: "text-xs uppercase tracking-wide text-gray-500", "SSH Username (optional)" }
+                    input {
+                        class: "w-full rounded-lg px-3 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
+                        value: "{credential_ssh_username}",
+                        placeholder: "git",
+                        oninput: move |evt| on_change.call(("credential_ssh_username".to_string(), evt.value())),
+                    }
+                }
+            }
+            if credential_type != "none" {
+                label {
+                    class: "space-y-2 block",
+                    span { class: "text-xs uppercase tracking-wide text-gray-500", if credential_type == "ssh_key" { "Private Key" } else if credential_type == "pat" { "Token Secret" } else { "Password" } }
+                    textarea {
+                        class: "w-full min-h-[110px] rounded-lg px-3 py-2 text-sm font-mono {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
+                        value: "{credential_secret}",
+                        placeholder: if has_existing_secret { "Leave blank to keep existing secret" } else { "Paste secret value" },
+                        oninput: move |evt| on_change.call(("credential_secret".to_string(), evt.value())),
+                    }
+                    if has_existing_secret {
+                        p { class: "text-xs text-amber-300", "A secret is already stored. Leave this blank to keep it unchanged." }
                     }
                 }
             }
@@ -1363,14 +2668,147 @@ fn start_edit_flake(
             id: flake.id,
             name: flake.name,
             repo_url: flake.repo_url,
+            branch: flake.branch,
+            build_scope: flake.build_scope,
+            credential_type: "none".to_string(),
+            credential_username: String::new(),
+            credential_secret: String::new(),
+            credential_ssh_username: String::new(),
+            has_existing_secret: false,
         }));
         edit_error.set(None);
+
+        spawn(async move {
+            match fetch_flake_credentials(flake_id).await {
+                Ok(summary) => {
+                    let current_value = editing_flake.read().clone();
+                    if let Some(mut current) = current_value {
+                        current.credential_type = summary.auth_type;
+                        current.credential_username = summary.username.unwrap_or_default();
+                        current.credential_ssh_username = summary.ssh_username.unwrap_or_default();
+                        current.has_existing_secret = summary.has_secret;
+                        editing_flake.set(Some(current));
+                    }
+                }
+                Err(error) => {
+                    edit_error.set(Some(format!("Failed to load credentials: {error}")));
+                }
+            }
+        });
     }
+}
+
+async fn save_flake_credentials(
+    flake_id: i32,
+    draft: &impl FlakeCredentialDraft,
+) -> Result<(), String> {
+    if draft.credential_type() == "none" {
+        if !draft.has_existing_secret() {
+            return Ok(());
+        }
+        delete_flake_credentials(flake_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    let secret = draft.credential_secret().trim().to_string();
+    let request = CreateFlakeCredentialRequest {
+        auth_type: draft.credential_type().to_string(),
+        username: normalize_optional_value(draft.credential_username()),
+        secret: if secret.is_empty() && draft.has_existing_secret() {
+            None
+        } else {
+            normalize_optional_value(&secret)
+        },
+        ssh_username: normalize_optional_value(draft.credential_ssh_username()),
+    };
+
+    put_flake_credentials(flake_id, &request)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+trait FlakeCredentialDraft {
+    fn credential_type(&self) -> &str;
+    fn credential_username(&self) -> &str;
+    fn credential_secret(&self) -> &str;
+    fn credential_ssh_username(&self) -> &str;
+    fn has_existing_secret(&self) -> bool;
+}
+
+impl FlakeCredentialDraft for NewFlakeDraft {
+    fn credential_type(&self) -> &str {
+        &self.credential_type
+    }
+    fn credential_username(&self) -> &str {
+        &self.credential_username
+    }
+    fn credential_secret(&self) -> &str {
+        &self.credential_secret
+    }
+    fn credential_ssh_username(&self) -> &str {
+        &self.credential_ssh_username
+    }
+    fn has_existing_secret(&self) -> bool {
+        false
+    }
+}
+
+impl FlakeCredentialDraft for EditFlakeDraft {
+    fn credential_type(&self) -> &str {
+        &self.credential_type
+    }
+    fn credential_username(&self) -> &str {
+        &self.credential_username
+    }
+    fn credential_secret(&self) -> &str {
+        &self.credential_secret
+    }
+    fn credential_ssh_username(&self) -> &str {
+        &self.credential_ssh_username
+    }
+    fn has_existing_secret(&self) -> bool {
+        self.has_existing_secret
+    }
+}
+
+fn normalize_optional_value(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn refresh_flake_by_id(
+    flake_id: i32,
+    mut refreshing_flake: Signal<Option<i32>>,
+    mut sync_note: Signal<Option<String>>,
+) {
+    use crate::api::client::refresh_flake;
+
+    refreshing_flake.set(Some(flake_id));
+    spawn(async move {
+        match refresh_flake(flake_id).await {
+            Ok(()) => {
+                sync_note.set(Some("✅ Flake cache refreshed successfully".to_string()));
+                refreshing_flake.set(None);
+            }
+            Err(e) => {
+                sync_note.set(Some(format!("❌ Failed to refresh flake: {}", e)));
+                refreshing_flake.set(None);
+            }
+        }
+    });
 }
 
 fn validate_new_flake(draft: &NewFlakeDraft, existing: &[FlakeListItem]) -> Result<(), String> {
     let name = draft.name.trim();
     let repo_url = draft.repo_url.trim();
+    let branch = draft.branch.trim();
 
     if name.is_empty() {
         return Err("Flake name is required.".to_string());
@@ -1387,6 +2825,9 @@ fn validate_new_flake(draft: &NewFlakeDraft, existing: &[FlakeListItem]) -> Resu
     {
         return Err("Repository URL already exists in the registry.".to_string());
     }
+    if !branch.is_empty() && branch.contains(char::is_whitespace) {
+        return Err("Branch must not contain whitespace.".to_string());
+    }
 
     Ok(())
 }
@@ -1394,6 +2835,7 @@ fn validate_new_flake(draft: &NewFlakeDraft, existing: &[FlakeListItem]) -> Resu
 fn validate_flake_edit(draft: &EditFlakeDraft, existing: &[FlakeListItem]) -> Result<(), String> {
     let name = draft.name.trim();
     let repo_url = draft.repo_url.trim();
+    let branch = draft.branch.trim();
 
     if name.is_empty() {
         return Err("Flake name is required.".to_string());
@@ -1410,6 +2852,9 @@ fn validate_flake_edit(draft: &EditFlakeDraft, existing: &[FlakeListItem]) -> Re
     {
         return Err("Repository URL already exists in the registry.".to_string());
     }
+    if !branch.is_empty() && branch.contains(char::is_whitespace) {
+        return Err("Branch must not contain whitespace.".to_string());
+    }
 
     Ok(())
 }
@@ -1421,6 +2866,15 @@ fn looks_like_repo_url(value: &str) -> bool {
         || lower.starts_with("git@")
         || lower.starts_with("ssh://")
         || lower.starts_with("github:")
+}
+
+fn normalize_optional_branch(value: &str) -> Option<String> {
+    let branch = value.trim();
+    if branch.is_empty() {
+        None
+    } else {
+        Some(branch.to_string())
+    }
 }
 
 #[component]
@@ -1821,6 +3275,8 @@ fn mock_flakes() -> Vec<FlakeListItem> {
             id: flake.id,
             name: flake.name.clone(),
             repo_url: flake.repo_url.clone(),
+            branch: "main".to_string(),
+            build_scope: "cf_systems_only".to_string(),
             latest_commit: flake.latest_commit.clone(),
             system_count: 0,
             environments: Vec::new(),
@@ -1880,10 +3336,30 @@ fn table_class(active: bool) -> &'static str {
     }
 }
 
-fn sync_flake_registry(flakes: &mut [FlakeListItem]) -> usize {
-    let now = Utc::now();
-    let latest_by_id: HashMap<i32, String> = crate::views::dashboard::mock_flake_timelines()
+fn merge_flake_timeline_batches(
+    current: Vec<FlakeTimeline>,
+    incoming: Vec<FlakeTimeline>,
+    ordered_ids: &[i32],
+) -> Vec<FlakeTimeline> {
+    let mut by_flake: HashMap<i32, FlakeTimeline> = current
         .into_iter()
+        .map(|timeline| (timeline.flake_id, timeline))
+        .collect();
+
+    for timeline in incoming {
+        by_flake.insert(timeline.flake_id, timeline);
+    }
+
+    ordered_ids
+        .iter()
+        .filter_map(|flake_id| by_flake.remove(flake_id))
+        .collect()
+}
+
+fn sync_flake_registry(flakes: &mut [FlakeListItem], timelines: &[FlakeTimeline]) -> usize {
+    let now = Utc::now();
+    let latest_by_id: HashMap<i32, String> = timelines
+        .iter()
         .filter_map(|timeline| {
             timeline
                 .commits
@@ -1906,33 +3382,250 @@ fn sync_flake_registry(flakes: &mut [FlakeListItem]) -> usize {
     changed
 }
 
-fn mock_flake_history() -> HashMap<i32, Vec<FlakeHistoryCommit>> {
-    let mut history = HashMap::new();
+fn sync_single_flake_registry(
+    flakes: &mut [FlakeListItem],
+    timelines: &[FlakeTimeline],
+    flake_id: i32,
+) -> usize {
+    let now = Utc::now();
+    let latest = timelines
+        .iter()
+        .find(|timeline| timeline.flake_id == flake_id)
+        .and_then(|timeline| {
+            timeline
+                .commits
+                .first()
+                .map(|commit| commit.hash.chars().take(7).collect::<String>())
+        });
 
-    for timeline in crate::views::dashboard::mock_flake_timelines() {
-        let commits: Vec<FlakeHistoryCommit> = timeline
-            .commits
-            .into_iter()
-            .map(|commit| {
-                let diff = full_diff_for_commit(&timeline.flake_name, &commit);
-                let (files_changed, insertions, deletions) = diff_stats(&diff);
-                FlakeHistoryCommit {
-                    hash: commit.hash,
-                    message: commit.message,
-                    author: commit.author,
-                    committed_at: commit.committed_at,
-                    files_changed,
-                    insertions,
-                    deletions,
-                    diff,
-                }
-            })
-            .collect();
+    let Some(flake) = flakes.iter_mut().find(|flake| flake.id == flake_id) else {
+        return 0;
+    };
 
-        history.insert(timeline.flake_id, commits);
+    let mut changed = 0;
+    if let Some(latest_commit) = latest {
+        if flake.latest_commit.as_deref() != Some(latest_commit.as_str()) {
+            flake.latest_commit = Some(latest_commit);
+            changed = 1;
+        }
+    }
+    flake.last_synced_at = now;
+    changed
+}
+fn build_flake_commits(timelines: &[FlakeTimeline], flake_id: i32) -> Vec<FlakeHistoryCommit> {
+    let Some(timeline) = timelines
+        .iter()
+        .find(|timeline| timeline.flake_id == flake_id)
+    else {
+        return Vec::new();
+    };
+
+    timeline
+        .commits
+        .iter()
+        .map(|commit| {
+            let short_hash = commit.hash.chars().take(7).collect::<String>();
+            let total_system_count = usize::try_from(commit.system_count)
+                .ok()
+                .unwrap_or(0)
+                .max(commit.systems.len())
+                .max(commit.system_paths.len());
+            let systems = commit
+                .systems
+                .iter()
+                .take(MAX_SYSTEMS_STORED_PER_COMMIT)
+                .cloned()
+                .collect();
+            let system_paths = commit
+                .system_paths
+                .iter()
+                .take(MAX_SYSTEMS_STORED_PER_COMMIT)
+                .cloned()
+                .collect();
+            FlakeHistoryCommit {
+                id: commit.id,
+                hash: commit.hash.clone(),
+                message: normalize_commit_message(&commit.message, &short_hash),
+                author: normalize_commit_author(&commit.author),
+                committed_at: commit.committed_at,
+                files_changed: 0,
+                insertions: 0,
+                deletions: 0,
+                diff: String::new(),
+                systems,
+                system_paths,
+                total_system_count,
+                build_status: commit.build_status.clone(),
+                evaluation_status: commit.evaluation_status.clone(),
+                evaluation_error_message: commit.evaluation_error_message.clone(),
+            }
+        })
+        .collect()
+}
+
+fn eval_badge_label(status: Option<&str>) -> &'static str {
+    match status {
+        Some("in_progress") => "running",
+        Some("pending") => "queued",
+        Some("failed") => "failed",
+        Some("complete") => "complete",
+        _ => "idle",
+    }
+}
+
+fn eval_badge_style(status: Option<&str>) -> &'static str {
+    match status {
+        Some("in_progress") => "background-color: #1f3d52; border-color: #3b82f6; color: #dbeafe;",
+        Some("pending") => "background-color: #3a3120; border-color: #d97706; color: #fef3c7;",
+        Some("failed") => "background-color: #472726; border-color: #ef4444; color: #fee2e2;",
+        Some("complete") => "background-color: #1f3a2f; border-color: #22c55e; color: #dcfce7;",
+        _ => "background-color: #2b303b; border-color: #495264; color: #cbd5e1;",
+    }
+}
+
+fn build_badge_label(status: &ApiBuildStatus) -> &'static str {
+    match status {
+        ApiBuildStatus::Queued => "queued",
+        ApiBuildStatus::Building => "running",
+        ApiBuildStatus::Cancelling => "stopping",
+        ApiBuildStatus::Cancelled => "cancelled",
+        ApiBuildStatus::Failed => "failed",
+        ApiBuildStatus::Complete => "complete",
+        ApiBuildStatus::Idle => "idle",
+        ApiBuildStatus::Cancelling => "stopping",
+        ApiBuildStatus::Cancelled => "cancelled",
+    }
+}
+
+fn build_badge_style(status: &ApiBuildStatus) -> &'static str {
+    match status {
+        ApiBuildStatus::Queued => {
+            "background-color: #3a3120; border-color: #d97706; color: #fef3c7;"
+        }
+        ApiBuildStatus::Building => {
+            "background-color: #1f3d52; border-color: #3b82f6; color: #dbeafe;"
+        }
+        ApiBuildStatus::Cancelling => {
+            "background-color: #3d2f1f; border-color: #fb923c; color: #fed7aa;"
+        }
+        ApiBuildStatus::Cancelled => {
+            "background-color: #2b303b; border-color: #6b7280; color: #9ca3af;"
+        }
+        ApiBuildStatus::Failed => {
+            "background-color: #472726; border-color: #ef4444; color: #fee2e2;"
+        }
+        ApiBuildStatus::Complete => {
+            "background-color: #1f3a2f; border-color: #22c55e; color: #dcfce7;"
+        }
+        ApiBuildStatus::Idle => "background-color: #2b303b; border-color: #495264; color: #cbd5e1;",
+        ApiBuildStatus::Cancelling => {
+            "background-color: #3d2f1f; border-color: #fb923c; color: #fed7aa;"
+        }
+        ApiBuildStatus::Cancelled => {
+            "background-color: #2b303b; border-color: #6b7280; color: #9ca3af;"
+        }
+    }
+}
+
+fn system_chip_style(status: Option<&crate::hooks::websocket::SystemEvalStatus>) -> &'static str {
+    match status {
+        Some(crate::hooks::websocket::SystemEvalStatus::Success) => {
+            "background-color: #163b2b; border-color: #22c55e; color: #dcfce7;"
+        }
+        Some(crate::hooks::websocket::SystemEvalStatus::Failed) => {
+            "background-color: #4a2324; border-color: #ef4444; color: #fee2e2;"
+        }
+        Some(crate::hooks::websocket::SystemEvalStatus::PolicyFailed) => {
+            "background-color: #4a2f18; border-color: #f59e0b; color: #ffedd5;"
+        }
+        Some(crate::hooks::websocket::SystemEvalStatus::QueuedForBuild) => {
+            "background-color: #1a3d3b; border-color: #10b981; color: #d1fae5;"
+        }
+        Some(crate::hooks::websocket::SystemEvalStatus::Evaluating) => {
+            "background-color: #4a3a16; border-color: #facc15; color: #fef9c3;"
+        }
+        Some(crate::hooks::websocket::SystemEvalStatus::Pending) | None => {
+            "background-color: #2b303b; border-color: #64748b; color: #cbd5e1;"
+        }
+    }
+}
+
+fn normalize_commit_message(message: &str, short_hash: &str) -> String {
+    let cleaned = message.trim();
+    if cleaned.is_empty() {
+        return format!("Commit {short_hash}");
     }
 
-    history
+    cleaned
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn normalize_commit_author(author: &str) -> String {
+    let cleaned = author.trim();
+    if cleaned.is_empty() {
+        "Unknown author".to_string()
+    } else {
+        cleaned.to_string()
+    }
+}
+
+fn commit_message_lines(message: &str, headline_limit: usize) -> (String, Option<String>) {
+    let mut lines: Vec<String> = message
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToString::to_string)
+        .collect();
+
+    if lines.is_empty() {
+        return ("Commit".to_string(), None);
+    }
+
+    let first = lines.remove(0);
+    if !lines.is_empty() {
+        let secondary = lines.join(" ");
+        return (
+            truncate_with_ellipsis(&first, headline_limit),
+            Some(truncate_with_ellipsis(&secondary, 220)),
+        );
+    }
+
+    if first.chars().count() > headline_limit {
+        let headline = truncate_with_ellipsis(&first, headline_limit);
+        let remainder = first
+            .chars()
+            .skip(headline_limit)
+            .collect::<String>()
+            .trim()
+            .to_string();
+        if remainder.is_empty() {
+            (headline, None)
+        } else {
+            (headline, Some(truncate_with_ellipsis(&remainder, 220)))
+        }
+    } else {
+        (first, None)
+    }
+}
+
+fn truncate_with_ellipsis(input: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+
+    let chars: Vec<char> = input.chars().collect();
+    if chars.len() <= max_chars {
+        return input.to_string();
+    }
+
+    let cutoff = max_chars.saturating_sub(1);
+    let mut truncated = chars[..cutoff].iter().collect::<String>();
+    truncated = truncated.trim_end().to_string();
+    format!("{truncated}…")
 }
 
 fn full_diff_for_commit(flake_name: &str, commit: &crate::api::models::FlakeCommit) -> String {
@@ -2074,6 +3767,33 @@ fn diff_stats(diff: &str) -> (usize, usize, usize) {
     }
 
     (files_changed, insertions, deletions)
+}
+
+fn diff_file_stats(file: &ParsedDiffFile) -> (usize, usize) {
+    let mut insertions = 0;
+    let mut deletions = 0;
+
+    for line in &file.lines {
+        if line.prefix == '+' {
+            insertions += 1;
+        } else if line.prefix == '-' {
+            deletions += 1;
+        }
+    }
+
+    (insertions, deletions)
+}
+
+fn diff_file_label(file: &ParsedDiffFile) -> String {
+    if file.new_path == "/dev/null" {
+        format!("{} (deleted)", file.old_path)
+    } else if file.old_path == "/dev/null" {
+        format!("{} (new)", file.new_path)
+    } else if file.new_path == file.old_path {
+        file.new_path.clone()
+    } else {
+        format!("{} -> {}", file.old_path, file.new_path)
+    }
 }
 
 fn parse_unified_diff(diff: &str) -> Vec<ParsedDiffFile> {
@@ -2260,6 +3980,33 @@ fn detect_language(path: &str) -> &'static str {
     }
 }
 
+fn extract_history_rewrite_conflict(
+    error: &ApiClientError,
+    selected_flake_id: Option<i32>,
+) -> Option<(i32, String)> {
+    let flake_id = selected_flake_id?;
+    match error {
+        ApiClientError::Status { code, body }
+            if *code == 409
+                && (body.to_ascii_lowercase().contains("history rewrite")
+                    || body
+                        .to_ascii_lowercase()
+                        .contains("history_rewrite_detected")) =>
+        {
+            #[cfg(target_arch = "wasm32")]
+            console::warn_1(
+                &format!(
+                    "[CF] history rewrite conflict detected for flake_id={}: {}",
+                    flake_id, body
+                )
+                .into(),
+            );
+            Some((flake_id, body.clone()))
+        }
+        _ => None,
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 fn highlight_diff_fragment(language: &str, text: &str) -> String {
     let Some(window) = web_sys::window() else {
@@ -2303,4 +4050,132 @@ fn escape_html(value: &str) -> String {
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_commit_message_uses_hash_placeholder_when_empty() {
+        assert_eq!(normalize_commit_message("   ", "abc1234"), "Commit abc1234");
+    }
+
+    #[test]
+    fn commit_message_lines_splits_multiline_messages() {
+        let (headline, secondary) =
+            commit_message_lines("Improve sync error handling\n\nAlso tighten validation", 80);
+        assert_eq!(headline, "Improve sync error handling");
+        assert_eq!(secondary, Some("Also tighten validation".to_string()));
+    }
+
+    #[test]
+    fn commit_message_lines_truncates_long_single_line() {
+        let message = "this is a very long commit subject that should be truncated for compact cards and still retain a readable continuation";
+        let (headline, secondary) = commit_message_lines(message, 40);
+        assert!(headline.ends_with('…'));
+        assert!(secondary.is_some());
+    }
+
+    #[test]
+    fn normalize_commit_author_falls_back_for_empty_value() {
+        assert_eq!(normalize_commit_author("  \n"), "Unknown author");
+    }
+
+    #[test]
+    fn build_flake_commits_only_maps_requested_flake() {
+        use crate::api::models::{BuildStatus, FlakeCommit, FlakeTimeline};
+
+        let timelines = vec![
+            FlakeTimeline {
+                flake_id: 10,
+                flake_name: "alpha".to_string(),
+                repo_url: "https://example.com/alpha.git".to_string(),
+                commits: vec![FlakeCommit {
+                    id: 1,
+                    hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                    message: "alpha commit".to_string(),
+                    author: "Alice".to_string(),
+                    committed_at: Utc::now(),
+                    system_count: 1,
+                    commits_behind: 0,
+                    systems: vec!["alpha-host".to_string()],
+                    system_paths: vec![],
+                    build_status: Some(BuildStatus::Queued),
+                    evaluation_status: Some("pending".to_string()),
+                    evaluation_error_message: None,
+                }],
+            },
+            FlakeTimeline {
+                flake_id: 20,
+                flake_name: "beta".to_string(),
+                repo_url: "https://example.com/beta.git".to_string(),
+                commits: vec![FlakeCommit {
+                    id: 2,
+                    hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+                    message: "beta commit".to_string(),
+                    author: "Bob".to_string(),
+                    committed_at: Utc::now(),
+                    system_count: 1,
+                    commits_behind: 0,
+                    systems: vec!["beta-host".to_string()],
+                    system_paths: vec![],
+                    build_status: Some(BuildStatus::Complete),
+                    evaluation_status: Some("complete".to_string()),
+                    evaluation_error_message: None,
+                }],
+            },
+        ];
+
+        let commits = build_flake_commits(&timelines, 20);
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].id, 2);
+        assert_eq!(commits[0].author, "Bob");
+    }
+
+    #[test]
+    fn build_flake_commits_preserves_system_path_details() {
+        use crate::api::models::{FlakeCommit, FlakeCommitSystemPath, FlakeTimeline};
+
+        let timelines = vec![FlakeTimeline {
+            flake_id: 42,
+            flake_name: "gamma".to_string(),
+            repo_url: "https://example.com/gamma.git".to_string(),
+            commits: vec![FlakeCommit {
+                id: 9,
+                hash: "9999999999999999999999999999999999999999".to_string(),
+                message: "gamma commit".to_string(),
+                author: "Gina".to_string(),
+                committed_at: Utc::now(),
+                system_count: 1,
+                commits_behind: 0,
+                systems: vec!["gamma-host [CF system]".to_string()],
+                system_paths: vec![FlakeCommitSystemPath {
+                    config_name: "gamma-host".to_string(),
+                    is_cf_system: true,
+                    cf_hostname: Some("gamma-host".to_string()),
+                    mapped_host_count: 1,
+                    expected_store_path: Some("/nix/store/expected-gamma".to_string()),
+                    current_store_path: Some("/nix/store/current-gamma".to_string()),
+                    cve_scan_eligible: true,
+                    cve_scan_blocked_reason: None,
+                }],
+                build_status: None,
+                evaluation_status: None,
+                evaluation_error_message: None,
+            }],
+        }];
+
+        let commits = build_flake_commits(&timelines, 42);
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].system_paths.len(), 1);
+        assert_eq!(
+            commits[0].system_paths[0].expected_store_path.as_deref(),
+            Some("/nix/store/expected-gamma")
+        );
+        assert_eq!(
+            commits[0].system_paths[0].current_store_path.as_deref(),
+            Some("/nix/store/current-gamma")
+        );
+    }
 }

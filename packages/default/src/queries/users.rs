@@ -67,10 +67,11 @@ pub async fn insert_user(pool: &PgPool, email: &str, display_name: Option<&str>)
             let parts: Vec<&str> = name.splitn(2, ' ').collect();
             (
                 Some(parts[0].to_string()),
-                parts.get(1).map(|s| s.to_string()),
+                Some(parts.get(1).copied().unwrap_or("").to_string()),
             )
         }
-        None => (None, None),
+        // Current schema has NOT NULL first_name/last_name.
+        None => (Some(String::new()), Some(String::new())),
     };
 
     let user = User {
@@ -87,4 +88,102 @@ pub async fn insert_user(pool: &PgPool, email: &str, display_name: Option<&str>)
 
     create_user(pool, user.clone()).await?;
     Ok(user)
+}
+
+pub async fn count_users(pool: &PgPool) -> Result<i64> {
+    let count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users")
+        .fetch_one(pool)
+        .await?;
+    Ok(count)
+}
+
+pub async fn update_username_and_password_hash(
+    pool: &PgPool,
+    user_id: Uuid,
+    username: &str,
+    password_hash: &str,
+) -> Result<()> {
+    sqlx::query("UPDATE users SET username = $1, password_hash = $2 WHERE id = $3")
+        .bind(username)
+        .bind(password_hash)
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn get_password_hash_by_user_id(pool: &PgPool, user_id: Uuid) -> Result<Option<String>> {
+    let hash =
+        sqlx::query_scalar::<_, Option<String>>("SELECT password_hash FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_one(pool)
+            .await?;
+    Ok(hash)
+}
+
+pub async fn update_password_hash_by_user_id(
+    pool: &PgPool,
+    user_id: Uuid,
+    password_hash: &str,
+) -> Result<()> {
+    sqlx::query("UPDATE users SET password_hash = $1 WHERE id = $2")
+        .bind(password_hash)
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn get_setup_wizard_dismissed(pool: &PgPool, user_id: Uuid) -> Result<bool> {
+    let value = sqlx::query_scalar::<_, bool>(
+        "SELECT COALESCE(setup_wizard_dismissed, false) FROM users WHERE id = $1",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?
+    .unwrap_or(false);
+
+    Ok(value)
+}
+
+pub async fn set_setup_wizard_dismissed(
+    pool: &PgPool,
+    user_id: Uuid,
+    dismissed: bool,
+) -> Result<()> {
+    sqlx::query("UPDATE users SET setup_wizard_dismissed = $1, updated_at = NOW() WHERE id = $2")
+        .bind(dismissed)
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}
+
+pub async fn get_setup_wizard_agent_acknowledged(pool: &PgPool, user_id: Uuid) -> Result<bool> {
+    let value = sqlx::query_scalar::<_, bool>(
+        "SELECT COALESCE(setup_wizard_agent_acknowledged, false) FROM users WHERE id = $1",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?
+    .unwrap_or(false);
+
+    Ok(value)
+}
+
+pub async fn set_setup_wizard_agent_acknowledged(
+    pool: &PgPool,
+    user_id: Uuid,
+    acknowledged: bool,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE users SET setup_wizard_agent_acknowledged = $1, updated_at = NOW() WHERE id = $2",
+    )
+    .bind(acknowledged)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+
+    Ok(())
 }

@@ -1,15 +1,26 @@
+pub mod admin;
 pub mod agent_heartbeat;
 pub mod auth_identity;
+pub mod build_jobs;
 pub mod build_reservations;
+pub mod builders;
+pub mod cache_destinations;
 pub mod cache_push;
 pub mod commits;
+pub mod commits_artifacts;
+pub mod config_health;
 pub mod cve_scans;
 pub mod dashboard;
 pub mod deployment;
+pub mod deployment_policies;
 pub mod derivations;
 pub mod environments;
+pub mod flake_credentials;
 pub mod flakes;
 pub mod status;
 pub mod system_states;
 pub mod systems;
 pub mod users;
+
+#[cfg(test)]
+mod cve_scans_tests;

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        DELETE FROM commit_metadata_cache\n        WHERE cached_at < NOW() - make_interval(days => $1)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d9b1b50c62340cd6b38d8e41989bf4b12cbf73b45040ed5d8dba16f219731811"
+}

@@ -7,6 +7,7 @@ use dioxus::prelude::*;
 use std::collections::HashSet;
 
 use crate::api::models::{BuildStatus, FlakeCommit, FlakeTimeline};
+use crate::routes::Route;
 use crate::theme;
 use chrono::TimeZone;
 
@@ -107,7 +108,7 @@ pub fn FlakeTimelineWidget(
                 class: "flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 relative z-20",
                 div {
                     class: "flex items-center gap-3",
-                    h3 { class: "{theme::typography::SECTION_TITLE} text-white", "Commit Timeline" }
+                    h3 { class: "{theme::typography::SECTION_TITLE} {theme::text::PRIMARY}", "Commit Timeline" }
                     // Legend inline with title
                     div {
                         class: "flex flex-wrap items-center gap-3",
@@ -185,7 +186,7 @@ pub fn FlakeTimelineWidget(
 
                                 // "All Flakes" option
                                 button {
-                                    class: "w-full flex items-center gap-2 px-3 py-2 text-sm text-left rounded-md hover:bg-gray-700 transition-colors",
+                                    class: "w-full flex items-center gap-2 px-3 py-2 text-sm text-left rounded-md {theme::interactive::HOVER_BG} transition-colors",
                                     onclick: {
                                         let on_filter_change = on_filter_change.clone();
                                         move |_| {
@@ -215,11 +216,11 @@ pub fn FlakeTimelineWidget(
                                             }
                                         }
                                     }
-                                    span { class: "text-white font-medium", "All Flakes" }
+                                    span { class: "{theme::text::PRIMARY} font-medium", "All Flakes" }
                                 }
 
                                 // Divider
-                                div { class: "border-t border-gray-700 my-1" }
+                                div { class: "border-t {theme::surface::CARD_BORDER} my-1" }
 
                                 // Individual flake options
                                 for (idx, name) in flake_names.iter().enumerate() {
@@ -229,7 +230,7 @@ pub fn FlakeTimelineWidget(
                                         rsx! {
                                             button {
                                                 key: "{idx}",
-                                                class: "group w-full flex items-center gap-2 px-3 py-2 text-sm text-left rounded-md hover:bg-gray-700 transition-colors",
+                                                class: "group w-full flex items-center gap-2 px-3 py-2 text-sm text-left rounded-md {theme::interactive::HOVER_BG} transition-colors",
                                                 onclick: {
                                                     let on_filter_change = on_filter_change.clone();
                                                     let selected = selected_flake_indices.clone();
@@ -269,7 +270,7 @@ pub fn FlakeTimelineWidget(
                                                         }
                                                     }
                                                 }
-                                                span { class: "{theme::text::SECONDARY} group-hover:text-white transition-colors", "{name}" }
+                                                span { class: "{theme::text::SECONDARY} transition-colors", "{name}" }
                                             }
                                         }
                                     }
@@ -331,14 +332,14 @@ fn ViewModeToggle(mode: TimelineViewMode, on_change: EventHandler<TimelineViewMo
     let is_stacked = mode == TimelineViewMode::Stacked;
 
     let combined_class = if !is_stacked {
-        "px-3 py-1.5 text-xs font-medium transition bg-gray-700 text-white"
+        "px-3 py-1.5 text-xs font-medium transition cf-subtle-bg cf-text-primary"
     } else {
-        "px-3 py-1.5 text-xs font-medium transition text-gray-400 hover:text-white hover:bg-gray-800"
+        "px-3 py-1.5 text-xs font-medium transition cf-text-secondary cf-hover-bg"
     };
     let stacked_class = if is_stacked {
-        "px-3 py-1.5 text-xs font-medium transition bg-gray-700 text-white"
+        "px-3 py-1.5 text-xs font-medium transition cf-subtle-bg cf-text-primary"
     } else {
-        "px-3 py-1.5 text-xs font-medium transition text-gray-400 hover:text-white hover:bg-gray-800"
+        "px-3 py-1.5 text-xs font-medium transition cf-text-secondary cf-hover-bg"
     };
 
     rsx! {
@@ -585,7 +586,7 @@ fn SingleFlakeTimeline(timeline: FlakeTimeline) -> Element {
             // Flake header
             div {
                 class: "flex items-center gap-2",
-                span { class: "text-sm font-medium text-white", "{timeline.flake_name}" }
+                span { class: "text-sm font-medium {theme::text::PRIMARY}", "{timeline.flake_name}" }
                 span { class: "{theme::text::MUTED} text-xs font-mono", "{timeline.repo_url}" }
             }
 
@@ -659,8 +660,8 @@ fn TimelineGraph(
 
                         // Main horizontal line
                         div {
-                            class: "absolute bg-gray-600",
-                            style: "left: {first_x}px; width: {line_width}px; top: {line_top}px; height: {line_thickness}px;"
+                            class: "absolute",
+                            style: "left: {first_x}px; width: {line_width}px; top: {line_top}px; height: {line_thickness}px; background-color: var(--cf-timeline-line);"
                         }
 
                         // Colored segments
@@ -713,8 +714,8 @@ fn TimelineGraph(
                                 "{tick.label}"
                             }
                             div {
-                                class: "absolute bg-gray-700",
-                                style: "left: {tick.x_position as i32}px; top: {line_top + 8}px; width: 1px; height: 6px;"
+                                class: "absolute",
+                                style: "left: {tick.x_position as i32}px; top: {line_top + 8}px; width: 1px; height: 6px; background-color: var(--cf-timeline-tick);"
                             }
                         }
                     }
@@ -734,10 +735,21 @@ fn CommitNode(
     node_top: i32,
     node_size: i32,
 ) -> Element {
+    let navigator = navigator();
     let short_hash = commit.hash.chars().take(7).collect::<String>();
     let node_bg = commit_node_bg(commit.system_count, commit.commits_behind);
     let build_status = commit.build_status.unwrap_or(BuildStatus::Idle);
     let build_ring = build_ring_style(build_status);
+    let target_route = if build_status == BuildStatus::Building {
+        Some(Route::BuildsView {})
+    } else if is_eval_active(commit.evaluation_status.as_deref()) {
+        Some(Route::EvaluationsCommitView {
+            commit_id: commit.id,
+        })
+    } else {
+        Some(Route::FlakesView {})
+    };
+    let clickable = target_route.is_some();
 
     let behind_text = if commit.commits_behind == 0 {
         "Latest".to_string()
@@ -753,6 +765,16 @@ fn CommitNode(
     let text_top = node_top + node_size + 4;
     let overlay_size = node_size + 9;
     let overlay_top = -(overlay_size - node_size) / 2 - 2;
+    let node_border_style = if commit.commits_behind == 0 {
+        "border-color: var(--cf-timeline-node-border-latest); box-shadow: 0 0 10px var(--cf-timeline-node-glow);"
+    } else {
+        "border-color: var(--cf-timeline-node-border-default);"
+    };
+    let node_text_style = if commit.commits_behind == 0 {
+        "color: var(--cf-timeline-node-text-latest);"
+    } else {
+        "color: var(--cf-timeline-node-text-default);"
+    };
 
     // Build tooltip text
     let tooltip = format!(
@@ -770,13 +792,21 @@ fn CommitNode(
 
             // Main node - colored circle with system count, centered ON the line
             div {
-                class: "absolute left-1/2 -translate-x-1/2 rounded-full flex items-center justify-center cursor-pointer {node_bg} border-2",
-                class: if commit.commits_behind == 0 { "border-white shadow-[0_0_10px_rgba(255,255,255,0.4)]" } else { "border-gray-900" },
-                style: "width: {node_size}px; height: {node_size}px; top: {badge_top}px; box-shadow: {build_ring};",
+                class: "absolute left-1/2 -translate-x-1/2 rounded-full flex items-center justify-center {node_bg} border-2",
+                class: if clickable { "cursor-pointer" } else { "cursor-default" },
+                style: "width: {node_size}px; height: {node_size}px; top: {badge_top}px; box-shadow: {build_ring}; {node_border_style}",
                 title: "{build_status.label()}",
+                onclick: {
+                    let target_route = target_route.clone();
+                    move |_| {
+                        if let Some(route) = target_route.clone() {
+                            navigator.push(route);
+                        }
+                    }
+                },
                 span {
                     class: "text-[9px] font-bold",
-                    class: if commit.commits_behind == 0 { "text-white" } else { "text-gray-900" },
+                    style: "{node_text_style}",
                     "{commit.system_count}"
                 }
 
@@ -792,7 +822,7 @@ fn CommitNode(
                             cy: "50",
                             r: "48",
                             fill: "none",
-                            stroke: "#42ff65",
+                            stroke: "var(--cf-timeline-ring-building)",
                             stroke_width: "3",
                             stroke_dasharray: "26 180",
                             stroke_dashoffset: "0",
@@ -828,7 +858,7 @@ fn CommitNode(
                             cy: "50",
                             r: "48",
                             fill: "none",
-                            stroke: "#e57c00",
+                            stroke: "var(--cf-timeline-ring-queued)",
                             stroke_width: "3",
                             stroke_dasharray: "26 180",
                             stroke_dashoffset: "0",
@@ -855,12 +885,21 @@ fn CommitNode(
 
             // Text content below the node
             div {
-                class: "absolute left-1/2 -translate-x-1/2 flex flex-col items-center cursor-pointer",
+                class: "absolute left-1/2 -translate-x-1/2 flex flex-col items-center",
+                class: if clickable { "cursor-pointer" } else { "cursor-default" },
                 style: "top: {text_top}px; min-width: 50px;",
+                onclick: {
+                    let target_route = target_route.clone();
+                    move |_| {
+                        if let Some(route) = target_route.clone() {
+                            navigator.push(route);
+                        }
+                    }
+                },
 
                 // Commit hash
                 span {
-                    class: "text-[9px] font-mono {theme::text::MUTED} group-hover:text-white transition",
+                    class: "text-[9px] font-mono {theme::text::MUTED} transition",
                     "{short_hash}"
                 }
 
@@ -900,7 +939,7 @@ fn commits_behind_color(behind: i64) -> &'static str {
 
 fn commit_node_bg(system_count: i64, behind: i64) -> &'static str {
     if system_count == 0 {
-        "bg-gray-700"
+        "cf-timeline-node-empty"
     } else {
         commits_behind_bg(behind)
     }
@@ -908,10 +947,22 @@ fn commit_node_bg(system_count: i64, behind: i64) -> &'static str {
 
 fn build_ring_style(status: BuildStatus) -> &'static str {
     match status {
-        BuildStatus::Queued => "0 0 0 2px #e57c00",
-        BuildStatus::Building => "0 0 0 3px #42ff65",
-        _ => "0 0 0 2px #9ca3af",
+        BuildStatus::Queued => "0 0 0 2px var(--cf-timeline-ring-queued)",
+        BuildStatus::Building => "0 0 0 3px var(--cf-timeline-ring-building)",
+        _ => "0 0 0 2px var(--cf-timeline-ring-idle)",
     }
+}
+
+fn is_eval_active(status: Option<&str>) -> bool {
+    let Some(status) = status else {
+        return false;
+    };
+
+    let normalized = status.trim().to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "pending" | "queued" | "evaluating" | "in_progress"
+    )
 }
 
 fn segment_color(_prev: &FlakeCommit, next: &FlakeCommit) -> Option<&'static str> {

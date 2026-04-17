@@ -1,0 +1,825 @@
+/* Prevent horizontal scrollbar from dropdowns/popups */
+html, body {
+  overflow-x: clip;
+}
+
+:root,
+:root[data-theme="dark"] {
+  --cf-brand-purple: #82699b;
+  --cf-brand-purple-hover: #8616e0;
+  --cf-danger-berry: #6f1649;
+  --cf-danger-berry-hover: #a3748e;
+
+  --cf-modal-blur: blur(6px);
+  --cf-action-text: #d6c3e8;
+
+  --cf-page-bg: #030712;
+  --cf-sidebar-bg: #111827;
+  --cf-card-bg: #111827;
+  --cf-card-border: #1f2937;
+  --cf-divider: #1f2937;
+  --cf-subtle-bg: rgba(31, 41, 55, 0.5);
+
+  --cf-text-primary: #f3f4f6;
+  --cf-text-secondary: #9ca3af;
+  --cf-text-muted: #6b7280;
+  --cf-text-disabled: #4b5563;
+
+  --cf-hover-bg: rgba(31, 41, 55, 0.5);
+  --cf-focus-ring-color: rgba(59, 130, 246, 0.5);
+  --cf-input-bg: #111827;
+  --cf-input-border: #374151;
+  --cf-input-border-focus: #3b82f6;
+
+  --cf-success-btn: #059669;
+  --cf-success-btn-hover: #047857;
+
+  --cf-chip-info-bg: #23354b;
+  --cf-chip-info-border: #406084;
+  --cf-chip-warning-bg: #493e26;
+  --cf-chip-warning-border: #8c7041;
+  --cf-chip-olive-bg: #3b2f00;
+  --cf-chip-olive-border: #7a6000;
+
+  --cf-chip-slate-bg: #2b303b;
+  --cf-chip-slate-border: #495264;
+  --cf-chip-teal-bg: #23363a;
+  --cf-chip-teal-border: #3d6870;
+  --cf-chip-blue-bg: #253449;
+  --cf-chip-blue-border: #3e5b82;
+
+  --cf-chip-violet-bg: rgba(130, 105, 155, 0.22);
+  --cf-chip-violet-border: #82699b;
+  --cf-chip-violet-text: #e5d8f3;
+
+  --cf-policy-selected-bg: #1f2e42;
+  --cf-policy-selected-border: #3e5b82;
+
+  --cf-auth-bg-base: linear-gradient(135deg, #0b1020 0%, #111827 50%, #1a1a2e 100%);
+  --cf-auth-bg-ambient:
+    radial-gradient(circle at 20% 20%, rgba(139, 92, 246, 0.15) 0%, rgba(15, 23, 42, 0) 45%),
+    radial-gradient(circle at 80% 80%, rgba(168, 85, 247, 0.12) 0%, rgba(15, 23, 42, 0) 40%),
+    linear-gradient(135deg, #0b1020 0%, #111827 50%, #1a1a2e 100%);
+  --cf-dev-login-bg: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+  --cf-history-timeline-bg: linear-gradient(180deg, #131b29 0%, #0f141d 100%);
+
+  --cf-timeline-line: #4b5563;
+  --cf-timeline-tick: #374151;
+  --cf-timeline-node-border-default: #111827;
+  --cf-timeline-node-border-latest: #f9fafb;
+  --cf-timeline-node-glow: rgba(255, 255, 255, 0.45);
+  --cf-timeline-node-text-default: #f9fafb;
+  --cf-timeline-node-text-latest: #f9fafb;
+  --cf-timeline-ring-building: #42ff65;
+  --cf-timeline-ring-queued: #e57c00;
+  --cf-timeline-ring-idle: #9ca3af;
+  --cf-timeline-node-empty-bg: #4b5563;
+}
+
+:root[data-theme="light"] {
+  --cf-brand-purple: #654a84;
+  --cf-brand-purple-hover: #573f72;
+  --cf-danger-berry: #9d2f67;
+  --cf-danger-berry-hover: #7f2551;
+
+  --cf-modal-blur: blur(6px);
+  --cf-action-text: #6f4f89;
+
+  --cf-page-bg: #eef2f7;
+  --cf-sidebar-bg: #ffffff;
+  --cf-card-bg: #ffffff;
+  --cf-card-border: #d1d9e6;
+  --cf-divider: #d7dfea;
+  --cf-subtle-bg: #eef3f9;
+
+  --cf-text-primary: #1f2937;
+  --cf-text-secondary: #4b5563;
+  --cf-text-muted: #6b7280;
+  --cf-text-disabled: #9ca3af;
+
+  --cf-hover-bg: #eef3f9;
+  --cf-focus-ring-color: rgba(59, 130, 246, 0.35);
+  --cf-input-bg: #ffffff;
+  --cf-input-border: #b9c6d8;
+  --cf-input-border-focus: #4f83d8;
+
+  --cf-success-btn: #059669;
+  --cf-success-btn-hover: #047857;
+
+  --cf-chip-info-bg: #e8f2ff;
+  --cf-chip-info-border: #95b6de;
+  --cf-chip-warning-bg: #fff3df;
+  --cf-chip-warning-border: #d3ad6e;
+  --cf-chip-olive-bg: #f8f2d8;
+  --cf-chip-olive-border: #cfbe76;
+
+  --cf-chip-slate-bg: #eef2f7;
+  --cf-chip-slate-border: #bcc8d8;
+  --cf-chip-teal-bg: #e5f5f6;
+  --cf-chip-teal-border: #89c3ca;
+  --cf-chip-blue-bg: #e8f0ff;
+  --cf-chip-blue-border: #90acda;
+
+  --cf-chip-violet-bg: rgba(130, 105, 155, 0.16);
+  --cf-chip-violet-border: #82699b;
+  --cf-chip-violet-text: #503868;
+
+  --cf-policy-selected-bg: #dfeeff;
+  --cf-policy-selected-border: #89a9d6;
+
+  --cf-auth-bg-base: linear-gradient(135deg, #f7f8fb 0%, #e8edf8 55%, #dee6f5 100%);
+  --cf-auth-bg-ambient:
+    radial-gradient(circle at 20% 20%, rgba(130, 105, 155, 0.16) 0%, rgba(255, 255, 255, 0) 45%),
+    radial-gradient(circle at 80% 80%, rgba(115, 139, 180, 0.14) 0%, rgba(255, 255, 255, 0) 40%),
+    linear-gradient(135deg, #f7f8fb 0%, #e8edf8 55%, #dee6f5 100%);
+  --cf-dev-login-bg: linear-gradient(135deg, #eef2fc 0%, #e0e8f8 100%);
+  --cf-history-timeline-bg: linear-gradient(180deg, #edf3fb 0%, #e6edf8 100%);
+
+  --cf-timeline-line: #9fb0c9;
+  --cf-timeline-tick: #bccbde;
+  --cf-timeline-node-border-default: #dbe5f3;
+  --cf-timeline-node-border-latest: #1f2937;
+  --cf-timeline-node-glow: rgba(59, 130, 246, 0.25);
+  --cf-timeline-node-text-default: #ffffff;
+  --cf-timeline-node-text-latest: #ffffff;
+  --cf-timeline-ring-building: #10b981;
+  --cf-timeline-ring-queued: #d97706;
+  --cf-timeline-ring-idle: #64748b;
+  --cf-timeline-node-empty-bg: #94a3b8;
+}
+
+.cf-primary-btn {
+  background-color: var(--cf-brand-purple);
+}
+
+.cf-primary-btn:hover {
+  background-color: var(--cf-brand-purple-hover);
+}
+
+.cf-success-btn {
+  background-color: var(--cf-success-btn);
+}
+
+.cf-success-btn:hover {
+  background-color: var(--cf-success-btn-hover);
+}
+
+.cf-danger-btn {
+  background-color: var(--cf-danger-berry);
+}
+
+.cf-danger-btn:hover {
+  background-color: var(--cf-danger-berry-hover);
+}
+
+.cf-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  width: 100vw;
+  height: 100vh;
+  backdrop-filter: var(--cf-modal-blur);
+}
+
+.cf-modal-overlay-z50 {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  width: 100vw;
+  height: 100vh;
+  backdrop-filter: var(--cf-modal-blur);
+}
+
+.cf-modal-panel-28 {
+  width: 100%;
+  max-width: 28rem;
+}
+
+.cf-modal-panel-30 {
+  width: 100%;
+  max-width: 30rem;
+}
+
+.cf-modal-panel-32 {
+  width: 100%;
+  max-width: 32rem;
+}
+
+.cf-modal-panel-34 {
+  width: 100%;
+  max-width: 34rem;
+}
+
+.cf-modal-panel-44 {
+  width: 100%;
+  max-width: 44rem;
+}
+
+.cf-modal-panel-wide {
+  width: 85vw;
+  max-width: 64rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.cf-modal-panel-xl {
+  height: 70vh;
+  width: 80vw;
+  max-width: 72rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.cf-chip-info {
+  background-color: var(--cf-chip-info-bg);
+  border-color: var(--cf-chip-info-border);
+}
+
+.cf-chip-warning {
+  background-color: var(--cf-chip-warning-bg);
+  border-color: var(--cf-chip-warning-border);
+}
+
+.cf-chip-olive {
+  background-color: var(--cf-chip-olive-bg);
+  border-color: var(--cf-chip-olive-border);
+}
+
+.cf-chip-slate {
+  background-color: var(--cf-chip-slate-bg);
+  border-color: var(--cf-chip-slate-border);
+}
+
+.cf-chip-amber {
+  background-color: #3d2e0a;
+  border-color: #b45309;
+  color: #fde68a;
+}
+
+.cf-chip-teal {
+  background-color: var(--cf-chip-teal-bg);
+  border-color: var(--cf-chip-teal-border);
+}
+
+.cf-chip-blue {
+  background-color: var(--cf-chip-blue-bg);
+  border-color: var(--cf-chip-blue-border);
+}
+
+.cf-chip-violet {
+  background-color: var(--cf-chip-violet-bg);
+  border-color: var(--cf-chip-violet-border);
+  color: var(--cf-chip-violet-text);
+}
+
+.cf-eval-chip-pending {
+  background-color: #253449;
+  border-color: #3e5b82;
+  color: #dbeafe;
+}
+
+.cf-eval-chip-active {
+  background-color: #493e26;
+  border-color: #8c7041;
+  color: #fde68a;
+}
+
+.cf-eval-chip-complete {
+  background-color: #23363a;
+  border-color: #3d6870;
+  color: #ccfbf1;
+}
+
+.cf-eval-chip-failed {
+  background-color: #4a252d;
+  border-color: #7a3d48;
+  color: #fecdd3;
+}
+
+.cf-eval-system-pending {
+  background-color: #2b303b;
+  border-color: #495264;
+  color: #cbd5e1;
+}
+
+.cf-eval-system-evaluating {
+  background-color: #493e26;
+  border-color: #8c7041;
+  color: #fde68a;
+}
+
+.cf-eval-system-success {
+  background-color: #23363a;
+  border-color: #3d6870;
+  color: #ccfbf1;
+}
+
+.cf-eval-system-policy-failed {
+  background-color: #3b2f00;
+  border-color: #7a6000;
+  color: #fef3c7;
+}
+
+.cf-eval-system-failed {
+  background-color: #4a252d;
+  border-color: #7a3d48;
+  color: #fecdd3;
+}
+
+.cf-policy-selected {
+  background-color: var(--cf-policy-selected-bg);
+  border-color: var(--cf-policy-selected-border);
+}
+
+.cf-action-link {
+  color: var(--cf-action-text);
+}
+
+.cf-auth-bg-base {
+  background: var(--cf-auth-bg-base);
+}
+
+.cf-auth-bg-ambient {
+  background: var(--cf-auth-bg-ambient);
+}
+
+.cf-page-bg {
+  background-color: var(--cf-page-bg);
+}
+
+.cf-sidebar-bg {
+  background-color: var(--cf-sidebar-bg);
+}
+
+.cf-card-bg {
+  background-color: var(--cf-card-bg);
+}
+
+.cf-card-border {
+  border-color: var(--cf-card-border);
+}
+
+.cf-divider > :not([hidden]) ~ :not([hidden]) {
+  border-color: var(--cf-divider);
+}
+
+.cf-subtle-bg {
+  background-color: var(--cf-subtle-bg);
+}
+
+.cf-text-primary {
+  color: var(--cf-text-primary);
+}
+
+.cf-text-secondary {
+  color: var(--cf-text-secondary);
+}
+
+.cf-text-muted {
+  color: var(--cf-text-muted);
+}
+
+.cf-text-disabled {
+  color: var(--cf-text-disabled);
+}
+
+.cf-hover-bg:hover {
+  background-color: var(--cf-hover-bg);
+}
+
+.cf-hover-text-primary:hover {
+  color: var(--cf-text-primary);
+}
+
+.cf-focus-ring:focus,
+.cf-focus-ring:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--cf-focus-ring-color);
+}
+
+.cf-input {
+  background-color: var(--cf-input-bg);
+  border-color: var(--cf-input-border);
+  color: var(--cf-text-secondary);
+}
+
+.cf-input:focus,
+.cf-input:focus-visible {
+  border-color: var(--cf-input-border-focus);
+}
+
+.cf-dev-login-bg {
+  background: var(--cf-dev-login-bg);
+}
+
+.cf-history-timeline-bg {
+  background: var(--cf-history-timeline-bg);
+}
+
+.cf-timeline-node-empty {
+  background-color: var(--cf-timeline-node-empty-bg);
+}
+
+.cf-first-run-banner {
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.9) 0%, rgba(124, 58, 237, 0.9) 100%);
+}
+
+.cf-logo-scale {
+  transform: scale(1.67);
+}
+
+.cf-spinner-accent {
+  border-color: var(--cf-brand-purple);
+}
+
+/*
+ * TEMPORARY: Light-theme compatibility bridge for remaining hardcoded
+ * Tailwind utility classes.
+ *
+ * Removal target:
+ * - Replace remaining legacy utility usage with token-backed semantic classes.
+ * - Remove this block once light theme no longer depends on global utility
+ *   overrides for readability.
+ */
+:root[data-theme="light"] .text-white,
+:root[data-theme="light"] .text-gray-100,
+:root[data-theme="light"] .text-gray-200 {
+  color: var(--cf-text-primary) !important;
+}
+
+:root[data-theme="light"] .text-gray-300,
+:root[data-theme="light"] .text-gray-400 {
+  color: var(--cf-text-secondary) !important;
+}
+
+:root[data-theme="light"] .text-gray-500,
+:root[data-theme="light"] .text-gray-600 {
+  color: var(--cf-text-muted) !important;
+}
+
+:root[data-theme="light"] .bg-gray-950,
+:root[data-theme="light"] .bg-gray-900,
+:root[data-theme="light"] .bg-gray-800 {
+  background-color: var(--cf-card-bg) !important;
+}
+
+:root[data-theme="light"] [class~="bg-gray-950/70"],
+:root[data-theme="light"] [class~="bg-gray-950/50"],
+:root[data-theme="light"] [class~="bg-gray-900/80"],
+:root[data-theme="light"] [class~="bg-gray-900/70"],
+:root[data-theme="light"] [class~="bg-gray-900/60"],
+:root[data-theme="light"] [class~="bg-gray-900/50"],
+:root[data-theme="light"] [class~="bg-gray-800/80"],
+:root[data-theme="light"] [class~="bg-gray-800/50"] {
+  background-color: var(--cf-subtle-bg) !important;
+}
+
+:root[data-theme="light"] .border-gray-800,
+:root[data-theme="light"] .border-gray-700,
+:root[data-theme="light"] .border-gray-600 {
+  border-color: var(--cf-card-border) !important;
+}
+
+:root[data-theme="light"] .hover\:bg-gray-800:hover,
+:root[data-theme="light"] .hover\:bg-gray-700:hover,
+:root[data-theme="light"] [class~="hover:bg-gray-800/80"]:hover,
+:root[data-theme="light"] [class~="hover:bg-gray-800/60"]:hover,
+:root[data-theme="light"] [class~="hover:bg-gray-700/70"]:hover,
+:root[data-theme="light"] [class~="hover:bg-gray-500/10"]:hover {
+  background-color: var(--cf-hover-bg) !important;
+}
+
+:root[data-theme="light"] .hover\:text-white:hover {
+  color: var(--cf-text-primary) !important;
+}
+
+:root[data-theme="light"] .ring-offset-gray-900,
+:root[data-theme="light"] [class~="ring-offset-gray-900"] {
+  --tw-ring-offset-color: var(--cf-page-bg) !important;
+}
+
+/*
+ * Button readability bridge in light mode.
+ * Keep neutral buttons light with dark text, and keep accent buttons high-contrast.
+ */
+:root[data-theme="light"] button.bg-gray-900,
+:root[data-theme="light"] button.bg-gray-800,
+:root[data-theme="light"] button.bg-gray-700,
+:root[data-theme="light"] a.bg-gray-900,
+:root[data-theme="light"] a.bg-gray-800,
+:root[data-theme="light"] a.bg-gray-700,
+:root[data-theme="light"] [class~="bg-gray-900/80"],
+:root[data-theme="light"] [class~="bg-gray-900/70"],
+:root[data-theme="light"] [class~="bg-gray-900/60"],
+:root[data-theme="light"] [class~="bg-gray-800/80"] {
+  background-color: #dde6f3 !important;
+  border-color: var(--cf-card-border) !important;
+  color: var(--cf-text-primary) !important;
+}
+
+:root[data-theme="light"] button.hover\:bg-gray-800:hover,
+:root[data-theme="light"] button.hover\:bg-gray-700:hover,
+:root[data-theme="light"] a.hover\:bg-gray-800:hover,
+:root[data-theme="light"] a.hover\:bg-gray-700:hover,
+:root[data-theme="light"] [class~="hover:bg-gray-800/80"]:hover,
+:root[data-theme="light"] [class~="hover:bg-gray-700/70"]:hover {
+  background-color: #cfdbea !important;
+  color: var(--cf-text-primary) !important;
+}
+
+:root[data-theme="light"] button.bg-blue-600,
+:root[data-theme="light"] button.bg-violet-600,
+:root[data-theme="light"] button.bg-red-500,
+:root[data-theme="light"] button.bg-emerald-600,
+:root[data-theme="light"] a.bg-blue-600,
+:root[data-theme="light"] a.bg-violet-600,
+:root[data-theme="light"] a.bg-red-500,
+:root[data-theme="light"] a.bg-emerald-600,
+:root[data-theme="light"] button.cf-primary-btn,
+:root[data-theme="light"] button.cf-danger-btn,
+:root[data-theme="light"] button.cf-success-btn {
+  color: #ffffff !important;
+}
+
+:root[data-theme="light"] button .text-gray-400,
+:root[data-theme="light"] button .text-gray-500,
+:root[data-theme="light"] a .text-gray-400,
+:root[data-theme="light"] a .text-gray-500 {
+  color: var(--cf-text-primary) !important;
+}
+
+.cf-worker-header-gradient {
+  background: linear-gradient(135deg, rgba(130, 105, 155, 0.34) 0%, rgba(17, 24, 39, 0.92) 100%);
+}
+
+.cf-worker-status-running,
+.cf-build-status-complete,
+.cf-event-level-info,
+.cf-metric-workers {
+  background-color: #1e3a2e;
+  border-color: #2f6b4a;
+  color: #d8fbe8;
+}
+
+.cf-worker-status-paused,
+.cf-build-status-canceled,
+.cf-event-level-default {
+  background-color: #2b303b;
+  border-color: #495264;
+  color: #e5e7eb;
+}
+
+.cf-worker-status-draining,
+.cf-build-status-stopping,
+.cf-event-level-warn,
+.cf-metric-warning {
+  background-color: #4a3b22;
+  border-color: #8c6a2f;
+  color: #fde8c6;
+}
+
+.cf-build-status-queued,
+.cf-metric-queued {
+  background-color: #2e2e3f;
+  border-color: #4d4d72;
+  color: #d9d9ff;
+}
+
+.cf-build-status-building,
+.cf-metric-building {
+  background-color: #23363a;
+  border-color: #3d6870;
+  color: #d9f6f9;
+}
+
+.cf-build-status-restarting {
+  background-color: #2e2a49;
+  border-color: #675cad;
+  color: #e4dfff;
+}
+
+.cf-build-status-failed,
+.cf-event-level-error,
+.cf-metric-failed {
+  background-color: #44262a;
+  border-color: #7a3d48;
+  color: #ffdce1;
+}
+
+.cf-toggle-active {
+  background-color: #253449;
+  border-color: #3e5b82;
+  color: #e2ebf7;
+}
+
+.cf-toggle-inactive {
+  background-color: #212733;
+  border-color: #394557;
+  color: #9ca3af;
+}
+
+.cf-queue-row {
+  border-color: #374151;
+}
+
+.cf-queue-row-selected {
+  border-color: #6d8fba;
+}
+
+.cf-queue-row-building,
+.cf-queue-row-restarting {
+  background-color: #1c2b3e;
+}
+
+.cf-queue-row-queued {
+  background-color: #242c3a;
+}
+
+.cf-queue-row-stopping {
+  background-color: #3c2f20;
+}
+
+.cf-queue-row-failed {
+  background-color: #3b232a;
+}
+
+.cf-queue-row-complete {
+  background-color: #1e362e;
+}
+
+.cf-queue-row-canceled {
+  background-color: #2c313a;
+}
+
+.cf-builds-split {
+  display: grid;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+  gap: 1.5rem;
+}
+
+/* Policy modal explicit theming (strong override to avoid utility drift) */
+.cf-policy-modal-panel {
+  background-color: var(--cf-card-bg) !important;
+  border-color: var(--cf-card-border) !important;
+}
+
+.cf-policy-modal-field {
+  background-color: rgba(3, 7, 18, 0.72) !important;
+  border-color: #1f2937 !important;
+  color: var(--cf-text-primary) !important;
+}
+
+.cf-policy-modal-field:focus,
+.cf-policy-modal-field:focus-visible {
+  border-color: var(--cf-input-border-focus) !important;
+  box-shadow: 0 0 0 2px var(--cf-focus-ring-color) !important;
+}
+
+.cf-policy-modal-editor-surface {
+  background-color: rgba(3, 7, 18, 0.78) !important;
+  border-color: #1f2937 !important;
+}
+
+.cf-policy-modal-error {
+  color: #fca5a5 !important;
+  background-color: rgba(127, 29, 29, 0.38) !important;
+  border: 1px solid rgba(248, 113, 113, 0.55) !important;
+}
+
+.cf-policy-modal-field-error {
+  border-color: rgba(248, 113, 113, 0.75) !important;
+  box-shadow: 0 0 0 2px rgba(248, 113, 113, 0.22) !important;
+}
+
+:root[data-theme="light"] .cf-policy-modal-field {
+  background-color: var(--cf-subtle-bg) !important;
+  border-color: var(--cf-card-border) !important;
+}
+
+:root[data-theme="light"] .cf-policy-modal-editor-surface {
+  background-color: var(--cf-subtle-bg) !important;
+  border-color: var(--cf-card-border) !important;
+}
+
+.cf-flakes-history-split {
+  display: grid;
+  grid-template-columns: minmax(0, 4fr) minmax(0, 8fr);
+  gap: 1.5rem;
+}
+
+@media (max-width: 1280px) {
+  .cf-flakes-history-split {
+    grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+  }
+}
+
+@media (max-width: 1024px) {
+  .cf-builds-split,
+  .cf-flakes-history-split {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Sidebar section headers */
+.cf-nav-section {
+  /* Bleed past the px-3 parent padding to fill edge-to-edge */
+  margin-left: -0.75rem;
+  margin-right: -0.75rem;
+  margin-top: 0.5rem;
+  /* Subtle tinted wash — one step darker/lighter than sidebar bg */
+  background-color: var(--cf-subtle-bg);
+  /* Hairline borders top and bottom to frame the row */
+  border-top: 1px solid var(--cf-card-border);
+  border-bottom: 1px solid var(--cf-card-border);
+  min-height: 1.625rem;
+  display: flex;
+  align-items: center;
+  padding: 0 1rem;
+  margin-bottom: 0.25rem;
+}
+
+.cf-nav-section-label {
+  display: block;
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--cf-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+/* Sidebar edge toggle — fixed to viewport center-left, flush with sidebar edge */
+.cf-sidebar-edge-toggle {
+  position: fixed;
+  top: 50vh;
+  transform: translate(-50%, -50%);
+  z-index: 50;
+  display: none; /* hidden on mobile, shown by cf-sidebar-shell media query */
+  height: 3rem;
+  width: 1.125rem;
+  align-items: center;
+  justify-content: center;
+  /* Pill shape — fully rounded on right, square flush on left */
+  border-radius: 0 999px 999px 0;
+  /* Matches sidebar exactly at rest — blends in */
+  background-color: var(--cf-sidebar-bg);
+  color: var(--cf-text-muted);
+  /* Subtle border on the non-sidebar edges only */
+  border-top: 1px solid var(--cf-card-border);
+  border-right: 1px solid var(--cf-card-border);
+  border-bottom: 1px solid var(--cf-card-border);
+  border-left: none;
+  transition: left 0.3s ease-in-out, background-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
+  cursor: pointer;
+}
+
+.cf-sidebar-edge-toggle:hover {
+  background-color: var(--cf-brand-purple);
+  color: #ffffff;
+  border-color: var(--cf-brand-purple);
+  box-shadow: 2px 0 8px -1px rgba(130, 105, 155, 0.5);
+}
+
+/* Responsive navigation controls and sidebar visibility */
+.cf-sidebar-shell {
+  display: none;
+}
+
+.cf-mobile-only {
+  display: inline-flex;
+}
+
+.cf-desktop-only {
+  display: none;
+}
+
+.cf-mobile-overlay,
+.cf-mobile-drawer {
+  display: flex;
+}
+
+@media (min-width: 480px) {
+  .cf-sidebar-shell {
+    display: flex;
+  }
+
+  .cf-sidebar-edge-toggle {
+    display: inline-flex;
+  }
+
+  .cf-mobile-only {
+    display: none;
+  }
+
+  .cf-desktop-only {
+    display: inline-flex;
+  }
+
+  .cf-mobile-overlay,
+  .cf-mobile-drawer {
+    display: none;
+  }
+}

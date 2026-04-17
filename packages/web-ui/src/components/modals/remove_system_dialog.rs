@@ -4,9 +4,9 @@ use dioxus::prelude::*;
 
 use crate::theme;
 
-/// Confirmation dialog for removing a system from the registry.
+/// Confirmation dialog for disabling a system in the registry.
 ///
-/// Shows a warning that the action only removes from the current view.
+/// Disabling hides the system from active views while preserving history.
 #[component]
 pub fn RemoveSystemDialog(
     /// The hostname of the system to remove
@@ -18,13 +18,11 @@ pub fn RemoveSystemDialog(
 ) -> Element {
     rsx! {
         div {
-            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4",
-            style: "position: fixed; inset: 0; z-index: 60; width: 100vw; height: 100vh; backdrop-filter: blur(6px);",
+            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
             onclick: move |_| on_cancel.call(()),
 
             div {
-                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6",
-                style: "width: 100%; max-width: 28rem;",
+                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6 cf-modal-panel-28",
                 onclick: |evt| evt.stop_propagation(),
 
                 h3 {
@@ -33,7 +31,7 @@ pub fn RemoveSystemDialog(
                 }
                 p {
                     class: "text-sm {theme::text::SECONDARY} text-center mb-6",
-                    "This removes the system from the current registry view."
+                    "This disables the system and hides it from active views. History is preserved."
                 }
                 div {
                     class: "flex gap-3",
@@ -45,7 +43,7 @@ pub fn RemoveSystemDialog(
                     button {
                         class: "flex-1 px-4 py-2 rounded-lg font-medium text-sm transition-colors bg-red-500 hover:bg-red-400 text-white",
                         onclick: move |_| on_confirm.call(()),
-                        "Remove"
+                        "Disable"
                     }
                 }
             }

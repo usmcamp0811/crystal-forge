@@ -1,12 +1,13 @@
 //! Dashboard view — fleet-wide overview with health, deployment, and CVE summaries.
 
-use chrono::{Duration, Utc};
+use chrono::Duration;
 use dioxus::prelude::*;
 use std::collections::HashSet;
 
+use crate::api::client::{ApiClientError, fetch_systems};
 use crate::api::models::{
-    BuildQueueItem, BuildQueueSummary, BuildStatus, CveSummary, DashboardSummary, DeploymentStatus,
-    DeploymentStatusSummary, FlakeCommit, FlakeTimeline, FleetHealthSummary, RecentDeployment,
+    BuildQueueSummary, BuildStatus, DeploymentStatus, FlakeCommit, FlakeTimeline, HealthStatus,
+    SystemSummary, SystemsListParams,
 };
 use crate::components::dashboard::{
     BuildQueuePanel, BuildSummaryPanel, CveSummaryPanel, DeploymentStatusBreakdown,
@@ -14,8 +15,16 @@ use crate::components::dashboard::{
 };
 use crate::components::flake::FlakeTimelineWidget;
 use crate::components::layout::Card;
+use crate::components::notifications::{AlertBanner, AlertSeverity};
 use crate::components::stat_card::StatCard;
 use crate::components::widget_grid::{GridWidget, WidgetGrid};
+use crate::dashboard::adapter::{
+    deterministic_mock_timestamp, empty_dashboard_summary, load_dashboard_with_fallback,
+    load_flake_timelines_with_fallback,
+};
+use crate::routes::Route;
+use crate::state::app_state::AppState;
+use crate::state::auth;
 use crate::theme;
 
 /// Global filter state for the dashboard - shared across all widgets.
@@ -113,19 +122,145 @@ fn default_widget_positions() -> Vec<WidgetPosition> {
             width: 2,
             height: 2,
         },
+        WidgetPosition {
+            id: "config-health",
+            title: "Pipeline Readiness",
+            col: 0,
+            row: 7,
+            width: 4,
+            height: 2,
+        },
     ]
 }
 
 /// The main dashboard page.
 #[component]
 pub fn DashboardView() -> Element {
-    // TODO: Replace with real API call using use_resource + fetch_dashboard()
-    let dashboard = mock_dashboard_summary();
-    let flake_timelines = mock_flake_timelines();
+    let nav = navigator();
+
+    let dashboard = use_signal(empty_dashboard_summary);
+    let dashboard_notice = use_signal(|| None::<String>);
+    let loading_dashboard = use_signal(|| true);
+    let redirect_to_login = use_signal(|| false);
+
+    // Shared config health (admin only).
+    let app_state = use_context::<Signal<AppState>>();
+    let is_admin_user = auth::is_admin(&app_state.read().auth);
+    let config_health = app_state.read().config_health.clone();
+
+    // Flake timelines state
+    let flake_timelines = use_signal(Vec::<FlakeTimeline>::new);
+    let timelines_notice = use_signal(|| None::<String>);
+    let loading_timelines = use_signal(|| true);
+    let dashboard_systems = use_signal(Vec::<SystemSummary>::new);
+
+    {
+        let mut dashboard = dashboard.clone();
+        let mut dashboard_notice = dashboard_notice.clone();
+        let mut loading_dashboard = loading_dashboard.clone();
+        let mut redirect_to_login = redirect_to_login.clone();
+
+        use_effect(move || {
+            spawn(async move {
+                let load_result = load_dashboard_with_fallback().await;
+
+                if load_result.redirect_to_login {
+                    redirect_to_login.set(true);
+                    loading_dashboard.set(false);
+                    return;
+                }
+
+                dashboard.set(load_result.summary);
+                dashboard_notice.set(load_result.notice);
+                loading_dashboard.set(false);
+            });
+        });
+    }
+
+    {
+        let mut dashboard_systems = dashboard_systems.clone();
+        let mut redirect_to_login = redirect_to_login.clone();
+
+        use_effect(move || {
+            spawn(async move {
+                match load_dashboard_systems().await {
+                    Ok(systems) => dashboard_systems.set(systems),
+                    Err(error) if should_redirect_to_login(&error) => {
+                        redirect_to_login.set(true);
+                    }
+                    Err(_) => {
+                        // Keep widget-level summaries usable even if host sampling fetch fails.
+                    }
+                }
+            });
+        });
+    }
+
+    {
+        let mut flake_timelines = flake_timelines.clone();
+        let mut timelines_notice = timelines_notice.clone();
+        let mut loading_timelines = loading_timelines.clone();
+        let mut redirect_to_login = redirect_to_login.clone();
+
+        use_effect(move || {
+            spawn(async move {
+                let load_result = load_flake_timelines_with_fallback().await;
+
+                if load_result.redirect_to_login {
+                    redirect_to_login.set(true);
+                    loading_timelines.set(false);
+                    return;
+                }
+
+                flake_timelines.set(load_result.timelines);
+                timelines_notice.set(load_result.notice);
+                loading_timelines.set(false);
+            });
+        });
+    }
+
+    if *redirect_to_login.read() {
+        nav.push(Route::LoginView {});
+        return rsx! {
+            div {
+                class: "min-h-screen flex items-center justify-center {theme::surface::PAGE_BG}",
+                p {
+                    class: "{theme::text::SECONDARY}",
+                    "Redirecting to login..."
+                }
+            }
+        };
+    }
+
+    let dashboard = dashboard.read().clone();
+    let timelines = flake_timelines.read().clone();
+    let systems = dashboard_systems.read().clone();
     let build_queue = dashboard
         .build_queue
         .clone()
-        .unwrap_or_else(|| mock_build_queue_summary(dashboard.timestamp));
+        .unwrap_or_else(|| BuildQueueSummary {
+            building_count: 0,
+            queued_count: 0,
+            items: vec![],
+            timestamp: dashboard.timestamp,
+        });
+
+    let healthy_hosts = hostnames_for_health(&systems, HealthStatus::Healthy);
+    let warning_hosts = hostnames_for_health(&systems, HealthStatus::Warning);
+    let critical_hosts = hostnames_for_health(&systems, HealthStatus::Critical);
+    let offline_hosts = hostnames_for_health(&systems, HealthStatus::Offline);
+
+    let up_to_date_hosts = hostnames_for_deployment(&systems, &[DeploymentStatus::UpToDate]);
+    let behind_hosts = hostnames_for_deployment(&systems, &[DeploymentStatus::Behind]);
+    let never_deployed_hosts =
+        hostnames_for_deployment(&systems, &[DeploymentStatus::NeverDeployed]);
+    let unknown_hosts = hostnames_for_deployment(
+        &systems,
+        &[
+            DeploymentStatus::Unknown,
+            DeploymentStatus::NoCommitsAvailable,
+        ],
+    );
 
     // Global filter state - shared across all widgets (multi-select)
     let mut dashboard_filter = use_signal(DashboardFilter::default);
@@ -295,13 +430,21 @@ pub fn DashboardView() -> Element {
             "fleet-health" => rsx! {
                 FleetHealthBreakdown {
                     health: dashboard.fleet_health.clone(),
-                    flake_filter: filter_display.clone()
+                    flake_filter: filter_display.clone(),
+                    healthy_hosts: healthy_hosts.clone(),
+                    warning_hosts: warning_hosts.clone(),
+                    critical_hosts: critical_hosts.clone(),
+                    offline_hosts: offline_hosts.clone(),
                 }
             },
             "deployment-status" => rsx! {
                 DeploymentStatusBreakdown {
                     status: dashboard.deployment_status.clone(),
-                    flake_filter: filter_display.clone()
+                    flake_filter: filter_display.clone(),
+                    up_to_date_hosts: up_to_date_hosts.clone(),
+                    behind_hosts: behind_hosts.clone(),
+                    never_deployed_hosts: never_deployed_hosts.clone(),
+                    unknown_hosts: unknown_hosts.clone(),
                 }
             },
             "build-summary" => rsx! {
@@ -328,6 +471,80 @@ pub fn DashboardView() -> Element {
                     flake_filter: filter_display.clone()
                 }
             },
+            "config-health" => {
+                if !is_admin_user {
+                    // Non-admins don't see this widget at all.
+                    return rsx! {};
+                }
+                let health_snapshot = config_health.clone();
+                match health_snapshot {
+                    None => rsx! {
+                        p {
+                            class: "text-xs {theme::text::SECONDARY}",
+                            "Checking pipeline readiness..."
+                        }
+                    },
+                    Some(ref h) if h.total_issues == 0 => rsx! {
+                        div {
+                            class: "flex items-center gap-2 text-emerald-400",
+                            svg {
+                                class: "w-5 h-5 shrink-0",
+                                fill: "none",
+                                stroke: "currentColor",
+                                view_box: "0 0 24 24",
+                                path {
+                                    stroke_linecap: "round",
+                                    stroke_linejoin: "round",
+                                    stroke_width: "2",
+                                    d: "M5 13l4 4L19 7",
+                                }
+                            }
+                            span {
+                                class: "text-sm font-medium",
+                                "All pipeline stages are configured and ready."
+                            }
+                        }
+                    },
+                    Some(ref h) => {
+                        let suffix = if h.total_issues == 1 { "" } else { "s" };
+                        let heading =
+                            format!("{} configuration issue{} detected", h.total_issues, suffix);
+                        rsx! {
+                            div {
+                                class: "rounded-xl border border-amber-300/35 bg-gradient-to-br from-amber-950/75 via-amber-900/30 to-yellow-950/10 p-4 h-full min-h-0 flex flex-col overflow-hidden shadow-[inset_0_1px_0_rgba(252,211,77,0.08)]",
+                                style: "background: linear-gradient(180deg, rgba(120, 53, 15, 0.32), rgba(120, 53, 15, 0.12)); border-color: rgba(245, 158, 11, 0.3); box-shadow: inset 0 1px 0 rgba(253, 230, 138, 0.08);",
+                                div {
+                                    class: "flex items-center gap-2",
+                                    div {
+                                        class: "flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-amber-300/22 text-xs font-bold text-amber-100 border border-amber-200/20",
+                                        style: "background: rgba(245, 158, 11, 0.18); color: rgb(254, 243, 199); border-color: rgba(252, 211, 77, 0.22);",
+                                        "!"
+                                    }
+                                    p {
+                                        class: "text-xs font-semibold text-amber-100 uppercase tracking-[0.18em]",
+                                        style: "color: rgb(253, 230, 138);",
+                                        "{heading}"
+                                    }
+                                }
+                                div {
+                                    class: "mt-3 flex-1 min-h-0 overflow-y-auto space-y-2 pr-1",
+                                    style: "overflow-y: auto; overscroll-behavior: contain;",
+                                    "data-testid": "pipeline-readiness-scroll",
+                                    for check in h.checks.iter().filter(|c| !c.passed) {
+                                        AlertBanner {
+                                            key: "{check.id}",
+                                            severity: AlertSeverity::Warning,
+                                            message: check.message.clone(),
+                                            action_label: Some("Fix →".to_string()),
+                                            action_url: Some(check.action_url.clone()),
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             _ => rsx! { div { "Unknown widget" } },
         }
     };
@@ -338,6 +555,20 @@ pub fn DashboardView() -> Element {
             "data-testid": "dashboard",
 
             // Top stats row
+            if *loading_dashboard.read() {
+                p {
+                    class: "text-xs px-3 py-2 rounded-lg border text-blue-100 cf-chip-info",
+                    "Loading dashboard data..."
+                }
+            }
+
+            if let Some(message) = dashboard_notice.read().clone() {
+                p {
+                    class: "text-xs px-3 py-2 rounded-lg border text-amber-100 cf-chip-warning",
+                    "{message}"
+                }
+            }
+
             div {
                 class: "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4",
                 StatCard {
@@ -362,17 +593,32 @@ pub fn DashboardView() -> Element {
             }
 
             // Flake Commit Timeline with multi-select filter
+            if *loading_timelines.read() {
+                p {
+                    class: "text-xs px-3 py-2 rounded-lg border text-blue-100 cf-chip-info",
+                    "Loading flake timelines..."
+                }
+            }
+
+            if let Some(message) = timelines_notice.read().clone() {
+                p {
+                    class: "text-xs px-3 py-2 rounded-lg border text-amber-100 cf-chip-warning",
+                    "{message}"
+                }
+            }
+
             Card {
                 title: None,
                 children: rsx! {
                     FlakeTimelineWidget {
-                        timelines: flake_timelines.clone(),
+                        timelines: timelines.clone(),
                         selected_flake_indices: dashboard_filter.read().selected_flake_indices.clone(),
                         on_filter_change: {
-                            let flake_timelines = flake_timelines.clone();
+                            let timelines_signal = flake_timelines.clone();
                             move |indices: HashSet<usize>| {
+                                let current_timelines = timelines_signal.read();
                                 let names: Vec<String> = indices.iter()
-                                    .filter_map(|&idx| flake_timelines.get(idx).map(|t| t.flake_name.clone()))
+                                    .filter_map(|&idx| current_timelines.get(idx).map(|t| t.flake_name.clone()))
                                     .collect();
                                 dashboard_filter.set(DashboardFilter {
                                     selected_flake_indices: indices,
@@ -388,11 +634,11 @@ pub fn DashboardView() -> Element {
             div {
                 class: "flex items-center justify-between",
                 h2 {
-                    class: "text-lg font-semibold text-white",
+                    class: "text-lg font-semibold {theme::text::PRIMARY}",
                     "Dashboard Widgets"
                 }
                 button {
-                    class: "px-3 py-1.5 text-xs font-medium text-gray-400 hover:text-white bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg transition-colors",
+                    class: "px-3 py-1.5 text-xs font-medium {theme::text::SECONDARY} {theme::interactive::HOVER_BG} {theme::surface::SUBTLE_BG} border {theme::surface::CARD_BORDER} rounded-lg transition-colors",
                     onclick: move |_| {
                         widget_positions.set(default_widget_positions());
                     },
@@ -434,139 +680,9 @@ pub fn DashboardView() -> Element {
 // Mock Data Functions (for development)
 // =============================================================================
 
-/// Generate mock build queue data for development.
-fn mock_build_queue_summary(now: chrono::DateTime<chrono::Utc>) -> BuildQueueSummary {
-    let items = vec![
-        BuildQueueItem {
-            hostname: "atlas-02".to_string(),
-            flake_name: "infrastructure".to_string(),
-            commit_hash: "a1b2c3d".to_string(),
-            commit_message: Some("feat: add monitoring stack".to_string()),
-            status: BuildStatus::Building,
-            queued_at: now - Duration::minutes(14),
-            started_at: Some(now - Duration::minutes(9)),
-            elapsed_secs: Some(9 * 60),
-        },
-        BuildQueueItem {
-            hostname: "ws-009".to_string(),
-            flake_name: "workstations".to_string(),
-            commit_hash: "a2b3c4d".to_string(),
-            commit_message: Some("fix: bluetooth audio".to_string()),
-            status: BuildStatus::Queued,
-            queued_at: now - Duration::minutes(6),
-            started_at: None,
-            elapsed_secs: None,
-        },
-        BuildQueueItem {
-            hostname: "edge-us-west".to_string(),
-            flake_name: "edge-nodes".to_string(),
-            commit_hash: "1234567".to_string(),
-            commit_message: Some("fix: wireguard tunnel".to_string()),
-            status: BuildStatus::Queued,
-            queued_at: now - Duration::minutes(22),
-            started_at: None,
-            elapsed_secs: None,
-        },
-        BuildQueueItem {
-            hostname: "luna-01".to_string(),
-            flake_name: "infrastructure".to_string(),
-            commit_hash: "b2c3d4e".to_string(),
-            commit_message: Some("fix: nginx config reload".to_string()),
-            status: BuildStatus::Queued,
-            queued_at: now - Duration::minutes(3),
-            started_at: None,
-            elapsed_secs: None,
-        },
-    ];
-
-    let building_count = items
-        .iter()
-        .filter(|item| item.status == BuildStatus::Building)
-        .count() as i64;
-    let queued_count = items
-        .iter()
-        .filter(|item| item.status == BuildStatus::Queued)
-        .count() as i64;
-
-    BuildQueueSummary {
-        building_count,
-        queued_count,
-        items,
-        timestamp: now,
-    }
-}
-
-/// Generate mock dashboard data for development.
-fn mock_dashboard_summary() -> DashboardSummary {
-    let now = Utc::now();
-    let build_queue = mock_build_queue_summary(now);
-
-    DashboardSummary {
-        fleet_health: FleetHealthSummary {
-            healthy: 17,
-            warning: 2,
-            critical: 0,
-            offline: 2,
-        },
-        deployment_status: DeploymentStatusSummary {
-            up_to_date: 7,
-            behind: 0,
-            never_deployed: 12,
-            unknown: 2,
-        },
-        cve_summary: CveSummary {
-            critical: 5,
-            high: 23,
-            medium: 67,
-            low: 142,
-        },
-        total_systems: 21,
-        active_builds: build_queue.building_count,
-        build_queue: Some(build_queue),
-        recent_deployments: vec![
-            RecentDeployment {
-                hostname: "atlas-01".to_string(),
-                commit_hash: "a1b2c3d4e5f6789".to_string(),
-                commit_message: Some("fix: update nginx config for TLS 1.3".to_string()),
-                deployed_at: now - Duration::minutes(15),
-                status: DeploymentStatus::UpToDate,
-            },
-            RecentDeployment {
-                hostname: "nova-05".to_string(),
-                commit_hash: "f9e8d7c6b5a4321".to_string(),
-                commit_message: Some("feat: add prometheus metrics endpoint".to_string()),
-                deployed_at: now - Duration::hours(2),
-                status: DeploymentStatus::UpToDate,
-            },
-            RecentDeployment {
-                hostname: "luna-02".to_string(),
-                commit_hash: "1234567890abcdef".to_string(),
-                commit_message: Some("chore: bump nixpkgs to 24.11".to_string()),
-                deployed_at: now - Duration::hours(5),
-                status: DeploymentStatus::Behind,
-            },
-            RecentDeployment {
-                hostname: "orion-03".to_string(),
-                commit_hash: "deadbeefcafe1234".to_string(),
-                commit_message: Some("refactor: migrate to systemd hardening options".to_string()),
-                deployed_at: now - Duration::days(1),
-                status: DeploymentStatus::UpToDate,
-            },
-            RecentDeployment {
-                hostname: "vega-04".to_string(),
-                commit_hash: "cafe1234deadbeef".to_string(),
-                commit_message: Some("fix: resolve CVE-2024-1234 in openssl".to_string()),
-                deployed_at: now - Duration::days(2),
-                status: DeploymentStatus::Behind,
-            },
-        ],
-        timestamp: now,
-    }
-}
-
 /// Generate mock flake timeline data for development.
 pub fn mock_flake_timelines() -> Vec<FlakeTimeline> {
-    let now = Utc::now();
+    let now = deterministic_mock_timestamp();
 
     vec![
         FlakeTimeline {
@@ -575,6 +691,7 @@ pub fn mock_flake_timelines() -> Vec<FlakeTimeline> {
             repo_url: "github:acme/infra".to_string(),
             commits: vec![
                 FlakeCommit {
+                    id: 1,
                     hash: "a1b2c3d4e5f6789012345678".to_string(),
                     message: "feat: add monitoring stack".to_string(),
                     author: "alice".to_string(),
@@ -588,9 +705,13 @@ pub fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                         "atlas-04".to_string(),
                         "atlas-05".to_string(),
                     ],
+                    system_paths: vec![],
                     build_status: Some(BuildStatus::Building),
+                    evaluation_status: None,
+                    evaluation_error_message: None,
                 },
                 FlakeCommit {
+                    id: 2,
                     hash: "b2c3d4e5f6789012345678ab".to_string(),
                     message: "fix: nginx config reload".to_string(),
                     author: "bob".to_string(),
@@ -598,9 +719,13 @@ pub fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                     system_count: 2,
                     commits_behind: 1,
                     systems: vec!["luna-01".to_string(), "luna-02".to_string()],
+                    system_paths: vec![],
                     build_status: Some(BuildStatus::Queued),
+                    evaluation_status: None,
+                    evaluation_error_message: None,
                 },
                 FlakeCommit {
+                    id: 3,
                     hash: "c3d4e5f6789012345678abcd".to_string(),
                     message: "chore: update nixpkgs".to_string(),
                     author: "alice".to_string(),
@@ -608,7 +733,10 @@ pub fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                     system_count: 1,
                     commits_behind: 2,
                     systems: vec!["orion-01".to_string()],
+                    system_paths: vec![],
                     build_status: Some(BuildStatus::Idle),
+                    evaluation_status: None,
+                    evaluation_error_message: None,
                 },
             ],
         },
@@ -618,6 +746,7 @@ pub fn mock_flake_timelines() -> Vec<FlakeTimeline> {
             repo_url: "github:acme/workstations".to_string(),
             commits: vec![
                 FlakeCommit {
+                    id: 4,
                     hash: "f1a2b3c4d5e6f7890123456".to_string(),
                     message: "feat: add vscode extensions".to_string(),
                     author: "dave".to_string(),
@@ -634,9 +763,13 @@ pub fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                         "ws-007".to_string(),
                         "ws-008".to_string(),
                     ],
+                    system_paths: vec![],
                     build_status: Some(BuildStatus::Queued),
+                    evaluation_status: None,
+                    evaluation_error_message: None,
                 },
                 FlakeCommit {
+                    id: 5,
                     hash: "a2b3c4d5e6f78901234567ab".to_string(),
                     message: "fix: bluetooth audio".to_string(),
                     author: "eve".to_string(),
@@ -644,7 +777,10 @@ pub fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                     system_count: 2,
                     commits_behind: 1,
                     systems: vec!["ws-009".to_string(), "ws-010".to_string()],
+                    system_paths: vec![],
                     build_status: Some(BuildStatus::Queued),
+                    evaluation_status: None,
+                    evaluation_error_message: None,
                 },
             ],
         },
@@ -653,6 +789,7 @@ pub fn mock_flake_timelines() -> Vec<FlakeTimeline> {
             flake_name: "edge-nodes".to_string(),
             repo_url: "github:acme/edge".to_string(),
             commits: vec![FlakeCommit {
+                id: 6,
                 hash: "1234567890abcdef12345678".to_string(),
                 message: "fix: wireguard tunnel".to_string(),
                 author: "frank".to_string(),
@@ -671,8 +808,69 @@ pub fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                     "edge-us-south".to_string(),
                     "edge-us-north".to_string(),
                 ],
+                system_paths: vec![],
                 build_status: Some(BuildStatus::Queued),
+                evaluation_status: None,
+                evaluation_error_message: None,
             }],
         },
     ]
+}
+
+fn should_redirect_to_login(error: &ApiClientError) -> bool {
+    matches!(
+        error,
+        ApiClientError::Status { code, .. } if *code == 401 || *code == 403
+    )
+}
+
+async fn load_dashboard_systems() -> Result<Vec<SystemSummary>, ApiClientError> {
+    let mut page = 1;
+    let per_page = 200;
+    let mut systems = Vec::new();
+
+    loop {
+        let response = fetch_systems(&SystemsListParams {
+            page: Some(page),
+            per_page: Some(per_page),
+            search: None,
+            health_status: None,
+            deployment_status: None,
+            environment: None,
+            sort_by: None,
+            sort_order: None,
+        })
+        .await?;
+
+        let total_pages = response.total_pages();
+        systems.extend(response.items);
+
+        if page >= total_pages || total_pages == 0 {
+            break;
+        }
+        page += 1;
+    }
+
+    Ok(systems)
+}
+
+fn hostnames_for_health(systems: &[SystemSummary], status: HealthStatus) -> Vec<String> {
+    systems
+        .iter()
+        .filter(|system| system.health_status == status)
+        .map(|system| system.hostname.clone())
+        .take(24)
+        .collect()
+}
+
+fn hostnames_for_deployment(
+    systems: &[SystemSummary],
+    statuses: &[DeploymentStatus],
+) -> Vec<String> {
+    systems
+        .iter()
+        .filter(|system| statuses.contains(&system.deployment_status))
+        .map(|system| system.hostname.clone())
+        .take(24)
+        .collect()
 }

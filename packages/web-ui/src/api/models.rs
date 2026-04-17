@@ -9,7 +9,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
+pub use uuid::Uuid;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Common Enums
@@ -256,6 +256,68 @@ impl CveSummary {
     }
 }
 
+/// Admin-only CVE dashboard fleet summary payload.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CveDashboardSummary {
+    pub total_open: i64,
+    pub severity: CveSummary,
+    pub affected_systems: i64,
+    pub new_cves_last_7_days: i64,
+    pub oldest_cve_age_days: Option<i64>,
+}
+
+/// Filters for CVE dashboard drill-down requests.
+#[derive(Debug, Clone, Default)]
+pub struct CveDashboardVulnerabilityParams {
+    pub severity: Option<String>,
+    pub status: Option<String>,
+    pub system: Option<String>,
+    pub environment: Option<String>,
+    pub package: Option<String>,
+    pub date_from: Option<String>,
+    pub date_to: Option<String>,
+    pub limit: Option<i64>,
+}
+
+/// A CVE row for dashboard drill-down views.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CveDashboardVulnerability {
+    pub system_id: Uuid,
+    pub hostname: String,
+    pub cve_id: String,
+    pub severity: CveSeverity,
+    pub cvss_score: Option<f64>,
+    pub package_name: String,
+    pub installed_version: String,
+    pub fixed_version: Option<String>,
+    pub first_seen: Option<DateTime<Utc>>,
+    pub status: String,
+}
+
+/// Top-affected system row for CVE dashboard visualization.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CveDashboardTopSystem {
+    pub system_id: Uuid,
+    pub hostname: String,
+    pub total_cves: i64,
+    pub critical_cves: i64,
+    pub high_cves: i64,
+    pub medium_cves: i64,
+    pub low_cves: i64,
+    pub days_since_scan: Option<i64>,
+    pub last_cve_scan: Option<DateTime<Utc>>,
+}
+
+/// Scan freshness/coverage per system.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CveScanFreshnessRow {
+    pub system_id: Uuid,
+    pub hostname: String,
+    pub days_since_scan: Option<i64>,
+    pub last_cve_scan: Option<DateTime<Utc>>,
+    pub total_cves: i64,
+}
+
 /// A single recent deployment event.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RecentDeployment {
@@ -275,7 +337,15 @@ pub struct RecentDeployment {
 pub struct SystemSummary {
     pub id: Uuid,
     pub hostname: String,
+    #[serde(default)]
+    pub system_configuration_name: Option<String>,
     pub environment: Option<String>,
+    #[serde(default)]
+    pub flake_id: Option<i32>,
+    /// Primary IP from agent heartbeat. Not included in server list responses
+    /// (use [`SystemNetworkInfo`] in [`SystemDetail`] for full network info).
+    /// Defaults to `None` for compatibility with the backend DTO.
+    #[serde(default)]
     pub primary_ip: Option<String>,
     pub health_status: HealthStatus,
     pub deployment_status: DeploymentStatus,
@@ -291,6 +361,8 @@ pub struct SystemSummary {
 pub struct SystemDetail {
     pub id: Uuid,
     pub hostname: String,
+    #[serde(default)]
+    pub system_configuration_name: Option<String>,
     pub environment: Option<String>,
     pub is_active: bool,
     pub deployment_policy: String,
@@ -354,7 +426,19 @@ pub struct FlakeRegistryItem {
     pub id: i32,
     pub name: String,
     pub repo_url: String,
+    pub branch: String,
+    #[serde(default = "default_flake_build_scope")]
+    pub build_scope: String,
     pub system_count: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FlakeCredentialSummary {
+    pub flake_id: i32,
+    pub auth_type: String,
+    pub username: Option<String>,
+    pub ssh_username: Option<String>,
+    pub has_secret: bool,
 }
 
 /// Request payload for creating a flake.
@@ -362,6 +446,148 @@ pub struct FlakeRegistryItem {
 pub struct CreateFlakeRequest {
     pub name: String,
     pub repo_url: String,
+    pub branch: Option<String>,
+    pub build_scope: Option<String>,
+}
+
+/// Request payload for updating a flake.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpdateFlakeRequest {
+    pub name: String,
+    pub repo_url: String,
+    pub branch: Option<String>,
+    pub build_scope: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateFlakeCredentialRequest {
+    pub auth_type: String,
+    pub username: Option<String>,
+    pub secret: Option<String>,
+    pub ssh_username: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpdateFlakeCredentialRequest {
+    pub auth_type: Option<String>,
+    pub username: Option<String>,
+    pub secret: Option<String>,
+    pub ssh_username: Option<String>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Environment DTOs — GET /api/v1/environments, GET /api/v1/environments/:id
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Lightweight environment summary returned by the environments API.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnvironmentSummary {
+    pub id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub color_hex: String,
+    pub is_active: bool,
+    /// Number of systems assigned to this environment.
+    pub system_count: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnvironmentWithPolicies {
+    pub id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub color_hex: String,
+    pub is_active: bool,
+    pub system_count: i64,
+    pub required_policy_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnvironmentPolicyMapEntry {
+    pub environment_id: Uuid,
+    pub required_policy_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateEnvironmentRequest {
+    pub name: String,
+    pub description: Option<String>,
+    pub color_hex: String,
+    pub is_active: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpdateEnvironmentRequest {
+    pub name: String,
+    pub description: Option<String>,
+    pub color_hex: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateEnvironmentPoliciesRequest {
+    pub required_policy_ids: Vec<uuid::Uuid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeploymentPolicySummary {
+    pub id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub policy_type: String,
+    pub config: serde_json::Value,
+    pub enabled: bool,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Deployment Policies CRUD DTOs
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Full deployment policy record with timestamps.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeploymentPolicyRecord {
+    pub id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub policy_type: String,
+    pub config: serde_json::Value,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Response for listing deployment policies with pagination.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeploymentPoliciesListResponse {
+    pub policies: Vec<DeploymentPolicyRecord>,
+    pub total: usize,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+/// Request to create a new deployment policy.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateDeploymentPolicyRequest {
+    pub name: String,
+    pub description: Option<String>,
+    pub policy_type: String,
+    pub config: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+}
+
+/// Request to update an existing deployment policy.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpdateDeploymentPolicyRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -387,16 +613,20 @@ pub enum BuildStatus {
     Queued,
     /// Build is currently in progress.
     Building,
+    /// Build is being cancelled (waiting for builder to stop).
+    Cancelling,
     /// Build completed successfully.
     Complete,
     /// Build failed.
     Failed,
+    /// Build was cancelled by user.
+    Cancelled,
 }
 
 impl BuildStatus {
     /// Returns true if this status represents an active build (queued or building).
     pub fn is_active(&self) -> bool {
-        matches!(self, Self::Queued | Self::Building)
+        matches!(self, Self::Queued | Self::Building | Self::Cancelling)
     }
 
     /// Human-readable label.
@@ -405,7 +635,9 @@ impl BuildStatus {
             Self::Idle => "Idle",
             Self::Queued => "Queued",
             Self::Building => "Building",
+            Self::Cancelling => "Stopping",
             Self::Complete => "Complete",
+            Self::Cancelled => "Cancelled",
             Self::Failed => "Failed",
         }
     }
@@ -416,16 +648,27 @@ impl BuildStatus {
             Self::Idle => "text-gray-400",
             Self::Queued => "text-blue-400",
             Self::Building => "text-cyan-400",
+            Self::Cancelling => "text-amber-400",
             Self::Complete => "text-emerald-400",
+            Self::Cancelled => "text-slate-400",
             Self::Failed => "text-red-400",
         }
     }
+}
+
+/// Response containing the git diff for a specific commit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitDiffResponse {
+    pub commit_hash: String,
+    pub diff: String,
 }
 
 /// A single commit in a flake's history with deployment info.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct FlakeCommit {
+    /// Database commit ID.
+    pub id: i32,
     /// Full commit hash.
     pub hash: String,
     /// Short commit message (first line).
@@ -438,16 +681,70 @@ pub struct FlakeCommit {
     pub system_count: i64,
     /// How many commits behind the latest this is (0 = latest).
     pub commits_behind: i64,
-    /// Hostnames of systems at this commit (for tooltip/expansion).
+    /// nixosConfigurations discovered at this commit.
+    ///
+    /// Entries may include the suffix " [CF system]" when the configuration
+    /// name matches a Crystal Forge system deployed at this commit.
     pub systems: Vec<String>,
+    /// Per-configuration path details for commit details UI.
+    #[serde(default)]
+    pub system_paths: Vec<FlakeCommitSystemPath>,
     /// Current build status for this commit (if any build is in progress).
     #[serde(default)]
     pub build_status: Option<BuildStatus>,
+    /// Dry-run/evaluation status for this commit.
+    #[serde(default)]
+    pub evaluation_status: Option<String>,
+    /// Error message if evaluation failed.
+    #[serde(default)]
+    pub evaluation_error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FlakeCommitSystemPath {
+    pub config_name: String,
+    #[serde(default)]
+    pub is_cf_system: bool,
+    #[serde(default)]
+    pub cf_hostname: Option<String>,
+    #[serde(default)]
+    pub mapped_host_count: i64,
+    #[serde(default)]
+    pub expected_store_path: Option<String>,
+    #[serde(default)]
+    pub current_store_path: Option<String>,
+    #[serde(default)]
+    pub cve_scan_eligible: bool,
+    #[serde(default)]
+    pub cve_scan_blocked_reason: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Build Queue DTOs
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// Query parameters for the paginated build queue endpoint.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct BuildQueueParams {
+    pub page: Option<i64>,
+    pub limit: Option<i64>,
+    /// Comma-separated statuses: queued, building, success, failed
+    pub status: Option<String>,
+    pub commit_hash: Option<String>,
+    pub flake_name: Option<String>,
+    pub config_name: Option<String>,
+    pub queued_after: Option<DateTime<Utc>>,
+    pub queued_before: Option<DateTime<Utc>>,
+}
+
+/// Paginated response for the build queue listing endpoint.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BuildQueuePageResponse {
+    pub total: i64,
+    pub page: i64,
+    pub limit: i64,
+    pub items: Vec<BuildQueueItem>,
+}
 
 /// Summary of the build queue for the dashboard widget.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -465,6 +762,10 @@ pub struct BuildQueueSummary {
 /// A single item in the build queue.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BuildQueueItem {
+    #[serde(default)]
+    pub job_id: Option<Uuid>,
+    #[serde(default)]
+    pub system_id: Option<Uuid>,
     /// The hostname/system being built.
     pub hostname: String,
     /// The flake name this build belongs to.
@@ -475,6 +776,8 @@ pub struct BuildQueueItem {
     pub commit_message: Option<String>,
     /// Current status (Queued or Building).
     pub status: BuildStatus,
+    #[serde(default)]
+    pub builder_name: Option<String>,
     /// When the build was queued.
     pub queued_at: DateTime<Utc>,
     /// When the build started (None if still queued).
@@ -482,6 +785,78 @@ pub struct BuildQueueItem {
     /// Elapsed time in seconds since started (for display).
     #[serde(default)]
     pub elapsed_secs: Option<i64>,
+    /// Build logs (if available).
+    #[serde(default)]
+    pub logs: Option<String>,
+    /// Environment name (if system has an environment).
+    #[serde(default)]
+    pub environment: Option<String>,
+}
+
+/// Summary of the evaluation queue for the evaluations page.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvalQueueSummary {
+    pub active_count: i64,
+    pub completed_count: i64,
+    pub execution_mode: String,
+    pub items: Vec<EvalQueueItem>,
+    pub timestamp: DateTime<Utc>,
+}
+
+/// A single commit item in the evaluation queue.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvalQueueItem {
+    pub commit_id: i32,
+    pub flake_id: i32,
+    pub flake_name: String,
+    pub branch: String,
+    pub commit_hash: String,
+    pub commit_message: Option<String>,
+    pub author: Option<String>,
+    pub committed_at: DateTime<Utc>,
+    pub evaluation_status: String,
+    pub queue_position: i64,
+    pub systems: Vec<String>,
+    pub system_count: i64,
+    pub passed_count: i64,
+    pub policy_failed_count: i64,
+    pub eval_failed_count: i64,
+}
+
+/// Request payload for persisting evaluation queue ordering.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReorderEvalQueueRequest {
+    pub ordered_commit_ids: Vec<i32>,
+}
+
+/// A single row in the eval history list.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvalHistoryItem {
+    pub commit_id: i32,
+    pub flake_id: i32,
+    pub flake_name: String,
+    pub branch: String,
+    pub commit_hash: String,
+    pub commit_message: Option<String>,
+    pub author: Option<String>,
+    pub committed_at: DateTime<Utc>,
+    pub evaluation_status: String,
+    pub evaluation_completed_at: Option<DateTime<Utc>>,
+    pub evaluation_duration_ms: Option<i64>,
+    pub evaluation_error_message: Option<String>,
+    pub system_count: i64,
+    pub passed_count: i64,
+    pub policy_failed_count: i64,
+    pub eval_failed_count: i64,
+}
+
+/// Paginated response for GET /api/v1/commits/eval-history.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvalHistoryPage {
+    pub total_count: i64,
+    pub page: i64,
+    pub limit: i64,
+    pub items: Vec<EvalHistoryItem>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -517,6 +892,119 @@ pub struct SystemsListParams {
     pub environment: Option<String>,
     pub sort_by: Option<String>,
     pub sort_order: Option<SortOrder>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemRollbackRequest {
+    pub target_commit: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeploySystemRequest {
+    pub commit_sha: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemCommitsResponse {
+    pub commits: Vec<CommitInfo>,
+    pub current_commit: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CommitInfo {
+    pub sha: String,
+    pub short_sha: String,
+    pub message: String,
+    pub author: String,
+    pub timestamp: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemHistoryEntry {
+    pub timestamp: DateTime<Utc>,
+    pub store_path: Option<String>,
+    pub system_configuration_name: Option<String>,
+    pub change_reason: String,
+    pub commit_hash: Option<String>,
+    pub flake_name: Option<String>,
+    pub flake_repo_url: Option<String>,
+    pub actor: String,
+    pub outcome: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemAgentEvent {
+    pub timestamp: DateTime<Utc>,
+    pub level: String,
+    pub event_type: String,
+    pub message: String,
+    pub deployment_related: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemMutationResponse {
+    pub status: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CveScanEligibilityResponse {
+    pub eligible: bool,
+    pub reason: Option<String>,
+    pub derivation_id: Option<i32>,
+    pub config_name: Option<String>,
+    pub hostname: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CveScanTriggerResponse {
+    pub scan_id: uuid::Uuid,
+    pub status: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CveScanStatusResponse {
+    pub scan_id: uuid::Uuid,
+    pub derivation_id: i32,
+    pub status: String,
+    pub scanner_name: String,
+    pub scheduled_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub attempts: i32,
+    pub total_vulnerabilities: i32,
+    pub critical_count: i32,
+    pub high_count: i32,
+    pub medium_count: i32,
+    pub low_count: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateSystemRequest {
+    pub hostname: String,
+    pub system_configuration_name: Option<String>,
+    pub public_key: String,
+    pub environment: Option<String>,
+    pub flake_name: Option<String>,
+    pub deployment_policy: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateSystemRequest {
+    pub hostname: String,
+    pub system_configuration_name: Option<String>,
+    pub environment: Option<String>,
+    pub flake_name: Option<String>,
+    pub deployment_policy: String,
+}
+
+fn default_flake_build_scope() -> String {
+    "cf_systems_only".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateSystemPublicKeyRequest {
+    pub public_key: String,
 }
 
 /// Sort direction for list queries.
@@ -556,6 +1044,12 @@ pub struct SystemCommitHistory {
     pub build_status: Option<BuildStatus>,
     /// Config diff summary (e.g., "+5 -3 lines" or "nginx, redis changed").
     pub diff_summary: Option<String>,
+    /// Optional external flake repository URL for this timeline entry.
+    #[serde(default)]
+    pub flake_repo_url: Option<String>,
+    /// Optional config identity shown on timeline cards.
+    #[serde(default)]
+    pub config_identity: Option<String>,
 }
 
 /// Deployment log entry for the Logs tab.
@@ -609,8 +1103,30 @@ pub struct SystemVulnerability {
     pub installed_version: String,
     /// Fixed version (if known).
     pub fixed_version: Option<String>,
+    /// First observed in fleet scans.
+    #[serde(default)]
+    pub first_seen: Option<DateTime<Utc>>,
     /// When this CVE was published.
+    #[serde(default)]
     pub published_at: Option<DateTime<Utc>>,
+    /// Current status (open/fixed/ignored).
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Optional saved justification category for this system/CVE.
+    #[serde(default)]
+    pub justification_category: Option<String>,
+    /// Optional saved justification reason for this system/CVE.
+    #[serde(default)]
+    pub justification_reason: Option<String>,
+    /// Last update timestamp for saved justification.
+    #[serde(default)]
+    pub justification_updated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SaveSystemCveJustificationRequest {
+    pub category: Option<String>,
+    pub reason: String,
 }
 
 impl CveSeverity {
@@ -624,6 +1140,175 @@ impl CveSeverity {
             Self::Low => cve::LOW_BG,
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Authentication Context DTOs
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Authentication mode the server is operating under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthMode {
+    /// Development mode with local fixture users.
+    Dev,
+    /// Local username/password authentication.
+    Local,
+    /// OIDC-based authentication.
+    Oidc,
+}
+
+/// User role in the RBAC system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum Role {
+    Admin,
+    Operator,
+    Viewer,
+}
+
+/// Authenticated user information for the current session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthUser {
+    pub id: String,
+    pub email: String,
+    pub display_name: Option<String>,
+}
+
+/// Authentication context exposed to the UI.
+///
+/// This is the single source of truth for auth state in the frontend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthContext {
+    /// Whether the user is authenticated.
+    pub is_authenticated: bool,
+    /// Authenticated user information (None if not authenticated).
+    pub user: Option<AuthUser>,
+    /// Roles assigned to the current user (empty if not authenticated).
+    pub roles: Vec<Role>,
+    /// Authentication mode the server is using.
+    pub auth_mode: AuthMode,
+}
+
+/// Admin users list item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdminUserSummary {
+    pub id: String,
+    pub identifier: String,
+    pub identity_source: IdentitySource,
+    pub role: Option<Role>,
+    pub enabled: bool,
+    pub environments: Vec<String>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentitySource {
+    LocalManaged,
+    OidcDerived,
+}
+
+/// Audit event action classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditAction {
+    UserCreated,
+    UserUpdated,
+    UserDeleted,
+    UserEnabled,
+    UserDisabled,
+    UserRoleAssigned,
+    UserEnvironmentMembershipUpdated,
+    OidcMappingChanged,
+    SystemSyncRequested,
+    SystemDeployRequested,
+    SystemRollbackRequested,
+    SessionInvalidated,
+}
+
+/// Admin audit log entry.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AuditEvent {
+    pub timestamp: DateTime<Utc>,
+    pub actor: Option<String>,
+    pub action: AuditAction,
+    pub target: String,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OidcGroupMapping {
+    pub id: String,
+    pub group_name: String,
+    pub role: Option<Role>,
+    pub environments: Vec<String>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdminUpsertOidcMappingRequest {
+    pub group_name: String,
+    pub role: Option<Role>,
+    pub environments: Vec<String>,
+}
+
+/// Query parameters for admin audit event listing.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AdminAuditEventsParams {
+    pub actor: Option<String>,
+    pub action: Option<String>,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub page: Option<i64>,
+    pub per_page: Option<i64>,
+}
+
+/// Request payload for creating a local admin-managed user.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdminCreateUserRequest {
+    pub email: String,
+    pub display_name: Option<String>,
+    pub password: Option<String>,
+    pub role: Role,
+    pub environments: Vec<String>,
+}
+
+/// Request payload for updating a local admin-managed user.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdminUpdateUserRequest {
+    pub role: Option<Role>,
+    pub enabled: Option<bool>,
+    pub environments: Option<Vec<String>>,
+    pub password: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetupWizardStepStatus {
+    pub complete: bool,
+    pub count: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetupWizardProgressResponse {
+    pub dismissed: bool,
+    pub agent_acknowledged: bool,
+    pub environment: SetupWizardStepStatus,
+    pub flake: SetupWizardStepStatus,
+    pub builder: SetupWizardStepStatus,
+    pub cache: SetupWizardStepStatus,
+    pub system: SetupWizardStepStatus,
+    pub all_required_complete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetupWizardDismissRequest {
+    pub dismissed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetupWizardAcknowledgeAgentRequest {
+    pub acknowledged: bool,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -645,6 +1330,25 @@ pub struct DevLoginResponse {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Local Auth DTOs
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Request payload for local login.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalLoginRequest {
+    pub username: String,
+    pub password: String,
+}
+
+/// Response from local login endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalLoginResponse {
+    pub user_id: String,
+    pub username: String,
+    pub email: String,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Error Response
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -655,4 +1359,300 @@ pub struct ApiError {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Builder Management
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Builder status
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BuilderStatus {
+    #[serde(alias = "Active")]
+    Active,
+    #[serde(alias = "Inactive")]
+    Inactive,
+    #[serde(alias = "Offline")]
+    Offline,
+}
+
+impl BuilderStatus {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Active => "Active",
+            Self::Inactive => "Inactive",
+            Self::Offline => "Offline",
+        }
+    }
+
+    pub fn color_class(&self) -> &'static str {
+        match self {
+            Self::Active => "text-emerald-400",
+            Self::Inactive => "text-slate-400",
+            Self::Offline => "text-red-400",
+        }
+    }
+
+    pub fn bg_class(&self) -> &'static str {
+        match self {
+            Self::Active => "bg-emerald-500/10",
+            Self::Inactive => "bg-slate-500/10",
+            Self::Offline => "bg-red-500/10",
+        }
+    }
+
+    pub fn dot_class(&self) -> &'static str {
+        match self {
+            Self::Active => "bg-emerald-400",
+            Self::Inactive => "bg-slate-400",
+            Self::Offline => "bg-red-400",
+        }
+    }
+}
+
+/// Builder summary for list view
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BuilderSummary {
+    pub id: Uuid,
+    pub name: String,
+    pub status: BuilderStatus,
+    pub max_cpu_cores: Option<i32>,
+    pub max_memory_mb: Option<i32>,
+    pub max_concurrent_jobs: i32,
+    pub last_heartbeat_at: Option<DateTime<Utc>>,
+    pub assigned_environment_count: i32,
+    #[serde(default)]
+    pub active_jobs: i32,
+    #[serde(default)]
+    pub queued_jobs: i32,
+}
+
+/// Full builder details
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuilderDetail {
+    pub id: Uuid,
+    pub name: String,
+    pub public_key: String,
+    pub status: BuilderStatus,
+    pub max_cpu_cores: Option<i32>,
+    pub max_memory_mb: Option<i32>,
+    pub max_concurrent_jobs: i32,
+    pub last_heartbeat_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub assigned_environment_ids: Vec<Uuid>,
+}
+
+/// Response returned when creating a builder.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuilderCreatedResponse {
+    pub builder: BuilderDetail,
+    #[serde(default)]
+    pub private_key: Option<String>,
+    #[serde(default)]
+    pub assigned_environment_ids: Vec<Uuid>,
+}
+
+/// Create builder request
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateBuilderRequest {
+    pub name: String,
+    pub public_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_cpu_cores: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_memory_mb: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_jobs: Option<i32>,
+    #[serde(default)]
+    pub environment_ids: Vec<Uuid>,
+}
+
+/// Update builder request
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateBuilderRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<BuilderStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_cpu_cores: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_memory_mb: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_jobs: Option<i32>,
+}
+
+/// Update builder environments request
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateBuilderEnvironmentsRequest {
+    pub environment_ids: Vec<Uuid>,
+}
+
+/// Update builder public key request
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateBuilderPublicKeyRequest {
+    pub public_key: String,
+}
+
+/// Builder metrics
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuilderMetrics {
+    pub id: i64,
+    pub builder_id: Uuid,
+    pub timestamp: DateTime<Utc>,
+    pub cpu_usage_percent: f64,
+    pub memory_usage_mb: i64,
+    pub system_cpu_usage_percent: Option<f64>,
+    pub system_memory_total_mb: Option<i64>,
+    pub system_memory_used_mb: Option<i64>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cache Management
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Cache destination configuration
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CacheDestination {
+    pub id: i32,
+    pub name: String,
+    pub cache_type: String,
+    pub push_to: Option<String>,
+    pub enabled: bool,
+    pub signing_key_path: Option<String>,
+    pub compression: Option<String>,
+    pub s3_region: Option<String>,
+    pub s3_profile: Option<String>,
+    pub s3_access_key_id: Option<String>,
+    pub s3_secret_access_key: Option<String>,
+    pub s3_session_token: Option<String>,
+    pub s3_endpoint_url: Option<String>,
+    pub attic_token: Option<String>,
+    pub attic_cache_name: Option<String>,
+    pub attic_public_key: Option<String>,
+    pub attic_ignore_upstream_cache_filter: Option<bool>,
+    pub attic_jobs: Option<i32>,
+    pub parallel_uploads: Option<i32>,
+    pub max_retries: Option<i32>,
+    pub retry_delay_seconds: Option<i64>,
+    pub push_timeout_seconds: Option<i64>,
+    pub force_repush: Option<bool>,
+    pub require_sigs: Option<bool>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+/// Create cache destination request
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CreateCacheDestination {
+    pub name: String,
+    pub cache_type: String,
+    pub push_to: Option<String>,
+    pub enabled: Option<bool>,
+    pub signing_key_path: Option<String>,
+    pub compression: Option<String>,
+    pub s3_region: Option<String>,
+    pub s3_profile: Option<String>,
+    pub s3_access_key_id: Option<String>,
+    pub s3_secret_access_key: Option<String>,
+    pub s3_session_token: Option<String>,
+    pub s3_endpoint_url: Option<String>,
+    pub attic_token: Option<String>,
+    pub attic_cache_name: Option<String>,
+    pub attic_public_key: Option<String>,
+    pub attic_ignore_upstream_cache_filter: Option<bool>,
+    pub attic_jobs: Option<i32>,
+    pub parallel_uploads: Option<i32>,
+    pub max_retries: Option<i32>,
+    pub retry_delay_seconds: Option<i64>,
+    pub push_timeout_seconds: Option<i64>,
+    pub force_repush: Option<bool>,
+    pub require_sigs: Option<bool>,
+    pub environment_ids: Option<Vec<Uuid>>,
+}
+
+/// Update cache destination request
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UpdateCacheDestination {
+    pub name: Option<String>,
+    pub cache_type: Option<String>,
+    pub push_to: Option<String>,
+    pub enabled: Option<bool>,
+    pub signing_key_path: Option<String>,
+    pub compression: Option<String>,
+    pub s3_region: Option<String>,
+    pub s3_profile: Option<String>,
+    pub s3_access_key_id: Option<String>,
+    pub s3_secret_access_key: Option<String>,
+    pub s3_session_token: Option<String>,
+    pub s3_endpoint_url: Option<String>,
+    pub attic_token: Option<String>,
+    pub attic_cache_name: Option<String>,
+    pub attic_public_key: Option<String>,
+    pub attic_ignore_upstream_cache_filter: Option<bool>,
+    pub attic_jobs: Option<i32>,
+    pub parallel_uploads: Option<i32>,
+    pub max_retries: Option<i32>,
+    pub retry_delay_seconds: Option<i64>,
+    pub push_timeout_seconds: Option<i64>,
+    pub force_repush: Option<bool>,
+    pub require_sigs: Option<bool>,
+    pub environment_ids: Option<Vec<Uuid>>,
+}
+
+/// Cache push job status and details
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CachePushJob {
+    pub id: i32,
+    pub derivation_id: i32,
+    pub status: String,
+    pub store_path: Option<String>,
+    pub scheduled_at: DateTime<Utc>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub attempts: i32,
+    pub error_message: Option<String>,
+    pub push_size_bytes: Option<i64>,
+    pub push_duration_ms: Option<i32>,
+    pub cache_destination: Option<String>,
+}
+
+/// Bulk job action request
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BulkJobAction {
+    pub job_ids: Vec<i32>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Admin Config Health DTOs — GET /api/v1/admin/config-health
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A single pipeline readiness check result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConfigHealthCheck {
+    /// Stable identifier for this check (e.g. `"no_flakes"`).
+    pub id: String,
+    /// Whether this check passed (no issue detected).
+    pub passed: bool,
+    /// Human-readable description shown when the check fails.
+    pub message: String,
+    /// URL path the admin can navigate to in order to resolve the issue.
+    pub action_url: String,
+}
+
+/// Top-level response for `GET /api/v1/admin/config-health`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConfigHealthResponse {
+    pub has_flakes: bool,
+    pub has_environments: bool,
+    pub has_builders: bool,
+    pub has_cache_destinations: bool,
+    /// Total number of failing checks.
+    pub total_issues: u32,
+    /// Per-check details for all pipeline readiness checks.
+    pub checks: Vec<ConfigHealthCheck>,
 }

@@ -3,11 +3,12 @@
 use dioxus::prelude::*;
 
 use crate::components::layout::Card;
+use crate::hooks::websocket::{ConnectionState, use_websocket_build_stream};
 use crate::theme;
 
 use super::helpers::{
-    BuildAction, BuildItem, BuildStatus, PendingAction, build_status_badge_style,
-    event_level_style, mock_artifacts, mock_events, mock_logs,
+    BuildAction, BuildItem, PendingAction, build_status_badge_class, event_level_class,
+    mock_artifacts, mock_events,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,6 +39,8 @@ pub fn BuildDetailPane(
     wrap_logs: Signal<bool>,
     log_query: Signal<String>,
 ) -> Element {
+    let mut log_modal_open = use_signal(|| false);
+
     let Some(build) = selected else {
         return rsx! {
             Card {
@@ -49,9 +52,33 @@ pub fn BuildDetailPane(
         };
     };
 
+    // Use WebSocket for real-time logs and metrics if job_id is available
+    let job_id_str = build.job_id.as_ref().map(|id| id.to_string());
+    let (ws_logs, ws_metrics, ws_state) = match job_id_str.as_ref() {
+        Some(job_id) => {
+            let (logs, metrics, state, _reconnect) = use_websocket_build_stream(job_id);
+            (Some(logs), Some(metrics), Some(state))
+        }
+        None => (None, None, None),
+    };
+
     let events = mock_events(build.id);
     let artifacts = mock_artifacts(build.id);
-    let logs = filtered_logs(build.id, &log_query.read());
+
+    // Use WebSocket logs if available.
+    // For completed builds with no active WS channel, fall back to stored logs from the API.
+    let logs = if let Some(ws_logs) = ws_logs {
+        let live = ws_logs.read().clone();
+        if live.is_empty() {
+            // WS connected but no frames yet — try stored logs as initial content.
+            stored_logs_filtered(&build, &log_query.read())
+        } else {
+            filtered_logs_from_vec(&live, &log_query.read())
+        }
+    } else {
+        // No WS (no job_id or completed job) — show stored logs.
+        stored_logs_filtered(&build, &log_query.read())
+    };
 
     rsx! {
         Card {
@@ -65,14 +92,13 @@ pub fn BuildDetailPane(
                             class: "flex flex-col md:flex-row md:items-center md:justify-between gap-3",
                             div {
                                 p { class: "text-sm text-white font-semibold", "{build.hostname}" }
-                                p { class: "text-xs text-gray-400", "{build.flake} · {build.branch} · {short_commit(build.commit)}" }
+                                p { class: "text-xs text-gray-400", "{build.flake} · {build.branch} · {short_commit(&build.commit)}" }
                                 p { class: "text-xs text-gray-500 mt-1", "Queued by {build.started_by} · worker {build.worker_id}" }
                             }
-                            span {
-                                class: "inline-flex px-2 py-1 text-[10px] uppercase rounded border",
-                                style: "{build_status_badge_style(build.status)}",
-                                "{build.status_label()}"
-                            }
+                                span {
+                                    class: "inline-flex px-2 py-1 text-[10px] uppercase rounded border {build_status_badge_class(build.status)}",
+                                    "{build.status_label()}"
+                                }
                         }
                     }
 
@@ -96,11 +122,65 @@ pub fn BuildDetailPane(
                     if *tab.read() == DetailTab::Logs {
                         div {
                             class: "space-y-3",
+
+                            // WebSocket connection status and metrics
+                            if let Some(state) = ws_state.as_ref() {
+                                div {
+                                    class: "flex items-center justify-between gap-3 p-3 rounded-lg border border-gray-700 bg-gray-900/60",
+                                    div {
+                                        class: "flex items-center gap-2",
+                                        // Connection status indicator
+                                        div {
+                                            class: match *state.read() {
+                                                ConnectionState::Connected => "w-2 h-2 rounded-full bg-green-500",
+                                                ConnectionState::Connecting => "w-2 h-2 rounded-full bg-yellow-500 animate-pulse",
+                                                ConnectionState::Disconnected => "w-2 h-2 rounded-full bg-gray-500",
+                                                ConnectionState::Error(_) => "w-2 h-2 rounded-full bg-red-500",
+                                            }
+                                        }
+                                        span {
+                                            class: "text-xs text-gray-300",
+                                            match state.read().clone() {
+                                                ConnectionState::Connected => "Live streaming",
+                                                ConnectionState::Connecting => "Connecting...",
+                                                ConnectionState::Disconnected => "Disconnected",
+                                                ConnectionState::Error(ref e) => e.as_str(),
+                                            }
+                                        }
+                                    }
+                                    // System metrics display
+                                    if let Some(metrics_signal) = ws_metrics {
+                                        if let Some(metrics) = metrics_signal.read().as_ref() {
+                                            div {
+                                                class: "flex items-center gap-4 text-xs",
+                                                div {
+                                                    class: "flex items-center gap-1",
+                                                    span { class: "text-gray-400", "CPU:" }
+                                                    span { class: "text-white font-mono", "{metrics.cpu_percent:.1}%" }
+                                                }
+                                                div {
+                                                    class: "flex items-center gap-1",
+                                                    span { class: "text-gray-400", "RAM:" }
+                                                    span { class: "text-white font-mono",
+                                                        "{metrics.ram_used_mb} MB / {metrics.ram_total_mb} MB"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
                             div {
                                 class: "flex flex-wrap gap-2",
                                 TogglePill { label: "Follow", value: follow_logs }
                                 TogglePill { label: "Pause", value: pause_logs }
                                 TogglePill { label: "Wrap", value: wrap_logs }
+                                button {
+                                    class: "text-xs text-white rounded px-3 py-1 {theme::interactive::PRIMARY_BTN}",
+                                    onclick: move |_| log_modal_open.set(true),
+                                    "⛶ Maximize"
+                                }
                                 button {
                                     class: "text-xs text-gray-300 border border-gray-700 rounded px-2 py-1 hover:bg-gray-700",
                                     onclick: move |_| log_query.set(String::new()),
@@ -120,7 +200,7 @@ pub fn BuildDetailPane(
                                 if logs.is_empty() {
                                     "No log lines match your filter."
                                 } else {
-                                    for line in logs {
+                                    for line in logs.iter() {
                                         "{line}\n"
                                     }
                                 }
@@ -138,8 +218,7 @@ pub fn BuildDetailPane(
                                         class: "flex items-center justify-between gap-2",
                                         p { class: "text-xs text-gray-400", "{event.ts}" }
                                         span {
-                                            class: "text-[10px] uppercase px-2 py-1 rounded border",
-                                            style: "{event_level_style(event.level)}",
+                                            class: "text-[10px] uppercase px-2 py-1 rounded border {event_level_class(event.level)}",
                                             "{event.level}"
                                         }
                                     }
@@ -168,6 +247,76 @@ pub fn BuildDetailPane(
                             }
                         }
                     }
+
+                    if *tab.read() == DetailTab::Logs && *log_modal_open.read() {
+                        div {
+                            style: "position: fixed; inset: 0; z-index: 9999; display: flex; align-items: center; justify-content: center; background-color: rgba(0, 0, 0, 0.8); padding: 1rem;",
+                            onclick: move |_| log_modal_open.set(false),
+                            div {
+                                style: "width: 100%; max-width: 90rem; max-height: 90vh; min-height: 0; overflow: hidden; display: flex; flex-direction: column; background-color: rgb(17, 24, 39); border-radius: 0.5rem; border: 1px solid rgb(55, 65, 81); box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);",
+                                onclick: |evt| evt.stop_propagation(),
+                                div {
+                                    class: "flex items-center justify-between p-4 border-b border-gray-700",
+                                    div {
+                                        h3 { class: "text-lg font-semibold text-white", "Build Logs" }
+                                        p { class: "text-sm text-gray-400", "{build.hostname} · {short_commit(&build.commit)}" }
+                                    }
+                                    button {
+                                        class: "text-gray-400 hover:text-white transition-colors",
+                                        onclick: move |_| log_modal_open.set(false),
+                                        "✕"
+                                    }
+                                }
+                                div {
+                                    class: "p-4 border-b border-gray-700 bg-gray-900/70",
+                                    div {
+                                        class: "flex items-center gap-2 text-xs",
+                                        if let Some(state) = ws_state.as_ref() {
+                                            div {
+                                                class: match *state.read() {
+                                                    ConnectionState::Connected => "w-2 h-2 rounded-full bg-green-500",
+                                                    ConnectionState::Connecting => "w-2 h-2 rounded-full bg-yellow-500 animate-pulse",
+                                                    ConnectionState::Disconnected => "w-2 h-2 rounded-full bg-gray-500",
+                                                    ConnectionState::Error(_) => "w-2 h-2 rounded-full bg-red-500",
+                                                }
+                                            }
+                                            span {
+                                                class: "text-gray-300",
+                                                match state.read().clone() {
+                                                    ConnectionState::Connected => "Live streaming",
+                                                    ConnectionState::Connecting => "Connecting...",
+                                                    ConnectionState::Disconnected => "Disconnected",
+                                                    ConnectionState::Error(ref e) => e.as_str(),
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                div {
+                                    style: "flex: 1 1 auto; min-height: 0; min-width: 0; overflow: auto; padding: 1rem; background-color: rgb(3, 7, 18);",
+                                    pre {
+                                        class: "block w-full max-w-full text-xs font-mono text-gray-200",
+                                        style: if *wrap_logs.read() { "white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-all;" } else { "white-space: pre;" },
+                                        if logs.is_empty() {
+                                            "No log lines match your filter."
+                                        } else {
+                                            for line in logs.iter() {
+                                                "{line}\n"
+                                            }
+                                        }
+                                    }
+                                }
+                                div {
+                                    class: "p-4 border-t border-gray-700 flex justify-end",
+                                    button {
+                                        class: "px-4 py-2 rounded-lg font-medium text-sm text-white {theme::interactive::PRIMARY_BTN}",
+                                        onclick: move |_| log_modal_open.set(false),
+                                        "Close"
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -178,8 +327,16 @@ fn short_commit(commit: &str) -> String {
     commit.chars().take(7).collect()
 }
 
-fn filtered_logs(build_id: i32, query: &str) -> Vec<String> {
-    let lines = mock_logs(build_id);
+/// Return stored logs from the build item, optionally filtered.
+/// Used for completed/historical builds where no active WS stream exists.
+fn stored_logs_filtered(build: &BuildItem, query: &str) -> Vec<String> {
+    let lines: Vec<String> = build
+        .logs
+        .as_deref()
+        .unwrap_or("")
+        .lines()
+        .map(|l| l.to_string())
+        .collect();
     if query.trim().is_empty() {
         return lines;
     }
@@ -190,17 +347,25 @@ fn filtered_logs(build_id: i32, query: &str) -> Vec<String> {
         .collect()
 }
 
+fn filtered_logs_from_vec(lines: &[String], query: &str) -> Vec<String> {
+    if query.trim().is_empty() {
+        return lines.to_vec();
+    }
+    let q = query.to_lowercase();
+    lines
+        .iter()
+        .filter(|line| line.to_lowercase().contains(&q))
+        .cloned()
+        .collect()
+}
+
 /// Toggle pill button component.
 #[component]
 fn TogglePill(label: &'static str, value: Signal<bool>) -> Element {
     rsx! {
         button {
             class: "text-xs rounded border px-2 py-1 transition",
-            style: if *value.read() {
-                "background-color: #253449; border-color: #3E5B82; color: #E2EBF7;"
-            } else {
-                "background-color: #212733; border-color: #394557; color: #9CA3AF;"
-            },
+            class: if *value.read() { "cf-toggle-active" } else { "cf-toggle-inactive" },
             onclick: move |_| {
                 let next = !*value.read();
                 value.set(next);
@@ -233,12 +398,10 @@ pub fn ConfirmActionModal(
 
     rsx! {
         div {
-            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4",
-            style: "position: fixed; inset: 0; z-index: 60; width: 100vw; height: 100vh; backdrop-filter: blur(6px);",
+            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
             onclick: move |_| on_cancel.call(()),
             div {
-                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6",
-                style: "width: 100%; max-width: 30rem;",
+                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6 cf-modal-panel-30",
                 onclick: |evt| evt.stop_propagation(),
                 h3 { class: "text-lg font-semibold text-white mb-2", "{title}" }
                 p { class: "text-sm {theme::text::SECONDARY} mb-6", "{description}" }
@@ -310,6 +473,16 @@ fn action_prompt(action: &PendingAction) -> (&'static str, String, &'static str)
                 "Build #{build_id} will send stop to the active systemd unit and mark canceled."
             ),
             "Stop",
+        ),
+        PendingAction::Build {
+            build_id,
+            action: BuildAction::ForceCancel,
+        } => (
+            "Force cancel build?",
+            format!(
+                "Build #{build_id} will be immediately marked as cancelled without waiting for builder confirmation. Use this for stuck builds."
+            ),
+            "Force Cancel",
         ),
         PendingAction::Build {
             build_id,
