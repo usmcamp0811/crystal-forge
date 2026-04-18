@@ -513,7 +513,9 @@ pub fn SystemDetailView(id: String) -> Element {
 
             // Tab navigation
             div {
-                class: "border-b {theme::surface::CARD_BORDER}",
+                "data-testid": "system-detail-tabs",
+                class: "border-b {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} backdrop-blur-sm",
+                style: "position: sticky; top: 0; z-index: 20;",
                 nav {
                     class: "flex gap-1 -mb-px",
                     for tab in [Tab::Overview, Tab::History, Tab::Policy, Tab::Cves, Tab::Logs] {
