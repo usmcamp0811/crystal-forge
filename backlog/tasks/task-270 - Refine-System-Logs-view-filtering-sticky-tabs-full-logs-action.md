@@ -1,10 +1,10 @@
 ---
 id: TASK-270
 title: 'Refine System Logs view: filtering, sticky tabs, full logs action'
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-04-14 01:31'
-updated_date: '2026-04-18 00:47'
+updated_date: '2026-04-18 02:21'
 labels:
   - ui
   - systems
@@ -12,6 +12,8 @@ labels:
   - sprint-ready
 milestone: System Details Hardening
 dependencies: []
+references:
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/240'
 priority: high
 ordinal: 2700
 ---
@@ -69,15 +71,21 @@ Medium (user-facing UX + potential log retrieval path wiring).
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 #1 Logs filters (type/severity/text) actually filter displayed entries
-- [ ] #2 #2 Filter controls have clear active visual state consistent with design system
-- [ ] #3 #3 Overview | History | Logs navigation remains visible while scrolling logs
-- [ ] #4 #4 Clicking "View full logs" opens complete log view/content (not a no-op)
-- [ ] #5 #5 web-ui verification includes assertions for filtering, sticky tabs, and full logs action
+- [x] #1 #1 Logs filters (type/severity/text) actually filter displayed entries
+- [x] #2 #2 Filter controls have clear active visual state consistent with design system
+- [x] #3 #3 Overview | History | Logs navigation remains visible while scrolling logs
+- [x] #4 #4 Clicking "View full logs" opens complete log view/content (not a no-op)
+- [x] #5 #5 web-ui verification includes assertions for filtering, sticky tabs, and full logs action
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-LOCK: gpt-5.3-codex on reckless in ~/code/crystal-forge/TASK-270-system-logs-refinement
+Implemented in commit cf4db58f on branch TASK-270-system-logs-refinement.
+
+MR opened: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/240
+
+Verification executed: nix develop -c node --check checks/web-ui/tests/integration-test.js; nix build .#checks.x86_64-linux.web-ui (pass).
+
+UI evidence uploaded in MR: 12g-system-detail-history-logs-edit screenshot attachment.
 <!-- SECTION:NOTES:END -->
