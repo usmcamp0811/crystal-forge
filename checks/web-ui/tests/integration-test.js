@@ -694,20 +694,32 @@ async function routeSystemsWarningData(page) {
 
   const agentEvents = [
     {
-      occurred_at: "2026-04-07T08:12:00Z",
+      timestamp: "2026-04-07T08:12:00Z",
       event_type: "heartbeat",
       level: "info",
       message: "Agent heartbeat received",
-      deployment_phase: "idle",
-      correlation_id: null,
+      deployment_related: false,
     },
     {
-      occurred_at: "2026-04-07T08:11:00Z",
+      timestamp: "2026-04-07T08:11:00Z",
       event_type: "deploy",
       level: "info",
       message: "Applied deployment for warning-system-01",
-      deployment_phase: "switch",
-      correlation_id: "cf-test-corr-1",
+      deployment_related: true,
+    },
+    {
+      timestamp: "2026-04-07T08:10:30Z",
+      event_type: "health_check",
+      level: "warn",
+      message: "Health check latency exceeded warning threshold",
+      deployment_related: true,
+    },
+    {
+      timestamp: "2026-04-07T08:10:00Z",
+      event_type: "deploy",
+      level: "error",
+      message: "Post-deploy verification timed out while probing service",
+      deployment_related: true,
     },
   ];
 
@@ -2376,6 +2388,54 @@ const steps = [
         page.getByText("Agent Events").first(),
         "Expected logs tab to render API-backed agent events",
       );
+
+      // Sticky tabs: ensure tab bar is rendered sticky
+      const tabs = page.locator('[data-testid="system-detail-tabs"]').first();
+      await assertVisible(tabs, "Expected system detail tabs container to be visible");
+      const tabsPosition = await tabs.evaluate((el) => window.getComputedStyle(el).position);
+      if (tabsPosition !== "sticky") {
+        throw new Error(`Expected system detail tabs to be sticky, got: ${tabsPosition}`);
+      }
+
+      // Logs filters: severity + text + event type
+      await assertVisible(
+        page.locator('[data-testid="system-logs-filter-severity"]').first(),
+        "Expected severity filter controls to render on logs tab",
+      );
+
+      // Severity filter to Error should isolate one log line
+      await page.locator('[data-testid="system-logs-filter-severity"]').first().selectOption("error");
+      await page.waitForTimeout(250);
+      await assertVisible(
+        page.getByText("Post-deploy verification timed out while probing service").first(),
+        "Expected error severity filter to show error log line",
+      );
+      const infoStillVisible = await page.getByText("Agent heartbeat received").first().isVisible().catch(() => false);
+      if (infoStillVisible) {
+        throw new Error("Expected severity filter to hide info log lines");
+      }
+
+      // Text search should match timeout message
+      const searchInput = page.getByPlaceholder("Filter log text...").first();
+      await searchInput.fill("timed out");
+      await page.waitForTimeout(250);
+      await assertVisible(
+        page.getByText("Post-deploy verification timed out while probing service").first(),
+        "Expected text search to keep matching error log",
+      );
+
+      // Event type filter: select verify
+      const typeSelect = page.locator('[data-testid="system-logs-filter-event-type"]').first();
+      await typeSelect.selectOption("Deployment");
+      await page.waitForTimeout(250);
+
+      // Full logs action should open modal (not a no-op)
+      await page.getByRole("button", { name: "View full logs →" }).first().click();
+      await assertVisible(
+        page.getByText("Full Agent Event Log").first(),
+        "Expected View full logs action to open full logs modal",
+      );
+      await page.getByRole("button", { name: "Close" }).first().click();
 
       await assertVisible(
         page.getByRole("button", { name: /^Edit$/ }).first(),
