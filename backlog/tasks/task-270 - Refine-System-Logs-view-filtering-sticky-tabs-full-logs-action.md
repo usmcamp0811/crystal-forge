@@ -1,10 +1,10 @@
 ---
 id: TASK-270
 title: 'Refine System Logs view: filtering, sticky tabs, full logs action'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-04-14 01:31'
-updated_date: '2026-04-14 01:38'
+updated_date: '2026-04-18 00:47'
 labels:
   - ui
   - systems
@@ -75,3 +75,9 @@ Medium (user-facing UX + potential log retrieval path wiring).
 - [ ] #4 #4 Clicking "View full logs" opens complete log view/content (not a no-op)
 - [ ] #5 #5 web-ui verification includes assertions for filtering, sticky tabs, and full logs action
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: gpt-5.3-codex on reckless in ~/code/crystal-forge/TASK-270-system-logs-refinement
+<!-- SECTION:NOTES:END -->
