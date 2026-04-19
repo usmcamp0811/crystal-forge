@@ -1,10 +1,10 @@
 ---
 id: TASK-276
 title: Add systemd hardening scanner and dashboard view
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-04-19 02:43'
-updated_date: '2026-04-19 13:22'
+updated_date: '2026-04-19 15:14'
 labels:
   - feature
   - security
@@ -46,17 +46,15 @@ Create a feature to scan NixOS system configurations for systemd service hardeni
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Continued implementation in TASK-276 worktree and resolved current hardening compile blockers.
+LOCK: gpt-5.3-codex on linux in /home/mcamp/code/crystal-forge/TASK-276-systemd-hardening-scanner
 
-Reintroduced hardening ScanStatus import in queries/hardening_scans.rs for sqlx enum decoding in existing query_as! macros.
+Opened MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/242
 
-Converted newly added hardening posture/target queries to runtime query_as::<_, T>() + bind() to avoid additional sqlx macro cache coupling for those new queries.
+Pushed follow-up commit f57071f9 to add deterministic web-ui evidence steps for hardening routes.
 
-Ran SQL sync workflow with local dev DB: `cargo sqlx migrate run` and `cargo sqlx prepare` under nix develop with DATABASE_URL=postgres://crystal_forge:password@127.0.0.1:3042/crystal_forge. Migration 0114 applied and `.sqlx` metadata regenerated.
+Verification rerun: `nix build .#checks.x86_64-linux.web-ui --print-out-paths` and `nix flake check` both pass.
 
-Verification run: `nix develop -c cargo fmt -- --check` (required formatting changes detected, then `cargo fmt` applied), and `nix develop -c env SQLX_OFFLINE=true cargo check` now succeeds.
-
-`cargo clippy -- -D warnings` currently fails due pre-existing repo-wide issues plus toolchain mismatch artifacts in target dir (E0514); not addressed in this task scope.
+web-ui artifacts now include hardening screenshots: 27-hardening-fleet.png and 28-system-hardening-tab.png.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
