@@ -278,3 +278,22 @@ lab:        { bg: "rgba(124,58,237,0.10)", fg: "#a78bfa", border: "rgba(167,139,
 - If logo image exists, keep it alongside or instead of the "CF" text mark
 - Design shows gradient box with "CF" text as fallback/alternative
 <!-- SECTION:NOTES:END -->
+
+## Definition of Done
+<!-- DOD:BEGIN -->
+- [ ] #1 Code passes `cargo fmt -- --check`
+- [ ] #2 Code passes `cargo clippy -- -D warnings`
+- [ ] #3 All existing tests pass (`cargo test`)
+- [ ] #4 Visual QA: Systems view matches design example in both Cards and Table modes
+- [ ] #5 Visual QA: Sidebar appearance matches design in both full and rail modes
+- [ ] #6 Visual QA: Stat strip displays correctly with all 5 metrics
+- [ ] #7 Visual QA: Filter bar layout and styling matches design
+- [ ] #8 Functional test: Theme toggle switches between light and dark correctly
+- [ ] #9 Functional test: View toggle switches between Cards and Table
+- [ ] #10 Functional test: All filters (search, environment, status, flake) work correctly
+- [ ] #11 Functional test: Card and row hover states work as expected
+- [ ] #12 Functional test: Sidebar rail mode toggle works
+- [ ] #13 Screenshot captured showing the updated Systems view for MR
+- [ ] #14 No console errors in browser developer tools
+- [ ] #15 Responsive test: Layout works on 1920px, 1366px, and 1024px widths
+<!-- DOD:END -->
