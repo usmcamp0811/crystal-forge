@@ -15,7 +15,7 @@ pub struct SystemsStats {
     pub warning: usize,
     pub critical: usize,
     pub offline: usize,
-    pub critical_cves: usize,
+    pub critical_cves: i64,
     pub env_distribution: Vec<(String, usize)>,
 }
 
@@ -39,7 +39,7 @@ impl SystemsStats {
             .iter()
             .filter(|s| s.health_status == HealthStatus::Offline)
             .count();
-        let critical_cves: usize = systems.iter().map(|s| s.cve_counts.critical).sum();
+        let critical_cves: i64 = systems.iter().map(|s| s.cve_counts.critical).sum();
 
         // Calculate environment distribution
         let mut env_map = std::collections::HashMap::new();
