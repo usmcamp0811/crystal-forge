@@ -4,7 +4,7 @@ title: Add day delineation and time filter to individual system log view
 status: Review
 assignee: []
 created_date: '2026-04-19 12:30'
-updated_date: '2026-04-19 13:58'
+updated_date: '2026-04-19 14:01'
 labels:
   - ui
   - logs
@@ -220,4 +220,27 @@ All implementation complete:
 - Commits pushed ✅
 
 Ready for review. Screenshot will be available from the web-ui check artifacts once CI runs.
+
+## Merge Conflicts Resolved
+
+Merged latest `dev` branch which had added log filtering features (severity, event type, search).
+
+**Resolution:**
+- Combined time filtering (my changes) with log filtering (dev changes)
+- Time filter UI (date range picker) appears first
+- Followed by severity/event type/search filters
+- Day grouping now applied to filtered logs (after all filters)
+- Both sets of features work together harmoniously
+
+**Next Steps for Screenshot:**
+1. Wait for CI to run the `web-ui` check
+2. Download screenshot from check artifacts: `12g2-system-logs-day-delineation-time-filter.png`
+3. Upload screenshot to GitLab MR using the uploads API
+4. Add the screenshot markdown to MR description under "UI Changes" section
+
+The CI will automatically run the test and capture the screenshot showing:
+- Time filter controls (From/To inputs + Apply button)
+- Day headers between log entries
+- Relative timestamps
+- All the filtering UI
 <!-- SECTION:NOTES:END -->
