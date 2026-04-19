@@ -4,7 +4,7 @@ title: Add systemd hardening scanner and dashboard view
 status: Review
 assignee: []
 created_date: '2026-04-19 02:43'
-updated_date: '2026-04-19 15:14'
+updated_date: '2026-04-19 16:15'
 labels:
   - feature
   - security
@@ -46,15 +46,15 @@ Create a feature to scan NixOS system configurations for systemd service hardeni
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-LOCK: gpt-5.3-codex on linux in /home/mcamp/code/crystal-forge/TASK-276-systemd-hardening-scanner
+Follow-up commit 63ce519b redesigns system-detail Hardening tab into dense risk-ranked audit dashboard layout with grouped hardening dimensions and compact status cells.
 
-Opened MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/242
+Added top summary rollups and lightweight filters/sort controls (search, severity, risky-only toggle, sort mode) using existing hardening API payload fields.
 
-Pushed follow-up commit f57071f9 to add deterministic web-ui evidence steps for hardening routes.
+Updated deterministic web-ui integration step `28-system-hardening-tab` mocks/assertions for grouped headers + dense status cell evidence.
 
-Verification rerun: `nix build .#checks.x86_64-linux.web-ui --print-out-paths` and `nix flake check` both pass.
+Verification pass after redesign: `nix develop -c cargo check` (packages/web-ui), `nix build .#checks.x86_64-linux.web-ui --print-out-paths`, and `nix flake check`.
 
-web-ui artifacts now include hardening screenshots: 27-hardening-fleet.png and 28-system-hardening-tab.png.
+Refreshed screenshot uploads for MR !242: `27-hardening-fleet` and `28-system-hardening-tab`; evidence posted in MR note https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/242#note_3264569822
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
