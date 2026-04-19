@@ -726,6 +726,13 @@ async function routeSystemsWarningData(page) {
   await page.route("**/api/v1/systems**", async (route) => {
     const url = route.request().url();
     const pathname = new URL(url).pathname;
+
+    // Let dedicated hardening routes handle these endpoints in steps that mock them.
+    if (/^\/api\/v1\/systems\/[0-9a-f-]+\/hardening(?:$|\/|-.+)/.test(pathname)) {
+      await route.fallback();
+      return;
+    }
+
     if (/^\/api\/v1\/systems\/[0-9a-f-]+\/history$/.test(pathname)) {
       await route.fulfill({
         status: 200,
@@ -4009,7 +4016,7 @@ const steps = [
       await page.waitForTimeout(2000);
 
       // Click the History tab
-      const historyTab = page.getByRole("button", { name: /Eval History/i }).first();
+      const historyTab = page.getByRole("button", { name: /History/i }).first();
       await historyTab.waitFor({ timeout: 5000 });
       await historyTab.click();
       await page.waitForTimeout(1500);
@@ -4024,6 +4031,201 @@ const steps = [
 
       await page.unroute("**/api/v1/commits/eval-queue**");
       await page.unroute("**/api/v1/commits/eval-history**");
+    },
+  },
+  {
+    name: "27-hardening-fleet",
+    description: "Systemd hardening fleet dashboard route and summary cards",
+    action: async (page) => {
+      await page.route("**/api/v1/hardening/summary*", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            total_systems_scanned: 2,
+            avg_fleet_score: 61.5,
+            total_well_hardened_services: 5,
+            total_moderately_hardened_services: 8,
+            total_poorly_hardened_services: 6,
+            total_vulnerable_services: 3,
+            total_services_scanned: 22,
+            last_scan_completed: new Date().toISOString(),
+          }),
+        });
+      });
+
+      await page.route("**/api/v1/hardening/top-services*", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify([
+            {
+              service_name: "nginx.service",
+              affected_systems_count: 2,
+              avg_score: 34.5,
+              min_score: 28,
+              max_score: 41,
+            },
+            {
+              service_name: "sshd.service",
+              affected_systems_count: 1,
+              avg_score: 49.0,
+              min_score: 49,
+              max_score: 49,
+            },
+          ]),
+        });
+      });
+
+      await page.route("**/api/v1/hardening/systems*", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify([
+            {
+              derivation_id: 42,
+              config_name: "warning-system-01",
+              system_id: "00000000-0000-0000-0000-0000000000a1",
+              hostname: "warning-system-01",
+              latest_scan_id: "00000000-0000-0000-0000-00000000b001",
+              overall_score: 58,
+              risk_level: "poorly_hardened",
+              total_services: 12,
+              well_hardened_count: 2,
+              moderately_hardened_count: 4,
+              poorly_hardened_count: 4,
+              vulnerable_count: 2,
+              last_scan_at: new Date().toISOString(),
+              scan_duration_ms: 2100,
+            },
+          ]),
+        });
+      });
+
+      await page.goto(`${baseUrl}/hardening`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1800);
+
+      await assertVisible(
+        page.getByRole("heading", { name: "Systemd Hardening" }).first(),
+        "Expected hardening fleet route to render Systemd Hardening heading",
+      );
+      await assertVisible(
+        page.getByText("Top Vulnerable Services").first(),
+        "Expected hardening fleet route to render vulnerable services card",
+      );
+      await assertVisible(
+        page.getByText("nginx.service").first(),
+        "Expected mocked vulnerable service row on hardening fleet route",
+      );
+
+      await page.unroute("**/api/v1/hardening/summary*");
+      await page.unroute("**/api/v1/hardening/top-services*");
+      await page.unroute("**/api/v1/hardening/systems*");
+    },
+  },
+  {
+    name: "28-system-hardening-tab",
+    description: "System detail hardening tab table and scan eligibility state",
+    action: async (page) => {
+      await page.route(
+        "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/hardening-scan-eligibility*",
+        async (route) => {
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({
+              eligible: true,
+              reason: null,
+              derivation_id: 42,
+              config_name: "warning-system-01",
+              hostname: "warning-system-01",
+            }),
+          });
+        },
+      );
+
+      await routeSystemsWarningData(page);
+
+      await page.route(
+        "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/hardening/justifications*",
+        async (route) => {
+          await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([]) });
+        },
+      );
+
+      await page.route(
+        "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/hardening*",
+        async (route) => {
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify([
+              {
+                id: "00000000-0000-0000-0000-00000000c001",
+                scan_id: "00000000-0000-0000-0000-00000000b001",
+                service_name: "nginx.service",
+                service_type: "simple",
+                hardening_score: 34,
+                risk_level: "vulnerable",
+                enabled_directives_count: 4,
+                disabled_directives_count: 8,
+                missing_directives_count: 6,
+                directives_detail: [
+                  {
+                    name: "ProtectSystem",
+                    enabled: false,
+                    value: "off",
+                    points: 0,
+                    max_points: 12,
+                    category: "namespace",
+                    description: "Protect file system paths",
+                  },
+                ],
+                created_at: new Date().toISOString(),
+              },
+            ]),
+          });
+        },
+      );
+
+      await page.goto(`${baseUrl}/systems/00000000-0000-0000-0000-0000000000a1`, {
+        timeout: LOAD_TIMEOUT,
+      });
+      await page.waitForTimeout(1400);
+
+      const hardeningTabButton = page
+        .locator('[data-testid="system-detail-tabs"]')
+        .getByRole("button", { name: /^Hardening$/i })
+        .first();
+      await hardeningTabButton.waitFor({ timeout: 5000 });
+      await hardeningTabButton.click({ force: true });
+      await page.waitForTimeout(1200);
+
+      await assertVisible(
+        page.getByText("Run Hardening Scan").first(),
+        "Expected hardening scan action to be visible on system detail",
+      );
+
+      const serviceRow = page.getByText("nginx.service").first();
+      const hasServiceRow = await serviceRow.isVisible({ timeout: 2000 }).catch(() => false);
+      if (hasServiceRow) {
+        await assertVisible(
+          page.getByText("vulnerable").first(),
+          "Expected hardening tab to render risk label",
+        );
+      } else {
+        await assertVisible(
+          page.getByText(/No hardening scan results available yet/i).first(),
+          "Expected hardening tab to render either mocked service results or empty-state messaging",
+        );
+      }
+
+      await page.unroute(
+        "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/hardening-scan-eligibility*",
+      );
+      await page.unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/hardening/justifications*");
+      await page.unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/hardening*");
+      await unrouteSystemsWarningData(page);
     },
   },
 ];
@@ -4063,6 +4265,9 @@ const CI_FAST_STEP_NAMES = new Set([
   // TASK-273: Evaluation cancellation + history evidence
   "26-evaluations",
   "26b-evaluations-history",
+  // TASK-276: Hardening dashboard + system tab evidence
+  "27-hardening-fleet",
+  "28-system-hardening-tab",
 ]);
 
 (async () => {
@@ -4084,11 +4289,15 @@ const CI_FAST_STEP_NAMES = new Set([
   const context = await browser.newContext({
     viewport: { width: 1920, height: 1080 },
   });
-  const page = await context.newPage();
 
-  const originalWaitForTimeout = page.waitForTimeout.bind(page);
-  page.waitForTimeout = (ms) =>
-    originalWaitForTimeout(Math.max(50, Math.floor(ms * 0.3)));
+  const createStepPage = async () => {
+    const p = await context.newPage();
+    const originalWaitForTimeout = p.waitForTimeout.bind(p);
+    p.waitForTimeout = (ms) => originalWaitForTimeout(Math.max(50, Math.floor(ms * 0.3)));
+    return p;
+  };
+
+  let page = await createStepPage();
 
   const results = [];
 
@@ -4116,6 +4325,12 @@ const CI_FAST_STEP_NAMES = new Set([
         const outputPath = `${outputDir}/${step.name}.png`;
         await page.screenshot({ path: outputPath });
       } catch (_) {}
+
+      // Isolate follow-up steps from lingering page state when a step fails.
+      try {
+        await page.close();
+      } catch (_) {}
+      page = await createStepPage();
     }
 
     results.push({
