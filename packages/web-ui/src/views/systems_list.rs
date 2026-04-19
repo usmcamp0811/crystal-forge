@@ -385,14 +385,42 @@ pub fn SystemsListView() -> Element {
                     }
                 }
                 div {
-                    class: "flex items-center gap-2",
+                    style: "display: flex; gap: 8px;",
+                    // Sync all
+                    button {
+                        class: "btn btn-ghost focus-ring",
+                        svg {
+                            class: "w-3.5 h-3.5",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            view_box: "0 0 24 24",
+                            path { d: "M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" }
+                        }
+                        "Sync all"
+                    }
+                    // Export
+                    button {
+                        class: "btn btn-ghost focus-ring",
+                        svg {
+                            class: "w-3.5 h-3.5",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            view_box: "0 0 24 24",
+                            path { d: "M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" }
+                        }
+                        "Export"
+                    }
+                    // Add system (primary) — keeps existing functionality
                     div {
                         class: "relative z-40",
                         button {
+                            "data-testid": "add-system-button",
                             class: if from_setup() && !*show_add_form.read() {
-                                "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN} animate-pulse ring-2 ring-blue-300/70 ring-offset-2 ring-offset-slate-950"
+                                "btn btn-primary focus-ring animate-pulse"
                             } else {
-                                "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}"
+                                "btn btn-primary focus-ring"
                             },
                             onclick: move |_| {
                                 let next = !*show_add_form.read();
@@ -402,7 +430,15 @@ pub fn SystemsListView() -> Element {
                                     dismiss_add_target_callout.set(true);
                                 }
                             },
-                            if *show_add_form.read() { "Close" } else { "Add System" }
+                            svg {
+                                class: "w-3.5 h-3.5",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                view_box: "0 0 24 24",
+                                path { d: "M12 4v16m8-8H4" }
+                            }
+                            if *show_add_form.read() { "Close" } else { "Add system" }
                         }
                         if from_setup() && !*show_add_form.read() && !dismiss_add_target_callout() {
                             div {
@@ -412,7 +448,7 @@ pub fn SystemsListView() -> Element {
                                     style: "position:absolute; top:-6px; right:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
                                 }
                                 p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
-                                p { style: "margin:2px 0 0 0;", "Click Add System to register your first managed machine." }
+                                p { style: "margin:2px 0 0 0;", "Click Add system to register your first managed machine." }
                             }
                         }
                     }

@@ -105,76 +105,19 @@ pub fn SystemsTable(
                     class: "sys-table",
                     thead {
                         tr {
-                            SortableHeader {
-                                label: "Hostname",
-                                column: SystemsSortColumn::Hostname,
-                                current_col: current_col,
-                                current_dir: current_dir,
-                                on_sort: move |(col, dir)| {
-                                    sort_column.set(Some(col));
-                                    sort_direction.set(dir);
-                                }
-                            }
-                            SortableHeader {
-                                label: "Flake · commit",
-                                column: SystemsSortColumn::Ip,
-                                current_col: current_col,
-                                current_dir: current_dir,
-                                on_sort: move |(col, dir)| {
-                                    sort_column.set(Some(col));
-                                    sort_direction.set(dir);
-                                }
-                            }
-                            SortableHeader {
-                                label: "Env",
-                                column: SystemsSortColumn::Environment,
-                                current_col: current_col,
-                                current_dir: current_dir,
-                                on_sort: move |(col, dir)| {
-                                    sort_column.set(Some(col));
-                                    sort_direction.set(dir);
-                                }
-                            }
-                            SortableHeader {
-                                label: "Status",
-                                column: SystemsSortColumn::Health,
-                                current_col: current_col,
-                                current_dir: current_dir,
-                                on_sort: move |(col, dir)| {
-                                    sort_column.set(Some(col));
-                                    sort_direction.set(dir);
-                                }
-                            }
-                            SortableHeader {
-                                label: "Deploy",
-                                column: SystemsSortColumn::Deployment,
-                                current_col: current_col,
-                                current_dir: current_dir,
-                                on_sort: move |(col, dir)| {
-                                    sort_column.set(Some(col));
-                                    sort_direction.set(dir);
-                                }
-                            }
-                            SortableHeader {
-                                label: "CVEs",
-                                column: SystemsSortColumn::Cves,
-                                current_col: current_col,
-                                current_dir: current_dir,
-                                on_sort: move |(col, dir)| {
-                                    sort_column.set(Some(col));
-                                    sort_direction.set(dir);
-                                }
-                            }
+                            // Host — 22% width matching design
                             th {
-                                class: "text-left px-4 py-3 text-xs font-medium uppercase tracking-wider",
-                                style: "color: var(--cf-text-muted); background: var(--cf-subtle-bg); letter-spacing: 0.08em;",
-                                "Heartbeat"
+                                style: "width: 22%;",
+                                "Host"
                             }
-                            th {
-                                class: "text-left px-4 py-3 text-xs font-medium uppercase tracking-wider",
-                                style: "color: var(--cf-text-muted); background: var(--cf-subtle-bg); letter-spacing: 0.08em;",
-                                "Actions"
-                            }
+                            th { "Env" }
+                            th { "Status" }
+                            th { "Flake · commit" }
+                            th { "Deploy" }
+                            th { "CVEs" }
+                            th { "Heartbeat" }
+                            // Actions — empty header, right-aligned
+                            th { style: "text-align: right;", " " }
                         }
                     }
                     tbody {
@@ -209,7 +152,7 @@ pub fn SystemsTable(
                                         }
                                     }
                                 }
-                                // Environment badge
+                                // Env
                                 td {
                                     {
                                         let env = environment_label(&system);
@@ -224,7 +167,7 @@ pub fn SystemsTable(
                                         }
                                     }
                                 }
-                                // Health status chip
+                                // Status
                                 td {
                                     Chip {
                                         variant: health_chip_variant(&system.health_status),
@@ -232,24 +175,28 @@ pub fn SystemsTable(
                                         "{system.health_status.label()}"
                                     }
                                 }
-                                // Flake / commit placeholder
+                                // Flake · commit
                                 td {
-                                    div {
-                                        class: "flex flex-col",
-                                        style: "line-height: 1.3;",
-                                        span {
-                                            class: "mono",
-                                            style: "font-size: 12px; color: var(--cf-text-primary)",
-                                            "flake-{system.flake_id.unwrap_or_default()}"
-                                        }
-                                        span {
-                                            class: "mono",
-                                            style: "font-size: 11px; color: var(--cf-text-muted)",
-                                            "abc123de · main"
+                                    {
+                                        let flake_name = format!("flake-{}", system.flake_id.unwrap_or_default());
+                                        rsx! {
+                                            div {
+                                                style: "display: flex; flex-direction: column; line-height: 1.3;",
+                                                span {
+                                                    class: "mono",
+                                                    style: "font-size: 12px; color: var(--cf-text-primary)",
+                                                    "{flake_name}"
+                                                }
+                                                span {
+                                                    class: "mono",
+                                                    style: "font-size: 11px; color: var(--cf-text-muted)",
+                                                    "abc123de · main"
+                                                }
+                                            }
                                         }
                                     }
                                 }
-                                // Deployment status
+                                // Deploy
                                 td {
                                     Chip {
                                         variant: deployment_chip_variant(&system.deployment_status),
@@ -257,30 +204,18 @@ pub fn SystemsTable(
                                         "{system.deployment_status.label()}"
                                     }
                                 }
-                                // CVEs with chips
+                                // CVEs
                                 td {
                                     div {
-                                        class: "flex gap-2 flex-wrap",
+                                        style: "display: flex; gap: 6px; flex-wrap: wrap;",
                                         if system.cve_counts.critical > 0 {
-                                            Chip {
-                                                variant: ChipVariant::Critical,
-                                                show_dot: false,
-                                                "{system.cve_counts.critical} crit"
-                                            }
+                                            span { class: "chip chip-critical", "{system.cve_counts.critical} crit" }
                                         }
                                         if system.cve_counts.high > 0 {
-                                            Chip {
-                                                variant: ChipVariant::Warning,
-                                                show_dot: false,
-                                                "{system.cve_counts.high} high"
-                                            }
+                                            span { class: "chip chip-warning", "{system.cve_counts.high} high" }
                                         }
                                         if system.cve_counts.critical == 0 && system.cve_counts.high == 0 {
-                                            span {
-                                                class: "text-xs",
-                                                style: "color: var(--cf-text-muted)",
-                                                "{system.cve_counts.medium + system.cve_counts.low} total"
-                                            }
+                                            span { class: "chip chip-healthy", "✓ clean" }
                                         }
                                     }
                                 }
@@ -326,9 +261,11 @@ pub fn SystemsTable(
                                         }
                                     }
                                 }
+                                // Row actions: Deploy | Evaluate | More (matching design)
                                 td {
                                     div {
                                         class: "row-actions",
+                                        // Deploy
                                         button {
                                             class: "btn-icon focus-ring",
                                             title: "Deploy",
@@ -342,15 +279,15 @@ pub fn SystemsTable(
                                                 stroke: "currentColor",
                                                 stroke_width: "2",
                                                 view_box: "0 0 24 24",
-                                                path { d: "M5 12h14M12 5l7 7-7 7" }
+                                                path { d: "M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" }
                                             }
                                         }
+                                        // Evaluate
                                         button {
                                             class: "btn-icon focus-ring",
-                                            title: "Edit",
+                                            title: "Evaluate",
                                             onclick: move |evt| {
                                                 evt.stop_propagation();
-                                                on_edit.call(system.id);
                                             },
                                             svg {
                                                 class: "w-3.5 h-3.5",
@@ -358,9 +295,10 @@ pub fn SystemsTable(
                                                 stroke: "currentColor",
                                                 stroke_width: "2",
                                                 view_box: "0 0 24 24",
-                                                path { d: "M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" }
+                                                path { d: "M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" }
                                             }
                                         }
+                                        // More
                                         button {
                                             class: "btn-icon focus-ring",
                                             title: "More",
@@ -369,13 +307,11 @@ pub fn SystemsTable(
                                             },
                                             svg {
                                                 class: "w-3.5 h-3.5",
-                                                fill: "none",
-                                                stroke: "currentColor",
-                                                stroke_width: "2",
+                                                fill: "currentColor",
                                                 view_box: "0 0 24 24",
-                                                circle { cx: "12", cy: "12", r: "1" }
-                                                circle { cx: "19", cy: "12", r: "1" }
-                                                circle { cx: "5", cy: "12", r: "1" }
+                                                circle { cx: "5", cy: "12", r: "2" }
+                                                circle { cx: "12", cy: "12", r: "2" }
+                                                circle { cx: "19", cy: "12", r: "2" }
                                             }
                                         }
                                     }

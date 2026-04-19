@@ -140,10 +140,17 @@ pub fn SystemsStatStrip(systems: Vec<SystemSummary>) -> Element {
                         div {
                             class: "spark-bar",
                             for (env, count) in stats.env_distribution.iter() {
-                                div {
-                                    class: "spark-seg",
-                                    style: "width: {((*count as f64 / stats.total as f64) * 100.0)}%; background: {env_color(env)}",
-                                    title: "{env}: {count}"
+                                {
+                                    let pct = (*count as f64 / stats.total as f64) * 100.0;
+                                    let color = env_color(env);
+                                    let env_title = format!("{}: {}", env, count);
+                                    rsx! {
+                                        div {
+                                            class: "spark-seg",
+                                            style: "width: {pct}%; background-color: {color} !important;",
+                                            title: "{env_title}"
+                                        }
+                                    }
                                 }
                             }
                         }
