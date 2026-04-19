@@ -647,7 +647,10 @@ pub fn SystemDetailView(id: String) -> Element {
                 class: "sd-body",
                 match *active_tab.read() {
                     Tab::Overview => rsx! {
-                        OverviewTab { system: system.clone() }
+                        OverviewTab {
+                            system: system.clone(),
+                            on_open_cves: move |_| active_tab.set(Tab::Cves),
+                        }
                     },
                     Tab::Deploy => rsx! {
                         DeployTab {
@@ -841,7 +844,7 @@ pub fn SystemDetailView(id: String) -> Element {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[component]
-fn OverviewTab(system: SystemDetail) -> Element {
+fn OverviewTab(system: SystemDetail, on_open_cves: EventHandler<()>) -> Element {
     let environment = system
         .environment
         .clone()
@@ -879,11 +882,6 @@ fn OverviewTab(system: SystemDetail) -> Element {
         .as_ref()
         .map(|f| f.name.clone())
         .unwrap_or_else(|| "unknown".to_string());
-    let flake_repo = system
-        .flake
-        .as_ref()
-        .map(|f| f.repo_url.clone())
-        .unwrap_or_else(|| "unknown".to_string());
     let flake_commit = system
         .flake
         .as_ref()
@@ -908,12 +906,21 @@ fn OverviewTab(system: SystemDetail) -> Element {
         .primary_ip
         .clone()
         .unwrap_or_else(|| "-".to_string());
+    let ipv6_text = "—".to_string();
+    let branch_text = "main".to_string();
+    let generation_text = "—".to_string();
+    let commit_message_text = "No commit message available".to_string();
 
     let critical = system.cve_counts.critical;
     let high = system.cve_counts.high;
     let medium = system.cve_counts.medium;
     let low = system.cve_counts.low;
     let cve_total = system.cve_counts.total();
+    let critical_label = if critical == 1 {
+        format!("{} critical CVE", critical)
+    } else {
+        format!("{} critical CVEs", critical)
+    };
 
     rsx! {
         div {
@@ -929,8 +936,10 @@ fn OverviewTab(system: SystemDetail) -> Element {
                 dl {
                     class: "kv-grid",
                     dt { "Flake" } dd { class: "mono", "{flake_name}" }
-                    dt { "Repository" } dd { class: "mono", "{flake_repo}" }
+                    dt { "Branch" } dd { class: "mono", "{branch_text}" }
                     dt { "Commit" } dd { class: "mono", "{flake_commit}" }
+                    dt { "Message" } dd { style: "white-space: normal; font-family: var(--font-sans);", "{commit_message_text}" }
+                    dt { "Generation" } dd { class: "mono", "{generation_text}" }
                     dt { "NixOS" } dd { class: "mono", "{nixos_version}" }
                     dt { "Kernel" } dd { class: "mono", "{kernel}" }
                 }
@@ -958,6 +967,7 @@ fn OverviewTab(system: SystemDetail) -> Element {
                     dt { "CPU" } dd { "{cpu_text}" }
                     dt { "Memory" } dd { "{memory_text}" }
                     dt { "IPv4" } dd { class: "mono", "{ipv4_text}" }
+                    dt { "IPv6" } dd { class: "mono", "{ipv6_text}" }
                 }
                 div {
                     class: "hb-panel",
@@ -976,6 +986,11 @@ fn OverviewTab(system: SystemDetail) -> Element {
                 div {
                     class: "sd-card-head",
                     h2 { "CVE exposure" }
+                    button {
+                        class: "btn btn-ghost xs focus-ring",
+                        onclick: move |_| on_open_cves.call(()),
+                        "View all"
+                    }
                 }
                 div {
                     class: "cve-bar",
@@ -1003,6 +1018,16 @@ fn OverviewTab(system: SystemDetail) -> Element {
                     span { class: "cve-legend-item", span { class: "cve-legend-swatch", style: "background: #fbbf24" } "{high} high" }
                     span { class: "cve-legend-item", span { class: "cve-legend-swatch", style: "background: #9ca3af" } "{medium} medium" }
                     span { class: "cve-legend-item", span { class: "cve-legend-swatch", style: "background: #4b5563" } "{low} low" }
+                }
+                if critical > 0 {
+                    div {
+                        class: "sd-callout sd-callout-danger",
+                        style: "margin-top: 14px;",
+                        div {
+                            strong { "{critical_label}" }
+                            " on this host. Review and patch at earliest opportunity."
+                        }
+                    }
                 }
             }
 
@@ -1042,6 +1067,20 @@ fn OverviewTab(system: SystemDetail) -> Element {
                             div { class: "tl-meta", "yesterday" }
                         }
                     }
+                }
+            }
+
+            section {
+                class: "card sd-card",
+                div {
+                    class: "sd-card-head",
+                    h2 { "Tags" }
+                }
+                div {
+                    class: "sd-tag-row",
+                    span { class: "sd-tag mono", "env:{environment.to_lowercase()}" }
+                    span { class: "sd-tag mono", "flake:{flake_name}" }
+                    button { class: "sd-tag sd-tag-add focus-ring", "add" }
                 }
             }
         }
