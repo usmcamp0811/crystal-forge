@@ -2463,7 +2463,7 @@ fn HardeningTab(
     let risky_toggle_class = if only_risky {
         "border-red-400/50 bg-red-500/10 text-red-200"
     } else {
-        "border-white/15 text-gray-200 hover:bg-white/5"
+        "border cf-card-border cf-text-secondary cf-hover-bg"
     };
 
     let mut filtered_results = results
@@ -2567,8 +2567,8 @@ fn HardeningTab(
 
     rsx! {
         div { class: "space-y-4",
-            div { class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-4",
-                h3 { class: "text-lg font-semibold text-white", "Systemd Security Risk Dashboard" }
+            div { class: "{theme::presets::CARD} p-4",
+                h3 { class: "{theme::typography::SECTION_TITLE} {theme::text::PRIMARY}", "Systemd Security Risk Dashboard" }
                 p {
                     class: "mt-1 text-sm {theme::text::SECONDARY}",
                     "Audit of service sandboxing, namespace isolation, capabilities, syscall filtering, and runtime exposure for this system."
@@ -2583,16 +2583,16 @@ fn HardeningTab(
                 CompactMetricCard { label: "Showing", value: format!("{}", filtered_count), tone: "neutral" }
             }
 
-            div { class: "flex flex-col xl:flex-row gap-2 xl:items-center xl:justify-between rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-3",
+            div { class: "{theme::presets::CARD} p-3 flex flex-col xl:flex-row gap-2 xl:items-center xl:justify-between",
                 div { class: "flex flex-1 flex-col sm:flex-row gap-2",
                     input {
-                        class: "w-full sm:max-w-xs rounded border border-white/15 bg-black/20 px-2 py-1.5 text-xs text-white",
+                        class: "w-full sm:max-w-xs rounded px-2 py-1.5 text-xs {theme::text::PRIMARY} {theme::interactive::INPUT}",
                         placeholder: "Search service or identity",
                         value: "{search_query}",
                         oninput: move |evt| search_query.set(evt.value()),
                     }
                     select {
-                        class: "rounded border border-white/15 bg-black/20 px-2 py-1.5 text-xs text-white",
+                        class: "rounded px-2 py-1.5 text-xs {theme::text::PRIMARY} {theme::interactive::INPUT}",
                         value: "{severity_filter}",
                         onchange: move |evt| severity_filter.set(evt.value()),
                         option { value: "all", "All severities" }
@@ -2603,7 +2603,7 @@ fn HardeningTab(
                         option { value: "well_hardened", "Well hardened" }
                     }
                     select {
-                        class: "rounded border border-white/15 bg-black/20 px-2 py-1.5 text-xs text-white",
+                        class: "rounded px-2 py-1.5 text-xs {theme::text::PRIMARY} {theme::interactive::INPUT}",
                         value: "{sort_mode}",
                         onchange: move |evt| sort_mode.set(evt.value()),
                         option { value: "risk_desc", "Sort: highest risk" }
@@ -2629,22 +2629,23 @@ fn HardeningTab(
             if results.is_empty() {
                 p { class: "{theme::text::SECONDARY}", "No hardening scan results available yet. Trigger a hardening scan to populate this tab." }
             } else {
-                div { class: "overflow-x-auto rounded-lg border border-white/10",
-                    table { class: "min-w-[1400px] text-xs",
+                div { class: "{theme::presets::TABLE_CONTAINER}",
+                    div { class: "overflow-x-auto",
+                    table { class: "w-full min-w-[1540px] text-xs table-auto",
                         thead {
-                            tr { class: "bg-gray-900/95 border-b border-white/10 text-left uppercase tracking-wide text-[10px] text-gray-300",
-                                th { class: "sticky top-0 z-10 px-2 py-2", colspan: "5", "Target" }
+                            tr { class: "{theme::surface::SUBTLE_BG} border-b {theme::surface::CARD_BORDER} uppercase tracking-wide text-[10px] {theme::text::MUTED}",
+                                th { class: "sticky top-0 z-10 px-2 py-2 text-left", colspan: "5", "Target" }
                                 for (group_name, directives) in directive_groups.iter() {
-                                    th { class: "sticky top-0 z-10 px-2 py-2", colspan: "{directives.len()}", "{group_name}" }
+                                    th { class: "sticky top-0 z-10 px-2 py-2 text-center", colspan: "{directives.len()}", "{group_name}" }
                                 }
-                                th { class: "sticky top-0 z-10 px-2 py-2", colspan: "2", "Audit" }
+                                th { class: "sticky top-0 z-10 px-2 py-2 text-center", colspan: "2", "Audit" }
                             }
-                            tr { class: "bg-gray-950/95 border-b border-white/10 text-left {theme::text::SECONDARY}",
-                                th { class: "sticky top-7 z-10 px-2 py-2", "Risk" }
-                                th { class: "sticky top-7 z-10 px-2 py-2", "Score" }
-                                th { class: "sticky top-7 z-10 px-2 py-2", "Service unit" }
-                                th { class: "sticky top-7 z-10 px-2 py-2", "Identity" }
-                                th { class: "sticky top-7 z-10 px-2 py-2", "Findings" }
+                            tr { class: "{theme::surface::CARD_BG} border-b {theme::surface::CARD_BORDER} text-left {theme::text::SECONDARY}",
+                                th { class: "sticky top-7 z-10 px-2 py-2 w-[68px]", "Risk" }
+                                th { class: "sticky top-7 z-10 px-2 py-2 w-[72px]", "Score" }
+                                th { class: "sticky top-7 z-10 px-2 py-2 w-[240px]", "Service unit" }
+                                th { class: "sticky top-7 z-10 px-2 py-2 w-[120px]", "Identity" }
+                                th { class: "sticky top-7 z-10 px-2 py-2 w-[112px]", "Findings" }
                                 for (_, directives) in directive_groups.iter() {
                                     for (directive_name, short_label) in directives.iter().copied() {
                                         th {
@@ -2677,7 +2678,7 @@ fn HardeningTab(
                                     rsx! {
                                         tr {
                                             key: "svc-{service.id}",
-                                            class: "border-b border-white/5 hover:bg-white/[0.03] {row_highlight}",
+                                            class: "border-b {theme::surface::DIVIDER} hover:bg-gray-800/30 {row_highlight}",
                                             td { class: "px-2 py-1.5",
                                                 span {
                                                     class: "inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide {risk_chip}",
@@ -2685,7 +2686,7 @@ fn HardeningTab(
                                                 }
                                             }
                                             td { class: "px-2 py-1.5 font-semibold text-white", "{service.hardening_score}" }
-                                            td { class: "px-2 py-1.5 font-mono text-[11px] text-gray-100", "{service.service_name}" }
+                                            td { class: "px-2 py-1.5 font-mono text-[11px] {theme::text::PRIMARY} whitespace-nowrap", "{service.service_name}" }
                                             td { class: "px-2 py-1.5 text-[11px] text-gray-300",
                                                 "{identity_label}"
                                             }
@@ -2715,7 +2716,7 @@ fn HardeningTab(
                                             td { class: "px-2 py-1.5 text-center text-[11px] text-gray-200", "{justifications_for(&service.service_name).len()}" }
                                             td { class: "px-2 py-1.5 text-center",
                                                 button {
-                                                    class: "px-2 py-1 rounded border border-white/15 text-[10px] hover:bg-white/5",
+                                                    class: "px-2 py-1 rounded border {theme::surface::CARD_BORDER} text-[10px] {theme::text::SECONDARY} {theme::interactive::HOVER_BG}",
                                                     onclick: {
                                                         let service = service.clone();
                                                         move |_| selected_service.set(Some(service.clone()))
@@ -2739,6 +2740,7 @@ fn HardeningTab(
                         }
                     }
                 }
+                }
             }
         }
 
@@ -2753,10 +2755,10 @@ fn HardeningTab(
                     h3 { class: "text-lg font-semibold text-white", "Service hardening: {service.service_name}" }
                     p { class: "text-sm {theme::text::SECONDARY}", "Score: {service.hardening_score} · Risk: {service.risk_level}" }
 
-                    div { class: "max-h-64 overflow-y-auto border border-white/10 rounded-md",
+                    div { class: "max-h-64 overflow-y-auto border {theme::surface::CARD_BORDER} rounded-md {theme::surface::SUBTLE_BG}",
                         table { class: "min-w-full text-xs",
                             thead {
-                                tr { class: "border-b border-white/10 text-left {theme::text::SECONDARY}",
+                                tr { class: "border-b {theme::surface::CARD_BORDER} text-left {theme::text::SECONDARY}",
                                     th { class: "py-2 px-3", "Directive" }
                                     th { class: "py-2 px-3", "Enabled" }
                                     th { class: "py-2 px-3", "Points" }
@@ -2765,7 +2767,7 @@ fn HardeningTab(
                             tbody {
                                 if let Some(directives) = service.directives_detail.as_array() {
                                     for item in directives {
-                                        tr { class: "border-b border-white/5",
+                                        tr { class: "border-b {theme::surface::DIVIDER}",
                                             td { class: "py-2 px-3 font-mono", "{item.get(\"name\").and_then(|v| v.as_str()).unwrap_or(\"\")}" }
                                             td { class: "py-2 px-3", {if item.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) { "yes" } else { "no" }} }
                                             td { class: "py-2 px-3", "{item.get(\"points\").and_then(|v| v.as_i64()).unwrap_or(0)}/{item.get(\"max_points\").and_then(|v| v.as_i64()).unwrap_or(0)}" }
@@ -2779,7 +2781,7 @@ fn HardeningTab(
                     div { class: "space-y-2",
                         h4 { class: "font-medium text-white", "Justifications" }
                         for item in justifications.iter().filter(|j| j.service_name == service.service_name) {
-                            div { class: "rounded-md border border-white/10 bg-black/20 p-2 text-xs",
+                            div { class: "rounded-md border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} p-2 text-xs",
                                 p { class: "text-gray-200", "{item.category.clone().unwrap_or_else(|| \"uncategorized\".to_string())}" }
                                 p { class: "text-gray-300 mt-1", "{item.reason}" }
                             }
@@ -2790,24 +2792,24 @@ fn HardeningTab(
                     }
 
                     if allow_mutations {
-                        div { class: "space-y-2 border-t border-white/10 pt-3",
+                        div { class: "space-y-2 border-t {theme::surface::CARD_BORDER} pt-3",
                             h4 { class: "font-medium text-white", "Add or update justification" }
                             div { class: "grid grid-cols-1 md:grid-cols-3 gap-2",
                                 input {
-                                    class: "px-2 py-1 rounded border border-white/15 bg-black/20 text-sm",
+                                    class: "px-2 py-1 rounded text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
                                     placeholder: "Category (optional)",
                                     value: "{category}",
                                     oninput: move |evt| category.set(evt.value()),
                                 }
                                 input {
-                                    class: "px-2 py-1 rounded border border-white/15 bg-black/20 text-sm",
+                                    class: "px-2 py-1 rounded text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
                                     placeholder: "Directive (optional)",
                                     value: "{directive_name}",
                                     oninput: move |evt| directive_name.set(evt.value()),
                                 }
                             }
                             textarea {
-                                class: "w-full min-h-[72px] px-2 py-1 rounded border border-white/15 bg-black/20 text-sm",
+                                class: "w-full min-h-[72px] px-2 py-1 rounded text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
                                 placeholder: "Reason",
                                 value: "{reason}",
                                 oninput: move |evt| reason.set(evt.value()),
@@ -2847,7 +2849,7 @@ fn HardeningTab(
 
                     div { class: "flex justify-end",
                         button {
-                            class: "px-3 py-1.5 rounded border border-white/15 text-sm hover:bg-white/5",
+                            class: "px-3 py-1.5 rounded border {theme::surface::CARD_BORDER} text-sm {theme::text::SECONDARY} hover:bg-gray-800/30",
                             onclick: move |_| selected_service.set(None),
                             "Close"
                         }
@@ -2863,7 +2865,7 @@ fn CompactMetricCard(label: String, value: String, tone: &'static str) -> Elemen
     let tone_class = match tone {
         "danger" => "border-red-400/30 bg-red-500/10",
         "warning" => "border-amber-400/30 bg-amber-500/10",
-        _ => "border-white/10 bg-white/[0.03]",
+        _ => "border cf-card-border cf-subtle-bg",
     };
 
     rsx! {
