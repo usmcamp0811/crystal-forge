@@ -4,7 +4,7 @@ title: Add systemd hardening scanner and dashboard view
 status: Backlog
 assignee: []
 created_date: '2026-04-19 02:43'
-updated_date: '2026-04-19 03:17'
+updated_date: '2026-04-19 03:21'
 labels:
   - feature
   - security
@@ -16,7 +16,7 @@ references:
   - >-
     https://www.reddit.com/r/homelab/comments/1spgay2/is_anyone_else_a_stickler_for_systemd_hardening/
   - 'https://www.freedesktop.org/software/systemd/man/systemd.exec.html#Security'
-priority: medium
+priority: high
 ---
 
 ## Description
@@ -59,12 +59,23 @@ Model after existing CVE scan infrastructure:
 **Tables:**
 - `hardening_scans` - scan metadata (system_id, commit_sha, status, scan_time, overall_score)
 - `service_hardening_results` - per-service results (scan_id, service_name, hardening_score, options_json)
-- Optional: `hardening_scan_justifications` - suppress false positives (similar to CVE justifications)
+- `hardening_scan_justifications` - suppress false positives (similar to CVE justifications)
 
 **Integration points:**
 - Reuse scan status tracking pattern (pending/running/completed/failed)
 - Link to existing `systems` and `commits` tables
 - Add security posture to `view_system_detail` aggregation
+
+## Scan Triggers
+
+**On-demand scanning:**
+- Admin endpoint to trigger scans for a specific system/commit
+- Similar to existing CVE scan trigger pattern
+
+**Automatic scanning:**
+- Trigger hardening scan when new commits are processed
+- Hook into existing commit processing pipeline
+- Only scan if NixOS configurations changed (optimization)
 
 ## Key Hardening Options to Track
 
@@ -109,6 +120,16 @@ Calculate a hardening score (0-100) per service based on:
 - 40-59: Poorly hardened (orange)
 - 0-39: Vulnerable (red)
 
+## Justification/Suppression System
+
+Some services legitimately require elevated privileges (e.g., VPN needs CAP_NET_ADMIN).
+
+**Features:**
+- Allow marking specific service findings as "justified" with reason
+- Justified findings excluded from risk calculations
+- Track who justified and when
+- Model after existing CVE justification system
+
 ## Dashboard Views
 
 **Fleet-Level Dashboard (Admin):**
@@ -127,7 +148,7 @@ Calculate a hardening score (0-100) per service based on:
 - Specific systemd directives enabled/disabled
 - Which options are missing and their impact
 - Link to NixOS config source (if available)
-- Option to justify/suppress findings (similar to CVE justifications)
+- Justify/suppress button with reason input
 
 ## Integration with Existing Infrastructure
 
@@ -136,7 +157,15 @@ Leverage:
 - **Flake evaluation:** Existing Nix eval infrastructure
 - **Dashboard components:** Reuse `BuildSummaryPanel`, donut charts, security info cards
 - **Scan trigger pattern:** Admin endpoint to trigger scans (like CVE scans)
+- **Commit processing:** Hook into pipeline for automatic scanning
 - **Database views:** Extend `view_system_detail` to include hardening posture
+
+## Test Strategy
+
+**Validation approach:**
+- Test against Crystal Forge's own NixOS configurations
+- Use existing CF systems as real-world test cases for scoring algorithm
+- Verify scoring produces sensible results for known service configurations
 
 ## Out of Scope (Initial Implementation)
 
@@ -147,13 +176,14 @@ Leverage:
 - Auto-generated NixOS config snippets to fix issues (future enhancement)
 - CI integration to block merges on hardening regressions (future enhancement)
 - Service categorization (network-facing vs internal) with risk weighting (future enhancement)
+- Scheduled/periodic re-scans (future enhancement)
 
 ## Key Challenges
 
 1. **Baseline calibration:** Avoid flagging everything as vulnerable; define sensible defaults
 2. **NixOS indirection:** Modules may set options indirectly; need fully merged config evaluation
-3. **False positives:** Some services legitimately need privileges (VPN needs CAP_NET_ADMIN)
-   - Solution: Justification/suppression system (like CVE justifications)
+3. **False positives:** Some services legitimately need privileges
+   - Solution: Justification/suppression system included in this task
 4. **Performance:** Full config evaluation can be slow
    - Solution: Cache results, only re-scan on config changes
 <!-- SECTION:DESCRIPTION:END -->
@@ -161,12 +191,27 @@ Leverage:
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 Static analysis successfully extracts systemd service configurations via nix eval from NixOS flake outputs
-- [ ] #2 Database schema created for hardening_scans and service_hardening_results tables
+- [ ] #2 Database migrations create hardening_scans, service_hardening_results, and hardening_scan_justifications tables
 - [ ] #3 Hardening score (0-100) calculated for each service based on presence/absence of 10-15 key security directives
 - [ ] #4 Fleet-level dashboard displays overall hardening posture with score distribution and top 10 vulnerable services
 - [ ] #5 System-level view shows per-service hardening breakdown with sortable/filterable table
 - [ ] #6 Service detail view displays specific enabled/disabled directives and missing critical options
-- [ ] #7 Scan can be triggered on-demand for a specific system/commit
-- [ ] #8 Results integrate with existing system detail views
-- [ ] #9 Color-coded risk indicators (green/yellow/orange/red) based on hardening score ranges
+- [ ] #7 Scan can be triggered on-demand via admin endpoint for a specific system/commit
+- [ ] #8 Automatic hardening scan triggers when new commits are processed
+- [ ] #9 Justification system allows marking service findings as acceptable with reason text
+- [ ] #10 Results integrate with existing system detail views (view_system_detail extended)
+- [ ] #11 Color-coded risk indicators (green/yellow/orange/red) based on hardening score ranges
+- [ ] #12 Scoring algorithm validated against Crystal Forge's own NixOS configurations
 <!-- AC:END -->
+
+## Definition of Done
+<!-- DOD:BEGIN -->
+- [ ] #1 All database migrations pass and sqlx metadata is in sync
+- [ ] #2 nix flake check passes
+- [ ] #3 cargo fmt -- --check passes
+- [ ] #4 cargo clippy -- -D warnings passes
+- [ ] #5 Unit tests cover scoring algorithm logic
+- [ ] #6 Integration tests verify scan trigger endpoints
+- [ ] #7 Dashboard views render correctly with test data
+- [ ] #8 No regressions in existing CVE scanning functionality
+<!-- DOD:END -->
