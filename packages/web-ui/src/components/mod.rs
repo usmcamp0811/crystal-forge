@@ -41,6 +41,7 @@ pub mod system;
 pub mod tables;
 
 // Top-level component modules
+pub mod chips;
 pub mod layout;
 pub mod loading;
 pub mod stat_card;
@@ -49,6 +50,7 @@ pub mod widget_grid;
 
 // Re-exports for convenience
 pub use charts::{DonutArc, DonutChartWithLegend, DonutSegment};
+pub use chips::{Chip, ChipVariant, EnvBadge, StatusDot};
 pub use cve::CvesTab;
 pub use diff::DiffViewer;
 pub use eval_log_modal::EvalLogModal;
