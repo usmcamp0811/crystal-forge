@@ -1085,6 +1085,39 @@ html, body {
   color: var(--cf-text-secondary);
 }
 
+/* Sidebar user profile section */
+.sidebar-user {
+  padding: 12px 14px;
+  border-top: 1px solid var(--cf-divider);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.user-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 99px;
+  background: linear-gradient(135deg, #f472b6, #6366f1);
+  display: grid;
+  place-items: center;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.user-name {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--cf-text-primary);
+}
+
+.user-meta {
+  font-size: 11px;
+  color: var(--cf-text-muted);
+}
+
 /* Topbar */
 .topbar {
   display: flex;

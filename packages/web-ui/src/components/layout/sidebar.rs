@@ -82,6 +82,27 @@ pub fn SidebarNav() -> Element {
     #[cfg(not(debug_assertions))]
     let show_dev_tools = false;
 
+    // Get user data for profile section
+    let user_initials = if let Some(name) = auth::user_short_name(&auth_context) {
+        name.chars().take(2).collect::<String>().to_uppercase()
+    } else {
+        "U".to_string()
+    };
+
+    let user_display_name =
+        auth::user_display_name(&auth_context).unwrap_or_else(|| "User".to_string());
+
+    let user_role_and_host = if let Some(ctx) = &auth_context {
+        let role = if auth::is_admin(&auth_context) {
+            "admin"
+        } else {
+            "user"
+        };
+        format!("{} · acme-prod", role)
+    } else {
+        "guest".to_string()
+    };
+
     rsx! {
         nav {
             "data-testid": "sidebar-nav",
@@ -327,13 +348,32 @@ pub fn SidebarNav() -> Element {
                         )
                     }
                 }
-            }
-            // Show footer only when not collapsed
-            if !is_collapsed {
+
+                // Spacer to push user profile to bottom
                 div {
-                    class: "p-4 border-t text-xs {theme::text::MUTED}",
-                    style: "border-top-color: var(--cf-card-border);",
-                    "v{env!(\"CARGO_PKG_VERSION\")}"
+                    style: "flex: 1;"
+                }
+
+                // User profile section at bottom
+                div {
+                    class: "sidebar-user",
+                    div {
+                        class: "user-avatar",
+                        {user_initials}
+                    }
+                    if !is_collapsed {
+                        div {
+                            style: "min-width: 0;",
+                            div {
+                                class: "user-name",
+                                {user_display_name}
+                            }
+                            div {
+                                class: "user-meta",
+                                {user_role_and_host}
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -354,6 +394,27 @@ pub fn MobileDrawer() -> Element {
     let show_dev_tools = true;
     #[cfg(not(debug_assertions))]
     let show_dev_tools = false;
+
+    // Get user data for profile section
+    let user_initials = if let Some(name) = auth::user_short_name(&auth_context) {
+        name.chars().take(2).collect::<String>().to_uppercase()
+    } else {
+        "U".to_string()
+    };
+
+    let user_display_name = auth::user_display_name(&auth_context)
+        .unwrap_or_else(|| "User".to_string());
+
+    let user_role_and_host = if let Some(ctx) = &auth_context {
+        let role = if auth::is_admin(&auth_context) {
+            "admin"
+        } else {
+            "user"
+        };
+        format!("{} · acme-prod", role)
+    } else {
+        "guest".to_string()
+    };
 
     if !is_mobile_drawer_open() {
         return rsx! { div { class: "hidden" } };
@@ -629,12 +690,31 @@ pub fn MobileDrawer() -> Element {
                         )
                     }
                 }
-            }
 
-            div {
-                class: "p-4 border-t text-xs {theme::text::MUTED}",
-                style: "border-top-color: var(--cf-card-border);",
-                "v{env!(\"CARGO_PKG_VERSION\")}"
+                // Spacer to push user profile to bottom
+                div {
+                    style: "flex: 1;"
+                }
+
+                // User profile section at bottom
+                div {
+                    class: "sidebar-user",
+                    div {
+                        class: "user-avatar",
+                        {user_initials}
+                    }
+                    div {
+                        style: "min-width: 0;",
+                        div {
+                            class: "user-name",
+                            {user_display_name}
+                        }
+                        div {
+                            class: "user-meta",
+                            {user_role_and_host}
+                        }
+                    }
+                }
             }
         }
     }
