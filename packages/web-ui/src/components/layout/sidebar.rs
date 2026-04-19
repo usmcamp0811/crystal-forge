@@ -681,29 +681,24 @@ pub fn MobileDrawer() -> Element {
                         )
                     }
                 }
+            }
 
-                // Spacer to push user profile to bottom
+            // User profile section at bottom
+            div {
+                class: "sidebar-user",
                 div {
-                    style: "flex: 1;"
+                    class: "user-avatar",
+                    {user_initials}
                 }
-
-                // User profile section at bottom
                 div {
-                    class: "sidebar-user",
+                    style: "min-width: 0;",
                     div {
-                        class: "user-avatar",
-                        {user_initials}
+                        class: "user-name",
+                        {user_display_name}
                     }
                     div {
-                        style: "min-width: 0;",
-                        div {
-                            class: "user-name",
-                            {user_display_name}
-                        }
-                        div {
-                            class: "user-meta",
-                            {user_role_and_host}
-                        }
+                        class: "user-meta",
+                        {user_role_and_host}
                     }
                 }
             }

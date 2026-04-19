@@ -1605,6 +1605,12 @@ html[data-theme="light"] .sd-nix {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex-shrink: 0;
+}
+
+.sidebar.rail .sidebar-user {
+  justify-content: center;
+  padding: 12px 8px;
 }
 
 .user-avatar {
@@ -2272,6 +2278,11 @@ html[data-theme="light"] .sd-nix {
 .cf-mobile-overlay,
 .cf-mobile-drawer {
   display: flex;
+}
+
+.cf-mobile-drawer {
+  height: 100vh;
+  overflow: hidden;
 }
 
 @media (min-width: 480px) {
