@@ -1299,74 +1299,142 @@ fn HistoryTab(
     allow_mutations: bool,
     on_rollback: EventHandler<SystemCommitHistory>,
 ) -> Element {
-    rsx! {
-        div {
-            class: "pt-6 flex flex-col max-h-[70vh] overflow-hidden",
+    let rows = commits;
 
-            // Legend
+    let status_chip = move |commit: &SystemCommitHistory| {
+        if commit.is_current || commit.was_deployed {
+            rsx!(
+                span { class: "chip chip-healthy", "success" }
+            )
+        } else if commit.is_ready_to_deploy {
+            rsx!(
+                span { class: "chip chip-warning", "pending" }
+            )
+        } else {
+            rsx!(
+                span { class: "chip chip-critical", "failed" }
+            )
+        }
+    };
+
+    rsx! {
+        section {
+            class: "card",
+            style: "overflow: hidden;",
+
             div {
-                class: "flex items-center gap-6 mb-6 text-sm {theme::text::SECONDARY}",
-                div {
-                    class: "flex items-center gap-2",
-                    div { class: "w-4 h-4 rounded-full bg-emerald-500 ring-2 ring-emerald-400" }
-                    span { "Current" }
-                }
-                div {
-                    class: "flex items-center gap-2",
-                    div { class: "w-4 h-4 rounded-full bg-blue-500" }
-                    span { "Deployed" }
-                }
-                div {
-                    class: "flex items-center gap-2",
-                    div { class: "w-4 h-4 rounded-full bg-orange-500" }
-                    span { "Pending" }
-                }
-                div {
-                    class: "flex items-center gap-2",
-                    div { class: "w-4 h-4 rounded-full bg-amber-500" }
-                    span { "Not Ready" }
-                }
-                div {
-                    class: "flex items-center gap-2",
-                    div { class: "w-4 h-4 rounded-full border-2 border-dashed border-gray-500 bg-gray-900" }
-                    span { "Skipped" }
-                }
+                class: "sd-card-head",
+                style: "padding: 14px 18px;",
+                h2 { "Deployment history" }
+                span { class: "sd-card-meta", "{rows.len()} deployments · policy {deployment_policy}" }
             }
 
-            // Git graph container - relative positioning for the continuous vertical line
-            div {
-                class: "flex-1 min-h-0 overflow-y-auto",
-
-                // Inner content wrapper - line sized to full content height
-                div {
-                    class: "relative",
-                    style: "padding-left: 48px;",
-
-                    // Continuous vertical line running the full content height
-                    div {
-                        class: "absolute bg-gray-600",
-                        style: "left: 14px; top: 0; bottom: 0; width: 4px; border-radius: 2px; z-index: 0;",
+            table {
+                class: "sys-table",
+                thead {
+                    tr {
+                        th { "When" }
+                        th { "Commit" }
+                        th { "Message" }
+                        th { "Status" }
+                        th { "Gen" }
+                        th { "By" }
+                        th { "Duration" }
+                        th { style: "text-align: right;", " " }
                     }
+                }
+                tbody {
+                    for commit in rows {
+                        {
+                            let short_hash = commit.hash.chars().take(7).collect::<String>();
+                            let when_text = relative_time(commit.committed_at);
+                            let by = commit.author.clone();
+                            let generation = if commit.is_current || commit.was_deployed {
+                                format!("#{}", commit.deployed_at.map(|_| 0).unwrap_or(0)).replace("#0", "#—")
+                            } else {
+                                "—".to_string()
+                            };
+                            let duration = commit
+                                .deployed_at
+                                .map(|deployed| {
+                                    let secs = deployed.signed_duration_since(commit.committed_at).num_seconds().abs();
+                                    format!("{}m {}s", secs / 60, secs % 60)
+                                })
+                                .unwrap_or_else(|| "—".to_string());
 
-                    // Commit entries
-                    div {
-                        class: "space-y-4 relative",
-                        style: "z-index: 1;",
-                    for (idx, commit) in commits.iter().enumerate() {
-                        CommitTimelineNode {
-                            key: "{commit.hash}",
-                            commit: commit.clone(),
-                            is_first: idx == 0,
-                            is_last: idx == commits.len() - 1,
-                            deployment_policy: deployment_policy.clone(),
-                            allow_mutations,
-                            on_rollback: on_rollback.clone()
+                            rsx! {
+                                tr {
+                                    td { style: "color: var(--cf-text-secondary); font-size: 12px;", "{when_text}" }
+                                    td { class: "mono", "{short_hash}" }
+                                    td { style: "color: var(--cf-text-primary); font-size: 13px;", "{commit.message}" }
+                                    td { {status_chip(&commit)} }
+                                    td { class: "mono", style: "font-size: 12px;", "{generation}" }
+                                    td { class: "mono", style: "font-size: 12px;", "{by}" }
+                                    td { class: "mono", style: "font-size: 12px;", "{duration}" }
+                                    td {
+                                        div {
+                                            class: "row-actions",
+                                            button {
+                                                class: "btn-icon focus-ring",
+                                                title: "View logs",
+                                                svg {
+                                                    class: "w-3.5 h-3.5",
+                                                    fill: "none",
+                                                    stroke: "currentColor",
+                                                    view_box: "0 0 24 24",
+                                                    path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M8 9l3 3-3 3m5 0h3" }
+                                                }
+                                            }
+                                            button {
+                                                class: "btn-icon focus-ring",
+                                                title: "Rollback",
+                                                disabled: !allow_mutations,
+                                                onclick: move |_| on_rollback.call(commit.clone()),
+                                                svg {
+                                                    class: "w-3.5 h-3.5",
+                                                    fill: "none",
+                                                    stroke: "currentColor",
+                                                    view_box: "0 0 24 24",
+                                                    path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M9 14l-4-4 4-4M5 10h7a4 4 0 014 4v1" }
+                                                }
+                                            }
+                                            button {
+                                                class: "btn-icon focus-ring",
+                                                title: "More",
+                                                svg {
+                                                    class: "w-3.5 h-3.5",
+                                                    fill: "currentColor",
+                                                    view_box: "0 0 24 24",
+                                                    circle { cx: "5", cy: "12", r: "2" }
+                                                    circle { cx: "12", cy: "12", r: "2" }
+                                                    circle { cx: "19", cy: "12", r: "2" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
-                    }
                     }
                 }
             }
         }
+    }
+}
+
+fn relative_time(at: chrono::DateTime<chrono::Utc>) -> String {
+    let now = chrono::Utc::now();
+    let d = now.signed_duration_since(at);
+    if d.num_minutes() < 1 {
+        "just now".to_string()
+    } else if d.num_hours() < 1 {
+        format!("{}m ago", d.num_minutes())
+    } else if d.num_days() < 1 {
+        format!("{}h ago", d.num_hours())
+    } else if d.num_days() < 7 {
+        format!("{}d ago", d.num_days())
+    } else {
+        at.format("%b %d").to_string()
     }
 }
 
