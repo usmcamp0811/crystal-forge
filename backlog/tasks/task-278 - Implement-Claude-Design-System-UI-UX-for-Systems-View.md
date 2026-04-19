@@ -4,7 +4,7 @@ title: Implement Claude Design System UI/UX for Systems View
 status: In Progress
 assignee: []
 created_date: '2026-04-19 17:54'
-updated_date: '2026-04-19 18:43'
+updated_date: '2026-04-19 18:57'
 labels:
   - ui-ux
   - frontend
@@ -313,6 +313,16 @@ Added missing .btn-icon CSS class definition
 Fixes Systems table action button visibility in tests
 
 Ready for Nix build re-verification
+
+=== Topbar & Sidebar Complete (2026-04-19 18:50) ===
+
+Topbar: Added bell, theme toggle (sun/moon), tweaks buttons
+
+Sidebar: Moved user profile to bottom with gradient avatar
+
+Both now match design example exactly
+
+Commit count: 16 total
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
