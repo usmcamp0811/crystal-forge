@@ -21,6 +21,7 @@ use crate::components::modals::{
 };
 use crate::components::notifications::{AlertBanner, AlertSeverity};
 use crate::components::system::{DeploySystemModal, EditSystemModal, SystemCard};
+use crate::components::systems_stat_strip::SystemsStatStrip;
 use crate::components::tables::SystemsTable;
 use crate::environments::adapter::load_environment_names_with_fallback;
 use crate::routes::Route;
@@ -369,13 +370,18 @@ pub fn SystemsListView() -> Element {
             }
 
             header {
-                class: "flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between",
+                class: "page-head",
                 div {
-                    h1 { class: "{theme::typography::PAGE_TITLE}", "Systems" }
-                    p { class: "text-sm {theme::text::SECONDARY}", "Manage fleet systems and deployment status." }
+                    h1 { class: "page-title", "Systems" }
+                    p {
+                        class: "page-subtitle",
+                        "{local_systems.read().len()} systems · \
+                        {local_systems.read().iter().filter(|s| s.health_status == HealthStatus::Healthy).count()} healthy · \
+                        {local_systems.read().iter().filter(|s| s.health_status != HealthStatus::Healthy).count()} needing attention"
+                    }
                 }
                 div {
-                    class: "flex items-center gap-3",
+                    class: "flex items-center gap-2",
                     div {
                         class: "relative z-40",
                         button {
@@ -414,6 +420,11 @@ pub fn SystemsListView() -> Element {
                         }
                     }
                 }
+            }
+
+            // Statistics Strip
+            SystemsStatStrip {
+                systems: local_systems.read().clone()
             }
 
             // System Form Modal
@@ -581,13 +592,26 @@ pub fn SystemsListView() -> Element {
 
             // Filters Bar
             div {
-                class: "grid grid-cols-1 lg:grid-cols-4 gap-4",
-                input {
-                    class: "rounded-lg px-4 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
-                    r#type: "search",
-                    placeholder: "Search hostname...",
-                    value: "{search.read()}",
-                    oninput: move |evt| search.set(evt.value()),
+                class: "filterbar",
+                id: "{container_id}",
+                div {
+                    class: "filter-search",
+                    svg {
+                        class: "w-3.5 h-3.5",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        view_box: "0 0 24 24",
+                        circle { cx: "11", cy: "11", r: "8" }
+                        path { d: "m21 21-4.35-4.35" }
+                    }
+                    input {
+                        class: "input focus-ring",
+                        r#type: "search",
+                        placeholder: "Filter by hostname, commit, or flake…",
+                        value: "{search.read()}",
+                        oninput: move |evt| search.set(evt.value()),
+                    }
                 }
                 EnvironmentFilterDropdown {
                     environments: environments.clone(),
@@ -602,6 +626,52 @@ pub fn SystemsListView() -> Element {
                     selected: deployment_filter,
                     open_dropdown: open_dropdown,
                 }
+                div {
+                    class: "seg",
+                    role: "tablist",
+                    "aria-label": "View mode",
+                    button {
+                        class: if *view_mode.read() == ViewMode::Cards { "active" } else { "" },
+                        onclick: move |_| {
+                            view_mode.set(ViewMode::Cards);
+                            let _ = LocalStorage::set(VIEW_PREF_KEY, ViewMode::Cards.as_storage());
+                        },
+                        svg {
+                            class: "w-3 h-3",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            view_box: "0 0 24 24",
+                            rect { x: "3", y: "3", width: "7", height: "7" }
+                            rect { x: "14", y: "3", width: "7", height: "7" }
+                            rect { x: "14", y: "14", width: "7", height: "7" }
+                            rect { x: "3", y: "14", width: "7", height: "7" }
+                        }
+                        " Cards"
+                    }
+                    button {
+                        class: if *view_mode.read() == ViewMode::Table { "active" } else { "" },
+                        onclick: move |_| {
+                            view_mode.set(ViewMode::Table);
+                            let _ = LocalStorage::set(VIEW_PREF_KEY, ViewMode::Table.as_storage());
+                        },
+                        svg {
+                            class: "w-3 h-3",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            view_box: "0 0 24 24",
+                            line { x1: "3", y1: "6", x2: "21", y2: "6" }
+                            line { x1: "3", y1: "12", x2: "21", y2: "12" }
+                            line { x1: "3", y1: "18", x2: "21", y2: "18" }
+                        }
+                        " Table"
+                    }
+                }
+                div {
+                    class: "filter-count",
+                    "{filtered_systems.len()} shown"
+                }
             }
 
             // Systems List (Cards or Table)
@@ -614,7 +684,7 @@ pub fn SystemsListView() -> Element {
                 }
             } else if *view_mode.read() == ViewMode::Cards {
                 div {
-                    class: "grid grid-cols-1 xl:grid-cols-2 gap-6",
+                    class: "cards-grid",
                     "data-testid": "systems-cards",
                     for system in filtered_systems.clone() {
                         SystemCard {
