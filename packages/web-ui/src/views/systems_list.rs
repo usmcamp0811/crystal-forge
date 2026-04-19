@@ -20,7 +20,7 @@ use crate::components::modals::{
     GeneratedKeyPair, KeyPairModal, RemoveSystemDialog, UpdatePublicKeyModal, generate_key_pair,
 };
 use crate::components::notifications::{AlertBanner, AlertSeverity};
-use crate::components::system::{DeploySystemModal, EditSystemModal, SystemCard};
+use crate::components::system::{DeploySystemModal, EditSystemModal, SystemCard, SystemCardV2};
 use crate::components::systems_stat_strip::SystemsStatStrip;
 use crate::components::tables::SystemsTable;
 use crate::environments::adapter::load_environment_names_with_fallback;
@@ -687,8 +687,9 @@ pub fn SystemsListView() -> Element {
                     class: "cards-grid",
                     "data-testid": "systems-cards",
                     for system in filtered_systems.clone() {
-                        SystemCard {
+                        SystemCardV2 {
                             system: system.clone(),
+                            compact: false,
                             on_remove: move |_| remove_system_by_id(local_systems, pending_remove, system.id),
                             on_update_key: move |_| update_key_for_system(local_systems, pending_update_key, system.id),
                             on_edit: move |_| {
