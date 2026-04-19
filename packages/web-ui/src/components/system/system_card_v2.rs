@@ -127,9 +127,11 @@ pub fn SystemCardV2(
         })
         .unwrap_or_else(|| "Never".to_string());
 
+    let compact_class = if compact { " compact" } else { "" };
+    
     rsx! {
         div {
-            class: "sys-card {if compact { \"compact\" } else { \"\" }}",
+            class: "sys-card{compact_class}",
             onclick: move |_| {
                 navigator.push(Route::SystemDetailView { id: system.id.to_string() });
             },
