@@ -91,20 +91,22 @@ const POLICY_JSON_SAMPLE: &str = r#"[
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Overview,
+    Deploy,
     History,
-    Policy,
-    Cves,
     Logs,
+    Config,
+    Cves,
 }
 
 impl Tab {
     fn label(&self) -> &'static str {
         match self {
             Self::Overview => "Overview",
+            Self::Deploy => "Deploy",
             Self::History => "History",
-            Self::Policy => "Policy",
-            Self::Cves => "CVEs",
             Self::Logs => "Logs",
+            Self::Config => "Config",
+            Self::Cves => "CVEs",
         }
     }
 }
@@ -552,7 +554,7 @@ pub fn SystemDetailView(id: String) -> Element {
                 role: "tablist",
                 nav {
                     class: "flex gap-1 -mb-px",
-                    for tab in [Tab::Overview, Tab::History, Tab::Policy, Tab::Cves, Tab::Logs] {
+                    for tab in [Tab::Overview, Tab::Deploy, Tab::History, Tab::Logs, Tab::Config, Tab::Cves] {
                         {
                             let is_active = *active_tab.read() == tab;
                             let tab_class = if is_active {
@@ -579,6 +581,15 @@ pub fn SystemDetailView(id: String) -> Element {
                                                     path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" }
                                                 }
                                             ),
+                                            Tab::Deploy => rsx!(
+                                                svg {
+                                                    class: "w-3.5 h-3.5",
+                                                    fill: "none",
+                                                    stroke: "currentColor",
+                                                    view_box: "0 0 24 24",
+                                                    path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" }
+                                                }
+                                            ),
                                             Tab::History => rsx!(
                                                 svg {
                                                     class: "w-3.5 h-3.5",
@@ -586,15 +597,6 @@ pub fn SystemDetailView(id: String) -> Element {
                                                     stroke: "currentColor",
                                                     view_box: "0 0 24 24",
                                                     path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" }
-                                                }
-                                            ),
-                                            Tab::Policy => rsx!(
-                                                svg {
-                                                    class: "w-3.5 h-3.5",
-                                                    fill: "none",
-                                                    stroke: "currentColor",
-                                                    view_box: "0 0 24 24",
-                                                    path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M9 12h6m-6 4h6M7 8h10M5 6h14a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2z" }
                                                 }
                                             ),
                                             Tab::Cves => rsx!(
@@ -613,6 +615,15 @@ pub fn SystemDetailView(id: String) -> Element {
                                                     stroke: "currentColor",
                                                     view_box: "0 0 24 24",
                                                     path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M8 9l3 3-3 3m5 0h3M5 4h14a2 2 0 012 2v12a2 2 0 01-2 2H5a2 2 0 01-2-2V6a2 2 0 012-2z" }
+                                                }
+                                            ),
+                                            Tab::Config => rsx!(
+                                                svg {
+                                                    class: "w-3.5 h-3.5",
+                                                    fill: "none",
+                                                    stroke: "currentColor",
+                                                    view_box: "0 0 24 24",
+                                                    path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M9 12h6m-6 4h6M7 8h10M5 6h14a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2z" }
                                                 }
                                             ),
                                         }
@@ -638,6 +649,17 @@ pub fn SystemDetailView(id: String) -> Element {
                     Tab::Overview => rsx! {
                         OverviewTab { system: system.clone() }
                     },
+                    Tab::Deploy => rsx! {
+                        DeployTab {
+                            system: system.clone(),
+                            commits: commit_history.clone(),
+                            allow_mutations: can_mutate,
+                            on_deploy_commit: move |commit| {
+                                rollback_target.set(Some(commit));
+                                show_rollback_dialog.set(true);
+                            }
+                        }
+                    },
                     Tab::History => rsx! {
                         HistoryTab {
                             commits: commit_history.clone(),
@@ -648,9 +670,6 @@ pub fn SystemDetailView(id: String) -> Element {
                                 show_rollback_dialog.set(true);
                             }
                         }
-                    },
-                    Tab::Policy => rsx! {
-                        PolicyTab { system: system.clone() }
                     },
                     Tab::Cves => rsx! {
                         CvesTab {
@@ -664,7 +683,10 @@ pub fn SystemDetailView(id: String) -> Element {
                         }
                     },
                     Tab::Logs => rsx! {
-                        LogsTab { logs: deployment_logs.clone() }
+                        LogsTabStyled { logs: deployment_logs.clone() }
+                    },
+                    Tab::Config => rsx! {
+                        ConfigTab { system: system.clone() }
                     },
                 }
             }
@@ -1024,6 +1046,249 @@ fn OverviewTab(system: SystemDetail) -> Element {
             }
         }
 
+    }
+}
+
+#[component]
+fn DeployTab(
+    system: SystemDetail,
+    commits: Vec<SystemCommitHistory>,
+    allow_mutations: bool,
+    on_deploy_commit: EventHandler<SystemCommitHistory>,
+) -> Element {
+    let default_commit = commits
+        .iter()
+        .find(|c| c.is_current)
+        .map(|c| c.hash.clone())
+        .or_else(|| commits.first().map(|c| c.hash.clone()))
+        .unwrap_or_default();
+    let mut selected_commit = use_signal(|| default_commit);
+    let mut show_diff = use_signal(|| false);
+
+    let selected = commits
+        .iter()
+        .find(|c| c.hash == *selected_commit.read())
+        .cloned()
+        .or_else(|| commits.first().cloned());
+
+    rsx! {
+        div {
+            class: "sd-grid sd-grid-deploy",
+
+            section {
+                class: "card sd-card",
+                div {
+                    class: "sd-card-head",
+                    h2 { "Select commit" }
+                }
+                div {
+                    class: "sd-deploy-picker",
+                    div {
+                        class: "sd-field",
+                        label { "Flake" }
+                        input {
+                            class: "input focus-ring",
+                            value: system.flake.as_ref().map(|f| f.name.clone()).unwrap_or_else(|| "unknown".to_string()),
+                            readonly: true,
+                        }
+                    }
+                    div {
+                        class: "sd-field",
+                        label { "Policy" }
+                        input {
+                            class: "input focus-ring",
+                            value: system.deployment_policy.clone(),
+                            readonly: true,
+                        }
+                    }
+                }
+                div {
+                    class: "sd-commit-list",
+                    for commit in commits.iter().cloned() {
+                        {
+                            let is_selected = selected_commit() == commit.hash;
+                            let item_class = if is_selected {
+                                "sd-commit-item selected focus-ring"
+                            } else {
+                                "sd-commit-item focus-ring"
+                            };
+                            let short_hash = commit.hash.chars().take(7).collect::<String>();
+                            let committed_text = commit.committed_at.format("%b %d %H:%M").to_string();
+                            rsx! {
+                                button {
+                                    key: "{commit.hash}",
+                                    class: "{item_class}",
+                                    onclick: move |_| selected_commit.set(commit.hash.clone()),
+                                    span { class: "mono sd-commit-sha", "{short_hash}" }
+                                    span { class: "sd-commit-msg", "{commit.message}" }
+                                    span { class: "sd-commit-meta mono", "{commit.author}" }
+                                    span { class: "sd-commit-meta", "{committed_text}" }
+                                    if commit.is_current {
+                                        span { class: "chip chip-info", "current" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            section {
+                class: "card sd-card sd-deploy-panel",
+                div {
+                    class: "sd-card-head",
+                    h2 { "Deployment plan" }
+                    button {
+                        class: "btn btn-ghost xs focus-ring",
+                        onclick: move |_| show_diff.set(!show_diff()),
+                        if show_diff() { "Hide diff" } else { "Show diff" }
+                    }
+                }
+                if let Some(commit) = selected {
+                    {
+                        let from_commit = system
+                            .flake
+                            .as_ref()
+                            .and_then(|f| f.latest_commit.clone())
+                            .unwrap_or_else(|| "unknown".to_string());
+                        let to_commit = commit.hash.chars().take(7).collect::<String>();
+                        let diff_text = commit
+                            .diff_summary
+                            .clone()
+                            .unwrap_or_else(|| "No diff available".to_string());
+                        rsx! {
+                            dl {
+                                class: "kv-grid",
+                                dt { "Target" } dd { class: "mono", "{system.hostname}" }
+                                dt { "From" } dd { class: "mono", "{from_commit}" }
+                                dt { "To" } dd { class: "mono", "{to_commit}" }
+                                dt { "Strategy" } dd { "immediate_persist" }
+                                dt { "Policy" } dd { class: "mono", "{system.deployment_policy}" }
+                            }
+
+                            if show_diff() {
+                                pre {
+                                    class: "sd-diff",
+                                    "{diff_text}"
+                                }
+                            }
+
+                            div {
+                                class: "sd-callout sd-callout-info",
+                                "Policy check {system.deployment_policy} runs before deploy."
+                            }
+
+                            div {
+                                class: "sd-deploy-actions",
+                                button {
+                                    class: "btn btn-primary focus-ring",
+                                    disabled: !allow_mutations,
+                                    onclick: move |_| on_deploy_commit.call(commit.clone()),
+                                    if allow_mutations {
+                                        "Deploy selected commit"
+                                    } else {
+                                        "Deploy (Operator/Admin required)"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn LogsTabStyled(logs: Vec<DeploymentLogEntry>) -> Element {
+    rsx! {
+        div {
+            class: "sd-grid",
+            section {
+                class: "card sd-card sd-logs-card",
+                div {
+                    class: "sd-card-head",
+                    h2 { "Logs" }
+                    span { class: "sd-card-meta", "live stream" }
+                }
+                pre {
+                    class: "sd-log-stream",
+                    for entry in logs {
+                        {
+                            let level_class = match entry.level {
+                                LogLevel::Info => "sd-log-line sd-log-info",
+                                LogLevel::Warn => "sd-log-line sd-log-warn",
+                                LogLevel::Error => "sd-log-line sd-log-error",
+                                LogLevel::Debug => "sd-log-line sd-log-info",
+                            };
+                            let ts = entry.timestamp.format("%H:%M:%S").to_string();
+                            let lvl = match entry.level {
+                                LogLevel::Info => "INFO",
+                                LogLevel::Warn => "WARN",
+                                LogLevel::Error => "ERROR",
+                                LogLevel::Debug => "DEBUG",
+                            };
+                            rsx! {
+                                div {
+                                    class: "{level_class}",
+                                    span { class: "sd-log-t", "{ts}" }
+                                    span { class: "sd-log-lvl", "{lvl}" }
+                                    span { class: "sd-log-m", "{entry.message}" }
+                                }
+                            }
+                        }
+                    }
+                    span { class: "sd-log-caret", "▌" }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn ConfigTab(system: SystemDetail) -> Element {
+    let flake_name = system
+        .flake
+        .as_ref()
+        .map(|f| f.name.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let nixos_version = system
+        .nixos_version
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let kernel = system
+        .kernel
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let store_path_text = system
+        .current_store_path
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let agent_version_text = system
+        .agent_version
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+
+    rsx! {
+        div {
+            class: "sd-grid sd-grid-config",
+            section {
+                class: "card sd-card",
+                div { class: "sd-card-head", h2 { "Nix configuration" } }
+                pre {
+                    class: "sd-nix",
+                    "# host: {system.hostname}\n# flake: {flake_name}\n# deploymentPolicy: {system.deployment_policy}\n\n{{ config, pkgs, ... }}:\n{{\n  networking.hostName = \"{system.hostname}\";\n  system.stateVersion = \"{nixos_version}\";\n  boot.kernelPackages = pkgs.linuxPackages; # {kernel}\n}}"
+                }
+            }
+            section {
+                class: "card sd-card",
+                div { class: "sd-card-head", h2 { "Drift checks" } }
+                div { class: "sd-drift-row", span { class: "sd-drift-label", "Store path" }, span { class: "sd-drift-val mono", "{store_path_text}" } }
+                div { class: "sd-drift-row", span { class: "sd-drift-label", "Agent version" }, span { class: "sd-drift-val mono", "{agent_version_text}" } }
+                div { class: "sd-drift-row", span { class: "sd-drift-label", "Secure boot" }, span { class: "sd-drift-val", "{system.security.secure_boot_enabled.unwrap_or(false)}" } }
+                div { class: "sd-drift-row", span { class: "sd-drift-label", "TPM" }, span { class: "sd-drift-val", "{system.security.tpm_present.unwrap_or(false)}" } }
+            }
+        }
     }
 }
 
