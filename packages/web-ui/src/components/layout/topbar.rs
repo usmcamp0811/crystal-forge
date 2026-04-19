@@ -52,42 +52,59 @@ pub fn TopBar(title: String) -> Element {
 
     rsx! {
         header {
-            class: "flex items-center justify-between h-16 px-6 {theme::surface::SIDEBAR_BG}",
-            style: "border-bottom: 1px solid var(--cf-card-border);",
-            div {
-                class: "flex items-center gap-3",
-                // Mobile (<480px): hamburger drawer button
-                button {
-                    "data-testid": "mobile-nav-toggle",
-                    class: "cf-mobile-only inline-flex items-center justify-center p-2 rounded-lg border {theme::surface::CARD_BORDER} {theme::interactive::HOVER_BG} {theme::text::SECONDARY} min-h-[44px] min-w-[44px]",
-                    onclick: toggle_drawer,
-                    "aria-label": "Open navigation menu",
-                    svg {
-                        class: "w-6 h-6",
-                        fill: "none",
-                        stroke: "currentColor",
-                        stroke_width: "2",
-                        view_box: "0 0 24 24",
-                        path { d: "M4 6h16M4 12h16M4 18h16" }
-                    }
-                }
-
-                h1 {
-                    class: "text-lg font-semibold",
-                    "{title}"
+            class: "topbar",
+            // Mobile (<480px): hamburger drawer button
+            button {
+                "data-testid": "mobile-nav-toggle",
+                class: "cf-mobile-only inline-flex items-center justify-center p-2 rounded-lg border {theme::surface::CARD_BORDER} {theme::interactive::HOVER_BG} {theme::text::SECONDARY} min-h-[44px] min-w-[44px]",
+                onclick: toggle_drawer,
+                "aria-label": "Open navigation menu",
+                svg {
+                    class: "w-6 h-6",
+                    fill: "none",
+                    stroke: "currentColor",
+                    stroke_width: "2",
+                    view_box: "0 0 24 24",
+                    path { d: "M4 6h16M4 12h16M4 18h16" }
                 }
             }
-            div {
-                class: "flex items-center gap-4",
 
-                div {
-                    class: "hidden md:block",
-                    input {
-                        class: "rounded-lg px-3 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
-                        r#type: "search",
-                        placeholder: "Search...",
+            // Breadcrumbs
+            div {
+                class: "breadcrumbs",
+                span { "Fleet" }
+                span { class: "sep", "/" }
+                span { class: "crumb-current", "{title}" }
+            }
+            // Search bar
+            div {
+                class: "topbar-search hidden md:block",
+                svg {
+                    class: "w-3.5 h-3.5",
+                    fill: "none",
+                    stroke: "currentColor",
+                    stroke_width: "2",
+                    view_box: "0 0 24 24",
+                    path {
+                        stroke_linecap: "round",
+                        stroke_linejoin: "round",
+                        d: "M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
                     }
                 }
+                input {
+                    class: "input focus-ring w-full",
+                    r#type: "search",
+                    placeholder: "Search systems, flakes, commits…",
+                }
+                span {
+                    class: "kbd",
+                    style: "position: absolute; right: 10px; top: 50%; transform: translateY(-50%);",
+                    "⌘K"
+                }
+            }
+
+            div {
+                class: "flex items-center gap-4"
 
                 // User menu
                 if let Some(user_name) = auth::user_short_name(&auth_context) {
