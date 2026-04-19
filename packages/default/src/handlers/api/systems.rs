@@ -13,10 +13,10 @@ use crate::api::models::{
     ApiError, AuditAction, CommitInfo, CreateSystemRequest, CveScanEligibilityResponse,
     CveScanStatusResponse, CveScanTriggerResponse, CveSummary, DeploySystemRequest,
     DeploymentStatus, PipelineStage, SaveSystemCveJustificationRequest, SortOrder,
-    SystemAgentEvent, SystemCommitsResponse, SystemDetail, SystemHardwareInfo, SystemHistoryEntry,
-    SystemMutationResponse, SystemNetworkInfo, SystemRollbackRequest, SystemSecurityInfo,
-    SystemSummary, SystemVulnerability, SystemsListParams, UpdateSystemPublicKeyRequest,
-    UpdateSystemRequest,
+    SystemAgentEvent, SystemAgentEventsParams, SystemCommitsResponse, SystemDetail,
+    SystemHardwareInfo, SystemHistoryEntry, SystemMutationResponse, SystemNetworkInfo,
+    SystemRollbackRequest, SystemSecurityInfo, SystemSummary, SystemVulnerability,
+    SystemsListParams, UpdateSystemPublicKeyRequest, UpdateSystemRequest,
 };
 use crate::auth::models::Role;
 use crate::handlers::api::rbac::{
@@ -1592,6 +1592,7 @@ pub async fn get_system_agent_events(
     State(pool): State<PgPool>,
     headers: HeaderMap,
     Path(system_id): Path<Uuid>,
+    Query(params): Query<SystemAgentEventsParams>,
 ) -> impl IntoResponse {
     let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
@@ -1616,7 +1617,7 @@ pub async fn get_system_agent_events(
         return not_found();
     }
 
-    let rows = match list_system_agent_event_rows(&pool, system_id, 300).await {
+    let rows = match list_system_agent_event_rows(&pool, system_id, params.since, params.before, 300).await {
         Ok(value) => value,
         Err(_) => return internal_error("Failed to load agent events"),
     };

@@ -169,15 +169,23 @@ pub fn SystemDetailView(id: String) -> Element {
         }
     });
 
+    // Time range for agent events (default: last 24 hours)
+    let mut log_time_range: Signal<(Option<chrono::DateTime<chrono::Utc>>, Option<chrono::DateTime<chrono::Utc>>)> = use_signal(|| {
+        let now = Utc::now();
+        let since = now - Duration::hours(24);
+        (Some(since), Some(now))
+    });
+
     let id_for_events = id.clone();
-    let agent_events_resource = use_resource(move || {
+    let mut agent_events_resource = use_resource(move || {
         let id = id_for_events.clone();
+        let (since, before) = *log_time_range.read();
         async move {
             let Ok(system_id) = Uuid::parse_str(&id) else {
                 return Vec::<SystemAgentEvent>::new();
             };
 
-            load_system_agent_events_with_fallback(system_id)
+            load_system_agent_events_with_fallback(system_id, since, before)
                 .await
                 .entries
         }
@@ -576,7 +584,13 @@ pub fn SystemDetailView(id: String) -> Element {
                         }
                     },
                     Tab::Logs => rsx! {
-                        LogsTab { logs: deployment_logs.clone() }
+                        LogsTab {
+                            logs: deployment_logs.clone(),
+                            on_time_range_change: move |(since, before)| {
+                                log_time_range.set((since, before));
+                                agent_events_resource.restart();
+                            }
+                        }
                     },
                 }
             }

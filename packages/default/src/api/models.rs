@@ -768,6 +768,15 @@ pub struct SystemsListParams {
     pub sort_order: Option<SortOrder>,
 }
 
+/// Query parameters for filtering system agent events by time range.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemAgentEventsParams {
+    /// Optional start time (inclusive). Events with timestamp >= since will be included.
+    pub since: Option<DateTime<Utc>>,
+    /// Optional end time (exclusive). Events with timestamp < before will be included.
+    pub before: Option<DateTime<Utc>>,
+}
+
 /// Request payload for rolling a system back to a specific commit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemRollbackRequest {

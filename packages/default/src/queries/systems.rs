@@ -356,6 +356,8 @@ pub async fn list_system_history_rows(
 pub async fn list_system_agent_event_rows(
     pool: &PgPool,
     system_id: Uuid,
+    since: Option<DateTime<Utc>>,
+    before: Option<DateTime<Utc>>,
     limit: i64,
 ) -> Result<Vec<SystemAgentEventRow>> {
     let rows = sqlx::query_as::<_, SystemAgentEventRow>(
@@ -399,11 +401,15 @@ pub async fn list_system_agent_event_rows(
             JOIN system_states ss ON ss.hostname = t.hostname
             JOIN agent_heartbeats ah ON ah.system_state_id = ss.id
         ) events
+        WHERE ($2::timestamptz IS NULL OR timestamp >= $2)
+          AND ($3::timestamptz IS NULL OR timestamp < $3)
         ORDER BY timestamp DESC
-        LIMIT $2
+        LIMIT $4
         "#,
     )
     .bind(system_id)
+    .bind(since)
+    .bind(before)
     .bind(limit)
     .fetch_all(pool)
     .await?;

@@ -286,8 +286,10 @@ pub async fn load_system_history_with_fallback(system_id: Uuid) -> SystemHistory
 
 pub async fn load_system_agent_events_with_fallback(
     system_id: Uuid,
+    since: Option<chrono::DateTime<chrono::Utc>>,
+    before: Option<chrono::DateTime<chrono::Utc>>,
 ) -> SystemAgentEventsLoadResult {
-    match fetch_system_agent_events(&system_id).await {
+    match fetch_system_agent_events(&system_id, since, before).await {
         Ok(entries) => SystemAgentEventsLoadResult {
             entries,
             notice: None,

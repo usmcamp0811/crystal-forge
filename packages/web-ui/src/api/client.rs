@@ -280,8 +280,24 @@ pub async fn fetch_system_history(
 
 pub async fn fetch_system_agent_events(
     id: &uuid::Uuid,
+    since: Option<chrono::DateTime<chrono::Utc>>,
+    before: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<Vec<crate::api::models::SystemAgentEvent>, ApiClientError> {
-    let url = format!("{}/systems/{}/agent-events", base_url(), id);
+    let mut url = format!("{}/systems/{}/agent-events", base_url(), id);
+    
+    let mut query_params = vec![];
+    if let Some(since_time) = since {
+        query_params.push(format!("since={}", since_time.to_rfc3339()));
+    }
+    if let Some(before_time) = before {
+        query_params.push(format!("before={}", before_time.to_rfc3339()));
+    }
+    
+    if !query_params.is_empty() {
+        url.push('?');
+        url.push_str(&query_params.join("&"));
+    }
+    
     fetch_json(&url).await
 }
 
