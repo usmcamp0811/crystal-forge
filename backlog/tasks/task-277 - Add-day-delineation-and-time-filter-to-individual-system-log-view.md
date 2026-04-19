@@ -4,7 +4,7 @@ title: Add day delineation and time filter to individual system log view
 status: Backlog
 assignee: []
 created_date: '2026-04-19 12:30'
-updated_date: '2026-04-19 12:38'
+updated_date: '2026-04-19 12:39'
 labels:
   - ui
   - logs
@@ -113,4 +113,53 @@ The individual system log view currently displays agent events (state changes an
 3. Frontend UI component (filter controls)
 4. Frontend day grouping and display logic
 5. Timestamp formatting improvement
+
+## Architectural Constraints
+- Backend API must remain backward compatible (query params are optional)
+- Follow existing patterns: SystemsListParams for query params, similar WHERE clause patterns
+- UI layer must not contain business logic (filtering happens in backend)
+- Database query must use parameterized queries (no SQL injection risk)
+- Date/time handling must use chrono::DateTime<Utc> consistently
+- Frontend must handle timezone conversion for display
+- No breaking changes to existing API response structure
+
+## Verification Plan
+**Tier:** Tier 1 (Feature-level integration)
+
+**Commands:**
+1. Backend unit tests:
+   - nix develop -c cargo test queries::systems::list_system_agent_event_rows
+   - nix develop -c cargo test handlers::api::systems::get_system_agent_events
+   
+2. Integration check:
+   - nix develop -c server-stack up
+   - Navigate to system detail page, logs tab
+   - Verify default shows last 24h
+   - Select custom date range, verify logs update
+   - Verify day headers appear between different days
+   - Verify timestamps show relative time
+   - Verify empty state when no logs in range
+
+3. Full verification:
+   - nix develop -c cargo fmt -- --check
+   - nix develop -c cargo clippy -- -D warnings
+   - nix develop -c cargo test
+   - nix flake check (includes sqlx metadata sync)
+
+**Screenshot Required:** UI showing date headers, dividers, and time filter controls
+
+## Impact Areas
+- Backend: API models, handlers, queries
+- Frontend: LogsTab component, API client
+- Database: Query performance (new WHERE clauses, potential index consideration)
+- User experience: Default behavior changes (24h limit vs 300 events)
+
+## Risk Level
+**Medium**
+- Database query changes could impact performance on large log tables
+- Frontend grouping logic adds complexity
+- Default time range changes user-visible behavior
+
+## Dependencies
+None - this is a standalone enhancement
 <!-- SECTION:NOTES:END -->
