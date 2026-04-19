@@ -1,7 +1,7 @@
 ---
 id: TASK-277
 title: Add day delineation and time filter to individual system log view
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-04-19 12:30'
 updated_date: '2026-04-19 13:58'
@@ -207,4 +207,17 @@ The test is included in CI_FAST_STEP_NAMES, so it will run in automated checks a
 - Relative timestamps in log entries
 
 The screenshot will be available from the web-ui check run artifacts.
+
+## Merge Request Created
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/241
+
+All implementation complete:
+- Backend API changes ✅
+- Frontend UI changes ✅
+- SQLx metadata synced ✅
+- Web-UI automated test added ✅
+- Commits pushed ✅
+
+Ready for review. Screenshot will be available from the web-ui check artifacts once CI runs.
 <!-- SECTION:NOTES:END -->
