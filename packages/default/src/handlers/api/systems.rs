@@ -1964,6 +1964,10 @@ mod tests {
             State(pool),
             HeaderMap::new(),
             Path(Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid")),
+            Query(SystemAgentEventsParams {
+                since: None,
+                before: None,
+            }),
         )
         .await
         .into_response();
