@@ -38,6 +38,9 @@ pub fn SystemsTable(
     on_deploy: EventHandler<Uuid>,
     /// Called when user clicks a row/open action
     on_open: EventHandler<Uuid>,
+    /// Currently selected row (for preview drawer highlight)
+    #[props(default = None)]
+    selected_id: Option<Uuid>,
 ) -> Element {
     let mut sort_column = use_signal(|| None::<SystemsSortColumn>);
     let mut sort_direction = use_signal(|| SortDirection::Asc);
@@ -177,14 +180,18 @@ pub fn SystemsTable(
                     tbody {
                         for system in sorted_systems {
                             tr {
-                                class: "cursor-pointer",
+                                class: if selected_id == Some(system.id) {
+                                    "cursor-pointer selected"
+                                } else {
+                                    "cursor-pointer"
+                                },
                                 onclick: move |_| {
                                     on_open.call(system.id);
                                 },
                                 // Hostname column with status dot
                                 td {
                                     div {
-                                        class: "flex items-center gap-3",
+                                        class: "sys-host-cell",
                                         StatusDot {
                                             color: status_color(&system.health_status).to_string(),
                                             large: false,
@@ -192,13 +199,11 @@ pub fn SystemsTable(
                                         div {
                                             class: "min-w-0",
                                             div {
-                                                class: "font-semibold",
-                                                style: "color: var(--cf-text-primary)",
+                                                class: "hostname",
                                                 "{system.hostname}"
                                             }
                                             div {
-                                                class: "text-xs mono truncate",
-                                                style: "color: var(--cf-text-muted)",
+                                                class: "fqdn truncate",
                                                 "{system.hostname}.local"
                                             }
                                         }

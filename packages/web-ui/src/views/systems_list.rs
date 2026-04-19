@@ -204,6 +204,7 @@ pub fn SystemsListView() -> Element {
         )>
     });
     let mut preview_system = use_signal(|| None::<SystemDetail>);
+    let selected_preview_id = preview_system.read().as_ref().map(|d| d.id);
     let mut deploy_error = use_signal(|| None::<String>);
 
     let current_systems = local_systems.read().clone();
@@ -772,6 +773,7 @@ pub fn SystemsListView() -> Element {
                             }
                         });
                     },
+                    selected_id: selected_preview_id,
                 }
             }
 
@@ -1010,6 +1012,21 @@ fn SystemPreviewPanel(
         .clone()
         .unwrap_or_else(|| "-".to_string());
 
+    let deploy_variant = match detail.deployment_status {
+        DeploymentStatus::UpToDate => ChipVariant::Healthy,
+        DeploymentStatus::Behind => ChipVariant::Warning,
+        DeploymentStatus::Ahead => ChipVariant::Info,
+        DeploymentStatus::NeverDeployed
+        | DeploymentStatus::NoCommitsAvailable
+        | DeploymentStatus::Unknown => ChipVariant::Unknown,
+    };
+
+    let timeline = vec![
+        ("Evaluation completed", "#34d399", "2m ago"),
+        ("Heartbeat received", "#60a5fa", "12s ago"),
+        ("Policy check passed", "#a78bfa", "9m ago"),
+    ];
+
     rsx! {
         div {
             class: "side-panel-backdrop",
@@ -1066,6 +1083,11 @@ fn SystemPreviewPanel(
                             fg: env_fg.to_string(),
                             bg: env_bg.to_string(),
                             border: env_border.to_string(),
+                        }
+                        Chip {
+                            variant: deploy_variant,
+                            show_dot: false,
+                            "{detail.deployment_status.label()}"
                         }
                         Chip {
                             variant: ChipVariant::Unknown,
@@ -1132,6 +1154,32 @@ fn SystemPreviewPanel(
                             }
                         }
                     }
+                    div {
+                        class: "cve-legend",
+                        span { class: "cve-legend-item", span { class: "cve-legend-swatch", style: "background: #f87171" } "{detail.cve_counts.critical} critical" }
+                        span { class: "cve-legend-item", span { class: "cve-legend-swatch", style: "background: #fbbf24" } "{detail.cve_counts.high} high" }
+                        span { class: "cve-legend-item", span { class: "cve-legend-swatch", style: "background: #9ca3af" } "{detail.cve_counts.medium} medium" }
+                        span { class: "cve-legend-item", span { class: "cve-legend-swatch", style: "background: #4b5563" } "{detail.cve_counts.low} low" }
+                    }
+                }
+
+                section {
+                    class: "panel-section",
+                    h3 { "Recent activity" }
+                    div {
+                        class: "timeline",
+                        for (title, color, at) in timeline {
+                            div {
+                                class: "tl-item",
+                                span { class: "tl-dot", style: "--status-color: {color};" }
+                                div {
+                                    class: "tl-body",
+                                    div { class: "tl-title", "{title}" }
+                                    div { class: "tl-meta", "{at}" }
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -1141,6 +1189,10 @@ fn SystemPreviewPanel(
                     class: "btn btn-ghost focus-ring",
                     onclick: move |_| on_open_detail.call(()),
                     "Open full detail"
+                }
+                button {
+                    class: "btn btn-ghost focus-ring",
+                    "Evaluate"
                 }
                 button {
                     class: "btn btn-primary focus-ring",

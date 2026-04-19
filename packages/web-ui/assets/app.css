@@ -1477,6 +1477,27 @@ html, body {
   background: color-mix(in oklab, var(--cf-brand-purple) 10%, var(--cf-card-bg));
 }
 
+.sys-table .sys-host-cell {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sys-table .sys-host-cell .hostname {
+  font-weight: 600;
+  color: var(--cf-text-primary);
+}
+
+.sys-table .sys-host-cell .fqdn {
+  font-size: 11px;
+  color: var(--cf-text-muted);
+  font-family: var(--font-mono);
+}
+
+.sys-table tbody tr.selected {
+  background: color-mix(in oklab, var(--cf-brand-purple) 10%, var(--cf-card-bg));
+}
+
 .sys-table.compact tbody td {
   padding: 8px 14px;
 }
@@ -1626,6 +1647,67 @@ html, body {
 
 .cve-seg {
   height: 100%;
+}
+
+.cve-legend {
+  display: flex;
+  gap: 12px;
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--cf-text-secondary);
+  flex-wrap: wrap;
+}
+
+.cve-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.cve-legend-swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+}
+
+.timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.tl-item {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.tl-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-top: 5px;
+  background: var(--status-color, var(--cf-gray-dot));
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--status-color, var(--cf-gray-dot)) 22%, transparent);
+  flex-shrink: 0;
+}
+
+.tl-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.tl-title {
+  font-size: 13px;
+  color: var(--cf-text-primary);
+  font-weight: 500;
+}
+
+.tl-meta {
+  font-size: 11px;
+  color: var(--cf-text-muted);
+  font-family: var(--font-mono);
+  margin-top: 2px;
 }
 
 /* Heartbeat spinner */
