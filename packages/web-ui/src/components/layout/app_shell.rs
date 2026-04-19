@@ -5,9 +5,7 @@ use dioxus::prelude::*;
 use crate::api::client::fetch_config_health;
 use crate::api::models::{AuthContext, AuthMode, AuthUser, Role};
 use crate::components::layout::TopBar;
-use crate::components::layout::sidebar::{
-    MobileDrawer, SidebarContext, SidebarEdgeToggle, SidebarNav,
-};
+use crate::components::layout::sidebar::{MobileDrawer, SidebarContext, SidebarNav};
 use crate::components::layout::{BannerPlacement, DevModeBanner};
 use crate::components::notifications::{AlertBanner, AlertSeverity};
 use crate::components::onboarding::OnboardingCoachPanel;
@@ -88,6 +86,8 @@ pub fn AppShell() -> Element {
         is_mobile_drawer_open,
         is_collapsed,
     });
+
+    let sidebar_width = if is_collapsed() { "64px" } else { "240px" };
 
     let state = app_state.read();
     let auth_fetch_state = state.auth_fetch_state.clone();
@@ -225,19 +225,19 @@ pub fn AppShell() -> Element {
 
     rsx! {
         div {
-            class: "min-h-screen {theme::surface::PAGE_BG} {theme::text::PRIMARY} flex flex-col overflow-x-hidden",
+            class: "{theme::surface::PAGE_BG} {theme::text::PRIMARY} flex flex-col overflow-x-hidden",
 
             DevModeBanner { placement: BannerPlacement::Top }
 
             div {
-                class: "flex-1 flex min-h-0 relative",
+                class: "app flex-1 min-h-0 relative",
+                style: "--sidebar-w: {sidebar_width};",
 
                 SidebarNav {}
-                SidebarEdgeToggle {}
                 MobileDrawer {}
 
                 div {
-                    class: "flex-1 flex flex-col min-w-0",
+                    class: "main",
                     TopBar { title: current_route.title() }
                     if show_health_bar {
                         if let Some(ref h) = shared_health {
@@ -263,7 +263,7 @@ pub fn AppShell() -> Element {
                         }
                     }
                     main {
-                        class: "flex-1 overflow-auto {theme::spacing::PAGE_PADDING}",
+                        class: "content",
                         if should_show_admin_denied(&current_route, &auth_context) {
                             section {
                                 class: "max-w-3xl mx-auto rounded-xl border border-amber-500/40 bg-amber-900/20 p-6 space-y-2",

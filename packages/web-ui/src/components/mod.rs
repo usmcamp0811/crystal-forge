@@ -33,6 +33,7 @@ pub mod eval_log_modal;
 pub mod filters;
 pub mod flake;
 pub mod forms;
+pub mod heartbeat_spinner;
 pub mod modals;
 pub mod notifications;
 pub mod onboarding;
@@ -59,6 +60,7 @@ pub use filters::{
     DeploymentFilterDropdown, EnvironmentFilterDropdown, HealthFilterDropdown, MultiSelectDropdown,
     ViewToggle,
 };
+pub use heartbeat_spinner::HeartbeatSpinner;
 pub use layout::{AppShell, Card, SidebarNav, TopBar};
 pub use loading::{ErrorMessage, LoadingSpinner};
 pub use modals::{ConfirmDialog, RollbackConfirmDialog, SyncConfirmDialog};

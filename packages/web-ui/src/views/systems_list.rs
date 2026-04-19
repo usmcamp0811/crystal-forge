@@ -15,6 +15,7 @@ use crate::components::filters::{
     DeploymentFilterDropdown, EnvironmentFilterDropdown, HealthFilterDropdown, ViewMode, ViewToggle,
 };
 use crate::components::forms::{AddSystemForm, NewSystemDraft, validate_new_system};
+use crate::components::heartbeat_spinner::HeartbeatSpinner;
 use crate::components::layout::Card;
 use crate::components::modals::{
     GeneratedKeyPair, KeyPairModal, RemoveSystemDialog, UpdatePublicKeyModal, generate_key_pair,
@@ -23,6 +24,7 @@ use crate::components::notifications::{AlertBanner, AlertSeverity};
 use crate::components::system::{DeploySystemModal, EditSystemModal, SystemCard, SystemCardV2};
 use crate::components::systems_stat_strip::SystemsStatStrip;
 use crate::components::tables::SystemsTable;
+use crate::components::{Chip, ChipVariant, EnvBadge};
 use crate::environments::adapter::load_environment_names_with_fallback;
 use crate::routes::Route;
 use crate::state::app_state::AppState;
@@ -201,6 +203,7 @@ pub fn SystemsListView() -> Element {
             Option<String>,
         )>
     });
+    let mut preview_system = use_signal(|| None::<SystemDetail>);
     let mut deploy_error = use_signal(|| None::<String>);
 
     let current_systems = local_systems.read().clone();
@@ -690,6 +693,15 @@ pub fn SystemsListView() -> Element {
                         SystemCardV2 {
                             system: system.clone(),
                             compact: false,
+                            on_open: move |_| {
+                                let mut preview_system = preview_system.clone();
+                                spawn(async move {
+                                    let detail = load_system_detail_with_fallback(&system.id.to_string()).await;
+                                    if let Some(detail) = detail.system {
+                                        preview_system.set(Some(detail));
+                                    }
+                                });
+                            },
                             on_remove: move |_| remove_system_by_id(local_systems, pending_remove, system.id),
                             on_update_key: move |_| update_key_for_system(local_systems, pending_update_key, system.id),
                             on_edit: move |_| {
@@ -749,6 +761,48 @@ pub fn SystemsListView() -> Element {
                                     }
                                 }
                             }
+                        });
+                    },
+                    on_open: move |id: uuid::Uuid| {
+                        let mut preview_system = preview_system.clone();
+                        spawn(async move {
+                            let detail = load_system_detail_with_fallback(&id.to_string()).await;
+                            if let Some(detail) = detail.system {
+                                preview_system.set(Some(detail));
+                            }
+                        });
+                    },
+                }
+            }
+
+            // Side panel preview (design: detail peek drawer)
+            if let Some(detail) = preview_system.read().clone() {
+                SystemPreviewPanel {
+                    detail: detail.clone(),
+                    on_close: move |_| preview_system.set(None),
+                    on_open_detail: move |_| {
+                        preview_system.set(None);
+                        nav.push(Route::SystemDetailView { id: detail.id.to_string() });
+                    },
+                    on_deploy: move |_| {
+                        let detail_for_deploy = detail.clone();
+                        let mut deploy_modal_system = deploy_modal_system.clone();
+                        let mut preview_system = preview_system.clone();
+                        spawn(async move {
+                            match fetch_system_commits_via_api(detail_for_deploy.id).await {
+                                Ok(commits_response) => {
+                                    deploy_modal_system.set(Some((
+                                        detail_for_deploy.clone(),
+                                        commits_response.commits,
+                                        commits_response.current_commit,
+                                    )));
+                                }
+                                Err(_) => {
+                                    deploy_modal_system
+                                        .set(Some((detail_for_deploy.clone(), vec![], None)));
+                                }
+                            }
+                            preview_system.set(None);
                         });
                     },
                 }
@@ -881,6 +935,249 @@ pub fn SystemsListView() -> Element {
                 }
             }
         }
+    }
+}
+
+#[component]
+fn SystemPreviewPanel(
+    detail: SystemDetail,
+    on_close: EventHandler<()>,
+    on_open_detail: EventHandler<()>,
+    on_deploy: EventHandler<()>,
+) -> Element {
+    let status_color = match detail.health_status {
+        HealthStatus::Healthy => "#34d399",
+        HealthStatus::Warning => "#fbbf24",
+        HealthStatus::Critical => "#f87171",
+        HealthStatus::Offline => "#6b7280",
+    };
+
+    let heartbeat_interval_sec = 60_i64;
+    let heartbeat_next_in_sec = detail
+        .last_seen
+        .map(|dt| 60.0 - chrono::Utc::now().signed_duration_since(dt).num_seconds() as f64)
+        .unwrap_or(0.0);
+    let last_heartbeat = detail
+        .last_seen
+        .map(|dt| {
+            let diff = chrono::Utc::now().signed_duration_since(dt);
+            if diff.num_seconds() < 60 {
+                format!("{}s ago", diff.num_seconds().max(0))
+            } else if diff.num_minutes() < 60 {
+                format!("{}m ago", diff.num_minutes().max(0))
+            } else if diff.num_hours() < 24 {
+                format!("{}h ago", diff.num_hours().max(0))
+            } else {
+                format!("{}d ago", diff.num_days().max(0))
+            }
+        })
+        .unwrap_or_else(|| "Never".to_string());
+
+    let (env_fg, env_bg, env_border) =
+        env_colors_for_badge(detail.environment.as_deref().unwrap_or("unknown"));
+
+    let flake_name = detail
+        .flake
+        .as_ref()
+        .map(|f| f.name.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let flake_commit = detail
+        .flake
+        .as_ref()
+        .and_then(|f| f.latest_commit.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let nixos_version = detail
+        .nixos_version
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let kernel = detail
+        .kernel
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let cpu_brand = detail
+        .hardware
+        .cpu_brand
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let memory_text = detail
+        .hardware
+        .memory_gb
+        .map(|m| format!("{:.1} GiB", m))
+        .unwrap_or_else(|| "unknown".to_string());
+    let primary_ip = detail
+        .network
+        .primary_ip
+        .clone()
+        .unwrap_or_else(|| "-".to_string());
+
+    rsx! {
+        div {
+            class: "side-panel-backdrop",
+            onclick: move |_| on_close.call(()),
+        }
+        aside {
+            class: "side-panel",
+            role: "dialog",
+            "aria-modal": "true",
+
+            div {
+                class: "panel-head",
+                div {
+                    class: "panel-title",
+                    h2 {
+                        span { class: "status-dot", style: "--status-color: {status_color};" }
+                        "{detail.hostname}"
+                        Chip {
+                            variant: match detail.health_status {
+                                HealthStatus::Healthy => ChipVariant::Healthy,
+                                HealthStatus::Warning => ChipVariant::Warning,
+                                HealthStatus::Critical => ChipVariant::Critical,
+                                HealthStatus::Offline => ChipVariant::Unknown,
+                            },
+                            show_dot: false,
+                            "{detail.health_status.label()}"
+                        }
+                    }
+                    span { class: "fqdn", "{detail.hostname}.local" }
+                }
+                button {
+                    class: "btn-icon focus-ring",
+                    "aria-label": "Close",
+                    onclick: move |_| on_close.call(()),
+                    svg {
+                        class: "w-4 h-4",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        view_box: "0 0 24 24",
+                        path { d: "M18 6L6 18M6 6l12 12" }
+                    }
+                }
+            }
+
+            div {
+                class: "panel-body",
+                section {
+                    class: "panel-section",
+                    div {
+                        style: "display: flex; gap: 8px; flex-wrap: wrap;",
+                        EnvBadge {
+                            name: detail.environment.clone().unwrap_or_else(|| "unknown".to_string()),
+                            fg: env_fg.to_string(),
+                            bg: env_bg.to_string(),
+                            border: env_border.to_string(),
+                        }
+                        Chip {
+                            variant: ChipVariant::Unknown,
+                            show_dot: false,
+                            "policy: {detail.deployment_policy}"
+                        }
+                    }
+                }
+
+                section {
+                    class: "panel-section",
+                    h3 { "Currently deployed" }
+                    dl {
+                        class: "kv-grid",
+                        dt { "Flake" } dd { "{flake_name}" }
+                        dt { "Commit" } dd { "{flake_commit}" }
+                        dt { "NixOS" } dd { "{nixos_version}" }
+                        dt { "Kernel" } dd { "{kernel}" }
+                    }
+                }
+
+                section {
+                    class: "panel-section",
+                    h3 { "Host" }
+                    dl {
+                        class: "kv-grid",
+                        dt { "Uptime" } dd { "{format_uptime(detail.hardware.uptime_secs)}" }
+                        dt { "CPU" } dd { "{cpu_brand}" }
+                        dt { "Memory" } dd { "{memory_text}" }
+                        dt { "IPv4" } dd { "{primary_ip}" }
+                        dt { "Last heartbeat" } dd { "{last_heartbeat}" }
+                    }
+                    div {
+                        class: "hb-panel",
+                        HeartbeatSpinner {
+                            interval_sec: heartbeat_interval_sec,
+                            next_in_sec: heartbeat_next_in_sec,
+                            size: 56,
+                            show_label: true,
+                        }
+                    }
+                }
+
+                section {
+                    class: "panel-section",
+                    h3 { "CVE exposure" }
+                    div {
+                        class: "cve-bar",
+                        {
+                            let total = (detail.cve_counts.total().max(1)) as f64;
+                            rsx! {
+                                if detail.cve_counts.critical > 0 {
+                                    div { class: "cve-seg", style: "background: #f87171; width: {(detail.cve_counts.critical as f64 / total) * 100.0}%;" }
+                                }
+                                if detail.cve_counts.high > 0 {
+                                    div { class: "cve-seg", style: "background: #fbbf24; width: {(detail.cve_counts.high as f64 / total) * 100.0}%;" }
+                                }
+                                if detail.cve_counts.medium > 0 {
+                                    div { class: "cve-seg", style: "background: #9ca3af; width: {(detail.cve_counts.medium as f64 / total) * 100.0}%;" }
+                                }
+                                if detail.cve_counts.low > 0 {
+                                    div { class: "cve-seg", style: "background: #4b5563; width: {(detail.cve_counts.low as f64 / total) * 100.0}%;" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            div {
+                class: "panel-actions",
+                button {
+                    class: "btn btn-ghost focus-ring",
+                    onclick: move |_| on_open_detail.call(()),
+                    "Open full detail"
+                }
+                button {
+                    class: "btn btn-primary focus-ring",
+                    onclick: move |_| on_deploy.call(()),
+                    "Deploy"
+                }
+            }
+        }
+    }
+}
+
+fn format_uptime(seconds: Option<i64>) -> String {
+    let Some(total) = seconds else {
+        return "unknown".to_string();
+    };
+    let days = total / 86_400;
+    let hours = (total % 86_400) / 3_600;
+    if days > 0 {
+        format!("{}d {}h", days, hours)
+    } else {
+        let minutes = (total % 3_600) / 60;
+        format!("{}h {}m", hours, minutes)
+    }
+}
+
+fn env_colors_for_badge(env_name: &str) -> (&'static str, &'static str, &'static str) {
+    match env_name.to_lowercase().as_str() {
+        "production" | "prod" => ("#f87171", "rgba(220,38,38,0.10)", "rgba(248,113,113,0.25)"),
+        "staging" | "stage" => ("#fbbf24", "rgba(217,119,6,0.10)", "rgba(251,191,36,0.25)"),
+        "dev" | "development" => ("#60a5fa", "rgba(37,99,235,0.10)", "rgba(96,165,250,0.25)"),
+        "edge" => ("#2dd4bf", "rgba(15,118,110,0.12)", "rgba(45,212,191,0.25)"),
+        "lab" => ("#a78bfa", "rgba(124,58,237,0.10)", "rgba(167,139,250,0.25)"),
+        _ => (
+            "#6b7280",
+            "rgba(107,114,128,0.16)",
+            "rgba(107,114,128,0.25)",
+        ),
     }
 }
 

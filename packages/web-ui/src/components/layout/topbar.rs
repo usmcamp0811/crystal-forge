@@ -12,6 +12,7 @@ pub fn TopBar(title: String) -> Element {
 
     let sidebar_ctx = use_context::<SidebarContext>();
     let mut is_mobile_drawer_open = sidebar_ctx.is_mobile_drawer_open;
+    let mut is_collapsed = sidebar_ctx.is_collapsed;
 
     let toggle_drawer = move |_| {
         is_mobile_drawer_open.set(!is_mobile_drawer_open());
@@ -60,7 +61,7 @@ pub fn TopBar(title: String) -> Element {
             }
             // Search bar
             div {
-                class: "topbar-search hidden md:block",
+                class: "topbar-search",
                 svg {
                     class: "w-3.5 h-3.5",
                     fill: "none",
@@ -144,6 +145,9 @@ pub fn TopBar(title: String) -> Element {
                 class: "btn-icon focus-ring",
                 "aria-label": "Tweaks",
                 title: "Tweaks",
+                onclick: move |_| {
+                    is_collapsed.set(!is_collapsed());
+                },
                 svg {
                     class: "w-4 h-4",
                     fill: "none",

@@ -3,11 +3,10 @@
 use dioxus::prelude::*;
 use uuid::Uuid;
 
-use crate::api::models::{HealthStatus, SystemSummary};
+use crate::api::models::{DeploymentStatus, HealthStatus, SystemSummary};
 use crate::components::chips::{Chip, ChipVariant, EnvBadge, StatusDot};
+use crate::components::heartbeat_spinner::HeartbeatSpinner;
 use crate::components::tables::{SortDirection, SortableHeader};
-use crate::routes::Route;
-use crate::theme;
 
 /// Column that can be sorted in the systems table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,8 +36,9 @@ pub fn SystemsTable(
     on_edit: EventHandler<Uuid>,
     /// Called when user clicks deploy on a system
     on_deploy: EventHandler<Uuid>,
+    /// Called when user clicks a row/open action
+    on_open: EventHandler<Uuid>,
 ) -> Element {
-    let navigator = use_navigator();
     let mut sort_column = use_signal(|| None::<SystemsSortColumn>);
     let mut sort_direction = use_signal(|| SortDirection::Asc);
 
@@ -113,7 +113,7 @@ pub fn SystemsTable(
                                 }
                             }
                             SortableHeader {
-                                label: "IP",
+                                label: "Flake · commit",
                                 column: SystemsSortColumn::Ip,
                                 current_col: current_col,
                                 current_dir: current_dir,
@@ -123,7 +123,7 @@ pub fn SystemsTable(
                                 }
                             }
                             SortableHeader {
-                                label: "Environment",
+                                label: "Env",
                                 column: SystemsSortColumn::Environment,
                                 current_col: current_col,
                                 current_dir: current_dir,
@@ -133,7 +133,7 @@ pub fn SystemsTable(
                                 }
                             }
                             SortableHeader {
-                                label: "Health",
+                                label: "Status",
                                 column: SystemsSortColumn::Health,
                                 current_col: current_col,
                                 current_dir: current_dir,
@@ -143,7 +143,7 @@ pub fn SystemsTable(
                                 }
                             }
                             SortableHeader {
-                                label: "Deployment",
+                                label: "Deploy",
                                 column: SystemsSortColumn::Deployment,
                                 current_col: current_col,
                                 current_dir: current_dir,
@@ -165,6 +165,11 @@ pub fn SystemsTable(
                             th {
                                 class: "text-left px-4 py-3 text-xs font-medium uppercase tracking-wider",
                                 style: "color: var(--cf-text-muted); background: var(--cf-subtle-bg); letter-spacing: 0.08em;",
+                                "Heartbeat"
+                            }
+                            th {
+                                class: "text-left px-4 py-3 text-xs font-medium uppercase tracking-wider",
+                                style: "color: var(--cf-text-muted); background: var(--cf-subtle-bg); letter-spacing: 0.08em;",
                                 "Actions"
                             }
                         }
@@ -174,7 +179,7 @@ pub fn SystemsTable(
                             tr {
                                 class: "cursor-pointer",
                                 onclick: move |_| {
-                                    navigator.push(Route::SystemDetailView { id: system.id.to_string() });
+                                    on_open.call(system.id);
                                 },
                                 // Hostname column with status dot
                                 td {
@@ -222,11 +227,28 @@ pub fn SystemsTable(
                                         "{system.health_status.label()}"
                                     }
                                 }
+                                // Flake / commit placeholder
+                                td {
+                                    div {
+                                        class: "flex flex-col",
+                                        style: "line-height: 1.3;",
+                                        span {
+                                            class: "mono",
+                                            style: "font-size: 12px; color: var(--cf-text-primary)",
+                                            "flake-{system.flake_id.unwrap_or_default()}"
+                                        }
+                                        span {
+                                            class: "mono",
+                                            style: "font-size: 11px; color: var(--cf-text-muted)",
+                                            "abc123de · main"
+                                        }
+                                    }
+                                }
                                 // Deployment status
                                 td {
-                                    span {
-                                        class: "text-xs",
-                                        style: "color: var(--cf-text-secondary)",
+                                    Chip {
+                                        variant: deployment_chip_variant(&system.deployment_status),
+                                        show_dot: false,
                                         "{system.deployment_status.label()}"
                                     }
                                 }
@@ -253,6 +275,48 @@ pub fn SystemsTable(
                                                 class: "text-xs",
                                                 style: "color: var(--cf-text-muted)",
                                                 "{system.cve_counts.medium + system.cve_counts.low} total"
+                                            }
+                                        }
+                                    }
+                                }
+                                // Heartbeat countdown
+                                td {
+                                    {
+                                        let last_seen_text = system
+                                            .last_seen
+                                            .map(|dt| {
+                                                let diff = chrono::Utc::now().signed_duration_since(dt);
+                                                if diff.num_seconds() < 60 {
+                                                    format!("{}s ago", diff.num_seconds().max(0))
+                                                } else if diff.num_minutes() < 60 {
+                                                    format!("{}m ago", diff.num_minutes().max(0))
+                                                } else if diff.num_hours() < 24 {
+                                                    format!("{}h ago", diff.num_hours().max(0))
+                                                } else {
+                                                    format!("{}d ago", diff.num_days().max(0))
+                                                }
+                                            })
+                                            .unwrap_or_else(|| "Never".to_string());
+
+                                        let next_in = system
+                                            .last_seen
+                                            .map(|dt| 60.0 - chrono::Utc::now().signed_duration_since(dt).num_seconds() as f64)
+                                            .unwrap_or(0.0);
+
+                                        rsx! {
+                                            div {
+                                                style: "display: flex; align-items: center; gap: 8px;",
+                                                HeartbeatSpinner {
+                                                    interval_sec: 60,
+                                                    next_in_sec: next_in,
+                                                    size: 20,
+                                                    show_label: false,
+                                                }
+                                                span {
+                                                    class: "text-xs",
+                                                    style: "color: var(--cf-text-secondary)",
+                                                    "{last_seen_text}"
+                                                }
                                             }
                                         }
                                     }
@@ -390,5 +454,16 @@ fn health_chip_variant(health: &HealthStatus) -> ChipVariant {
         HealthStatus::Warning => ChipVariant::Warning,
         HealthStatus::Critical => ChipVariant::Critical,
         HealthStatus::Offline => ChipVariant::Unknown,
+    }
+}
+
+fn deployment_chip_variant(status: &DeploymentStatus) -> ChipVariant {
+    match status {
+        DeploymentStatus::UpToDate => ChipVariant::Healthy,
+        DeploymentStatus::Behind => ChipVariant::Warning,
+        DeploymentStatus::Ahead => ChipVariant::Info,
+        DeploymentStatus::NeverDeployed
+        | DeploymentStatus::NoCommitsAvailable
+        | DeploymentStatus::Unknown => ChipVariant::Unknown,
     }
 }

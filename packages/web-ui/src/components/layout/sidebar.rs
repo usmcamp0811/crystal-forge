@@ -70,12 +70,8 @@ pub fn SidebarNav() -> Element {
     let sidebar_ctx = use_context::<SidebarContext>();
     let is_collapsed = (sidebar_ctx.is_collapsed)();
 
-    // Responsive width logic:
-    // - Mobile (<480px): hidden, use drawer
-    // - Narrow desktop/tablet and up (>=480px): toggle between 4rem and 16rem
-    let nav_width = if is_collapsed { "4rem" } else { "16rem" };
-
-    let header_justify = if is_collapsed { "justify-center" } else { "" };
+    // Match design-example sizing for sidebar and rail mode.
+    let nav_width = if is_collapsed { "64px" } else { "240px" };
 
     #[cfg(debug_assertions)]
     let show_dev_tools = true;
@@ -92,7 +88,7 @@ pub fn SidebarNav() -> Element {
     let user_display_name =
         auth::user_display_name(&auth_context).unwrap_or_else(|| "User".to_string());
 
-    let user_role_and_host = if let Some(ctx) = &auth_context {
+    let user_role_and_host = if auth_context.is_some() {
         let role = if auth::is_admin(&auth_context) {
             "admin"
         } else {
@@ -106,7 +102,11 @@ pub fn SidebarNav() -> Element {
     rsx! {
         nav {
             "data-testid": "sidebar-nav",
-            class: "cf-sidebar-shell relative z-20 {theme::surface::SIDEBAR_BG} flex-col transition-all duration-300 ease-in-out",
+            class: if is_collapsed {
+                "cf-sidebar-shell sidebar rail relative z-20 {theme::surface::SIDEBAR_BG} flex-col transition-all duration-300 ease-in-out"
+            } else {
+                "cf-sidebar-shell sidebar relative z-20 {theme::surface::SIDEBAR_BG} flex-col transition-all duration-300 ease-in-out"
+            },
             style: "border-right: 1px solid var(--cf-card-border); width: {nav_width};",
             div {
                 class: "sidebar-brand",
@@ -312,7 +312,7 @@ pub fn SidebarNav() -> Element {
                     NavLink {
                         collapsed: is_collapsed,
                         to: Route::AdminView {},
-                        label: "Server Management",
+                        label: "Server",
                         icon: rsx!(
                             svg {
                                 class: "w-4 h-4",
@@ -348,30 +348,25 @@ pub fn SidebarNav() -> Element {
                         )
                     }
                 }
+            }
 
-                // Spacer to push user profile to bottom
+            // User profile section at bottom
+            div {
+                class: "sidebar-user",
                 div {
-                    style: "flex: 1;"
+                    class: "user-avatar",
+                    {user_initials}
                 }
-
-                // User profile section at bottom
-                div {
-                    class: "sidebar-user",
+                if !is_collapsed {
                     div {
-                        class: "user-avatar",
-                        {user_initials}
-                    }
-                    if !is_collapsed {
+                        style: "min-width: 0;",
                         div {
-                            style: "min-width: 0;",
-                            div {
-                                class: "user-name",
-                                {user_display_name}
-                            }
-                            div {
-                                class: "user-meta",
-                                {user_role_and_host}
-                            }
+                            class: "user-name",
+                            {user_display_name}
+                        }
+                        div {
+                            class: "user-meta",
+                            {user_role_and_host}
                         }
                     }
                 }
@@ -402,10 +397,10 @@ pub fn MobileDrawer() -> Element {
         "U".to_string()
     };
 
-    let user_display_name = auth::user_display_name(&auth_context)
-        .unwrap_or_else(|| "User".to_string());
+    let user_display_name =
+        auth::user_display_name(&auth_context).unwrap_or_else(|| "User".to_string());
 
-    let user_role_and_host = if let Some(ctx) = &auth_context {
+    let user_role_and_host = if auth_context.is_some() {
         let role = if auth::is_admin(&auth_context) {
             "admin"
         } else {
@@ -439,19 +434,15 @@ pub fn MobileDrawer() -> Element {
                 class: "p-6 flex items-center justify-between min-h-[5rem]",
                 div {
                     class: "flex items-center gap-3",
-                    img {
-                        class: "h-8 w-8 object-contain",
-                        src: asset!("assets/crystal-forge-icon.png"),
-                        alt: "Crystal Forge"
-                    }
+                    div { class: "brand-mark", "CF" }
                     div {
-                        h1 {
-                            class: "text-xl font-bold {theme::text::PRIMARY}",
+                        div {
+                            class: "brand-name",
                             "Crystal Forge"
                         }
-                        p {
-                            class: "text-xs {theme::text::MUTED} mt-1",
-                            "Fleet Management"
+                        div {
+                            class: "brand-sub",
+                            "v{env!(\"CARGO_PKG_VERSION\")} · dev"
                         }
                     }
                 }
@@ -655,7 +646,7 @@ pub fn MobileDrawer() -> Element {
                     NavLink {
                         collapsed: false,
                         to: Route::AdminView {},
-                        label: "Server Management",
+                        label: "Server",
                         icon: rsx!(
                             svg {
                                 class: "w-4 h-4",
@@ -734,9 +725,9 @@ fn NavLink(collapsed: bool, to: Route, label: &'static str, icon: Element) -> El
     };
 
     let nav_class = if is_active {
-        "nav-item active"
+        "nav-item active focus-ring"
     } else {
-        "nav-item"
+        "nav-item focus-ring"
     };
 
     rsx! {
@@ -752,6 +743,7 @@ fn NavLink(collapsed: bool, to: Route, label: &'static str, icon: Element) -> El
             // Show label only when not collapsed
             if !collapsed {
                 span {
+                    class: "nav-label",
                     "{label}"
                 }
             }

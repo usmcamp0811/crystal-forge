@@ -11,7 +11,7 @@ use dioxus::prelude::*;
 
 use crate::api::models::{HealthStatus, SystemSummary};
 use crate::components::chips::{Chip, ChipVariant, EnvBadge, StatusDot};
-use crate::routes::Route;
+use crate::components::heartbeat_spinner::HeartbeatSpinner;
 
 /// Environment color configuration for badges and styling.
 struct EnvColors {
@@ -91,12 +91,12 @@ fn deployment_chip_variant(status: &crate::api::models::DeploymentStatus) -> Chi
 pub fn SystemCardV2(
     system: SystemSummary,
     #[props(default = false)] compact: bool,
+    on_open: EventHandler<()>,
     on_remove: EventHandler<()>,
     on_update_key: EventHandler<()>,
     on_edit: EventHandler<()>,
     on_deploy: EventHandler<()>,
 ) -> Element {
-    let navigator = use_navigator();
     let environment = system
         .environment
         .clone()
@@ -111,21 +111,32 @@ pub fn SystemCardV2(
         .map(|_| "flake")
         .unwrap_or("unknown");
 
-    // Format last seen as relative time (simplified)
+    // Format last seen as relative time
     let last_seen = system
         .last_seen
         .map(|dt| {
             let now = chrono::Utc::now();
             let diff = now.signed_duration_since(dt);
-            if diff.num_minutes() < 60 {
-                format!("{}m ago", diff.num_minutes())
+            if diff.num_seconds() < 60 {
+                format!("{}s ago", diff.num_seconds().max(0))
+            } else if diff.num_minutes() < 60 {
+                format!("{}m ago", diff.num_minutes().max(0))
             } else if diff.num_hours() < 24 {
-                format!("{}h ago", diff.num_hours())
+                format!("{}h ago", diff.num_hours().max(0))
             } else {
-                format!("{}d ago", diff.num_days())
+                format!("{}d ago", diff.num_days().max(0))
             }
         })
         .unwrap_or_else(|| "Never".to_string());
+
+    let heartbeat_interval_sec = 60_i64;
+    let heartbeat_next_in_sec = system
+        .last_seen
+        .map(|dt| {
+            let elapsed = chrono::Utc::now().signed_duration_since(dt).num_seconds() as f64;
+            heartbeat_interval_sec as f64 - elapsed
+        })
+        .unwrap_or(0.0);
 
     let compact_class = if compact { " compact" } else { "" };
 
@@ -133,7 +144,7 @@ pub fn SystemCardV2(
         div {
             class: "sys-card{compact_class}",
             onclick: move |_| {
-                navigator.push(Route::SystemDetailView { id: system.id.to_string() });
+                on_open.call(());
             },
 
             // Status rail (colored left edge)
@@ -212,8 +223,14 @@ pub fn SystemCardV2(
                         }
                         div {
                             class: "text-xs",
-                            style: "color: var(--cf-text-primary)",
-                            "{last_seen}"
+                            style: "color: var(--cf-text-primary); display: flex; align-items: center; gap: 8px;",
+                            HeartbeatSpinner {
+                                interval_sec: heartbeat_interval_sec,
+                                next_in_sec: heartbeat_next_in_sec,
+                                size: 22,
+                                show_label: false,
+                            }
+                            span { "{last_seen}" }
                         }
                     }
                     // Policy
