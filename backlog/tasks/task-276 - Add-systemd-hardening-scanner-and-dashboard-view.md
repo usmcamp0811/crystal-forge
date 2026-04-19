@@ -4,7 +4,7 @@ title: Add systemd hardening scanner and dashboard view
 status: Backlog
 assignee: []
 created_date: '2026-04-19 02:43'
-updated_date: '2026-04-19 03:21'
+updated_date: '2026-04-19 03:22'
 labels:
   - feature
   - security
@@ -203,6 +203,109 @@ Leverage:
 - [ ] #11 Color-coded risk indicators (green/yellow/orange/red) based on hardening score ranges
 - [ ] #12 Scoring algorithm validated against Crystal Forge's own NixOS configurations
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+## Verification Plan
+
+**Tier 2: nix flake check (Required)**
+
+### Pre-Implementation
+```bash
+nix develop
+cargo fmt -- --check
+cargo clippy -- -D warnings
+```
+
+### During Implementation
+```bash
+# After schema changes
+sqlx-refresh  # or sqlx database reset -y && cargo sqlx prepare
+cargo check
+
+# After Rust changes
+cargo test --package cf-server
+cargo test --package cf-core
+```
+
+### Final Verification
+```bash
+nix flake check
+```
+
+### Manual Validation
+1. Start full stack: `full-stack up`
+2. Navigate to admin dashboard
+3. Trigger hardening scan for a test system
+4. Verify fleet-level dashboard renders
+5. Drill down to system view and verify service table
+6. Click into service detail and verify directive display
+7. Test justification flow (mark a finding as justified)
+8. Verify automatic scan triggers on new commit processing
+
+### Regression Check
+- Existing CVE scanning must continue to work
+- Existing system detail views must not break
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+## Implementation Notes
+
+### Suggested File Structure
+```
+crates/cf-core/src/
+├── hardening/
+│   ├── mod.rs
+│   ├── scanner.rs          # Nix eval + JSON parsing
+│   ├── scoring.rs          # Score calculation logic
+│   └── types.rs            # HardeningScan, ServiceResult, etc.
+
+crates/cf-server/src/
+├── routes/
+│   └── hardening.rs        # API endpoints
+├── handlers/
+│   └── hardening.rs        # Request handlers
+
+crates/cf-web/src/
+├── views/
+│   └── hardening/
+│       ├── mod.rs
+│       ├── fleet_dashboard.rs
+│       ├── system_view.rs
+│       └── service_detail.rs
+```
+
+### Migration Order
+1. Create `hardening_scans` table
+2. Create `service_hardening_results` table  
+3. Create `hardening_scan_justifications` table
+4. Add columns to or create view for `view_system_detail`
+
+### Key Reference Files (Existing Patterns)
+- CVE scan infrastructure: look at cve_scans table and related handlers
+- Scan trigger pattern: look at existing CVE scan endpoints
+- Dashboard components: BuildSummaryPanel, donut charts in admin views
+- Justification pattern: system_cve_justifications table
+
+### Nix Eval Command
+```bash
+nix eval .#nixosConfigurations.<system>.config.systemd.services --json 2>/dev/null
+```
+
+Parse output as JSON object where keys are service names and values contain:
+- `serviceConfig.PrivateTmp`
+- `serviceConfig.ProtectSystem`
+- `serviceConfig.NoNewPrivileges`
+- etc.
+
+### Risk Areas
+- Large JSON output from nix eval (may need streaming/chunking)
+- Service filtering (ignore generated/internal services?)
+- Score calibration (may need iteration based on real-world results)
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
