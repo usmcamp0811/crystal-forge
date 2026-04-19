@@ -21,8 +21,8 @@ use crate::api::client::{
 };
 use crate::api::models::{
     BuildStatus, CveScanEligibilityResponse, CveSeverity, CveSummary, DeploymentLogEntry,
-    DeploymentStatus, LogLevel, PipelineStage, SystemAgentEvent, SystemCommitHistory, SystemDetail,
-    SystemHardwareInfo, SystemHistoryEntry, SystemNetworkInfo, SystemRollbackRequest,
+    DeploymentStatus, HealthStatus, LogLevel, PipelineStage, SystemAgentEvent, SystemCommitHistory,
+    SystemDetail, SystemHardwareInfo, SystemHistoryEntry, SystemNetworkInfo, SystemRollbackRequest,
     SystemSecurityInfo, SystemVulnerability,
 };
 use crate::components::cve::CvesTab;
@@ -276,6 +276,20 @@ pub fn SystemDetailView(id: String) -> Element {
         .unwrap_or_else(|| "Unknown".to_string());
     let env_style = environment_style(&environment);
 
+    let status_dot_color = match system.health_status {
+        HealthStatus::Healthy => "#34d399",
+        HealthStatus::Warning => "#fbbf24",
+        HealthStatus::Critical => "#f87171",
+        HealthStatus::Offline => "#6b7280",
+    };
+    let health_chip_class = match system.health_status {
+        HealthStatus::Healthy => "chip chip-healthy",
+        HealthStatus::Warning => "chip chip-warning",
+        HealthStatus::Critical => "chip chip-critical",
+        HealthStatus::Offline => "chip chip-unknown",
+    };
+    let health_label = system.health_status.label();
+
     // Format last seen for header
     let last_seen_text = system
         .last_seen
@@ -333,50 +347,93 @@ pub fn SystemDetailView(id: String) -> Element {
                     class: "sd-head-main",
                     div {
                         class: "sd-title-block",
-                        h1 { class: "sd-hostname", "{system.hostname}" }
-                        div { class: "sd-fqdn mono", "{system.hostname}.local" }
-                    }
-
-                    span {
-                        class: "inline-flex items-center px-3 py-1 rounded-md text-xs font-semibold uppercase tracking-wide {env_style.chip_bg} {env_style.chip_text}",
-                        "{environment}"
-                    }
-                    StatusBadge {
-                        label: system.health_status.label(),
-                        color_class: system.health_status.color_class(),
-                        bg_class: system.health_status.bg_class()
-                    }
-                    StatusBadge {
-                        label: system.deployment_status.label(),
-                        color_class: system.deployment_status.color_class(),
-                        bg_class: system.deployment_status.bg_class()
-                    }
-                    span {
-                        class: "text-sm {theme::text::MUTED}",
-                        "Last seen: {last_seen_text}"
-                    }
-                    if let Some(ref store_path) = system.current_store_path {
-                        {
-                            let hash = store_path.split('-').next().unwrap_or("").chars().skip(11).take(7).collect::<String>();
-                            rsx! {
-                                if !hash.is_empty() {
-                                    span {
-                                        class: "font-mono text-xs px-2 py-0.5 rounded bg-gray-800 text-gray-400",
-                                        "{hash}"
-                                    }
-                                }
-                            }
+                        span {
+                            class: "status-dot lg",
+                            style: "--status-color: {status_dot_color};",
+                        }
+                        div {
+                            h1 { class: "sd-hostname", "{system.hostname}" }
+                            div { class: "sd-fqdn mono", "{system.hostname}.local" }
+                        }
+                        span {
+                            class: "env-badge",
+                            style: "color: {env_style.chip_text}; background: {env_style.chip_bg};",
+                            span { class: "chip-dot" }
+                            "{environment}"
+                        }
+                        span { class: "{health_chip_class}", "{health_label}" }
+                        span {
+                            class: "chip chip-info",
+                            "{system.deployment_status.label()}"
                         }
                     }
+
                     div {
                         class: "sd-head-actions",
-                    button {
-                        class: "inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} {theme::text::PRIMARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors disabled:opacity-60 disabled:cursor-not-allowed",
-                        disabled: !can_mutate,
-                        onclick: move |_| edit_modal_open.set(true),
-                        if !can_mutate {
-                            "Edit (Operator/Admin required)"
-                        } else {
+                        // Evaluate
+                        button {
+                            class: "btn btn-ghost focus-ring",
+                            disabled: !can_mutate,
+                            svg {
+                                class: "w-3.5 h-3.5",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                view_box: "0 0 24 24",
+                                path { d: "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 12l2 2 4-4" }
+                            }
+                            "Evaluate"
+                        }
+                        // Rollback
+                        button {
+                            class: "btn btn-ghost focus-ring",
+                            disabled: !can_mutate,
+                            onclick: move |_| show_rollback_dialog.set(true),
+                            svg {
+                                class: "w-3.5 h-3.5",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                view_box: "0 0 24 24",
+                                path { d: "M9 14l-4-4 4-4M5 10h7a4 4 0 014 4v1" }
+                            }
+                            "Rollback"
+                        }
+                        // SSH
+                        button {
+                            class: "btn btn-ghost focus-ring",
+                            svg {
+                                class: "w-3.5 h-3.5",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                view_box: "0 0 24 24",
+                                path { d: "M8 9l3 3-3 3m5 0h3M5 4h14a2 2 0 012 2v12a2 2 0 01-2 2H5a2 2 0 01-2-2V6a2 2 0 012-2z" }
+                            }
+                            "SSH"
+                        }
+                        // Deploy (primary)
+                        button {
+                            class: "btn btn-primary focus-ring",
+                            disabled: !can_mutate,
+                            onclick: move |_| active_tab.set(Tab::Deploy),
+                            svg {
+                                class: "w-3.5 h-3.5",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                view_box: "0 0 24 24",
+                                path { d: "M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" }
+                            }
+                            "Deploy"
+                        }
+                        button {
+                            class: "inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} {theme::text::PRIMARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors disabled:opacity-60 disabled:cursor-not-allowed",
+                            disabled: !can_mutate,
+                            onclick: move |_| edit_modal_open.set(true),
+                            if !can_mutate {
+                                "Edit (Operator/Admin required)"
+                            } else {
                             "Edit"
                         }
                     }
@@ -523,27 +580,74 @@ pub fn SystemDetailView(id: String) -> Element {
                 }
             }
 
-            div {
-                class: "sd-metric-strip",
-                div {
-                    class: "sd-metric",
-                    div { class: "sd-metric-label", "CVE Total" }
-                    div { class: "sd-metric-val", "{system.cve_counts.total()}" }
-                }
-                div {
-                    class: "sd-metric",
-                    div { class: "sd-metric-label", "Critical" }
-                    div { class: "sd-metric-val", "{system.cve_counts.critical}" }
-                }
-                div {
-                    class: "sd-metric",
-                    div { class: "sd-metric-label", "Deployment" }
-                    div { class: "sd-metric-val", "{system.deployment_status.label()}" }
-                }
-                div {
-                    class: "sd-metric",
-                    div { class: "sd-metric-label", "Last heartbeat" }
-                    div { class: "sd-metric-val", "{last_seen_text}" }
+            {
+                let heartbeat_interval_sec = 60_i64;
+                let heartbeat_next_in_sec = system
+                    .last_seen
+                    .map(|dt| 60.0 - Utc::now().signed_duration_since(dt).num_seconds() as f64)
+                    .unwrap_or(0.0);
+                let uptime_str = format_uptime(system.hardware.uptime_secs.unwrap_or(0));
+                let kernel_str = system.kernel.clone().unwrap_or_else(|| "unknown".to_string());
+                let policy_str = system.deployment_policy.clone();
+                let env_str = environment.clone();
+                let cve_total = system.cve_counts.total();
+                let cve_critical = system.cve_counts.critical;
+                let cve_high = system.cve_counts.high;
+
+                rsx! {
+                    div {
+                        class: "sd-metric-strip",
+                        // Heartbeat
+                        div {
+                            class: "sd-metric",
+                            div { class: "sd-metric-label", "Heartbeat" }
+                            div {
+                                class: "sd-metric-val",
+                                crate::components::HeartbeatSpinner {
+                                    interval_sec: heartbeat_interval_sec,
+                                    next_in_sec: heartbeat_next_in_sec,
+                                    size: 36,
+                                    show_label: false,
+                                }
+                            }
+                        }
+                        // Generation
+                        div {
+                            class: "sd-metric",
+                            div { class: "sd-metric-label", "Generation" }
+                            div { class: "sd-metric-val-num", "#—" }
+                            div { class: "sd-metric-sub", "activated · {last_seen_text}" }
+                        }
+                        // Uptime
+                        div {
+                            class: "sd-metric",
+                            div { class: "sd-metric-label", "Uptime" }
+                            div { class: "sd-metric-val-num", "{uptime_str}" }
+                            div { class: "sd-metric-sub mono", "{kernel_str}" }
+                        }
+                        // CVEs
+                        div {
+                            class: "sd-metric",
+                            div { class: "sd-metric-label", "CVEs" }
+                            div {
+                                class: "sd-metric-val-num",
+                                style: if cve_critical > 0 { "color: #f87171;" } else { "color: #34d399;" },
+                                "{cve_total}"
+                            }
+                            div { class: "sd-metric-sub", "{cve_critical} critical · {cve_high} high" }
+                        }
+                        // Policy
+                        div {
+                            class: "sd-metric",
+                            div { class: "sd-metric-label", "Policy" }
+                            div {
+                                class: "sd-metric-val-num mono",
+                                style: "font-size: 18px;",
+                                "{policy_str}"
+                            }
+                            div { class: "sd-metric-sub", "env: {env_str}" }
+                        }
+                    }
                 }
             }
 
@@ -675,13 +779,32 @@ pub fn SystemDetailView(id: String) -> Element {
                         }
                     },
                     Tab::Cves => rsx! {
-                        CvesTab {
-                            system_id: system.id,
-                            cve_counts: system.cve_counts.clone(),
-                            vulnerabilities: vulnerabilities.clone(),
-                            allow_mutations: can_mutate,
-                            on_saved: move |_| {
-                                vulnerabilities_resource.restart();
+                        div {
+                            class: "sd-grid",
+                            section {
+                                class: "card",
+                                style: "overflow: hidden;",
+                                div {
+                                    class: "sd-card-head",
+                                    style: "padding: 14px 18px;",
+                                    h2 { "Vulnerabilities" }
+                                    span {
+                                        class: "sd-card-meta",
+                                        "{system.cve_counts.total()} total · {system.cve_counts.critical} critical"
+                                    }
+                                }
+                                div {
+                                    style: "padding: 0 18px 18px;",
+                                    CvesTab {
+                                        system_id: system.id,
+                                        cve_counts: system.cve_counts.clone(),
+                                        vulnerabilities: vulnerabilities.clone(),
+                                        allow_mutations: can_mutate,
+                                        on_saved: move |_| {
+                                            vulnerabilities_resource.restart();
+                                        }
+                                    }
+                                }
                             }
                         }
                     },
@@ -1240,45 +1363,79 @@ fn DeployTab(
 
 #[component]
 fn LogsTabStyled(logs: Vec<DeploymentLogEntry>) -> Element {
+    let mut filter = use_signal(|| "all".to_string());
+
+    let filtered_logs: Vec<&DeploymentLogEntry> = logs
+        .iter()
+        .filter(|e| {
+            let f = filter.read();
+            match f.as_str() {
+                "info" => matches!(e.level, LogLevel::Info | LogLevel::Debug),
+                "warn" => matches!(e.level, LogLevel::Warn),
+                "error" => matches!(e.level, LogLevel::Error),
+                _ => true,
+            }
+        })
+        .collect();
+
     rsx! {
-        div {
-            class: "sd-grid",
-            section {
-                class: "card sd-card sd-logs-card",
+        section {
+            class: "card sd-logs-card",
+            div {
+                class: "sd-card-head",
+                style: "padding: 14px 18px;",
+                h2 { "Live logs" }
                 div {
-                    class: "sd-card-head",
-                    h2 { "Logs" }
-                    span { class: "sd-card-meta", "live stream" }
-                }
-                pre {
-                    class: "sd-log-stream",
-                    for entry in logs {
-                        {
-                            let level_class = match entry.level {
-                                LogLevel::Info => "sd-log-line sd-log-info",
-                                LogLevel::Warn => "sd-log-line sd-log-warn",
-                                LogLevel::Error => "sd-log-line sd-log-error",
-                                LogLevel::Debug => "sd-log-line sd-log-info",
-                            };
-                            let ts = entry.timestamp.format("%H:%M:%S").to_string();
-                            let lvl = match entry.level {
-                                LogLevel::Info => "INFO",
-                                LogLevel::Warn => "WARN",
-                                LogLevel::Error => "ERROR",
-                                LogLevel::Debug => "DEBUG",
-                            };
-                            rsx! {
-                                div {
-                                    class: "{level_class}",
-                                    span { class: "sd-log-t", "{ts}" }
-                                    span { class: "sd-log-lvl", "{lvl}" }
-                                    span { class: "sd-log-m", "{entry.message}" }
+                    class: "sd-logs-controls",
+                    div {
+                        class: "seg",
+                        for lvl in ["all", "info", "warn", "error"] {
+                            {
+                                let cls = if filter() == lvl { "active" } else { "" };
+                                rsx! {
+                                    button {
+                                        class: "{cls}",
+                                        onclick: move |_| filter.set(lvl.to_string()),
+                                        "{lvl}"
+                                    }
                                 }
                             }
                         }
                     }
-                    span { class: "sd-log-caret", "▌" }
+                    button {
+                        class: "btn btn-ghost xs focus-ring",
+                        "Download"
+                    }
                 }
+            }
+            pre {
+                class: "sd-log-stream",
+                for entry in filtered_logs {
+                    {
+                        let level_class = match entry.level {
+                            LogLevel::Info => "sd-log-line sd-log-info",
+                            LogLevel::Warn => "sd-log-line sd-log-warn",
+                            LogLevel::Error => "sd-log-line sd-log-error",
+                            LogLevel::Debug => "sd-log-line sd-log-info",
+                        };
+                        let ts = entry.timestamp.format("%H:%M:%S").to_string();
+                        let lvl = match entry.level {
+                            LogLevel::Info => "INFO",
+                            LogLevel::Warn => "WARN",
+                            LogLevel::Error => "ERROR",
+                            LogLevel::Debug => "DEBUG",
+                        };
+                        rsx! {
+                            div {
+                                class: "{level_class}",
+                                span { class: "sd-log-t", "{ts}" }
+                                span { class: "sd-log-lvl", "{lvl}" }
+                                span { class: "sd-log-m", "{entry.message}" }
+                            }
+                        }
+                    }
+                }
+                div { class: "sd-log-caret", "▍" }
             }
         }
     }

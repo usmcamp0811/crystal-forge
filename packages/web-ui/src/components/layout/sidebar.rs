@@ -111,15 +111,13 @@ pub fn SidebarNav() -> Element {
             div {
                 class: "sidebar-brand",
                 style: if is_collapsed { "justify-content: center;" } else { "" },
-                // Use brand mark (gradient box with CF) - but keep logo as fallback/alternative
                 div {
                     class: "brand-mark",
                     "CF"
                 }
-                // Show text only when sidebar is expanded
                 if !is_collapsed {
                     div {
-                        style: "min-width: 0;",
+                        style: "flex: 1; min-width: 0;",
                         div {
                             class: "brand-name",
                             "Crystal Forge"
@@ -127,6 +125,39 @@ pub fn SidebarNav() -> Element {
                         div {
                             class: "brand-sub",
                             "v{env!(\"CARGO_PKG_VERSION\")} · dev"
+                        }
+                    }
+                    // Collapse toggle in brand row — layout/panels icon
+                    {
+                        let mut sidebar_ctx2 = use_context::<SidebarContext>();
+                        let toggle = move |_| {
+                            let new_state = !(sidebar_ctx2.is_collapsed)();
+                            sidebar_ctx2.is_collapsed.set(new_state);
+                            if let Some(window) = web_sys::window() {
+                                if let Ok(Some(storage)) = window.local_storage() {
+                                    let _ = storage.set_item(
+                                        "cf-sidebar-collapsed",
+                                        if new_state { "true" } else { "false" },
+                                    );
+                                }
+                            }
+                        };
+                        rsx! {
+                            button {
+                                class: "btn-icon focus-ring",
+                                "aria-label": "Collapse sidebar",
+                                onclick: toggle,
+                                // panels/layout icon matching design
+                                svg {
+                                    class: "w-4 h-4",
+                                    fill: "none",
+                                    stroke: "currentColor",
+                                    stroke_width: "1.75",
+                                    view_box: "0 0 24 24",
+                                    rect { x: "3", y: "3", width: "18", height: "18", rx: "2" }
+                                    path { d: "M9 3v18" }
+                                }
+                            }
                         }
                     }
                 }

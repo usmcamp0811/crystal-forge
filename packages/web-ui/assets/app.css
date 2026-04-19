@@ -1176,8 +1176,124 @@ html, body {
   color: #fca5a5;
 }
 
+/* card must always have explicit background */
+.card {
+  background: var(--cf-card-bg);
+  border: 1px solid var(--cf-card-border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-card);
+}
+
 .sd-body {
-  min-height: 400px;
+  display: block;
+  padding-top: 16px;
+}
+
+/* sd-metric numeric value */
+.sd-metric-val-num {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--cf-text-primary);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+
+.sd-metric-sub {
+  font-size: 11px;
+  color: var(--cf-text-muted);
+}
+
+/* callout danger variant */
+.sd-callout-danger {
+  background: rgba(248, 113, 113, 0.08);
+  border: 1px solid rgba(248, 113, 113, 0.25);
+  color: var(--cf-text-primary);
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+/* Segmented control */
+.seg {
+  display: inline-flex;
+  background: var(--cf-card-bg);
+  border: 1px solid var(--cf-card-border);
+  border-radius: var(--radius-md);
+  padding: 3px;
+}
+
+.seg button {
+  border: 0;
+  background: transparent;
+  color: var(--cf-text-secondary);
+  padding: 5px 10px;
+  font-size: 12px;
+  border-radius: 7px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: inherit;
+}
+
+.seg button.active {
+  background: var(--cf-subtle-bg);
+  color: var(--cf-text-primary);
+}
+
+/* Logs tab controls */
+.sd-logs-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sd-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--cf-text-secondary);
+  cursor: pointer;
+}
+
+.sd-toggle input {
+  accent-color: var(--cf-brand-purple);
+}
+
+/* Tags */
+.sd-tag-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.sd-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: var(--cf-subtle-bg);
+  color: var(--cf-text-secondary);
+  border: 1px solid var(--cf-card-border);
+}
+
+.sd-tag-add {
+  cursor: pointer;
+  background: transparent;
+  color: var(--cf-text-muted);
+  border-style: dashed;
+}
+
+.sd-tag-add:hover {
+  color: var(--cf-text-primary);
+  border-color: var(--cf-text-secondary);
 }
 
 /* Grid layouts per system detail tabs */
