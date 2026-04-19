@@ -868,6 +868,23 @@ html, body {
   gap: 4px;
 }
 
+.btn-icon {
+  padding: 6px;
+  border-radius: 8px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--cf-text-secondary);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.btn-icon:hover {
+  background: var(--cf-hover-bg);
+  color: var(--cf-text-primary);
+}
+
 /* Enhanced chip styles */
 .chip {
   display: inline-flex;
