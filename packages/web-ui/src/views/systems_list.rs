@@ -399,9 +399,17 @@ pub fn SystemsListView() -> Element {
                         }
                         "Sync all"
                     }
-                    // Export
+                    // Export — downloads OSCAL SSP system inventory JSON
                     button {
                         class: "btn btn-ghost focus-ring",
+                        "data-testid": "export-systems-button",
+                        title: "Export system inventory as OSCAL SSP JSON",
+                        onclick: {
+                            let systems_snapshot = local_systems.read().clone();
+                            move |_| {
+                                export_systems_oscal(&systems_snapshot);
+                            }
+                        },
                         svg {
                             class: "w-3.5 h-3.5",
                             fill: "none",
@@ -1270,3 +1278,160 @@ fn env_colors_for_badge(env_name: &str) -> (&'static str, &'static str, &'static
 }
 
 // Mock data has been moved to `crate::systems::adapter::fallback_systems`.
+
+/// Generate an OSCAL-style System Security Plan (SSP) component inventory JSON
+/// and trigger a browser download.
+///
+/// Format follows NIST OSCAL SSP schema (simplified inventory subset).
+/// See: https://pages.nist.gov/OSCAL/resources/concepts/layer/implementation/ssp/
+pub fn export_systems_oscal(systems: &[crate::api::models::SystemSummary]) {
+    let now = js_sys::Date::new_0();
+    let iso_now = now.to_iso_string().as_string().unwrap_or_default();
+
+    // Build OSCAL SSP inventory JSON as a string
+    let mut components = Vec::new();
+    for sys in systems {
+        let env = sys.environment.as_deref().unwrap_or("unknown").to_string();
+        let health = sys.health_status.label();
+        let deploy = sys.deployment_status.label();
+        let last_seen = sys
+            .last_seen
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_else(|| "never".to_string());
+        let nixos = sys
+            .nixos_version
+            .as_deref()
+            .unwrap_or("unknown")
+            .to_string();
+        let ip = sys.primary_ip.as_deref().unwrap_or("unknown").to_string();
+        let cve_crit = sys.cve_counts.critical;
+        let cve_high = sys.cve_counts.high;
+        let cve_med = sys.cve_counts.medium;
+        let cve_low = sys.cve_counts.low;
+        let cve_total = sys.cve_counts.total();
+        let policy = &sys.deployment_policy;
+        let uuid = sys.id;
+
+        components.push(format!(
+            r#"        {{
+          "uuid": "{uuid}",
+          "type": "software",
+          "title": "{hostname}",
+          "description": "NixOS system managed by Crystal Forge",
+          "props": [
+            {{ "name": "hostname",             "value": "{hostname}" }},
+            {{ "name": "environment",          "value": "{env}" }},
+            {{ "name": "ip-address",           "value": "{ip}" }},
+            {{ "name": "os-name",              "value": "NixOS" }},
+            {{ "name": "os-version",           "value": "{nixos}" }},
+            {{ "name": "health-status",        "value": "{health}" }},
+            {{ "name": "deployment-status",    "value": "{deploy}" }},
+            {{ "name": "deployment-policy",    "value": "{policy}" }},
+            {{ "name": "last-heartbeat",       "value": "{last_seen}" }},
+            {{ "name": "cve-critical",         "value": "{cve_crit}" }},
+            {{ "name": "cve-high",             "value": "{cve_high}" }},
+            {{ "name": "cve-medium",           "value": "{cve_med}" }},
+            {{ "name": "cve-low",              "value": "{cve_low}" }},
+            {{ "name": "cve-total",            "value": "{cve_total}" }}
+          ],
+          "status": {{ "state": "{health}" }}
+        }}"#,
+            uuid = uuid,
+            hostname = sys.hostname,
+            env = env,
+            ip = ip,
+            nixos = nixos,
+            health = health,
+            deploy = deploy,
+            policy = policy,
+            last_seen = last_seen,
+            cve_crit = cve_crit,
+            cve_high = cve_high,
+            cve_med = cve_med,
+            cve_low = cve_low,
+            cve_total = cve_total,
+        ));
+    }
+
+    let components_json = components.join(",\n");
+    let total = systems.len();
+    let critical_hosts = systems.iter().filter(|s| s.cve_counts.critical > 0).count();
+    let total_crit_cves: i64 = systems.iter().map(|s| s.cve_counts.critical).sum();
+
+    let json = format!(
+        r#"{{
+  "oscal-version": "1.1.2",
+  "metadata": {{
+    "title": "Crystal Forge — System Inventory Report",
+    "last-modified": "{iso_now}",
+    "version": "1.0",
+    "oscal-version": "1.1.2",
+    "remarks": "Automated system inventory exported from Crystal Forge fleet management. Contains {total} managed NixOS systems. {critical_hosts} host(s) with critical CVEs ({total_crit_cves} critical CVEs total)."
+  }},
+  "system-security-plan": {{
+    "uuid": "cf-export-{ts}",
+    "system-characteristics": {{
+      "system-name": "Crystal Forge Managed Fleet",
+      "description": "NixOS fleet managed by Crystal Forge",
+      "status": {{ "state": "operational" }},
+      "system-information": {{
+        "information-types": [
+          {{
+            "title": "Fleet Inventory",
+            "description": "System inventory and security posture data"
+          }}
+        ]
+      }}
+    }},
+    "system-implementation": {{
+      "users": [],
+      "components": [
+{components_json}
+      ]
+    }}
+  }}
+}}"#,
+        iso_now = iso_now,
+        total = total,
+        critical_hosts = critical_hosts,
+        total_crit_cves = total_crit_cves,
+        ts = now.get_time() as u64,
+        components_json = components_json,
+    );
+
+    // Trigger browser download
+    trigger_json_download(
+        &json,
+        &format!("cf-system-inventory-{ts}.json", ts = now.get_time() as u64),
+    );
+}
+
+fn trigger_json_download(content: &str, filename: &str) {
+    // Build a data: URI and use inline JS to trigger the download.
+    // This avoids needing web_sys::Blob/Url/HtmlAnchorElement Cargo features.
+    let encoded = js_sys::encode_uri_component(content)
+        .as_string()
+        .unwrap_or_default();
+    let data_uri = format!("data:application/json;charset=utf-8,{}", encoded);
+
+    // Use js_sys::Function to call a tiny JS snippet that creates and clicks
+    // a temporary anchor element — the most reliable cross-browser approach.
+    let js_code = format!(
+        r#"
+        (function() {{
+            var a = document.createElement('a');
+            a.href = '{uri}';
+            a.download = '{name}';
+            a.style = 'display:none';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        }})();
+        "#,
+        uri = data_uri.replace('\'', "\\'"),
+        name = filename.replace('\'', "\\'"),
+    );
+
+    let func = js_sys::Function::new_no_args(&js_code);
+    func.call0(&wasm_bindgen::JsValue::NULL).ok();
+}
