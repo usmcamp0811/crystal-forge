@@ -1,10 +1,10 @@
 ---
 id: TASK-278
 title: Implement Claude Design System UI/UX for Systems View
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-04-19 17:54'
-updated_date: '2026-04-19 17:55'
+updated_date: '2026-04-19 17:57'
 labels:
   - ui-ux
   - frontend
@@ -277,6 +277,8 @@ lab:        { bg: "rgba(124,58,237,0.10)", fg: "#a78bfa", border: "rgba(167,139,
 - Check for existing logo usage in current sidebar
 - If logo image exists, keep it alongside or instead of the "CF" text mark
 - Design shows gradient box with "CF" text as fallback/alternative
+
+LOCK: agent on gray in ~/code/crystal-forge/TASK-278-design-system-ui-ux (starting 2026-04-19 17:56)
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
