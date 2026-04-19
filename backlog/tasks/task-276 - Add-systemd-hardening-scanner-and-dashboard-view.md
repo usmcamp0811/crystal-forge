@@ -1,7 +1,7 @@
 ---
 id: TASK-276
 title: Add systemd hardening scanner and dashboard view
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-04-19 02:43'
 updated_date: '2026-04-19 03:25'
@@ -339,6 +339,8 @@ Shows:
 ```
 /hardening (fleet) → click system → /systems/:id#hardening → click service → detail modal
 ```
+
+LOCK: claude-agent on gray in ~/code/crystal-forge/TASK-276-systemd-hardening-scanner
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
