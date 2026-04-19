@@ -46,6 +46,7 @@ pub mod layout;
 pub mod loading;
 pub mod stat_card;
 pub mod status_badge;
+pub mod systems_stat_strip;
 pub mod widget_grid;
 
 // Re-exports for convenience
@@ -69,5 +70,6 @@ pub use system::{
     AgentCard, BooleanRow, HardwareCard, InfoRow, InfoRowMono, LogLine, LogsTab, NetworkCard,
     SecurityCard, StatusBadge, SystemInfoCard,
 };
+pub use systems_stat_strip::{SystemsStatStrip, SystemsStats};
 pub use tables::{SortDirection, SortableHeader};
 pub use widget_grid::{GridWidget, WidgetGrid};
