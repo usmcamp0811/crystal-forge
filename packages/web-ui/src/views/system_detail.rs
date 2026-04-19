@@ -2685,15 +2685,15 @@ fn HardeningTab(
                                                     "{short_risk_label(&service.risk_level)}"
                                                 }
                                             }
-                                            td { class: "px-2 py-1.5 font-semibold text-white", "{service.hardening_score}" }
+                                            td { class: "px-2 py-1.5 font-semibold {theme::text::PRIMARY}", "{service.hardening_score}" }
                                             td { class: "px-2 py-1.5 font-mono text-[11px] {theme::text::PRIMARY} whitespace-nowrap", "{service.service_name}" }
-                                            td { class: "px-2 py-1.5 text-[11px] text-gray-300",
+                                            td { class: "px-2 py-1.5 text-[11px] {theme::text::SECONDARY}",
                                                 "{identity_label}"
                                             }
-                                            td { class: "px-2 py-1.5 text-[11px] text-gray-300",
-                                                span { class: "text-red-300", "M:{service.missing_directives_count}" }
-                                                span { class: "mx-1 text-gray-500", "·" }
-                                                span { class: "text-amber-300", "D:{service.disabled_directives_count}" }
+                                            td { class: "px-2 py-1.5 text-[11px] {theme::text::SECONDARY}",
+                                                span { class: "{theme::health::CRITICAL_TEXT}", "M:{service.missing_directives_count}" }
+                                                span { class: "mx-1 {theme::text::MUTED}", "·" }
+                                                span { class: "{theme::health::WARNING_TEXT}", "D:{service.disabled_directives_count}" }
                                             }
 
                                             for (_, group_directives) in directive_groups.iter() {
@@ -2713,7 +2713,7 @@ fn HardeningTab(
                                                 }
                                             }
 
-                                            td { class: "px-2 py-1.5 text-center text-[11px] text-gray-200", "{justifications_for(&service.service_name).len()}" }
+                                            td { class: "px-2 py-1.5 text-center text-[11px] {theme::text::PRIMARY}", "{justifications_for(&service.service_name).len()}" }
                                             td { class: "px-2 py-1.5 text-center",
                                                 button {
                                                     class: "px-2 py-1 rounded border {theme::surface::CARD_BORDER} text-[10px] {theme::text::SECONDARY} {theme::interactive::HOVER_BG}",
@@ -2863,8 +2863,8 @@ fn HardeningTab(
 #[component]
 fn CompactMetricCard(label: String, value: String, tone: &'static str) -> Element {
     let tone_class = match tone {
-        "danger" => "border-red-400/30 bg-red-500/10",
-        "warning" => "border-amber-400/30 bg-amber-500/10",
+        "danger" => "border {theme::health::CRITICAL_BORDER} {theme::health::CRITICAL_BG}",
+        "warning" => "border {theme::health::WARNING_BORDER} {theme::health::WARNING_BG}",
         _ => "border cf-card-border cf-subtle-bg",
     };
 
@@ -2932,7 +2932,12 @@ fn directive_badge_content(directive: Option<&DirectiveCell>) -> DirectiveBadgeC
     match directive {
         None => DirectiveBadgeContent {
             label: "--".to_string(),
-            class_name: "border-red-500/40 bg-red-500/15 text-red-200".to_string(),
+            class_name: format!(
+                "{} {} {}",
+                theme::health::CRITICAL_BORDER,
+                theme::health::CRITICAL_BG,
+                theme::health::CRITICAL_TEXT,
+            ),
             title: "Directive missing from scan output".to_string(),
         },
         Some(directive) => {
@@ -2942,17 +2947,38 @@ fn directive_badge_content(directive: Option<&DirectiveCell>) -> DirectiveBadgeC
             {
                 (
                     "ON",
-                    "border-emerald-500/40 bg-emerald-500/20 text-emerald-100",
+                    format!(
+                        "{} {} {}",
+                        theme::health::HEALTHY_BORDER,
+                        theme::health::HEALTHY_BG,
+                        theme::health::HEALTHY_TEXT,
+                    ),
                 )
             } else if directive.points > 0 || directive.enabled {
-                ("PAR", "border-amber-500/40 bg-amber-500/20 text-amber-100")
+                (
+                    "PAR",
+                    format!(
+                        "{} {} {}",
+                        theme::health::WARNING_BORDER,
+                        theme::health::WARNING_BG,
+                        theme::health::WARNING_TEXT,
+                    ),
+                )
             } else {
-                ("OFF", "border-red-500/40 bg-red-500/20 text-red-100")
+                (
+                    "OFF",
+                    format!(
+                        "{} {} {}",
+                        theme::health::CRITICAL_BORDER,
+                        theme::health::CRITICAL_BG,
+                        theme::health::CRITICAL_TEXT,
+                    ),
+                )
             };
 
             DirectiveBadgeContent {
                 label: label.to_string(),
-                class_name: class_name.to_string(),
+                class_name,
                 title: format!(
                     "{}: {}/{} · value={}",
                     directive.name,
@@ -3010,10 +3036,10 @@ fn short_risk_label(level: &str) -> &'static str {
 
 fn risk_level_compact_badge_class(level: &str) -> &'static str {
     match level {
-        "well_hardened" => "bg-emerald-500/20 text-emerald-200 border border-emerald-400/40",
-        "moderately_hardened" => "bg-yellow-500/20 text-yellow-200 border border-yellow-400/40",
-        "poorly_hardened" => "bg-orange-500/20 text-orange-200 border border-orange-400/40",
-        _ => "bg-red-500/20 text-red-200 border border-red-400/40",
+        "well_hardened" => "border border-emerald-400/30 bg-emerald-400/10 text-emerald-400",
+        "moderately_hardened" => "border border-amber-400/30 bg-amber-400/10 text-amber-400",
+        "poorly_hardened" => "border border-orange-400/30 bg-orange-400/10 text-orange-400",
+        _ => "border border-red-400/30 bg-red-400/10 text-red-400",
     }
 }
 
