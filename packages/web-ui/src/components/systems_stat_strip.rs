@@ -44,7 +44,10 @@ impl SystemsStats {
         // Calculate environment distribution
         let mut env_map = std::collections::HashMap::new();
         for system in systems {
-            let env_name = system.environment.clone().unwrap_or_else(|| "unknown".to_string());
+            let env_name = system
+                .environment
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
             *env_map.entry(env_name).or_insert(0) += 1;
         }
         let mut env_distribution: Vec<(String, usize)> = env_map.into_iter().collect();
@@ -73,7 +76,9 @@ fn StatCard(
     children: Element,
 ) -> Element {
     let style = format!("--stat-color: {}", accent_color);
-    let value_style = value_color.map(|c| format!("color: {}", c)).unwrap_or_default();
+    let value_style = value_color
+        .map(|c| format!("color: {}", c))
+        .unwrap_or_default();
 
     rsx! {
         div {
@@ -180,7 +185,7 @@ pub fn SystemsStatStrip(systems: Vec<SystemSummary>) -> Element {
             StatCard {
                 label: "CVEs (critical)".to_string(),
                 value: format!("{}", stats.critical_cves),
-                meta: format!("across {} host{}", 
+                meta: format!("across {} host{}",
                     systems.iter().filter(|s| s.cve_counts.critical > 0).count(),
                     if systems.iter().filter(|s| s.cve_counts.critical > 0).count() != 1 { "s" } else { "" }
                 ),

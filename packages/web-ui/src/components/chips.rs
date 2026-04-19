@@ -84,7 +84,10 @@ pub fn EnvBadge(
     /// Border color (CSS color value)
     border: String,
 ) -> Element {
-    let style = format!("--env-fg: {}; --env-bg: {}; --env-border: {}", fg, bg, border);
+    let style = format!(
+        "--env-fg: {}; --env-bg: {}; --env-border: {}",
+        fg, bg, border
+    );
 
     rsx! {
         span {
