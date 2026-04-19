@@ -294,8 +294,9 @@ pub fn SystemDetailView(id: String) -> Element {
 
     rsx! {
         div {
-            class: "space-y-6",
+            class: "sd-root",
             "data-testid": "system-detail",
+            "data-screen-label": "SystemDetail",
 
             // API fallback notice banner (shown when using mock data)
             if let Some(ref notice) = api_notice {
@@ -305,26 +306,35 @@ pub fn SystemDetailView(id: String) -> Element {
                 }
             }
 
-            // Back link
-            Link {
-                to: crate::routes::Route::SystemsView {},
-                class: "inline-flex items-center gap-1 text-sm {theme::text::SECONDARY} hover:text-white transition-colors",
-                svg {
-                    class: "w-4 h-4",
-                    fill: "none",
-                    stroke: "currentColor",
-                    view_box: "0 0 24 24",
-                    path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M15 19l-7-7 7-7" }
+            div {
+                class: "sd-crumb",
+                button {
+                    class: "sd-back focus-ring",
+                    onclick: move |_| {
+                        nav.push(Route::SystemsView {});
+                    },
+                    "aria-label": "Back to systems",
+                    "← Back"
                 }
-                "Back to Systems"
+                span {
+                    class: "sd-crumb-text",
+                    span { class: "sd-crumb-parent", "Systems" }
+                    span { class: "sd-crumb-sep", "/" }
+                    span { class: "sd-crumb-current mono", "{system.hostname}" }
+                }
             }
 
             // Page header
             header {
-                class: "flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between",
+                class: "sd-head",
                 div {
-                    class: "flex items-center gap-3 flex-wrap",
-                    h1 { class: "{theme::typography::PAGE_TITLE}", "{system.hostname}" }
+                    class: "sd-head-main",
+                    div {
+                        class: "sd-title-block",
+                        h1 { class: "sd-hostname", "{system.hostname}" }
+                        div { class: "sd-fqdn mono", "{system.hostname}.local" }
+                    }
+
                     span {
                         class: "inline-flex items-center px-3 py-1 rounded-md text-xs font-semibold uppercase tracking-wide {env_style.chip_bg} {env_style.chip_text}",
                         "{environment}"
@@ -356,9 +366,8 @@ pub fn SystemDetailView(id: String) -> Element {
                             }
                         }
                     }
-                }
-                div {
-                    class: "flex items-center gap-2",
+                    div {
+                        class: "sd-head-actions",
                     button {
                         class: "inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} {theme::text::PRIMARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors disabled:opacity-60 disabled:cursor-not-allowed",
                         disabled: !can_mutate,
@@ -502,6 +511,7 @@ pub fn SystemDetailView(id: String) -> Element {
                             "Sync Now"
                         }
                     }
+                    }
                 }
                 if let Some(scan_status) = cve_scan_status_text() {
                     p {
@@ -511,20 +521,43 @@ pub fn SystemDetailView(id: String) -> Element {
                 }
             }
 
+            div {
+                class: "sd-metric-strip",
+                div {
+                    class: "sd-metric",
+                    div { class: "sd-metric-label", "CVE Total" }
+                    div { class: "sd-metric-val", "{system.cve_counts.total()}" }
+                }
+                div {
+                    class: "sd-metric",
+                    div { class: "sd-metric-label", "Critical" }
+                    div { class: "sd-metric-val", "{system.cve_counts.critical}" }
+                }
+                div {
+                    class: "sd-metric",
+                    div { class: "sd-metric-label", "Deployment" }
+                    div { class: "sd-metric-val", "{system.deployment_status.label()}" }
+                }
+                div {
+                    class: "sd-metric",
+                    div { class: "sd-metric-label", "Last heartbeat" }
+                    div { class: "sd-metric-val", "{last_seen_text}" }
+                }
+            }
+
             // Tab navigation
             div {
                 "data-testid": "system-detail-tabs",
-                class: "border-b {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} backdrop-blur-sm",
-                style: "position: sticky; top: 0; z-index: 20;",
+                class: "sd-tabs",
                 nav {
                     class: "flex gap-1 -mb-px",
                     for tab in [Tab::Overview, Tab::History, Tab::Policy, Tab::Cves, Tab::Logs] {
                         {
                             let is_active = *active_tab.read() == tab;
                             let tab_class = if is_active {
-                                "px-4 py-2 text-sm font-semibold text-cyan-300 border-b-2 border-cyan-400 bg-cyan-500/10"
+                                "sd-tab active"
                             } else {
-                                "px-4 py-2 text-sm font-medium {theme::text::SECONDARY} hover:text-white hover:border-cyan-500/50 transition-colors border-b-2 border-transparent"
+                                "sd-tab"
                             };
                             rsx! {
                                 button {
@@ -534,7 +567,7 @@ pub fn SystemDetailView(id: String) -> Element {
                                     "{tab.label()}"
                                     if tab == Tab::Cves && system.cve_counts.total() > 0 {
                                         span {
-                                            class: "ml-2 px-1.5 py-0.5 text-xs rounded-full bg-red-500/20 text-red-400",
+                                            class: "sd-tab-badge",
                                             "{system.cve_counts.total()}"
                                         }
                                     }
@@ -547,7 +580,7 @@ pub fn SystemDetailView(id: String) -> Element {
 
             // Tab content
             div {
-                class: "min-h-[400px]",
+                class: "sd-body",
                 match *active_tab.read() {
                     Tab::Overview => rsx! {
                         OverviewTab { system: system.clone() }
