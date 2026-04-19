@@ -759,6 +759,164 @@ async function unrouteSystemsWarningData(page) {
   await page.unroute("**/api/v1/systems**");
 }
 
+// Mock function for system with multi-day agent events to test day delineation
+function mockSystemLogsMultiDay() {
+  const now = new Date("2026-04-19T14:30:00Z");
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  const twoDaysAgo = new Date(now);
+  twoDaysAgo.setDate(twoDaysAgo.getDate() - 2);
+  
+  const agentEvents = [
+    // Today's events
+    {
+      timestamp: new Date(now.getTime() - 2 * 3600000).toISOString(), // 2 hours ago
+      level: "info",
+      event_type: "heartbeat",
+      message: "agent heartbeat version=0.3.2",
+      deployment_related: false,
+    },
+    {
+      timestamp: new Date(now.getTime() - 4 * 3600000).toISOString(), // 4 hours ago
+      level: "info",
+      event_type: "state_change",
+      message: "agent reported cf_deployment (/nix/store/abc123-system)",
+      deployment_related: true,
+    },
+    {
+      timestamp: new Date(now.getTime() - 6 * 3600000).toISOString(), // 6 hours ago
+      level: "debug",
+      event_type: "heartbeat",
+      message: "agent heartbeat version=0.3.2",
+      deployment_related: false,
+    },
+    // Yesterday's events
+    {
+      timestamp: new Date(yesterday.getTime() - 2 * 3600000).toISOString(),
+      level: "info",
+      event_type: "state_change",
+      message: "agent reported startup (/nix/store/def456-system)",
+      deployment_related: false,
+    },
+    {
+      timestamp: new Date(yesterday.getTime() - 8 * 3600000).toISOString(),
+      level: "debug",
+      event_type: "heartbeat",
+      message: "agent heartbeat version=0.3.1",
+      deployment_related: false,
+    },
+    // Two days ago events
+    {
+      timestamp: new Date(twoDaysAgo.getTime() - 4 * 3600000).toISOString(),
+      level: "info",
+      event_type: "state_change",
+      message: "agent reported config_change (/nix/store/ghi789-system)",
+      deployment_related: false,
+    },
+  ];
+
+  const detail = {
+    id: "00000000-0000-0000-0000-0000000000d1",
+    hostname: "logs-test-system",
+    system_configuration_name: "logs-test-system",
+    environment: "production",
+    is_active: true,
+    deployment_policy: "manual",
+    health_status: "healthy",
+    deployment_status: "up_to_date",
+    pipeline_stage: "deployed",
+    nixos_version: "24.11",
+    kernel: null,
+    agent_version: "0.3.2",
+    current_store_path: "/nix/store/abc123-system",
+    last_seen: now.toISOString(),
+    cve_counts: { critical: 0, high: 0, medium: 0, low: 0 },
+    flake: {
+      id: 42,
+      name: "test-flake",
+      repo_url: "https://gitlab.com/crystal-forge/test-flake.git",
+      latest_commit: null,
+    },
+    network: {
+      primary_ip: "10.20.30.40",
+      primary_mac: null,
+      gateway_ip: null,
+    },
+    hardware: {
+      cpu_brand: null,
+      cpu_cores: null,
+      memory_gb: null,
+      uptime_secs: null,
+      board_serial: null,
+      bios_version: null,
+      hardware_changed_24h: false,
+      hardware_ever_changed: false,
+    },
+    security: {
+      tpm_present: false,
+      secure_boot_enabled: false,
+      fips_mode: false,
+      selinux_status: null,
+    },
+    created_at: twoDaysAgo.toISOString(),
+    updated_at: now.toISOString(),
+  };
+
+  return { detail, agentEvents };
+}
+
+async function routeSystemLogsMultiDay(page) {
+  const { detail, agentEvents } = mockSystemLogsMultiDay();
+  
+  await page.route("**/api/v1/systems**", async (route) => {
+    const url = route.request().url();
+    const pathname = new URL(url).pathname;
+    const searchParams = new URL(url).searchParams;
+    
+    if (/^\/api\/v1\/systems\/[0-9a-f-]+\/agent-events$/.test(pathname)) {
+      // Check for time filter query parameters
+      const since = searchParams.get("since");
+      const before = searchParams.get("before");
+      
+      let filteredEvents = agentEvents;
+      if (since) {
+        const sinceDate = new Date(since);
+        filteredEvents = filteredEvents.filter(e => new Date(e.timestamp) >= sinceDate);
+      }
+      if (before) {
+        const beforeDate = new Date(before);
+        filteredEvents = filteredEvents.filter(e => new Date(e.timestamp) < beforeDate);
+      }
+      
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(filteredEvents),
+      });
+      return;
+    }
+    
+    if (/^\/api\/v1\/systems\/[0-9a-f-]+$/.test(pathname)) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(detail),
+      });
+      return;
+    }
+    
+    await route.fulfill({
+      status: 404,
+      contentType: "application/json",
+      body: JSON.stringify({ error: "not_found" }),
+    });
+  });
+}
+
+async function unrouteSystemLogsMultiDay(page) {
+  await page.unroute("**/api/v1/systems**");
+}
+
 async function routeSystemsApiFailure(page) {
   await page.route("**/api/v1/systems**", async (route) => {
     await route.fulfill({
@@ -2386,6 +2544,66 @@ const steps = [
     },
   },
   {
+    name: "12g2-system-logs-day-delineation-time-filter",
+    description: "System logs tab with day headers, dividers, relative timestamps, and time filter UI",
+    action: async (page) => {
+      await routeSystemLogsMultiDay(page);
+
+      await page.goto(`${baseUrl}/systems/00000000-0000-0000-0000-0000000000d1`, {
+        timeout: LOAD_TIMEOUT,
+      });
+      await page.waitForTimeout(1800);
+
+      // Click Logs tab
+      await page.getByRole("button", { name: "Logs" }).first().click();
+      await page.waitForTimeout(1200);
+
+      // Assert time filter UI is visible
+      await assertVisible(
+        page.locator("input[type='datetime-local']").first(),
+        "Expected From datetime input to be visible in logs time filter",
+      );
+      await assertVisible(
+        page.locator("input[type='datetime-local']").last(),
+        "Expected To datetime input to be visible in logs time filter",
+      );
+      await assertVisible(
+        page.locator("button:has-text('Apply Filter')"),
+        "Expected Apply Filter button to be visible",
+      );
+
+      // Assert day headers are visible (should have multiple days of data)
+      const dayHeaders = await page.locator(".sticky.top-0").count();
+      if (dayHeaders < 2) {
+        throw new Error(`Expected at least 2 day headers for multi-day logs, got ${dayHeaders}`);
+      }
+
+      // Assert relative timestamps are present (look for "ago" pattern)
+      const relativeTime = page.locator("text=/\\d+ (hour|min|day)s? ago/").first();
+      await assertVisible(relativeTime, "Expected relative timestamps (e.g., '2 hours ago') to be visible");
+
+      // Test empty state by setting a narrow time range with no logs
+      const futureDate = new Date("2026-04-20T00:00:00Z");
+      const futureEndDate = new Date("2026-04-20T01:00:00Z");
+      await page.locator("input[type='datetime-local']").first().fill(
+        futureDate.toISOString().slice(0, 16)
+      );
+      await page.locator("input[type='datetime-local']").last().fill(
+        futureEndDate.toISOString().slice(0, 16)
+      );
+      await page.locator("button:has-text('Apply Filter')").click();
+      await page.waitForTimeout(1200);
+
+      // Assert empty state message
+      await assertVisible(
+        page.locator("text=/No agent events found in the selected time range/"),
+        "Expected empty state message when no logs exist in selected range",
+      );
+
+      await unrouteSystemLogsMultiDay(page);
+    },
+  },
+  {
     name: "12h-system-detail-cves-grouped-justification",
     description: "System detail CVEs tab grouped list, filters, details link, and justification save",
     action: async (page) => {
@@ -3783,6 +4001,7 @@ const CI_FAST_STEP_NAMES = new Set([
   "12e-systems-edit-modal",
   "12f-systems-deploy-modal",
   "12g-system-detail-history-logs-edit",
+  "12g2-system-logs-day-delineation-time-filter",
   "12h-system-detail-cves-grouped-justification",
   "12d-systems-api-error-no-mock-fallback",
   "12g-systems-warning-clears-after-link",
