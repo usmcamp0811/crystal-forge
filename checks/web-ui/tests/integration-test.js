@@ -4156,6 +4156,50 @@ const steps = [
       await page.route(
         "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/hardening*",
         async (route) => {
+          const vulnerableDirectives = [
+            { name: "PrivateTmp", enabled: false, value: false, points: 0, max_points: 5 },
+            { name: "PrivateDevices", enabled: false, value: false, points: 0, max_points: 4 },
+            { name: "PrivateNetwork", enabled: false, value: false, points: 0, max_points: 3 },
+            { name: "PrivateUsers", enabled: false, value: false, points: 0, max_points: 3 },
+            { name: "ProtectHome", enabled: false, value: "off", points: 0, max_points: 5 },
+            { name: "ProtectSystem", enabled: false, value: "off", points: 0, max_points: 5 },
+            { name: "ProtectKernelTunables", enabled: false, value: false, points: 0, max_points: 3 },
+            { name: "ProtectKernelModules", enabled: false, value: false, points: 0, max_points: 2 },
+            { name: "NoNewPrivileges", enabled: false, value: false, points: 0, max_points: 8 },
+            { name: "CapabilityBoundingSet", enabled: true, value: "", points: 5, max_points: 10 },
+            { name: "AmbientCapabilities", enabled: false, value: ["CAP_NET_BIND_SERVICE"], points: 0, max_points: 7 },
+            { name: "SystemCallFilter", enabled: false, value: [], points: 0, max_points: 12 },
+            { name: "SystemCallArchitectures", enabled: true, value: ["native"], points: 8, max_points: 8 },
+            { name: "MemoryDenyWriteExecute", enabled: false, value: false, points: 0, max_points: 6 },
+            { name: "LockPersonality", enabled: false, value: false, points: 0, max_points: 3 },
+            { name: "RestrictRealtime", enabled: false, value: false, points: 0, max_points: 3 },
+            { name: "RestrictSUIDSGID", enabled: false, value: false, points: 0, max_points: 4 },
+            { name: "RestrictNamespaces", enabled: true, value: true, points: 3, max_points: 5 },
+            { name: "RestrictAddressFamilies", enabled: false, value: [], points: 0, max_points: 4 },
+          ];
+
+          const moderateDirectives = [
+            { name: "PrivateTmp", enabled: true, value: true, points: 5, max_points: 5 },
+            { name: "PrivateDevices", enabled: true, value: true, points: 4, max_points: 4 },
+            { name: "PrivateNetwork", enabled: false, value: false, points: 0, max_points: 3 },
+            { name: "PrivateUsers", enabled: true, value: true, points: 3, max_points: 3 },
+            { name: "ProtectHome", enabled: true, value: "read-only", points: 3, max_points: 5 },
+            { name: "ProtectSystem", enabled: true, value: "full", points: 3, max_points: 5 },
+            { name: "ProtectKernelTunables", enabled: true, value: true, points: 3, max_points: 3 },
+            { name: "ProtectKernelModules", enabled: false, value: false, points: 0, max_points: 2 },
+            { name: "NoNewPrivileges", enabled: true, value: true, points: 8, max_points: 8 },
+            { name: "CapabilityBoundingSet", enabled: true, value: "", points: 10, max_points: 10 },
+            { name: "AmbientCapabilities", enabled: true, value: "", points: 7, max_points: 7 },
+            { name: "SystemCallFilter", enabled: true, value: ["@system-service"], points: 12, max_points: 12 },
+            { name: "SystemCallArchitectures", enabled: true, value: ["native"], points: 8, max_points: 8 },
+            { name: "MemoryDenyWriteExecute", enabled: true, value: true, points: 6, max_points: 6 },
+            { name: "LockPersonality", enabled: true, value: true, points: 3, max_points: 3 },
+            { name: "RestrictRealtime", enabled: true, value: true, points: 3, max_points: 3 },
+            { name: "RestrictSUIDSGID", enabled: true, value: true, points: 4, max_points: 4 },
+            { name: "RestrictNamespaces", enabled: true, value: true, points: 5, max_points: 5 },
+            { name: "RestrictAddressFamilies", enabled: true, value: ["AF_UNIX", "AF_INET"], points: 4, max_points: 4 },
+          ];
+
           await route.fulfill({
             status: 200,
             contentType: "application/json",
@@ -4170,17 +4214,20 @@ const steps = [
                 enabled_directives_count: 4,
                 disabled_directives_count: 8,
                 missing_directives_count: 6,
-                directives_detail: [
-                  {
-                    name: "ProtectSystem",
-                    enabled: false,
-                    value: "off",
-                    points: 0,
-                    max_points: 12,
-                    category: "namespace",
-                    description: "Protect file system paths",
-                  },
-                ],
+                directives_detail: vulnerableDirectives,
+                created_at: new Date().toISOString(),
+              },
+              {
+                id: "00000000-0000-0000-0000-00000000c002",
+                scan_id: "00000000-0000-0000-0000-00000000b001",
+                service_name: "sshd.service",
+                service_type: "notify",
+                hardening_score: 78,
+                risk_level: "moderately_hardened",
+                enabled_directives_count: 16,
+                disabled_directives_count: 3,
+                missing_directives_count: 1,
+                directives_detail: moderateDirectives,
                 created_at: new Date().toISOString(),
               },
             ]),
@@ -4205,20 +4252,19 @@ const steps = [
         page.getByText("Run Hardening Scan").first(),
         "Expected hardening scan action to be visible on system detail",
       );
-
-      const serviceRow = page.getByText("nginx.service").first();
-      const hasServiceRow = await serviceRow.isVisible({ timeout: 2000 }).catch(() => false);
-      if (hasServiceRow) {
-        await assertVisible(
-          page.getByText("vulnerable").first(),
-          "Expected hardening tab to render risk label",
-        );
-      } else {
-        await assertVisible(
-          page.getByText(/No hardening scan results available yet/i).first(),
-          "Expected hardening tab to render either mocked service results or empty-state messaging",
-        );
-      }
+      await assertVisible(
+        page.getByText("Systemd Security Risk Dashboard").first(),
+        "Expected hardening tab dashboard title to be visible",
+      );
+      await assertVisible(
+        page.getByText("Mount/Filesystem").first(),
+        "Expected grouped hardening table headers to render",
+      );
+      await assertVisible(page.getByText("nginx.service").first(), "Expected mocked service row to render");
+      await assertVisible(
+        page.getByText("OFF").first(),
+        "Expected compact hardening status badge cells to render",
+      );
 
       await page.unroute(
         "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/hardening-scan-eligibility*",

@@ -16,10 +16,11 @@ use uuid::Uuid;
 use wasm_bindgen::{JsCast, JsValue};
 
 use crate::api::client::{
-    ApiClientError, fetch_cve_scan_status, fetch_hardening_scan_status, fetch_system_cve_scan_eligibility,
-    fetch_system_cves, fetch_system_hardening, fetch_system_hardening_justifications,
-    fetch_system_hardening_scan_eligibility, request_system_rollback, request_system_sync,
-    save_system_hardening_justification, trigger_system_cve_scan, trigger_system_hardening_scan,
+    ApiClientError, fetch_cve_scan_status, fetch_hardening_scan_status,
+    fetch_system_cve_scan_eligibility, fetch_system_cves, fetch_system_hardening,
+    fetch_system_hardening_justifications, fetch_system_hardening_scan_eligibility,
+    request_system_rollback, request_system_sync, save_system_hardening_justification,
+    trigger_system_cve_scan, trigger_system_hardening_scan,
 };
 use crate::api::models::{
     BuildStatus, CommitInfo, CveScanEligibilityResponse, CveSeverity, CveSummary,
@@ -263,7 +264,9 @@ pub fn SystemDetailView(id: String) -> Element {
                 return None;
             };
 
-            fetch_system_hardening_scan_eligibility(&system_id).await.ok()
+            fetch_system_hardening_scan_eligibility(&system_id)
+                .await
+                .ok()
         }
     });
 
@@ -2417,6 +2420,34 @@ fn HardeningTab(
     let mut category = use_signal(String::new);
     let mut directive_name = use_signal(String::new);
     let mut reason = use_signal(String::new);
+    let mut search_query = use_signal(String::new);
+    let mut severity_filter = use_signal(|| "all".to_string());
+    let mut sort_mode = use_signal(|| "risk_desc".to_string());
+    let mut risky_only = use_signal(|| false);
+
+    let total_services = results.len();
+    let avg_score = if total_services > 0 {
+        results
+            .iter()
+            .map(|service| service.hardening_score as f64)
+            .sum::<f64>()
+            / total_services as f64
+    } else {
+        0.0
+    };
+    let high_risk_count = results
+        .iter()
+        .filter(|service| {
+            matches!(
+                service.risk_level.as_str(),
+                "vulnerable" | "poorly_hardened"
+            )
+        })
+        .count();
+    let cumulative_exposure = results
+        .iter()
+        .map(|service| service.missing_directives_count + service.disabled_directives_count)
+        .sum::<i32>();
 
     let justifications_for = |service_name: &str| {
         justifications
@@ -2425,42 +2456,283 @@ fn HardeningTab(
             .collect::<Vec<_>>()
     };
 
+    let query = search_query.read().trim().to_lowercase();
+    let active_severity = severity_filter.read().clone();
+    let active_sort = sort_mode.read().clone();
+    let only_risky = *risky_only.read();
+    let risky_toggle_class = if only_risky {
+        "border-red-400/50 bg-red-500/10 text-red-200"
+    } else {
+        "border-white/15 text-gray-200 hover:bg-white/5"
+    };
+
+    let mut filtered_results = results
+        .iter()
+        .filter(|service| {
+            if !query.is_empty() {
+                let service_match = service.service_name.to_lowercase().contains(&query);
+                let type_match = service
+                    .service_type
+                    .as_deref()
+                    .unwrap_or("")
+                    .to_lowercase()
+                    .contains(&query);
+                if !service_match && !type_match {
+                    return false;
+                }
+            }
+
+            if only_risky
+                && !matches!(
+                    service.risk_level.as_str(),
+                    "vulnerable" | "poorly_hardened"
+                )
+            {
+                return false;
+            }
+
+            severity_matches(service, &active_severity)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    match active_sort.as_str() {
+        "service_asc" => {
+            filtered_results.sort_by(|a, b| a.service_name.cmp(&b.service_name));
+        }
+        "score_desc" => {
+            filtered_results.sort_by(|a, b| b.hardening_score.cmp(&a.hardening_score));
+        }
+        "score_asc" => {
+            filtered_results.sort_by(|a, b| a.hardening_score.cmp(&b.hardening_score));
+        }
+        _ => {
+            // Highest risk first (lowest score first), then highest missing controls.
+            filtered_results.sort_by(|a, b| {
+                a.hardening_score
+                    .cmp(&b.hardening_score)
+                    .then_with(|| b.missing_directives_count.cmp(&a.missing_directives_count))
+            });
+        }
+    }
+
+    let filtered_count = filtered_results.len();
+
+    let directive_groups: Vec<(&str, Vec<(&str, &str)>)> = vec![
+        (
+            "Isolation",
+            vec![
+                ("PrivateTmp", "Tmp"),
+                ("PrivateDevices", "Dev"),
+                ("PrivateNetwork", "Net"),
+                ("PrivateUsers", "Usr"),
+            ],
+        ),
+        (
+            "Mount/Filesystem",
+            vec![
+                ("ProtectHome", "PHm"),
+                ("ProtectSystem", "PSys"),
+                ("ProtectKernelTunables", "PKT"),
+                ("ProtectKernelModules", "PKM"),
+            ],
+        ),
+        (
+            "Capabilities",
+            vec![
+                ("NoNewPrivileges", "NNP"),
+                ("CapabilityBoundingSet", "CapB"),
+                ("AmbientCapabilities", "AmbC"),
+            ],
+        ),
+        (
+            "Seccomp",
+            vec![
+                ("SystemCallFilter", "SCF"),
+                ("SystemCallArchitectures", "SCA"),
+            ],
+        ),
+        (
+            "Runtime Guards",
+            vec![
+                ("MemoryDenyWriteExecute", "WX"),
+                ("LockPersonality", "Pers"),
+                ("RestrictRealtime", "RT"),
+                ("RestrictSUIDSGID", "SUID"),
+                ("RestrictNamespaces", "NS"),
+                ("RestrictAddressFamilies", "AF"),
+            ],
+        ),
+    ];
+
     rsx! {
         div { class: "space-y-4",
+            div { class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-4",
+                h3 { class: "text-lg font-semibold text-white", "Systemd Security Risk Dashboard" }
+                p {
+                    class: "mt-1 text-sm {theme::text::SECONDARY}",
+                    "Audit of service sandboxing, namespace isolation, capabilities, syscall filtering, and runtime exposure for this system."
+                }
+            }
+
+            div { class: "grid grid-cols-2 lg:grid-cols-5 gap-2",
+                CompactMetricCard { label: "Scanned services", value: format!("{}", total_services), tone: "neutral" }
+                CompactMetricCard { label: "Average score", value: format!("{avg_score:.1}"), tone: "neutral" }
+                CompactMetricCard { label: "High risk services", value: format!("{}", high_risk_count), tone: "danger" }
+                CompactMetricCard { label: "Cumulative exposure", value: format!("{}", cumulative_exposure), tone: "warning" }
+                CompactMetricCard { label: "Showing", value: format!("{}", filtered_count), tone: "neutral" }
+            }
+
+            div { class: "flex flex-col xl:flex-row gap-2 xl:items-center xl:justify-between rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-3",
+                div { class: "flex flex-1 flex-col sm:flex-row gap-2",
+                    input {
+                        class: "w-full sm:max-w-xs rounded border border-white/15 bg-black/20 px-2 py-1.5 text-xs text-white",
+                        placeholder: "Search service or identity",
+                        value: "{search_query}",
+                        oninput: move |evt| search_query.set(evt.value()),
+                    }
+                    select {
+                        class: "rounded border border-white/15 bg-black/20 px-2 py-1.5 text-xs text-white",
+                        value: "{severity_filter}",
+                        onchange: move |evt| severity_filter.set(evt.value()),
+                        option { value: "all", "All severities" }
+                        option { value: "high_risk", "High risk only" }
+                        option { value: "vulnerable", "Vulnerable" }
+                        option { value: "poorly_hardened", "Poorly hardened" }
+                        option { value: "moderately_hardened", "Moderately hardened" }
+                        option { value: "well_hardened", "Well hardened" }
+                    }
+                    select {
+                        class: "rounded border border-white/15 bg-black/20 px-2 py-1.5 text-xs text-white",
+                        value: "{sort_mode}",
+                        onchange: move |evt| sort_mode.set(evt.value()),
+                        option { value: "risk_desc", "Sort: highest risk" }
+                        option { value: "score_asc", "Sort: score asc" }
+                        option { value: "score_desc", "Sort: score desc" }
+                        option { value: "service_asc", "Sort: service" }
+                    }
+                }
+                button {
+                    class: "rounded border px-2 py-1.5 text-xs font-medium {risky_toggle_class}",
+                    onclick: move |_| {
+                        let current = *risky_only.read();
+                        risky_only.set(!current);
+                    },
+                    if only_risky {
+                        "Only risky: ON"
+                    } else {
+                        "Only risky: OFF"
+                    }
+                }
+            }
+
             if results.is_empty() {
                 p { class: "{theme::text::SECONDARY}", "No hardening scan results available yet. Trigger a hardening scan to populate this tab." }
             } else {
-                div { class: "overflow-x-auto",
-                    table { class: "min-w-full text-sm",
+                div { class: "overflow-x-auto rounded-lg border border-white/10",
+                    table { class: "min-w-[1400px] text-xs",
                         thead {
-                            tr { class: "border-b border-white/10 text-left {theme::text::SECONDARY}",
-                                th { class: "py-2 pr-3", "Service" }
-                                th { class: "py-2 pr-3", "Score" }
-                                th { class: "py-2 pr-3", "Risk" }
-                                th { class: "py-2 pr-3", "Missing" }
-                                th { class: "py-2 pr-3", "Justifications" }
-                                th { class: "py-2 pr-3", "Actions" }
+                            tr { class: "bg-gray-900/95 border-b border-white/10 text-left uppercase tracking-wide text-[10px] text-gray-300",
+                                th { class: "sticky top-0 z-10 px-2 py-2", colspan: "5", "Target" }
+                                for (group_name, directives) in directive_groups.iter() {
+                                    th { class: "sticky top-0 z-10 px-2 py-2", colspan: "{directives.len()}", "{group_name}" }
+                                }
+                                th { class: "sticky top-0 z-10 px-2 py-2", colspan: "2", "Audit" }
+                            }
+                            tr { class: "bg-gray-950/95 border-b border-white/10 text-left {theme::text::SECONDARY}",
+                                th { class: "sticky top-7 z-10 px-2 py-2", "Risk" }
+                                th { class: "sticky top-7 z-10 px-2 py-2", "Score" }
+                                th { class: "sticky top-7 z-10 px-2 py-2", "Service unit" }
+                                th { class: "sticky top-7 z-10 px-2 py-2", "Identity" }
+                                th { class: "sticky top-7 z-10 px-2 py-2", "Findings" }
+                                for (_, directives) in directive_groups.iter() {
+                                    for (directive_name, short_label) in directives.iter().copied() {
+                                        th {
+                                            key: "hdr-{directive_name}",
+                                            class: "sticky top-7 z-10 px-1.5 py-2 text-center font-mono text-[10px]",
+                                            title: "{directive_name}",
+                                            "{short_label}"
+                                        }
+                                    }
+                                }
+                                th { class: "sticky top-7 z-10 px-2 py-2 text-center", "J" }
+                                th { class: "sticky top-7 z-10 px-2 py-2 text-center", "Detail" }
                             }
                         }
                         tbody {
-                            for service in &results {
-                                tr { class: "border-b border-white/5",
-                                    td { class: "py-2 pr-3 font-mono", "{service.service_name}" }
-                                    td { class: "py-2 pr-3", "{service.hardening_score}" }
-                                    td { class: "py-2 pr-3",
-                                        span { class: "px-2 py-0.5 rounded text-xs {risk_level_badge_class(&service.risk_level)}", "{service.risk_level}" }
-                                    }
-                                    td { class: "py-2 pr-3", "{service.missing_directives_count}" }
-                                    td { class: "py-2 pr-3", "{justifications_for(&service.service_name).len()}" }
-                                    td { class: "py-2 pr-3",
-                                        button {
-                                            class: "px-2 py-1 rounded border border-white/15 text-xs hover:bg-white/5",
-                                            onclick: {
-                                                let service = service.clone();
-                                                move |_| selected_service.set(Some(service.clone()))
-                                            },
-                                            "Details"
+                            for service in filtered_results.iter() {
+                                {
+                                    let directives = directive_cells(service);
+                                    let risk_chip = risk_level_compact_badge_class(&service.risk_level);
+                                    let identity_label = service
+                                        .service_type
+                                        .clone()
+                                        .unwrap_or_else(|| "system".to_string());
+                                    let row_highlight = if matches!(service.risk_level.as_str(), "vulnerable" | "poorly_hardened") {
+                                        "bg-red-500/[0.05]"
+                                    } else {
+                                        ""
+                                    };
+
+                                    rsx! {
+                                        tr {
+                                            key: "svc-{service.id}",
+                                            class: "border-b border-white/5 hover:bg-white/[0.03] {row_highlight}",
+                                            td { class: "px-2 py-1.5",
+                                                span {
+                                                    class: "inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide {risk_chip}",
+                                                    "{short_risk_label(&service.risk_level)}"
+                                                }
+                                            }
+                                            td { class: "px-2 py-1.5 font-semibold text-white", "{service.hardening_score}" }
+                                            td { class: "px-2 py-1.5 font-mono text-[11px] text-gray-100", "{service.service_name}" }
+                                            td { class: "px-2 py-1.5 text-[11px] text-gray-300",
+                                                "{identity_label}"
+                                            }
+                                            td { class: "px-2 py-1.5 text-[11px] text-gray-300",
+                                                span { class: "text-red-300", "M:{service.missing_directives_count}" }
+                                                span { class: "mx-1 text-gray-500", "·" }
+                                                span { class: "text-amber-300", "D:{service.disabled_directives_count}" }
+                                            }
+
+                                            for (_, group_directives) in directive_groups.iter() {
+                                                for (directive_name, _) in group_directives.iter().copied() {
+                                                    {
+                                                        let status = directive_badge_content(directive_for(&directives, directive_name));
+                                                        rsx! {
+                                                            td { class: "px-1 py-1 text-center",
+                                                                span {
+                                                                    class: "inline-flex min-w-[34px] justify-center rounded border px-1 py-0.5 text-[10px] font-semibold {status.class_name}",
+                                                                    title: "{status.title}",
+                                                                    "{status.label}"
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            td { class: "px-2 py-1.5 text-center text-[11px] text-gray-200", "{justifications_for(&service.service_name).len()}" }
+                                            td { class: "px-2 py-1.5 text-center",
+                                                button {
+                                                    class: "px-2 py-1 rounded border border-white/15 text-[10px] hover:bg-white/5",
+                                                    onclick: {
+                                                        let service = service.clone();
+                                                        move |_| selected_service.set(Some(service.clone()))
+                                                    },
+                                                    "Open"
+                                                }
+                                            }
                                         }
+                                    }
+                                }
+                            }
+                            if filtered_results.is_empty() {
+                                tr {
+                                    td {
+                                        class: "px-3 py-6 text-sm text-center {theme::text::SECONDARY}",
+                                        colspan: "{5 + directive_groups.iter().map(|(_, d)| d.len()).sum::<usize>() + 2}",
+                                        "No services match the current filters."
                                     }
                                 }
                             }
@@ -2583,6 +2855,163 @@ fn HardeningTab(
                 }
             }
         }
+    }
+}
+
+#[component]
+fn CompactMetricCard(label: String, value: String, tone: &'static str) -> Element {
+    let tone_class = match tone {
+        "danger" => "border-red-400/30 bg-red-500/10",
+        "warning" => "border-amber-400/30 bg-amber-500/10",
+        _ => "border-white/10 bg-white/[0.03]",
+    };
+
+    rsx! {
+        div { class: "rounded-md border {tone_class} px-2.5 py-2",
+            p { class: "text-[10px] uppercase tracking-wide {theme::text::MUTED}", "{label}" }
+            p { class: "mt-0.5 text-base font-semibold text-white", "{value}" }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct DirectiveCell {
+    name: String,
+    enabled: bool,
+    points: i32,
+    max_points: i32,
+    value: JsonValue,
+}
+
+#[derive(Clone, Debug)]
+struct DirectiveBadgeContent {
+    label: String,
+    class_name: String,
+    title: String,
+}
+
+fn directive_cells(service: &HardeningServiceResultResponse) -> Vec<DirectiveCell> {
+    service
+        .directives_detail
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| DirectiveCell {
+                    name: item
+                        .get("name")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    enabled: item
+                        .get("enabled")
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(false),
+                    points: item
+                        .get("points")
+                        .and_then(|value| value.as_i64())
+                        .unwrap_or(0) as i32,
+                    max_points: item
+                        .get("max_points")
+                        .and_then(|value| value.as_i64())
+                        .unwrap_or(0) as i32,
+                    value: item.get("value").cloned().unwrap_or(JsonValue::Null),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn directive_for<'a>(directives: &'a [DirectiveCell], name: &str) -> Option<&'a DirectiveCell> {
+    directives.iter().find(|directive| directive.name == name)
+}
+
+fn directive_badge_content(directive: Option<&DirectiveCell>) -> DirectiveBadgeContent {
+    match directive {
+        None => DirectiveBadgeContent {
+            label: "--".to_string(),
+            class_name: "border-red-500/40 bg-red-500/15 text-red-200".to_string(),
+            title: "Directive missing from scan output".to_string(),
+        },
+        Some(directive) => {
+            let (label, class_name) = if directive.max_points > 0
+                && directive.enabled
+                && directive.points >= directive.max_points
+            {
+                (
+                    "ON",
+                    "border-emerald-500/40 bg-emerald-500/20 text-emerald-100",
+                )
+            } else if directive.points > 0 || directive.enabled {
+                ("PAR", "border-amber-500/40 bg-amber-500/20 text-amber-100")
+            } else {
+                ("OFF", "border-red-500/40 bg-red-500/20 text-red-100")
+            };
+
+            DirectiveBadgeContent {
+                label: label.to_string(),
+                class_name: class_name.to_string(),
+                title: format!(
+                    "{}: {}/{} · value={}",
+                    directive.name,
+                    directive.points,
+                    directive.max_points,
+                    compact_directive_value(&directive.value)
+                ),
+            }
+        }
+    }
+}
+
+fn compact_directive_value(value: &JsonValue) -> String {
+    match value {
+        JsonValue::Null => "unset".to_string(),
+        JsonValue::Bool(flag) => {
+            if *flag {
+                "true".to_string()
+            } else {
+                "false".to_string()
+            }
+        }
+        JsonValue::Number(number) => number.to_string(),
+        JsonValue::String(string) => string.clone(),
+        JsonValue::Array(items) => {
+            if items.is_empty() {
+                "[]".to_string()
+            } else {
+                format!("{} items", items.len())
+            }
+        }
+        JsonValue::Object(_) => "object".to_string(),
+    }
+}
+
+fn severity_matches(service: &HardeningServiceResultResponse, filter_value: &str) -> bool {
+    match filter_value {
+        "all" => true,
+        "high_risk" => matches!(
+            service.risk_level.as_str(),
+            "vulnerable" | "poorly_hardened"
+        ),
+        level => service.risk_level == level,
+    }
+}
+
+fn short_risk_label(level: &str) -> &'static str {
+    match level {
+        "well_hardened" => "GOOD",
+        "moderately_hardened" => "MOD",
+        "poorly_hardened" => "POOR",
+        _ => "VULN",
+    }
+}
+
+fn risk_level_compact_badge_class(level: &str) -> &'static str {
+    match level {
+        "well_hardened" => "bg-emerald-500/20 text-emerald-200 border border-emerald-400/40",
+        "moderately_hardened" => "bg-yellow-500/20 text-yellow-200 border border-yellow-400/40",
+        "poorly_hardened" => "bg-orange-500/20 text-orange-200 border border-orange-400/40",
+        _ => "bg-red-500/20 text-red-200 border border-red-400/40",
     }
 }
 
