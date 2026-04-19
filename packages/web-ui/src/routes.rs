@@ -15,6 +15,7 @@ use crate::views::dev_login::DevLoginView;
 use crate::views::environments::EnvironmentsView;
 use crate::views::evaluations::{EvaluationsCommitView, EvaluationsView};
 use crate::views::flakes::FlakesView;
+use crate::views::hardening::HardeningView;
 use crate::views::login::LoginView;
 use crate::views::not_found::NotFoundView;
 use crate::views::policies::PoliciesView;
@@ -64,6 +65,9 @@ pub enum Route {
     #[route("/cves")]
     CvesView {},
 
+    #[route("/hardening")]
+    HardeningView {},
+
     #[route("/deployment-policies")]
     PoliciesView {},
 
@@ -108,6 +112,7 @@ impl Route {
             Route::BuildersView { .. } => "Builders".to_string(),
             Route::CachesView { .. } => "Cache Management".to_string(),
             Route::CvesView { .. } => "CVEs".to_string(),
+            Route::HardeningView { .. } => "Hardening".to_string(),
             Route::PoliciesView { .. } => "Deployment Policies".to_string(),
             Route::AdminView { .. } => "Server Management".to_string(),
             Route::StyleGuideView { .. } => "Component Showcase".to_string(),

@@ -16,14 +16,18 @@ use uuid::Uuid;
 use wasm_bindgen::{JsCast, JsValue};
 
 use crate::api::client::{
-    ApiClientError, fetch_cve_scan_status, fetch_system_cve_scan_eligibility, fetch_system_cves,
-    request_system_rollback, request_system_sync, trigger_system_cve_scan,
+    ApiClientError, fetch_cve_scan_status, fetch_hardening_scan_status, fetch_system_cve_scan_eligibility,
+    fetch_system_cves, fetch_system_hardening, fetch_system_hardening_justifications,
+    fetch_system_hardening_scan_eligibility, request_system_rollback, request_system_sync,
+    save_system_hardening_justification, trigger_system_cve_scan, trigger_system_hardening_scan,
 };
 use crate::api::models::{
     BuildStatus, CommitInfo, CveScanEligibilityResponse, CveSeverity, CveSummary,
-    DeploymentLogEntry, DeploymentStatus, HealthStatus, LogLevel, PipelineStage, SystemAgentEvent,
-    SystemCommitHistory, SystemDetail, SystemHardwareInfo, SystemHistoryEntry, SystemNetworkInfo,
-    SystemRollbackRequest, SystemSecurityInfo, SystemVulnerability,
+    DeploymentStatus, HardeningJustificationResponse, HardeningScanEligibilityResponse,
+    HardeningServiceResultResponse, HealthStatus, LogLevel, PipelineStage,
+    SaveHardeningJustificationRequest, SystemAgentEvent, SystemCommitHistory, SystemDetail,
+    SystemHardwareInfo, SystemHistoryEntry, SystemNetworkInfo, SystemRollbackRequest,
+    SystemSecurityInfo, SystemVulnerability,
 };
 use crate::components::cve::CvesTab;
 use crate::components::diff::DiffViewer;
@@ -93,6 +97,7 @@ enum Tab {
     Overview,
     Deploy,
     History,
+    Hardening,
     Logs,
     Config,
     Cves,
@@ -104,6 +109,7 @@ impl Tab {
             Self::Overview => "Overview",
             Self::Deploy => "Deploy",
             Self::History => "History",
+            Self::Hardening => "Hardening",
             Self::Logs => "Logs",
             Self::Config => "Config",
             Self::Cves => "CVEs",
@@ -130,6 +136,8 @@ pub fn SystemDetailView(id: String) -> Element {
     let mut sync_in_progress = use_signal(|| false);
     let mut cve_scan_in_progress = use_signal(|| false);
     let mut cve_scan_status_text: Signal<Option<String>> = use_signal(|| None);
+    let mut hardening_scan_in_progress = use_signal(|| false);
+    let mut hardening_scan_status_text: Signal<Option<String>> = use_signal(|| None);
 
     // Confirmation dialog state for rollback/deploying a historical commit
     let mut show_rollback_dialog = use_signal(|| false);
@@ -221,6 +229,44 @@ pub fn SystemDetailView(id: String) -> Element {
         }
     });
 
+    let id_for_hardening = id.clone();
+    let mut hardening_results_resource = use_resource(move || {
+        let id = id_for_hardening.clone();
+        async move {
+            let Ok(system_id) = Uuid::parse_str(&id) else {
+                return Vec::<HardeningServiceResultResponse>::new();
+            };
+
+            fetch_system_hardening(&system_id).await.unwrap_or_default()
+        }
+    });
+
+    let id_for_hardening_justifications = id.clone();
+    let mut hardening_justifications_resource = use_resource(move || {
+        let id = id_for_hardening_justifications.clone();
+        async move {
+            let Ok(system_id) = Uuid::parse_str(&id) else {
+                return Vec::<HardeningJustificationResponse>::new();
+            };
+
+            fetch_system_hardening_justifications(&system_id)
+                .await
+                .unwrap_or_default()
+        }
+    });
+
+    let id_for_hardening_scan_eligibility = id.clone();
+    let hardening_scan_eligibility_resource = use_resource(move || {
+        let id = id_for_hardening_scan_eligibility.clone();
+        async move {
+            let Ok(system_id) = Uuid::parse_str(&id) else {
+                return None;
+            };
+
+            fetch_system_hardening_scan_eligibility(&system_id).await.ok()
+        }
+    });
+
     // Derive state from resource result
     let (system, api_notice, redirect_to_login, not_found) =
         match &*detail_resource.read_unchecked() {
@@ -296,6 +342,18 @@ pub fn SystemDetailView(id: String) -> Element {
         .read_unchecked())
     .clone()
     .flatten();
+    let hardening_results = hardening_results_resource
+        .read_unchecked()
+        .clone()
+        .unwrap_or_default();
+    let hardening_justifications = hardening_justifications_resource
+        .read_unchecked()
+        .clone()
+        .unwrap_or_default();
+    let hardening_scan_eligibility: Option<HardeningScanEligibilityResponse> =
+        (*hardening_scan_eligibility_resource.read_unchecked())
+            .clone()
+            .flatten();
 
     let auth_context = app_state.read().auth.clone();
     let can_mutate = auth::can_mutate_systems(&auth_context);
@@ -307,6 +365,14 @@ pub fn SystemDetailView(id: String) -> Element {
         .as_ref()
         .and_then(|item| item.reason.clone())
         .unwrap_or_else(|| "CVE scan availability is still loading.".to_string());
+    let hardening_scan_eligible = hardening_scan_eligibility
+        .as_ref()
+        .map(|item| item.eligible)
+        .unwrap_or(false);
+    let hardening_scan_blocked_reason = hardening_scan_eligibility
+        .as_ref()
+        .and_then(|item| item.reason.clone())
+        .unwrap_or_else(|| "Hardening scan availability is still loading.".to_string());
 
     let environment = system
         .environment
@@ -559,6 +625,94 @@ pub fn SystemDetailView(id: String) -> Element {
                         }
                     }
                     button {
+                        class: "inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-white bg-violet-600 hover:bg-violet-500 {theme::interactive::FOCUS_RING} transition-colors disabled:opacity-60 disabled:cursor-not-allowed",
+                        disabled: *hardening_scan_in_progress.read() || !can_mutate || !hardening_scan_eligible,
+                        title: if hardening_scan_eligible {
+                            Some("Run hardening scan immediately for this system configuration")
+                        } else {
+                            Some(hardening_scan_blocked_reason.as_str())
+                        },
+                        onclick: {
+                            let system_id = system.id;
+                            move |_| {
+                                if !can_mutate || !hardening_scan_eligible {
+                                    return;
+                                }
+
+                                hardening_scan_in_progress.set(true);
+                                hardening_scan_status_text.set(Some("Hardening scan queued...".to_string()));
+
+                                spawn(async move {
+                                    let trigger_result = trigger_system_hardening_scan(&system_id).await;
+                                    match trigger_result {
+                                        Ok(triggered) => {
+                                            hardening_scan_status_text
+                                                .set(Some("Hardening scan running...".to_string()));
+                                            let mut terminal_status: Option<String> = None;
+
+                                            for _ in 0..25 {
+                                                match fetch_hardening_scan_status(&triggered.scan_id).await {
+                                                    Ok(status) => {
+                                                        let normalized = status.status.to_lowercase();
+                                                        if normalized == "completed" {
+                                                            terminal_status = Some(format!(
+                                                                "Hardening scan completed: {} services, score {}",
+                                                                status.total_services,
+                                                                status.overall_score
+                                                                    .map(|v| v.to_string())
+                                                                    .unwrap_or_else(|| "n/a".to_string())
+                                                            ));
+                                                            break;
+                                                        }
+
+                                                        if normalized == "failed" {
+                                                            terminal_status = Some(
+                                                                "Hardening scan failed. Check server logs for details."
+                                                                    .to_string(),
+                                                            );
+                                                            break;
+                                                        }
+                                                    }
+                                                    Err(_) => {
+                                                        terminal_status = Some(
+                                                            "Unable to poll hardening scan status.".to_string(),
+                                                        );
+                                                        break;
+                                                    }
+                                                }
+
+                                                use gloo_timers::future::TimeoutFuture;
+                                                TimeoutFuture::new(1500).await;
+                                            }
+
+                                            if let Some(msg) = terminal_status {
+                                                let is_success = msg.contains("completed");
+                                                toast_message.set(Some((msg.clone(), is_success)));
+                                                hardening_scan_status_text.set(Some(msg));
+                                                hardening_results_resource.restart();
+                                            }
+                                        }
+                                        Err(err) => {
+                                            let msg = format!("Failed to trigger hardening scan: {}", err);
+                                            toast_message.set(Some((msg.clone(), false)));
+                                            hardening_scan_status_text.set(Some(msg));
+                                        }
+                                    }
+
+                                    hardening_scan_in_progress.set(false);
+                                });
+                            }
+                        },
+
+                        if *hardening_scan_in_progress.read() {
+                            "Scanning..."
+                        } else if !can_mutate {
+                            "Run Hardening Scan (Operator/Admin required)"
+                        } else {
+                            "Run Hardening Scan"
+                        }
+                    }
+                    button {
                         class: "inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::SUCCESS_BTN} {theme::interactive::FOCUS_RING} transition-colors disabled:opacity-60 disabled:cursor-not-allowed",
                         disabled: *sync_in_progress.read() || !can_mutate,
                         onclick: move |_| show_sync_dialog.set(true),
@@ -606,6 +760,12 @@ pub fn SystemDetailView(id: String) -> Element {
                 if let Some(scan_status) = cve_scan_status_text() {
                     p {
                         class: "text-xs text-amber-200 mt-1",
+                        "{scan_status}"
+                    }
+                }
+                if let Some(scan_status) = hardening_scan_status_text() {
+                    p {
+                        class: "text-xs text-violet-200 mt-1",
                         "{scan_status}"
                     }
                 }
@@ -686,7 +846,7 @@ pub fn SystemDetailView(id: String) -> Element {
                 "data-testid": "system-detail-tabs",
                 class: "sd-tabs",
                 role: "tablist",
-                for tab in [Tab::Overview, Tab::Deploy, Tab::History, Tab::Logs, Tab::Config, Tab::Cves] {
+                for tab in [Tab::Overview, Tab::Deploy, Tab::History, Tab::Cves, Tab::Hardening, Tab::Logs, Tab::Config] {
                     {
                         let is_active = *active_tab.read() == tab;
                         let tab_class = if is_active {
@@ -736,6 +896,16 @@ pub fn SystemDetailView(id: String) -> Element {
                                             stroke: "currentColor",
                                             view_box: "0 0 24 24",
                                             path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M12 3l8 4v5c0 5-3.5 9.5-8 11-4.5-1.5-8-6-8-11V7l8-4z" }
+                                        }
+                                    ),
+                                    Tab::Hardening => rsx!(
+                                        svg {
+                                            class: "w-3.5 h-3.5",
+                                            fill: "none",
+                                            stroke: "currentColor",
+                                            view_box: "0 0 24 24",
+                                            path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M12 3l8 4v5c0 5-3 8-8 9-5-1-8-4-8-9V7l8-4z" }
+                                            path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M9 12h6" }
                                         }
                                     ),
                                     Tab::Logs => rsx!(
@@ -831,6 +1001,18 @@ pub fn SystemDetailView(id: String) -> Element {
                                         }
                                     }
                                 }
+                            }
+                        }
+                    },
+                    Tab::Hardening => rsx! {
+                        HardeningTab {
+                            system_id: system.id,
+                            results: hardening_results.clone(),
+                            justifications: hardening_justifications.clone(),
+                            allow_mutations: can_mutate,
+                            on_saved: move |_| {
+                                hardening_results_resource.restart();
+                                hardening_justifications_resource.restart();
                             }
                         }
                     },
@@ -2220,6 +2402,205 @@ fn CommitTimelineNode(
                 }
             }
         }
+    }
+}
+
+#[component]
+fn HardeningTab(
+    system_id: Uuid,
+    results: Vec<HardeningServiceResultResponse>,
+    justifications: Vec<HardeningJustificationResponse>,
+    allow_mutations: bool,
+    on_saved: EventHandler<()>,
+) -> Element {
+    let mut selected_service: Signal<Option<HardeningServiceResultResponse>> = use_signal(|| None);
+    let mut category = use_signal(String::new);
+    let mut directive_name = use_signal(String::new);
+    let mut reason = use_signal(String::new);
+
+    let justifications_for = |service_name: &str| {
+        justifications
+            .iter()
+            .filter(|j| j.service_name == service_name)
+            .collect::<Vec<_>>()
+    };
+
+    rsx! {
+        div { class: "space-y-4",
+            if results.is_empty() {
+                p { class: "{theme::text::SECONDARY}", "No hardening scan results available yet. Trigger a hardening scan to populate this tab." }
+            } else {
+                div { class: "overflow-x-auto",
+                    table { class: "min-w-full text-sm",
+                        thead {
+                            tr { class: "border-b border-white/10 text-left {theme::text::SECONDARY}",
+                                th { class: "py-2 pr-3", "Service" }
+                                th { class: "py-2 pr-3", "Score" }
+                                th { class: "py-2 pr-3", "Risk" }
+                                th { class: "py-2 pr-3", "Missing" }
+                                th { class: "py-2 pr-3", "Justifications" }
+                                th { class: "py-2 pr-3", "Actions" }
+                            }
+                        }
+                        tbody {
+                            for service in &results {
+                                tr { class: "border-b border-white/5",
+                                    td { class: "py-2 pr-3 font-mono", "{service.service_name}" }
+                                    td { class: "py-2 pr-3", "{service.hardening_score}" }
+                                    td { class: "py-2 pr-3",
+                                        span { class: "px-2 py-0.5 rounded text-xs {risk_level_badge_class(&service.risk_level)}", "{service.risk_level}" }
+                                    }
+                                    td { class: "py-2 pr-3", "{service.missing_directives_count}" }
+                                    td { class: "py-2 pr-3", "{justifications_for(&service.service_name).len()}" }
+                                    td { class: "py-2 pr-3",
+                                        button {
+                                            class: "px-2 py-1 rounded border border-white/15 text-xs hover:bg-white/5",
+                                            onclick: {
+                                                let service = service.clone();
+                                                move |_| selected_service.set(Some(service.clone()))
+                                            },
+                                            "Details"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(service) = selected_service() {
+            div {
+                class: "fixed inset-0 bg-black/60 z-40 flex items-center justify-center p-4",
+                onclick: move |_| selected_service.set(None),
+
+                div {
+                    class: "w-full max-w-4xl rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-5 space-y-4",
+                    onclick: move |evt| evt.stop_propagation(),
+                    h3 { class: "text-lg font-semibold text-white", "Service hardening: {service.service_name}" }
+                    p { class: "text-sm {theme::text::SECONDARY}", "Score: {service.hardening_score} · Risk: {service.risk_level}" }
+
+                    div { class: "max-h-64 overflow-y-auto border border-white/10 rounded-md",
+                        table { class: "min-w-full text-xs",
+                            thead {
+                                tr { class: "border-b border-white/10 text-left {theme::text::SECONDARY}",
+                                    th { class: "py-2 px-3", "Directive" }
+                                    th { class: "py-2 px-3", "Enabled" }
+                                    th { class: "py-2 px-3", "Points" }
+                                }
+                            }
+                            tbody {
+                                if let Some(directives) = service.directives_detail.as_array() {
+                                    for item in directives {
+                                        tr { class: "border-b border-white/5",
+                                            td { class: "py-2 px-3 font-mono", "{item.get(\"name\").and_then(|v| v.as_str()).unwrap_or(\"\")}" }
+                                            td { class: "py-2 px-3", {if item.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) { "yes" } else { "no" }} }
+                                            td { class: "py-2 px-3", "{item.get(\"points\").and_then(|v| v.as_i64()).unwrap_or(0)}/{item.get(\"max_points\").and_then(|v| v.as_i64()).unwrap_or(0)}" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    div { class: "space-y-2",
+                        h4 { class: "font-medium text-white", "Justifications" }
+                        for item in justifications.iter().filter(|j| j.service_name == service.service_name) {
+                            div { class: "rounded-md border border-white/10 bg-black/20 p-2 text-xs",
+                                p { class: "text-gray-200", "{item.category.clone().unwrap_or_else(|| \"uncategorized\".to_string())}" }
+                                p { class: "text-gray-300 mt-1", "{item.reason}" }
+                            }
+                        }
+                        if justifications.iter().all(|j| j.service_name != service.service_name) {
+                            p { class: "text-xs {theme::text::SECONDARY}", "No justifications yet." }
+                        }
+                    }
+
+                    if allow_mutations {
+                        div { class: "space-y-2 border-t border-white/10 pt-3",
+                            h4 { class: "font-medium text-white", "Add or update justification" }
+                            div { class: "grid grid-cols-1 md:grid-cols-3 gap-2",
+                                input {
+                                    class: "px-2 py-1 rounded border border-white/15 bg-black/20 text-sm",
+                                    placeholder: "Category (optional)",
+                                    value: "{category}",
+                                    oninput: move |evt| category.set(evt.value()),
+                                }
+                                input {
+                                    class: "px-2 py-1 rounded border border-white/15 bg-black/20 text-sm",
+                                    placeholder: "Directive (optional)",
+                                    value: "{directive_name}",
+                                    oninput: move |evt| directive_name.set(evt.value()),
+                                }
+                            }
+                            textarea {
+                                class: "w-full min-h-[72px] px-2 py-1 rounded border border-white/15 bg-black/20 text-sm",
+                                placeholder: "Reason",
+                                value: "{reason}",
+                                oninput: move |evt| reason.set(evt.value()),
+                            }
+                            button {
+                                class: "px-3 py-1.5 rounded bg-violet-600 hover:bg-violet-500 text-sm text-white",
+                                onclick: {
+                                    let service_name = service.service_name.clone();
+                                    let on_saved = on_saved.clone();
+                                    move |_| {
+                                        let reason_value = reason();
+                                        if reason_value.trim().is_empty() {
+                                            return;
+                                        }
+
+                                        let request = SaveHardeningJustificationRequest {
+                                            directive_name: non_empty(directive_name()),
+                                            category: non_empty(category()),
+                                            reason: reason_value,
+                                        };
+                                        let service_name_for_request = service_name.clone();
+
+                                        spawn(async move {
+                                            if save_system_hardening_justification(&system_id, &service_name_for_request, &request)
+                                                .await
+                                                .is_ok()
+                                            {
+                                                on_saved.call(());
+                                            }
+                                        });
+                                    }
+                                },
+                                "Save justification"
+                            }
+                        }
+                    }
+
+                    div { class: "flex justify-end",
+                        button {
+                            class: "px-3 py-1.5 rounded border border-white/15 text-sm hover:bg-white/5",
+                            onclick: move |_| selected_service.set(None),
+                            "Close"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn risk_level_badge_class(level: &str) -> &'static str {
+    match level {
+        "well_hardened" => "bg-emerald-500/20 text-emerald-300",
+        "moderately_hardened" => "bg-yellow-500/20 text-yellow-300",
+        "poorly_hardened" => "bg-orange-500/20 text-orange-300",
+        _ => "bg-red-500/20 text-red-300",
+    }
+}
+
+fn non_empty(value: String) -> Option<String> {
+    let trimmed = value.trim().to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
     }
 }
 

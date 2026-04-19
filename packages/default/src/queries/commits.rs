@@ -528,21 +528,16 @@ fn validate_eval_queue_reorder_payload(
 /// - `pending → cancelled` immediately (sets cancellation_requested = FALSE)
 /// - `in_progress → cancelling` (sets cancellation_requested = TRUE so the loop kills the subprocess)
 /// - Returns `NotFound` if no matching row, `AlreadyTerminal` for complete/failed/cancelled rows.
-pub async fn cancel_commit_evaluation(
-    pool: &PgPool,
-    commit_id: i32,
-) -> Result<CancelEvalOutcome> {
+pub async fn cancel_commit_evaluation(pool: &PgPool, commit_id: i32) -> Result<CancelEvalOutcome> {
     #[derive(sqlx::FromRow)]
     struct Row {
         evaluation_status: Option<String>,
     }
 
-    let current = sqlx::query_as::<_, Row>(
-        "SELECT evaluation_status FROM commits WHERE id = $1",
-    )
-    .bind(commit_id)
-    .fetch_optional(pool)
-    .await?;
+    let current = sqlx::query_as::<_, Row>("SELECT evaluation_status FROM commits WHERE id = $1")
+        .bind(commit_id)
+        .fetch_optional(pool)
+        .await?;
 
     let Some(row) = current else {
         return Ok(CancelEvalOutcome::NotFound);
@@ -628,12 +623,11 @@ pub async fn force_cancel_commit_evaluation(pool: &PgPool, commit_id: i32) -> Re
 /// Called periodically from inside `evaluate_with_nix_eval_jobs` to allow
 /// cooperative cancellation without holding a lock.
 pub async fn check_cancellation_requested(pool: &PgPool, commit_id: i32) -> Result<bool> {
-    let flag: Option<bool> = sqlx::query_scalar(
-        "SELECT cancellation_requested FROM commits WHERE id = $1",
-    )
-    .bind(commit_id)
-    .fetch_optional(pool)
-    .await?;
+    let flag: Option<bool> =
+        sqlx::query_scalar("SELECT cancellation_requested FROM commits WHERE id = $1")
+            .bind(commit_id)
+            .fetch_optional(pool)
+            .await?;
     Ok(flag.unwrap_or(false))
 }
 
