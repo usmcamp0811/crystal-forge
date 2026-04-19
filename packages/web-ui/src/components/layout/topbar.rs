@@ -104,7 +104,7 @@ pub fn TopBar(title: String) -> Element {
             }
 
             div {
-                class: "flex items-center gap-4"
+                class: "flex items-center gap-4",
 
                 // User menu
                 if let Some(user_name) = auth::user_short_name(&auth_context) {
