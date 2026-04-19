@@ -869,6 +869,56 @@ html, body {
   gap: 4px;
 }
 
+.btn-primary {
+  background: var(--cf-brand-purple);
+  color: #fff;
+  border-color: transparent;
+}
+
+.btn-primary:hover {
+  background: var(--cf-brand-purple-hover);
+}
+
+.btn-primary:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--cf-text-primary);
+  border-color: var(--cf-card-border);
+}
+
+.btn-ghost:hover {
+  background: var(--cf-hover-bg);
+}
+
+.btn-ghost:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.btn-subtle {
+  background: var(--cf-subtle-bg);
+  color: var(--cf-text-primary);
+  border-color: transparent;
+}
+
+.btn-subtle:hover {
+  background: var(--cf-hover-bg);
+}
+
+.btn-danger {
+  background: var(--cf-danger-berry);
+  color: #fff;
+  border-color: transparent;
+}
+
+.btn-danger:hover {
+  opacity: 0.9;
+}
+
 .btn-icon {
   padding: 6px;
   border-radius: 8px;

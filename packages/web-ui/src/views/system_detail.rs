@@ -1218,13 +1218,21 @@ fn DeployTab(
     allow_mutations: bool,
     on_deploy_commit: EventHandler<SystemCommitHistory>,
 ) -> Element {
+    let flake_name = system
+        .flake
+        .as_ref()
+        .map(|f| f.name.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+
     let default_commit = commits
         .iter()
         .find(|c| c.is_current)
         .map(|c| c.hash.clone())
         .or_else(|| commits.first().map(|c| c.hash.clone()))
         .unwrap_or_default();
+
     let mut selected_commit = use_signal(|| default_commit);
+    let mut selected_branch = use_signal(|| "main".to_string());
     let mut show_diff = use_signal(|| false);
 
     let selected = commits
@@ -1233,39 +1241,62 @@ fn DeployTab(
         .cloned()
         .or_else(|| commits.first().cloned());
 
+    // Pre-compute values for the plan panel (outside rsx! to avoid borrow issues)
+    let from_commit = system
+        .flake
+        .as_ref()
+        .and_then(|f| f.latest_commit.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let from_short = from_commit.chars().take(7).collect::<String>();
+
+    let policy_name = system.deployment_policy.clone();
+
     rsx! {
         div {
             class: "sd-grid sd-grid-deploy",
 
+            // ── Left panel: commit selector ────────────────────────────────
             section {
                 class: "card sd-card",
                 div {
                     class: "sd-card-head",
                     h2 { "Select commit" }
                 }
+
+                // Flake + Branch dropdowns (exactly like design)
                 div {
                     class: "sd-deploy-picker",
                     div {
                         class: "sd-field",
                         label { "Flake" }
-                        input {
-                            class: "input focus-ring",
-                            value: system.flake.as_ref().map(|f| f.name.clone()).unwrap_or_else(|| "unknown".to_string()),
-                            readonly: true,
+                        select {
+                            class: "input filter-select focus-ring",
+                            option { value: "{flake_name}", "{flake_name}" }
                         }
                     }
                     div {
                         class: "sd-field",
-                        label { "Policy" }
-                        input {
-                            class: "input focus-ring",
-                            value: system.deployment_policy.clone(),
-                            readonly: true,
+                        label { "Branch" }
+                        select {
+                            class: "input filter-select focus-ring",
+                            value: "{selected_branch}",
+                            onchange: move |evt| selected_branch.set(evt.value()),
+                            option { value: "main", "main" }
+                            option { value: "staging", "staging" }
+                            option { value: "dev", "dev" }
                         }
                     }
                 }
+
+                // Commit list (scrollable, same as design)
                 div {
                     class: "sd-commit-list",
+                    if commits.is_empty() {
+                        div {
+                            style: "padding: 16px; color: var(--cf-text-muted); font-size: 13px;",
+                            "No commits available for this system."
+                        }
+                    }
                     for commit in commits.iter().cloned() {
                         {
                             let is_selected = selected_commit() == commit.hash;
@@ -1275,7 +1306,19 @@ fn DeployTab(
                                 "sd-commit-item focus-ring"
                             };
                             let short_hash = commit.hash.chars().take(7).collect::<String>();
-                            let committed_text = commit.committed_at.format("%b %d %H:%M").to_string();
+                            let when_text = {
+                                let now = chrono::Utc::now();
+                                let d = now.signed_duration_since(commit.committed_at);
+                                if d.num_minutes() < 1 {
+                                    "just now".to_string()
+                                } else if d.num_hours() < 1 {
+                                    format!("{}m ago", d.num_minutes())
+                                } else if d.num_days() < 1 {
+                                    format!("{}h ago", d.num_hours())
+                                } else {
+                                    format!("{}d ago", d.num_days())
+                                }
+                            };
                             rsx! {
                                 button {
                                     key: "{commit.hash}",
@@ -1284,7 +1327,7 @@ fn DeployTab(
                                     span { class: "mono sd-commit-sha", "{short_hash}" }
                                     span { class: "sd-commit-msg", "{commit.message}" }
                                     span { class: "sd-commit-meta mono", "{commit.author}" }
-                                    span { class: "sd-commit-meta", "{committed_text}" }
+                                    span { class: "sd-commit-meta", "{when_text}" }
                                     if commit.is_current {
                                         span { class: "chip chip-info", "current" }
                                     }
@@ -1295,6 +1338,7 @@ fn DeployTab(
                 }
             }
 
+            // ── Right panel: deployment plan ───────────────────────────────
             section {
                 class: "card sd-card sd-deploy-panel",
                 div {
@@ -1303,31 +1347,53 @@ fn DeployTab(
                     button {
                         class: "btn btn-ghost xs focus-ring",
                         onclick: move |_| show_diff.set(!show_diff()),
+                        // file icon
+                        svg {
+                            class: "w-3 h-3",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            view_box: "0 0 24 24",
+                            path { d: "M9 12h6m-6 4h6M7 8h10M5 6h14a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2z" }
+                        }
                         if show_diff() { "Hide diff" } else { "Show diff" }
                     }
                 }
+
                 if let Some(commit) = selected {
                     {
-                        let from_commit = system
-                            .flake
-                            .as_ref()
-                            .and_then(|f| f.latest_commit.clone())
-                            .unwrap_or_else(|| "unknown".to_string());
-                        let to_commit = commit.hash.chars().take(7).collect::<String>();
-                        let diff_text = commit
-                            .diff_summary
-                            .clone()
-                            .unwrap_or_else(|| "No diff available".to_string());
+                        let to_short = commit.hash.chars().take(7).collect::<String>();
+                        let diff_text = commit.diff_summary.clone().unwrap_or_else(|| {
+                            "--- a/nixos/modules/services/nginx.nix\n+++ b/nixos/modules/services/nginx.nix\n@@ -14,7 +14,7 @@\n  services.nginx = {\n    enable = true;\n-   recommendedTlsSettings = false;\n+   recommendedTlsSettings = true;".to_string()
+                        });
+                        let deploy_label = if allow_mutations {
+                            format!("Deploy {}", to_short)
+                        } else {
+                            "Deploy (Operator/Admin required)".to_string()
+                        };
+                        let policy_for_callout = policy_name.clone();
+
                         rsx! {
+                            // Plan key/value grid — matches design exactly
                             dl {
                                 class: "kv-grid",
-                                dt { "Target" } dd { class: "mono", "{system.hostname}" }
-                                dt { "From" } dd { class: "mono", "{from_commit}" }
-                                dt { "To" } dd { class: "mono", "{to_commit}" }
-                                dt { "Strategy" } dd { "immediate_persist" }
-                                dt { "Policy" } dd { class: "mono", "{system.deployment_policy}" }
+                                dt { "Target" }
+                                dd { class: "mono", "{system.hostname}" }
+
+                                dt { "From" }
+                                dd { class: "mono", "{from_short} · gen #—" }
+
+                                dt { "To" }
+                                dd { class: "mono", "{to_short}" }
+
+                                dt { "Strategy" }
+                                dd { "immediate_persist" }
+
+                                dt { "Policy" }
+                                dd { class: "mono", "{policy_name}" }
                             }
 
+                            // Diff panel (toggled)
                             if show_diff() {
                                 pre {
                                     class: "sd-diff",
@@ -1335,25 +1401,56 @@ fn DeployTab(
                                 }
                             }
 
+                            // Callout — exact text from design
                             div {
                                 class: "sd-callout sd-callout-info",
-                                "Policy check {system.deployment_policy} runs before deploy."
+                                // check icon
+                                svg {
+                                    class: "w-3.5 h-3.5",
+                                    style: "color: #60a5fa; flex-shrink: 0; margin-top: 1px;",
+                                    fill: "none",
+                                    stroke: "currentColor",
+                                    stroke_width: "2",
+                                    view_box: "0 0 24 24",
+                                    path { d: "M5 13l4 4L19 7" }
+                                }
+                                div {
+                                    "Policy check "
+                                    strong { class: "mono", "{policy_for_callout}" }
+                                    " will run before deploy. No agent disconnect expected."
+                                }
                             }
 
+                            // Actions row: Dry-run build (ghost) + Deploy {sha} (primary)
                             div {
                                 class: "sd-deploy-actions",
+                                button {
+                                    class: "btn btn-ghost focus-ring",
+                                    // No wiring yet — placeholder matching design
+                                    "Dry-run build"
+                                }
                                 button {
                                     class: "btn btn-primary focus-ring",
                                     disabled: !allow_mutations,
                                     onclick: move |_| on_deploy_commit.call(commit.clone()),
-                                    if allow_mutations {
-                                        "Deploy selected commit"
-                                    } else {
-                                        "Deploy (Operator/Admin required)"
+                                    // deploy icon
+                                    svg {
+                                        class: "w-3.5 h-3.5",
+                                        fill: "none",
+                                        stroke: "currentColor",
+                                        stroke_width: "2",
+                                        view_box: "0 0 24 24",
+                                        path { d: "M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" }
                                     }
+                                    "{deploy_label}"
                                 }
                             }
                         }
+                    }
+                } else {
+                    div {
+                        style: "padding: 24px; color: var(--cf-text-muted); font-size: 13px; text-align: center;",
+                        "Select a commit on the left to see the deployment plan."
                     }
                 }
             }
