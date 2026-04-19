@@ -225,7 +225,7 @@ pub fn AppShell() -> Element {
 
     rsx! {
         div {
-            class: "{theme::surface::PAGE_BG} {theme::text::PRIMARY} flex flex-col overflow-x-hidden",
+            class: "min-h-screen {theme::surface::PAGE_BG} {theme::text::PRIMARY} flex flex-col overflow-x-hidden",
 
             DevModeBanner { placement: BannerPlacement::Top }
 

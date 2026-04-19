@@ -1001,7 +1001,7 @@ html, body {
 .app {
   display: grid;
   grid-template-columns: var(--sidebar-w, 240px) 1fr;
-  height: 100vh;
+  min-height: 100vh;
   overflow: hidden;
 }
 
@@ -1010,6 +1010,7 @@ html, body {
   border-right: 1px solid var(--cf-card-border);
   display: flex;
   flex-direction: column;
+  min-height: 100%;
   min-width: 0;
   overflow: hidden;
 }
