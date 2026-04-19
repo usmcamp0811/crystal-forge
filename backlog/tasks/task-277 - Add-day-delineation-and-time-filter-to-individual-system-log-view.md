@@ -4,7 +4,7 @@ title: Add day delineation and time filter to individual system log view
 status: In Progress
 assignee: []
 created_date: '2026-04-19 12:30'
-updated_date: '2026-04-19 13:05'
+updated_date: '2026-04-19 13:58'
 labels:
   - ui
   - logs
@@ -186,4 +186,25 @@ LOCK: AI Agent on gray in /home/mcamp/code/crystal-forge/TASK-277-day-delineatio
 3. Verify UI functionality and capture screenshot
 4. Run full verification suite (fmt, clippy, test)
 5. Create merge request
+
+## Web-UI Check Added
+
+Added automated test step `12g2-system-logs-day-delineation-time-filter` to `checks/web-ui/tests/integration-test.js`:
+
+**Test Coverage:**
+- Mocks system with multi-day agent events (today, yesterday, two days ago)
+- Mocks time-filtered API responses based on query parameters
+- Verifies day headers appear (expects at least 2 day headers)
+- Verifies time filter UI controls (From/To datetime inputs + Apply button)
+- Verifies relative timestamps display (e.g., '2 hours ago' pattern)
+- Tests empty state by filtering to future date range with no logs
+- Verifies empty state message appears
+
+**Screenshot Capture:**
+The test is included in CI_FAST_STEP_NAMES, so it will run in automated checks and capture screenshot `12g2-system-logs-day-delineation-time-filter.png` showing:
+- Day headers between log entries
+- Time filter controls above logs
+- Relative timestamps in log entries
+
+The screenshot will be available from the web-ui check run artifacts.
 <!-- SECTION:NOTES:END -->
