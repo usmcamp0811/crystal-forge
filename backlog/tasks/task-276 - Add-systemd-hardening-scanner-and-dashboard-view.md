@@ -4,7 +4,7 @@ title: Add systemd hardening scanner and dashboard view
 status: Backlog
 assignee: []
 created_date: '2026-04-19 02:43'
-updated_date: '2026-04-19 03:22'
+updated_date: '2026-04-19 03:24'
 labels:
   - feature
   - security
@@ -305,6 +305,40 @@ Parse output as JSON object where keys are service names and values contain:
 - Large JSON output from nix eval (may need streaming/chunking)
 - Service filtering (ignore generated/internal services?)
 - Score calibration (may need iteration based on real-world results)
+
+## View Locations (Confirmed)
+
+### Fleet-Level Hardening Dashboard
+**Route:** `/hardening`
+**Sidebar position:** Between "CVEs" and "Policies"
+
+Shows:
+- Overall fleet hardening score distribution (donut chart)
+- Top 10 least-hardened services across all systems
+- System comparison table
+- Scan status indicators
+
+### Per-System Hardening Tab
+**Route:** `/systems/:id` → new "Hardening" tab
+**Tab order:** Overview | History | Policy | CVEs | **Hardening** | Logs
+
+Shows:
+- Per-service hardening breakdown table (sortable/filterable)
+- Service name, score, risk level, missing critical options
+- Drill-down links to service detail
+
+### Service Detail View
+**Route:** Modal or `/systems/:id/hardening/:service_name`
+
+Shows:
+- Specific systemd directives enabled/disabled
+- Missing options and their impact
+- Justify/suppress button with reason input
+
+### Navigation Flow
+```
+/hardening (fleet) → click system → /systems/:id#hardening → click service → detail modal
+```
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
