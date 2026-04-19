@@ -4,7 +4,7 @@ title: Implement Claude Design System UI/UX for Systems View
 status: In Progress
 assignee: []
 created_date: '2026-04-19 17:54'
-updated_date: '2026-04-19 18:31'
+updated_date: '2026-04-19 18:43'
 labels:
   - ui-ux
   - frontend
@@ -305,6 +305,14 @@ Fixed RSX syntax error in topbar.rs (missing comma)
 Compilation now succeeds with only warnings
 
 Ready for Nix build verification
+
+=== Test Fix (2026-04-19 18:35) ===
+
+Added missing .btn-icon CSS class definition
+
+Fixes Systems table action button visibility in tests
+
+Ready for Nix build re-verification
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
