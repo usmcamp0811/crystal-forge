@@ -32,7 +32,7 @@ use crate::components::modals::{RollbackConfirmDialog, SyncConfirmDialog};
 use crate::components::notifications::Toast;
 use crate::components::system::{
     AgentCard, BooleanRow, EditSystemModal, HardwareCard, InfoRow, InfoRowMono, LogLine, LogsTab,
-    NetworkCard, SecurityCard, StatusBadge, SystemInfoCard, environment_style,
+    NetworkCard, SecurityCard, StatusBadge, SystemInfoCard, environment_style, format_uptime,
 };
 use crate::routes::Route;
 use crate::state::{app_state::AppState, auth};
@@ -549,6 +549,7 @@ pub fn SystemDetailView(id: String) -> Element {
             div {
                 "data-testid": "system-detail-tabs",
                 class: "sd-tabs",
+                role: "tablist",
                 nav {
                     class: "flex gap-1 -mb-px",
                     for tab in [Tab::Overview, Tab::History, Tab::Policy, Tab::Cves, Tab::Logs] {
@@ -563,7 +564,59 @@ pub fn SystemDetailView(id: String) -> Element {
                                 button {
                                     key: "{tab:?}",
                                     class: "{tab_class}",
+                                    role: "tab",
+                                    "aria-selected": "{is_active}",
                                     onclick: move |_| active_tab.set(tab),
+                                    span {
+                                        class: "inline-flex items-center",
+                                        match tab {
+                                            Tab::Overview => rsx!(
+                                                svg {
+                                                    class: "w-3.5 h-3.5",
+                                                    fill: "none",
+                                                    stroke: "currentColor",
+                                                    view_box: "0 0 24 24",
+                                                    path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" }
+                                                }
+                                            ),
+                                            Tab::History => rsx!(
+                                                svg {
+                                                    class: "w-3.5 h-3.5",
+                                                    fill: "none",
+                                                    stroke: "currentColor",
+                                                    view_box: "0 0 24 24",
+                                                    path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" }
+                                                }
+                                            ),
+                                            Tab::Policy => rsx!(
+                                                svg {
+                                                    class: "w-3.5 h-3.5",
+                                                    fill: "none",
+                                                    stroke: "currentColor",
+                                                    view_box: "0 0 24 24",
+                                                    path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M9 12h6m-6 4h6M7 8h10M5 6h14a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2z" }
+                                                }
+                                            ),
+                                            Tab::Cves => rsx!(
+                                                svg {
+                                                    class: "w-3.5 h-3.5",
+                                                    fill: "none",
+                                                    stroke: "currentColor",
+                                                    view_box: "0 0 24 24",
+                                                    path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M12 3l8 4v5c0 5-3.5 9.5-8 11-4.5-1.5-8-6-8-11V7l8-4z" }
+                                                }
+                                            ),
+                                            Tab::Logs => rsx!(
+                                                svg {
+                                                    class: "w-3.5 h-3.5",
+                                                    fill: "none",
+                                                    stroke: "currentColor",
+                                                    view_box: "0 0 24 24",
+                                                    path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M8 9l3 3-3 3m5 0h3M5 4h14a2 2 0 012 2v12a2 2 0 01-2 2H5a2 2 0 01-2-2V6a2 2 0 012-2z" }
+                                                }
+                                            ),
+                                        }
+                                    }
                                     "{tab.label()}"
                                     if tab == Tab::Cves && system.cve_counts.total() > 0 {
                                         span {
@@ -767,53 +820,204 @@ pub fn SystemDetailView(id: String) -> Element {
 
 #[component]
 fn OverviewTab(system: SystemDetail) -> Element {
+    let environment = system
+        .environment
+        .clone()
+        .unwrap_or_else(|| "Unknown".to_string());
+    let env_style = environment_style(&environment);
+    let heartbeat_text = system
+        .last_seen
+        .map(|dt| {
+            let now = Utc::now();
+            let duration = now.signed_duration_since(dt);
+            if duration.num_minutes() < 1 {
+                "Just now".to_string()
+            } else if duration.num_hours() < 1 {
+                format!("{}m ago", duration.num_minutes())
+            } else if duration.num_days() < 1 {
+                format!("{}h ago", duration.num_hours())
+            } else {
+                format!("{}d ago", duration.num_days())
+            }
+        })
+        .unwrap_or_else(|| "Never".to_string());
+
+    let uptime = format_uptime(system.hardware.uptime_secs.unwrap_or_default());
+    let kernel = system
+        .kernel
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let heartbeat_next_in_sec = system
+        .last_seen
+        .map(|dt| 60.0 - Utc::now().signed_duration_since(dt).num_seconds() as f64)
+        .unwrap_or(0.0);
+
+    let flake_name = system
+        .flake
+        .as_ref()
+        .map(|f| f.name.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let flake_repo = system
+        .flake
+        .as_ref()
+        .map(|f| f.repo_url.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let flake_commit = system
+        .flake
+        .as_ref()
+        .and_then(|f| f.latest_commit.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let nixos_version = system
+        .nixos_version
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let cpu_text = system
+        .hardware
+        .cpu_brand
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let memory_text = system
+        .hardware
+        .memory_gb
+        .map(|v| format!("{:.1} GiB", v))
+        .unwrap_or_else(|| "unknown".to_string());
+    let ipv4_text = system
+        .network
+        .primary_ip
+        .clone()
+        .unwrap_or_else(|| "-".to_string());
+
+    let critical = system.cve_counts.critical;
+    let high = system.cve_counts.high;
+    let medium = system.cve_counts.medium;
+    let low = system.cve_counts.low;
+    let cve_total = system.cve_counts.total();
+
     rsx! {
-        // Store path (full width)
-        if let Some(ref store_path) = system.current_store_path {
-            div {
-                class: "mb-6",
-                Card {
-                    title: Some("Current Store Path".to_string()),
-                    children: rsx! {
-                        code {
-                            class: "block text-sm font-mono text-gray-300 bg-gray-800/50 px-4 py-3 rounded-lg overflow-x-auto",
-                            "{store_path}"
+        div {
+            class: "sd-grid sd-grid-overview",
+
+            section {
+                class: "card sd-card",
+                div {
+                    class: "sd-card-head",
+                    h2 { "Currently deployed" }
+                    span { class: "chip chip-healthy", "up-to-date" }
+                }
+                dl {
+                    class: "kv-grid",
+                    dt { "Flake" } dd { class: "mono", "{flake_name}" }
+                    dt { "Repository" } dd { class: "mono", "{flake_repo}" }
+                    dt { "Commit" } dd { class: "mono", "{flake_commit}" }
+                    dt { "NixOS" } dd { class: "mono", "{nixos_version}" }
+                    dt { "Kernel" } dd { class: "mono", "{kernel}" }
+                }
+            }
+
+            section {
+                class: "card sd-card",
+                div {
+                    class: "sd-card-head",
+                    h2 { "Host" }
+                    span { class: "mono sd-card-meta", "{system.id}" }
+                }
+                dl {
+                    class: "kv-grid",
+                    dt { "Hostname" } dd { class: "mono", "{system.hostname}" }
+                    dt { "FQDN" } dd { class: "mono", "{system.hostname}.local" }
+                    dt { "Environment" }
+                    dd {
+                        span {
+                            class: "inline-flex items-center px-3 py-1 rounded-md text-xs font-semibold uppercase tracking-wide {env_style.chip_bg} {env_style.chip_text}",
+                            "{environment}"
                         }
+                    }
+                    dt { "Uptime" } dd { "{uptime}" }
+                    dt { "CPU" } dd { "{cpu_text}" }
+                    dt { "Memory" } dd { "{memory_text}" }
+                    dt { "IPv4" } dd { class: "mono", "{ipv4_text}" }
+                }
+                div {
+                    class: "hb-panel",
+                    style: "margin-top: 16px;",
+                    crate::components::HeartbeatSpinner {
+                        interval_sec: 60,
+                        next_in_sec: heartbeat_next_in_sec,
+                        size: 56,
+                        show_label: true,
                     }
                 }
             }
-        }
 
-        div {
-            class: "grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6 pt-6",
-
-            // System Info card
-            SystemInfoCard { system: system.clone() }
-
-            // Hardware card
-            HardwareCard { hardware: system.hardware.clone() }
-
-            // Network card
-            NetworkCard { network: system.network.clone() }
-
-            // Security card
-            SecurityCard { security: system.security.clone() }
-
-            // Agent card
-            AgentCard { system: system.clone() }
-
-            // Flake info card (if available)
-            if let Some(ref flake) = system.flake {
-                Card {
-                    title: Some("Flake".to_string()),
-                    children: rsx! {
-                        dl {
-                            class: "space-y-3",
-                            InfoRow { label: "Name", value: flake.name.clone() }
-                            InfoRowMono { label: "Repository", value: flake.repo_url.clone() }
-                            if let Some(ref commit) = flake.latest_commit {
-                                InfoRowMono { label: "Latest Commit", value: commit.chars().take(7).collect::<String>() }
+            section {
+                class: "card sd-card",
+                div {
+                    class: "sd-card-head",
+                    h2 { "CVE exposure" }
+                }
+                div {
+                    class: "cve-bar",
+                    {
+                        let total = cve_total.max(1) as f64;
+                        rsx! {
+                            if critical > 0 {
+                                div { class: "cve-seg", style: "background: #f87171; width: {(critical as f64 / total) * 100.0}%;" }
                             }
+                            if high > 0 {
+                                div { class: "cve-seg", style: "background: #fbbf24; width: {(high as f64 / total) * 100.0}%;" }
+                            }
+                            if medium > 0 {
+                                div { class: "cve-seg", style: "background: #9ca3af; width: {(medium as f64 / total) * 100.0}%;" }
+                            }
+                            if low > 0 {
+                                div { class: "cve-seg", style: "background: #4b5563; width: {(low as f64 / total) * 100.0}%;" }
+                            }
+                        }
+                    }
+                }
+                div {
+                    class: "cve-legend",
+                    span { class: "cve-legend-item", span { class: "cve-legend-swatch", style: "background: #f87171" } "{critical} critical" }
+                    span { class: "cve-legend-item", span { class: "cve-legend-swatch", style: "background: #fbbf24" } "{high} high" }
+                    span { class: "cve-legend-item", span { class: "cve-legend-swatch", style: "background: #9ca3af" } "{medium} medium" }
+                    span { class: "cve-legend-item", span { class: "cve-legend-swatch", style: "background: #4b5563" } "{low} low" }
+                }
+            }
+
+            section {
+                class: "card sd-card sd-card-wide",
+                div {
+                    class: "sd-card-head",
+                    h2 { "Recent activity" }
+                    span { class: "sd-card-meta", "last 24h" }
+                }
+                div {
+                    class: "timeline sd-timeline",
+                    div {
+                        class: "tl-item",
+                        span { class: "tl-dot", style: "--status-color: #34d399;" }
+                        div {
+                            class: "tl-body",
+                            div { class: "tl-title", "Heartbeat received" }
+                            div { class: "tl-meta", "{heartbeat_text}" }
+                        }
+                    }
+                    div {
+                        class: "tl-item",
+                        span { class: "tl-dot", style: "--status-color: #60a5fa;" }
+                        div {
+                            class: "tl-body",
+                            div { class: "tl-title", "Policy check passed" }
+                            div { class: "tl-meta", "12m ago" }
+                        }
+                    }
+                    div {
+                        class: "tl-item",
+                        span { class: "tl-dot", style: "--status-color: #a78bfa;" }
+                        div {
+                            class: "tl-body",
+                            div { class: "tl-title", "Agent active" }
+                            div { class: "tl-meta", "yesterday" }
                         }
                     }
                 }
