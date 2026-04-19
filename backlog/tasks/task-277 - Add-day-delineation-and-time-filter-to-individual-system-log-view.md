@@ -1,10 +1,10 @@
 ---
 id: TASK-277
 title: Add day delineation and time filter to individual system log view
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-04-19 12:30'
-updated_date: '2026-04-19 12:39'
+updated_date: '2026-04-19 12:58'
 labels:
   - ui
   - logs
