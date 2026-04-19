@@ -12,7 +12,10 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tokio::time::{Duration, interval};
 
-use crate::api::models::{ApiError, EvalQueueItem, EvalQueueSummary, ReorderEvalQueueRequest};
+use crate::api::models::{
+    ApiError, CancelEvalOutcome, EvalHistoryPage, EvalQueueItem, EvalQueueSummary,
+    ReorderEvalQueueRequest,
+};
 use crate::handlers::agent_request::CFState;
 use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_above};
 
@@ -411,6 +414,136 @@ pub async fn re_evaluate_commit(
                 "message": format!("Failed to reset evaluation: {}", e)
             })),
         ),
+    }
+}
+
+/// Cancel an evaluation (pending → cancelled; in_progress → cancelling).
+/// POST /api/v1/commits/:commit_id/cancel-evaluation
+pub async fn cancel_commit_evaluation(
+    Path(commit_id): Path<i32>,
+    State(state): State<CFState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if require_operator_or_admin(&state.pool, &headers)
+        .await
+        .is_none()
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+
+    match crate::queries::commits::cancel_commit_evaluation(&state.pool, commit_id).await {
+        Ok(CancelEvalOutcome::Cancelled) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "outcome": "cancelled" })),
+        )
+            .into_response(),
+        Ok(CancelEvalOutcome::CancellingInProgress) => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({ "outcome": "cancelling_in_progress" })),
+        )
+            .into_response(),
+        Ok(CancelEvalOutcome::AlreadyTerminal) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "conflict",
+                "message": "Evaluation is already in a terminal state"
+            })),
+        )
+            .into_response(),
+        Ok(CancelEvalOutcome::NotFound) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "not_found",
+                "message": format!("Commit {} not found", commit_id)
+            })),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!("Failed to cancel evaluation for commit {commit_id}: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// Force-cancel an evaluation stuck in 'cancelling' state.
+/// POST /api/v1/commits/:commit_id/force-cancel-evaluation
+pub async fn force_cancel_commit_evaluation(
+    Path(commit_id): Path<i32>,
+    State(state): State<CFState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if require_operator_or_admin(&state.pool, &headers)
+        .await
+        .is_none()
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+
+    match crate::queries::commits::force_cancel_commit_evaluation(&state.pool, commit_id).await {
+        Ok(true) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "outcome": "cancelled" })),
+        )
+            .into_response(),
+        Ok(false) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "conflict",
+                "message": "Evaluation was not in cancelling or in_progress state"
+            })),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!("Failed to force-cancel evaluation for commit {commit_id}: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// List paginated eval history (complete, failed, cancelled).
+/// GET /api/v1/commits/eval-history
+pub async fn list_eval_history(
+    State(state): State<CFState>,
+    headers: HeaderMap,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    if require_viewer_or_above(&state.pool, &headers)
+        .await
+        .is_none()
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+
+    let page: i64 = params
+        .get("page")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1)
+        .max(1);
+    let limit: i64 = params
+        .get("limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(50)
+        .clamp(1, 200);
+    let status_filter = params.get("status").map(|s| s.as_str());
+    let flake_filter = params.get("flake").map(|s| s.as_str());
+
+    match crate::queries::commits::list_eval_history(
+        &state.pool,
+        page,
+        limit,
+        status_filter,
+        flake_filter,
+    )
+    .await
+    {
+        Ok(page_result) => {
+            let body: EvalHistoryPage = page_result;
+            (StatusCode::OK, Json(body)).into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to list eval history: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
     }
 }
 

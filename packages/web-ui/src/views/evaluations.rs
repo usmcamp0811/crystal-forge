@@ -5,12 +5,21 @@ use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 
 use crate::api::{
-    client::{fetch_eval_queue, reorder_eval_queue},
-    models::{EvalQueueItem, EvalQueueSummary},
+    client::{
+        cancel_commit_evaluation, fetch_eval_history, fetch_eval_queue,
+        force_cancel_commit_evaluation, re_evaluate_commit, reorder_eval_queue,
+    },
+    models::{EvalHistoryItem, EvalHistoryPage, EvalQueueItem, EvalQueueSummary},
 };
 use crate::components::layout::Card;
 use crate::hooks::websocket::{ConnectionState, SystemEvalStatus, use_websocket_eval_stream};
 use crate::theme;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EvaluationsTab {
+    ActiveQueue,
+    History,
+}
 
 #[component]
 pub fn EvaluationsView() -> Element {
@@ -29,6 +38,31 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
     let mut refresh = use_signal(|| 0_u64);
     let mut reorder_error = use_signal(|| None::<String>);
     let mut drag_commit_id = use_signal(|| None::<i32>);
+
+    // Tab state
+    let mut active_tab = use_signal(|| EvaluationsTab::ActiveQueue);
+
+    // Cancel-in-flight tracking: set of commit_ids currently being cancelled
+    let mut cancelling_ids = use_signal(Vec::<i32>::new);
+
+    // History tab state
+    let mut history_page = use_signal(|| 1_i64);
+    let mut history_status_filter = use_signal(|| None::<String>);
+    let mut history_flake_filter = use_signal(|| String::new());
+
+    let history_resource = use_resource(move || async move {
+        let _ = refresh();
+        let page = history_page();
+        let status = history_status_filter();
+        let flake = history_flake_filter();
+        fetch_eval_history(
+            page,
+            50,
+            status.as_deref(),
+            if flake.is_empty() { None } else { Some(flake.as_str()) },
+        )
+        .await
+    });
 
     let queue_resource = use_resource(move || async move {
         let _ = refresh();
@@ -191,6 +225,29 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                 }
             }
 
+            // Tab bar — mirrors builds page
+            div {
+                class: "flex border-b border-slate-700",
+                button {
+                    class: if active_tab() == EvaluationsTab::ActiveQueue {
+                        "px-4 py-2 border-b-2 border-blue-500 text-blue-400 font-medium"
+                    } else {
+                        "px-4 py-2 border-b-2 border-transparent text-slate-400 hover:text-white transition-colors"
+                    },
+                    onclick: move |_| active_tab.set(EvaluationsTab::ActiveQueue),
+                    "Active Queue"
+                }
+                button {
+                    class: if active_tab() == EvaluationsTab::History {
+                        "px-4 py-2 border-b-2 border-blue-500 text-blue-400 font-medium"
+                    } else {
+                        "px-4 py-2 border-b-2 border-transparent text-slate-400 hover:text-white transition-colors"
+                    },
+                    onclick: move |_| active_tab.set(EvaluationsTab::History),
+                    "Eval History"
+                }
+            }
+
             if let Some(error) = reorder_error.read().clone() {
                 p {
                     class: "text-xs px-3 py-2 rounded-lg border text-red-100",
@@ -207,15 +264,17 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                 }
             }
 
-            if in_progress_count == 0 && pending_count > 0 {
-                p {
-                    class: "text-xs px-3 py-2 rounded-lg border text-amber-100",
-                    style: "background-color: #493E26; border-color: #8C7041;",
-                    "No evaluations are currently running. {pending_count} commit(s) are pending in queue. If this persists, the eval worker loop may be stalled."
+            if active_tab() == EvaluationsTab::ActiveQueue {
+                if in_progress_count == 0 && pending_count > 0 {
+                    p {
+                        class: "text-xs px-3 py-2 rounded-lg border text-amber-100",
+                        style: "background-color: #493E26; border-color: #8C7041;",
+                        "No evaluations are currently running. {pending_count} commit(s) are pending in queue. If this persists, the eval worker loop may be stalled."
+                    }
                 }
             }
 
-            // Full-width Evaluation Logs at the top
+            // Full-width Evaluation Logs at the top (active queue view only)
             Card {
                 title: Some("Evaluation Logs".to_string()),
                 children: rsx! {
@@ -335,18 +394,25 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                                             },
                                         );
 
-                                        let mut drag_start_signal = drag_commit_id.clone();
-                                        let mut drag_drop_signal = drag_commit_id.clone();
-                                        let mut selected_commit_signal = selected_commit_id.clone();
+                                         let mut drag_start_signal = drag_commit_id.clone();
+                                         let mut drag_drop_signal = drag_commit_id.clone();
+                                         let mut selected_commit_signal = selected_commit_id.clone();
 
-                                        let mut queue_items_drop = queue_items.clone();
-                                        let reorder_error_drop = reorder_error.clone();
+                                         let mut queue_items_drop = queue_items.clone();
+                                         let reorder_error_drop = reorder_error.clone();
 
-                                        let mut queue_items_up = queue_items.clone();
-                                        let reorder_error_up = reorder_error.clone();
+                                         let mut queue_items_up = queue_items.clone();
+                                         let reorder_error_up = reorder_error.clone();
 
-                                        let mut queue_items_down = queue_items.clone();
-                                        let reorder_error_down = reorder_error.clone();
+                                         let mut queue_items_down = queue_items.clone();
+                                         let reorder_error_down = reorder_error.clone();
+
+                                         let eval_status = item.evaluation_status.clone();
+                                         let is_cancelling = eval_status == "cancelling";
+                                         let can_cancel = matches!(eval_status.as_str(), "pending" | "in_progress");
+                                         let cancel_in_flight = cancelling_ids.read().contains(&commit_id);
+                                         let mut cancelling_ids_cancel = cancelling_ids.clone();
+                                         let mut refresh_cancel = refresh.clone();
 
                                         rsx! {
                                             button {
@@ -408,27 +474,13 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                                                             disabled: !can_move_up,
                                                             onclick: move |evt| {
                                                                 evt.stop_propagation();
-                                                                if !can_move_up {
-                                                                    return;
-                                                                }
-                                                                let mut reordered = queue_items_up
-                                                                    .read()
-                                                                    .iter()
-                                                                    .filter(|entry| is_active_eval_status(&entry.evaluation_status))
-                                                                    .cloned()
-                                                                    .collect::<Vec<_>>();
-                                                                if let Some(current_index) = reordered
-                                                                    .iter()
-                                                                    .position(|entry| entry.commit_id == commit_id)
-                                                                {
-                                                                    if current_index > 0 {
-                                                                        reordered.swap(current_index - 1, current_index);
+                                                                if !can_move_up { return; }
+                                                                let mut reordered = queue_items_up.read().iter().filter(|e| is_active_eval_status(&e.evaluation_status)).cloned().collect::<Vec<_>>();
+                                                                if let Some(i) = reordered.iter().position(|e| e.commit_id == commit_id) {
+                                                                    if i > 0 {
+                                                                        reordered.swap(i - 1, i);
                                                                         queue_items_up.with_mut(|all| apply_active_reorder(all, &reordered));
-                                                                        let ordered_ids = reordered
-                                                                            .iter()
-                                                                            .map(|entry| entry.commit_id)
-                                                                            .collect::<Vec<_>>();
-                                                                        spawn_reorder_request(ordered_ids, reorder_error_up);
+                                                                        spawn_reorder_request(reordered.iter().map(|e| e.commit_id).collect(), reorder_error_up);
                                                                     }
                                                                 }
                                                             },
@@ -439,31 +491,50 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                                                             disabled: !can_move_down,
                                                             onclick: move |evt| {
                                                                 evt.stop_propagation();
-                                                                if !can_move_down {
-                                                                    return;
-                                                                }
-                                                                let mut reordered = queue_items_down
-                                                                    .read()
-                                                                    .iter()
-                                                                    .filter(|entry| is_active_eval_status(&entry.evaluation_status))
-                                                                    .cloned()
-                                                                    .collect::<Vec<_>>();
-                                                                if let Some(current_index) = reordered
-                                                                    .iter()
-                                                                    .position(|entry| entry.commit_id == commit_id)
-                                                                {
-                                                                    if current_index + 1 < reordered.len() {
-                                                                        reordered.swap(current_index, current_index + 1);
+                                                                if !can_move_down { return; }
+                                                                let mut reordered = queue_items_down.read().iter().filter(|e| is_active_eval_status(&e.evaluation_status)).cloned().collect::<Vec<_>>();
+                                                                if let Some(i) = reordered.iter().position(|e| e.commit_id == commit_id) {
+                                                                    if i + 1 < reordered.len() {
+                                                                        reordered.swap(i, i + 1);
                                                                         queue_items_down.with_mut(|all| apply_active_reorder(all, &reordered));
-                                                                        let ordered_ids = reordered
-                                                                            .iter()
-                                                                            .map(|entry| entry.commit_id)
-                                                                            .collect::<Vec<_>>();
-                                                                        spawn_reorder_request(ordered_ids, reorder_error_down);
+                                                                        spawn_reorder_request(reordered.iter().map(|e| e.commit_id).collect(), reorder_error_down);
                                                                     }
                                                                 }
                                                             },
                                                             "Down"
+                                                        }
+                                                        if can_cancel {
+                                                            button {
+                                                                class: "px-2 py-1 text-xs rounded text-white bg-red-700 hover:bg-red-600 transition-colors disabled:opacity-40 disabled:cursor-not-allowed",
+                                                                disabled: cancel_in_flight,
+                                                                onclick: move |evt| {
+                                                                    evt.stop_propagation();
+                                                                    if cancel_in_flight { return; }
+                                                                    cancelling_ids_cancel.with_mut(|ids| ids.push(commit_id));
+                                                                    let mut ids_done = cancelling_ids_cancel.clone();
+                                                                    let mut refresh_done = refresh_cancel.clone();
+                                                                    spawn(async move {
+                                                                        let _ = cancel_commit_evaluation(commit_id).await;
+                                                                        ids_done.with_mut(|ids| ids.retain(|&id| id != commit_id));
+                                                                        refresh_done.set(refresh_done() + 1);
+                                                                    });
+                                                                },
+                                                                if cancel_in_flight { "…" } else { "Cancel" }
+                                                            }
+                                                        }
+                                                        if is_cancelling {
+                                                            button {
+                                                                class: "px-2 py-1 text-xs rounded text-white bg-orange-700 hover:bg-orange-600 transition-colors",
+                                                                onclick: move |evt| {
+                                                                    evt.stop_propagation();
+                                                                    let mut refresh_fc = refresh_cancel.clone();
+                                                                    spawn(async move {
+                                                                        let _ = force_cancel_commit_evaluation(commit_id).await;
+                                                                        refresh_fc.set(refresh_fc() + 1);
+                                                                    });
+                                                                },
+                                                                "Force Cancel"
+                                                            }
                                                         }
                                                     }
                                                 }
@@ -471,9 +542,9 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                                         }
                                     }
                                 }
-                                if active_items.is_empty() {
-                                    p { class: "text-sm text-gray-400", "No active evaluations in queue." }
-                                }
+                            }
+                            if active_items.is_empty() {
+                                p { class: "text-sm text-gray-400", "No active evaluations in queue." }
                             }
                         }
                     }
@@ -564,6 +635,188 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                     }
                 }
             }
+            // ── History tab ──────────────────────────────────────────────────
+            if active_tab() == EvaluationsTab::History {
+                div { class: "space-y-4",
+
+                    // Filter bar
+                    div { class: "flex flex-wrap items-center gap-3",
+                        // Status filter chips
+                        div { class: "flex items-center gap-1",
+                            span { class: "text-xs text-slate-400 mr-1", "Status:" }
+                            for (label, value) in [("All", ""), ("Complete", "complete"), ("Failed", "failed"), ("Cancelled", "cancelled")] {
+                                {
+                                    let filter_val = value.to_string();
+                                    let is_active = history_status_filter.read().as_deref().unwrap_or("") == value;
+                                    rsx! {
+                                        button {
+                                            key: "filter-{label}",
+                                            class: if is_active {
+                                                "px-2 py-1 text-[11px] rounded border border-blue-500 bg-blue-900/40 text-blue-200"
+                                            } else {
+                                                "px-2 py-1 text-[11px] rounded border border-slate-600 text-slate-400 hover:border-slate-400 transition-colors"
+                                            },
+                                            onclick: move |_| {
+                                                history_status_filter.set(if filter_val.is_empty() { None } else { Some(filter_val.clone()) });
+                                                history_page.set(1);
+                                                refresh.set(refresh() + 1);
+                                            },
+                                            "{label}"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // Flake name filter
+                        input {
+                            class: "px-2 py-1 rounded border border-slate-600 bg-slate-900 text-slate-200 text-xs w-40 focus:outline-none focus:border-blue-500",
+                            r#type: "text",
+                            placeholder: "Filter by flake…",
+                            value: "{history_flake_filter}",
+                            oninput: move |evt| {
+                                history_flake_filter.set(evt.value().clone());
+                                history_page.set(1);
+                                refresh.set(refresh() + 1);
+                            }
+                        }
+                    }
+
+                    // History table
+                    Card {
+                        title: Some("Evaluation History".to_string()),
+                        children: rsx! {
+                            match &*history_resource.read() {
+                                Some(Ok(page_data)) => rsx! {
+                                    div { class: "overflow-x-auto",
+                                        table { class: "w-full text-sm",
+                                            thead {
+                                                tr { class: "border-b border-slate-700 text-left",
+                                                    th { class: "py-2 pr-3 text-xs font-medium text-slate-400", "Commit" }
+                                                    th { class: "py-2 pr-3 text-xs font-medium text-slate-400", "Flake" }
+                                                    th { class: "py-2 pr-3 text-xs font-medium text-slate-400", "Branch" }
+                                                    th { class: "py-2 pr-3 text-xs font-medium text-slate-400", "Status" }
+                                                    th { class: "py-2 pr-3 text-xs font-medium text-slate-400", "Completed" }
+                                                    th { class: "py-2 pr-3 text-xs font-medium text-slate-400", "Duration" }
+                                                    th { class: "py-2 pr-3 text-xs font-medium text-slate-400", "Systems" }
+                                                    th { class: "py-2 text-xs font-medium text-slate-400", "" }
+                                                }
+                                            }
+                                            tbody {
+                                                for item in page_data.items.iter() {
+                                                    {
+                                                        let item = item.clone();
+                                                        let commit_id = item.commit_id;
+                                                        rsx! {
+                                                            tr { key: "hist-{commit_id}", class: "border-b border-slate-800/70",
+                                                                td { class: "py-2 pr-3 font-mono text-slate-300 text-xs",
+                                                                    "{item.commit_hash.chars().take(8).collect::<String>()}"
+                                                                }
+                                                                td { class: "py-2 pr-3 text-slate-200 text-xs", "{item.flake_name}" }
+                                                                td { class: "py-2 pr-3 text-slate-400 text-xs", "{item.branch}" }
+                                                                td { class: "py-2 pr-3",
+                                                                    span {
+                                                                        class: "inline-flex px-2 py-0.5 text-[10px] rounded border {eval_status_class(&item.evaluation_status)}",
+                                                                        "{item.evaluation_status}"
+                                                                    }
+                                                                }
+                                                                td { class: "py-2 pr-3 text-slate-400 text-xs",
+                                                                    "{format_eval_completed_at(&item)}"
+                                                                }
+                                                                td { class: "py-2 pr-3 text-slate-400 text-xs",
+                                                                    "{format_eval_duration(&item)}"
+                                                                }
+                                                                td { class: "py-2 pr-3 text-slate-400 text-xs",
+                                                                    "{item.system_count}"
+                                                                }
+                                                                td { class: "py-2 text-right",
+                                                                    if item.evaluation_status == "failed" || item.evaluation_status == "cancelled" {
+                                                                        button {
+                                                                            class: "text-[10px] px-2 py-1 rounded transition-colors cf-action-link",
+                                                                            onclick: move |_| {
+                                                                                let mut refresh_re = refresh.clone();
+                                                                                spawn(async move {
+                                                                                    let _ = re_evaluate_commit(commit_id).await;
+                                                                                    refresh_re.set(refresh_re() + 1);
+                                                                                });
+                                                                            },
+                                                                            "Re-evaluate"
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                            // Error message row (collapsed under item)
+                                                            if let Some(err) = item.evaluation_error_message.clone() {
+                                                                if !err.is_empty() {
+                                                                    tr { key: "hist-err-{commit_id}", class: "border-b border-slate-800/70",
+                                                                        td { colspan: "8", class: "pb-2 pt-0 px-2",
+                                                                            p { class: "text-[10px] font-mono text-red-400 bg-red-950/30 rounded px-2 py-1 truncate",
+                                                                                title: "{err}",
+                                                                                "{err}"
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                if page_data.items.is_empty() {
+                                                    tr {
+                                                        td { colspan: "8", class: "py-4 text-center text-slate-400 text-sm",
+                                                            "No evaluation history yet."
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Pagination
+                                    if page_data.total_count > page_data.limit {
+                                        div { class: "flex items-center justify-between mt-3 pt-3 border-t border-slate-700",
+                                            span { class: "text-xs text-slate-400",
+                                                "Showing {((page_data.page - 1) * page_data.limit) + 1}–{(page_data.page * page_data.limit).min(page_data.total_count)} of {page_data.total_count}"
+                                            }
+                                            div { class: "flex items-center gap-2",
+                                                button {
+                                                    class: "px-3 py-1 text-xs rounded border border-slate-600 text-slate-300 hover:border-slate-400 disabled:opacity-40 disabled:cursor-not-allowed transition-colors",
+                                                    disabled: page_data.page <= 1,
+                                                    onclick: move |_| {
+                                                        history_page.set((history_page() - 1).max(1));
+                                                        refresh.set(refresh() + 1);
+                                                    },
+                                                    "← Prev"
+                                                }
+                                                span { class: "text-xs text-slate-400",
+                                                    "Page {page_data.page}"
+                                                }
+                                                button {
+                                                    class: "px-3 py-1 text-xs rounded border border-slate-600 text-slate-300 hover:border-slate-400 disabled:opacity-40 disabled:cursor-not-allowed transition-colors",
+                                                    disabled: page_data.page * page_data.limit >= page_data.total_count,
+                                                    onclick: move |_| {
+                                                        history_page.set(history_page() + 1);
+                                                        refresh.set(refresh() + 1);
+                                                    },
+                                                    "Next →"
+                                                }
+                                            }
+                                        }
+                                    }
+                                },
+                                Some(Err(e)) => rsx! {
+                                    p { class: "text-sm text-red-400", "Failed to load eval history: {e}" }
+                                },
+                                None => rsx! {
+                                    div { class: "flex items-center gap-2 text-slate-400 py-4",
+                                        div { class: "animate-spin rounded-full h-4 w-4 border-b-2 border-slate-400" }
+                                        p { class: "text-sm", "Loading history…" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } // end History tab
         }
 
         // Modal for maximized logs - OUTSIDE main content div for proper z-index layering
@@ -783,7 +1036,7 @@ fn is_active_eval_status(status: &str) -> bool {
     let normalized = status.trim().to_ascii_lowercase();
     matches!(
         normalized.as_str(),
-        "pending" | "in_progress" | "in-progress" | "in progress"
+        "pending" | "in_progress" | "in-progress" | "in progress" | "cancelling"
     )
 }
 
@@ -811,6 +1064,8 @@ fn eval_status_class(status: &str) -> &'static str {
     let normalized = status.trim().to_ascii_lowercase();
     match normalized.as_str() {
         "in_progress" | "in-progress" => "cf-eval-chip-active",
+        "cancelling" => "cf-chip-amber",
+        "cancelled" => "cf-chip-slate",
         "pending" => "cf-eval-chip-pending",
         "complete" => "cf-eval-chip-complete",
         "failed" => "cf-eval-chip-failed",
@@ -822,12 +1077,43 @@ fn eval_status_help(status: &str) -> &'static str {
     let normalized = status.trim().to_ascii_lowercase();
     match normalized.as_str() {
         "pending" => "Waiting in queue",
-        "in-progress" => "Evaluation currently running",
-        "in_progress" => "Evaluation currently running",
+        "in-progress" | "in_progress" => "Evaluation currently running",
+        "cancelling" => "Cancellation requested — killing subprocess",
+        "cancelled" => "Evaluation was cancelled",
         "complete" => "Evaluation completed",
         "failed" => "Evaluation failed",
         _ => "Unknown evaluation state",
     }
+}
+
+fn format_eval_completed_at(item: &EvalHistoryItem) -> String {
+    item.evaluation_completed_at
+        .map(|dt| {
+            let secs = (chrono::Utc::now() - dt).num_seconds();
+            if secs < 60 {
+                format!("{secs}s ago")
+            } else if secs < 3600 {
+                format!("{}m ago", secs / 60)
+            } else if secs < 86400 {
+                format!("{}h ago", secs / 3600)
+            } else {
+                format!("{}d ago", secs / 86400)
+            }
+        })
+        .unwrap_or_else(|| "—".to_string())
+}
+
+fn format_eval_duration(item: &EvalHistoryItem) -> String {
+    item.evaluation_duration_ms
+        .map(|ms| {
+            let secs = ms / 1000;
+            if secs < 60 {
+                format!("{secs}s")
+            } else {
+                format!("{}m {}s", secs / 60, secs % 60)
+            }
+        })
+        .unwrap_or_else(|| "—".to_string())
 }
 
 fn connection_badge_class(state: &ConnectionState) -> &'static str {
