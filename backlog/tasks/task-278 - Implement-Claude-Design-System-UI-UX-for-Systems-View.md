@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@ai-agent'
 created_date: '2026-04-19 17:54'
-updated_date: '2026-04-20 02:03'
+updated_date: '2026-04-20 02:09'
 labels:
   - ui
   - systems
@@ -53,7 +53,7 @@ Implement the Claude Design System-inspired UI/UX for the Systems view (`/system
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Committed 249ddbd6 to finish a broader System Detail parity sweep: Overview now uses current commit messaging where available and shows prototype-style chip/callout/button icons, FQDN formatting is closer to the handoff, Logs regained prototype-like tail/clear/download controls, and Config was reshaped toward the prototype's Rendered module + Drift sections.
+Committed e81c5805 to move the sidebar collapse/expand control into the top-right topbar icon cluster, replacing the previous tweaks-position button and removing the duplicate brand-row control in the sidebar.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
