@@ -3,9 +3,9 @@ id: TASK-278
 title: Implement Claude Design System UI/UX for Systems View
 status: In Progress
 assignee:
-  - ai-agent
+  - '@ai-agent'
 created_date: '2026-04-19 17:54'
-updated_date: '2026-04-20 00:22'
+updated_date: '2026-04-20 00:35'
 labels:
   - ui
   - systems
@@ -53,11 +53,9 @@ Implement the Claude Design System-inspired UI/UX for the Systems view (`/system
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Moved to Review after opening MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/243
+Applied follow-up deploy/detail parity fix in commit 64e21322: removed branch dropdown, deduplicated deploy commit list by hash, changed commit list messaging away from configuration identity text, added hover titles for truncated commit fields, reduced policy-callout check icon size, and aligned metric strip to 5-card desktop layout with responsive breakpoints.
 
-Latest pass included sidebar lock + persistent user profile behavior in rail/mobile and overview card parity refinements.
-
-Local verification executed: cargo fmt --all and cargo check in packages/web-ui.
+Created follow-up backlog task TASK-278.1 to add real generation data in API/DTO so the metric strip can replace #— placeholder.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
