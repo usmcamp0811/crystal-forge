@@ -25,7 +25,9 @@ use crate::components::system::{DeploySystemModal, EditSystemModal, SystemCard, 
 use crate::components::systems_stat_strip::SystemsStatStrip;
 use crate::components::tables::SystemsTable;
 use crate::components::{Chip, ChipVariant, EnvBadge};
-use crate::environments::adapter::load_environment_names_with_fallback;
+use crate::environments::adapter::{
+    load_environment_colors_with_fallback, load_environment_names_with_fallback,
+};
 use crate::routes::Route;
 use crate::state::app_state::AppState;
 use crate::state::auth;
@@ -159,6 +161,8 @@ pub fn SystemsListView() -> Element {
 
     let environment_names_resource =
         use_resource(move || async move { load_environment_names_with_fallback().await });
+    let environment_colors_resource =
+        use_resource(move || async move { load_environment_colors_with_fallback().await });
     let flake_names_resource =
         use_resource(move || async move { load_flake_names_with_fallback().await });
 
@@ -193,6 +197,11 @@ pub fn SystemsListView() -> Element {
             .map(|r| r.redirect_to_login)
             .unwrap_or(false)
         || environment_names_resource
+            .read_unchecked()
+            .as_ref()
+            .map(|r| r.redirect_to_login)
+            .unwrap_or(false)
+        || environment_colors_resource
             .read_unchecked()
             .as_ref()
             .map(|r| r.redirect_to_login)
@@ -244,6 +253,11 @@ pub fn SystemsListView() -> Element {
         .as_ref()
         .map(|r| r.names.clone())
         .unwrap_or_else(fallback_flake_names);
+    let environment_color_pairs = environment_colors_resource
+        .read_unchecked()
+        .as_ref()
+        .map(|r| r.colors.clone())
+        .unwrap_or_default();
 
     let filtered_systems: Vec<SystemSummary> = current_systems
         .into_iter()
@@ -497,7 +511,8 @@ pub fn SystemsListView() -> Element {
 
             // Statistics Strip
             SystemsStatStrip {
-                systems: local_systems.read().clone()
+                systems: local_systems.read().clone(),
+                environment_colors: environment_color_pairs.clone(),
             }
 
             // System Form Modal

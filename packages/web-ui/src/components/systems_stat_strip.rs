@@ -97,14 +97,21 @@ fn StatCard(
 }
 
 /// Environment color mapping for spark bar visualization.
-fn env_color(env_name: &str) -> &'static str {
+fn env_color(env_name: &str, environment_colors: &[(String, String)]) -> String {
+    if let Some((_, color_hex)) = environment_colors
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(env_name))
+    {
+        return color_hex.clone();
+    }
+
     match env_name.to_lowercase().as_str() {
-        "production" | "prod" => "#f87171",
-        "staging" | "stage" => "#fbbf24",
-        "dev" | "development" => "#60a5fa",
-        "edge" => "#2dd4bf",
-        "lab" => "#a78bfa",
-        _ => "#6b7280",
+        "production" | "prod" => "#f87171".to_string(),
+        "staging" | "stage" => "#fbbf24".to_string(),
+        "dev" | "development" => "#60a5fa".to_string(),
+        "edge" => "#2dd4bf".to_string(),
+        "lab" => "#a78bfa".to_string(),
+        _ => "#6b7280".to_string(),
     }
 }
 
@@ -119,7 +126,10 @@ fn env_color(env_name: &str) -> &'static str {
 /// }
 /// ```
 #[component]
-pub fn SystemsStatStrip(systems: Vec<SystemSummary>) -> Element {
+pub fn SystemsStatStrip(
+    systems: Vec<SystemSummary>,
+    #[props(default)] environment_colors: Vec<(String, String)>,
+) -> Element {
     let stats = SystemsStats::from_systems(&systems);
     let needing_attention = stats.warning + stats.critical + stats.offline;
     let env_count = stats.env_distribution.len();
@@ -142,15 +152,7 @@ pub fn SystemsStatStrip(systems: Vec<SystemSummary>) -> Element {
                             for (env, count) in stats.env_distribution.iter() {
                                 {
                                     let pct = (*count as f64 / stats.total as f64) * 100.0;
-                                    let color = env_color(env);
-
-                                    // Debug: log spark bar segment data
-                                    #[cfg(debug_assertions)]
-                                    {
-                                        let msg = format!("SparkBar: env='{}' count={} pct={:.1}% color={}",
-                                            env, count, pct, color);
-                                        web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&msg));
-                                    }
+                                    let color = env_color(env, &environment_colors);
 
                                     let env_title = format!("{}: {}", env, count);
                                     let segment_style = format!("width: {:.1}%; background: {};", pct, color);
