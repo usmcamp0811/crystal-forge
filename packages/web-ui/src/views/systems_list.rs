@@ -1034,6 +1034,18 @@ fn SystemPreviewPanel(
     on_open_detail: EventHandler<()>,
     on_deploy: EventHandler<()>,
 ) -> Element {
+    let mut now_tick = use_signal(chrono::Utc::now);
+    use_effect(move || {
+        spawn(async move {
+            loop {
+                gloo_timers::future::TimeoutFuture::new(1000).await;
+                now_tick.set(chrono::Utc::now());
+            }
+        });
+    });
+
+    let now = now_tick();
+
     let status_color = match detail.health_status {
         HealthStatus::Healthy => "#34d399",
         HealthStatus::Warning => "#fbbf24",
@@ -1044,22 +1056,11 @@ fn SystemPreviewPanel(
     let heartbeat_interval_sec = 60_i64;
     let heartbeat_next_in_sec = detail
         .last_seen
-        .map(|dt| 60.0 - chrono::Utc::now().signed_duration_since(dt).num_seconds() as f64)
+        .map(|dt| 60.0 - now.signed_duration_since(dt).num_seconds() as f64)
         .unwrap_or(0.0);
     let last_heartbeat = detail
         .last_seen
-        .map(|dt| {
-            let diff = chrono::Utc::now().signed_duration_since(dt);
-            if diff.num_seconds() < 60 {
-                format!("{}s ago", diff.num_seconds().max(0))
-            } else if diff.num_minutes() < 60 {
-                format!("{}m ago", diff.num_minutes().max(0))
-            } else if diff.num_hours() < 24 {
-                format!("{}h ago", diff.num_hours().max(0))
-            } else {
-                format!("{}d ago", diff.num_days().max(0))
-            }
-        })
+        .map(|dt| format_relative_time_from(now, dt))
         .unwrap_or_else(|| "Never".to_string());
 
     let (env_fg, env_bg, env_border) =
@@ -1108,11 +1109,26 @@ fn SystemPreviewPanel(
         | DeploymentStatus::Unknown => ChipVariant::Unknown,
     };
 
-    let timeline = vec![
-        ("Evaluation completed", "#34d399", "2m ago"),
-        ("Heartbeat received", "#60a5fa", "12s ago"),
-        ("Policy check passed", "#a78bfa", "9m ago"),
+    let mut timeline = vec![
+        (
+            "System record updated".to_string(),
+            "#34d399".to_string(),
+            detail.updated_at,
+        ),
+        (
+            "System registered".to_string(),
+            "#a78bfa".to_string(),
+            detail.created_at,
+        ),
     ];
+    if let Some(last_seen_at) = detail.last_seen {
+        timeline.push((
+            "Heartbeat received".to_string(),
+            "#60a5fa".to_string(),
+            last_seen_at,
+        ));
+    }
+    timeline.sort_by(|a, b| b.2.cmp(&a.2));
 
     rsx! {
         div {
@@ -1262,7 +1278,7 @@ fn SystemPreviewPanel(
                                 div {
                                     class: "tl-body",
                                     div { class: "tl-title", "{title}" }
-                                    div { class: "tl-meta", "{at}" }
+                                    div { class: "tl-meta", "{format_relative_time_from(now, at)}" }
                                 }
                             }
                         }
@@ -1302,6 +1318,22 @@ fn format_uptime(seconds: Option<i64>) -> String {
     } else {
         let minutes = (total % 3_600) / 60;
         format!("{}h {}m", hours, minutes)
+    }
+}
+
+fn format_relative_time_from(
+    now: chrono::DateTime<chrono::Utc>,
+    at: chrono::DateTime<chrono::Utc>,
+) -> String {
+    let diff = now.signed_duration_since(at);
+    if diff.num_seconds() < 60 {
+        format!("{}s ago", diff.num_seconds().max(0))
+    } else if diff.num_minutes() < 60 {
+        format!("{}m ago", diff.num_minutes().max(0))
+    } else if diff.num_hours() < 24 {
+        format!("{}h ago", diff.num_hours().max(0))
+    } else {
+        format!("{}d ago", diff.num_days().max(0))
     }
 }
 
