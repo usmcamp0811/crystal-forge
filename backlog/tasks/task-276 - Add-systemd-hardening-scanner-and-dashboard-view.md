@@ -4,7 +4,7 @@ title: Add systemd hardening scanner and dashboard view
 status: In Progress
 assignee: []
 created_date: '2026-04-19 02:43'
-updated_date: '2026-04-20 20:37'
+updated_date: '2026-04-20 20:58'
 labels:
   - feature
   - security
@@ -46,7 +46,7 @@ Create a feature to scan NixOS system configurations for systemd service hardeni
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-LOCK: gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-276-systemd-hardening-scanner
+Rebased branch onto latest dev (includes TASK-278 Systems UI/UX parity merge), resolved conflicts in `packages/web-ui/src/views/system_detail.rs` and `packages/web-ui/src/components/layout/sidebar.rs`, and preserved hardening-tab behavior/style token alignment. Verification rerun: `nix develop -c cargo check` (packages/web-ui) and `nix build .#checks.x86_64-linux.web-ui --print-out-paths` (pass). Force-pushed updated branch: `92fd62c4`.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
