@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@ai-agent'
 created_date: '2026-04-19 17:54'
-updated_date: '2026-04-20 00:58'
+updated_date: '2026-04-20 01:38'
 labels:
   - ui
   - systems
@@ -53,9 +53,7 @@ Implement the Claude Design System-inspired UI/UX for the Systems view (`/system
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Reviewed external handoff README and fully read `crystal-forge/project/Systems View.html` plus all imported files (`styles.css`, `data.js`, `components/Icon.jsx`, `components/Shell.jsx`, `components/Systems.jsx`, `components/SystemDetail.jsx`, `app.jsx`) before comparing against MR branch UI.
-
-Applied parity corrections in commit 21fa495a: restored Deploy branch selector, restored heartbeat label rendering in top metric strip, and matched callout check icon sizing to prototype. Kept recent de-duplication and hover-title improvements where they do not alter visual intent.
+Committed 670dd851 to finish a stricter prototype parity sweep for System Detail header/tabs: matched back-button treatment, header spacing, tab-strip styling, removed non-prototype sticky/background behavior, and aligned CVEs tab badge semantics to show critical count only.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
