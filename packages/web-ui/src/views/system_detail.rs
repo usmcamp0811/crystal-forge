@@ -1232,14 +1232,24 @@ fn DeployTab(
         .unwrap_or_default();
 
     let mut selected_commit = use_signal(|| default_commit);
-    let mut selected_branch = use_signal(|| "main".to_string());
     let mut show_diff = use_signal(|| false);
 
-    let selected = commits
+    let displayed_commits = {
+        use std::collections::HashSet;
+
+        let mut seen_hashes: HashSet<String> = HashSet::new();
+        commits
+            .iter()
+            .filter(|commit| seen_hashes.insert(commit.hash.clone()))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+
+    let selected = displayed_commits
         .iter()
         .find(|c| c.hash == *selected_commit.read())
         .cloned()
-        .or_else(|| commits.first().cloned());
+        .or_else(|| displayed_commits.first().cloned());
 
     // Pre-compute values for the plan panel (outside rsx! to avoid borrow issues)
     let from_commit = system
@@ -1263,9 +1273,9 @@ fn DeployTab(
                     h2 { "Select commit" }
                 }
 
-                // Flake + Branch dropdowns (exactly like design)
+                // Flake dropdown
                 div {
-                    class: "sd-deploy-picker",
+                    class: "sd-deploy-picker single",
                     div {
                         class: "sd-field",
                         label { "Flake" }
@@ -1274,30 +1284,18 @@ fn DeployTab(
                             option { value: "{flake_name}", "{flake_name}" }
                         }
                     }
-                    div {
-                        class: "sd-field",
-                        label { "Branch" }
-                        select {
-                            class: "input filter-select focus-ring",
-                            value: "{selected_branch}",
-                            onchange: move |evt| selected_branch.set(evt.value()),
-                            option { value: "main", "main" }
-                            option { value: "staging", "staging" }
-                            option { value: "dev", "dev" }
-                        }
-                    }
                 }
 
                 // Commit list (scrollable, same as design)
                 div {
                     class: "sd-commit-list",
-                    if commits.is_empty() {
+                    if displayed_commits.is_empty() {
                         div {
                             style: "padding: 16px; color: var(--cf-text-muted); font-size: 13px;",
                             "No commits available for this system."
                         }
                     }
-                    for commit in commits.iter().cloned() {
+                    for commit in displayed_commits.iter().cloned() {
                         {
                             let is_selected = selected_commit() == commit.hash;
                             let item_class = if is_selected {
@@ -1305,7 +1303,12 @@ fn DeployTab(
                             } else {
                                 "sd-commit-item focus-ring"
                             };
+                            let commit_hash_for_key = commit.hash.clone();
+                            let commit_hash_for_select = commit.hash.clone();
+                            let commit_hash_for_title = commit.hash.clone();
                             let short_hash = commit.hash.chars().take(7).collect::<String>();
+                            let commit_message = commit.message.clone();
+                            let commit_author = commit.author.clone();
                             let when_text = {
                                 let now = chrono::Utc::now();
                                 let d = now.signed_duration_since(commit.committed_at);
@@ -1321,12 +1324,24 @@ fn DeployTab(
                             };
                             rsx! {
                                 button {
-                                    key: "{commit.hash}",
+                                    key: "{commit_hash_for_key}",
                                     class: "{item_class}",
-                                    onclick: move |_| selected_commit.set(commit.hash.clone()),
-                                    span { class: "mono sd-commit-sha", "{short_hash}" }
-                                    span { class: "sd-commit-msg", "{commit.message}" }
-                                    span { class: "sd-commit-meta mono", "{commit.author}" }
+                                    onclick: move |_| selected_commit.set(commit_hash_for_select.clone()),
+                                    span {
+                                        class: "mono sd-commit-sha",
+                                        title: "{commit_hash_for_title}",
+                                        "{short_hash}"
+                                    }
+                                    span {
+                                        class: "sd-commit-msg",
+                                        title: "{commit_message}",
+                                        "{commit_message}"
+                                    }
+                                    span {
+                                        class: "sd-commit-meta mono",
+                                        title: "{commit_author}",
+                                        "{commit_author}"
+                                    }
                                     span { class: "sd-commit-meta", "{when_text}" }
                                     if commit.is_current {
                                         span { class: "chip chip-info", "current" }
@@ -1406,7 +1421,7 @@ fn DeployTab(
                                 class: "sd-callout sd-callout-info",
                                 // check icon
                                 svg {
-                                    class: "w-3.5 h-3.5",
+                                    class: "w-3 h-3",
                                     style: "color: #60a5fa; flex-shrink: 0; margin-top: 1px;",
                                     fill: "none",
                                     stroke: "currentColor",
@@ -3001,16 +3016,26 @@ fn map_history_entries_to_commit_history(
                 status_fragments.push("Revert detected".to_string());
             }
 
+            let message = {
+                let reason = entry.change_reason.replace('_', " ");
+                let outcome = entry.outcome.replace('_', " ");
+
+                if reason.trim().is_empty() {
+                    config_identity
+                        .clone()
+                        .map(|value| format!("Configuration {value}"))
+                        .unwrap_or_else(|| "Configuration update".to_string())
+                } else if outcome.trim().is_empty() {
+                    reason
+                } else {
+                    format!("{reason}: {outcome}")
+                }
+            };
+
             SystemCommitHistory {
                 hash,
-                message: config_identity
-                    .clone()
-                    .map(|value| format!("Configuration {value}"))
-                    .unwrap_or_else(|| "Configuration update".to_string()),
-                author: format!(
-                    "{} · {} · {}",
-                    entry.actor, entry.change_reason, entry.outcome
-                ),
+                message,
+                author: entry.actor.clone(),
                 committed_at: entry.timestamp,
                 was_deployed: true,
                 deployed_at: Some(entry.timestamp),
