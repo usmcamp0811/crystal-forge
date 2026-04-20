@@ -46,7 +46,7 @@ Create a feature to scan NixOS system configurations for systemd service hardeni
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-LOCK: gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-276-systemd-hardening-scanner
+Rebased onto dev after TASK-278 merge, resolved conflicts, reran `nix develop -c cargo check` and `nix build .#checks.x86_64-linux.web-ui --print-out-paths`, then force-pushed branch at 92fd62c4.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
