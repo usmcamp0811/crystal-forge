@@ -18,91 +18,49 @@ pub fn MultiSelectDropdown<T: Clone + PartialEq + 'static>(
     dropdown_id: String,
     all_label: String,
 ) -> Element {
-    let is_open = *open_dropdown.read() == Some(dropdown_id.clone());
-    let display_label = if selected.read().is_empty() {
-        all_label.clone()
-    } else if selected.read().len() == 1 {
+    // These are no longer needed with native select controls, but are kept in
+    // the component signature to avoid touching call sites.
+    let _ = open_dropdown;
+    let _ = dropdown_id;
+
+    let selected_index = selected.read().first().and_then(|current| {
         options
             .iter()
-            .find(|(opt, _)| selected.read().contains(opt))
-            .map(|(_, label)| label.clone())
-            .unwrap_or_else(|| all_label.clone())
-    } else {
-        format!("{} selected", selected.read().len())
-    };
+            .position(|(value, _)| value == current)
+            .map(|idx| idx.to_string())
+    });
 
     rsx! {
         div {
             class: "relative",
-            button {
-                class: "w-full flex items-center justify-between rounded-lg px-4 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
-                onclick: move |_| {
-                    if is_open {
-                        open_dropdown.set(None);
-                    } else {
-                        open_dropdown.set(Some(dropdown_id.clone()));
+            label {
+                class: "sr-only",
+                r#for: "filter-{label}",
+                "{label}"
+            }
+            select {
+                id: "filter-{label}",
+                class: "input filter-select focus-ring w-full {theme::interactive::INPUT} {theme::text::SECONDARY}",
+                value: selected_index.unwrap_or_else(|| "__all__".to_string()),
+                onchange: move |evt| {
+                    let value = evt.value();
+                    if value == "__all__" {
+                        selected.set(Vec::new());
+                    } else if let Ok(idx) = value.parse::<usize>() {
+                        if let Some((option, _)) = options.get(idx) {
+                            selected.set(vec![option.clone()]);
+                        }
                     }
                 },
-                span { "{display_label}" }
-                svg {
-                    class: "w-4 h-4",
-                    fill: "none",
-                    stroke: "currentColor",
-                    view_box: "0 0 24 24",
-                    path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M19 9l-7 7-7-7" }
+                option {
+                    value: "__all__",
+                    "{all_label}"
                 }
-            }
-
-            if is_open {
-                div {
-                    style: "position: fixed; inset: 0; z-index: 2999;",
-                    onclick: move |_| open_dropdown.set(None),
-                }
-                div {
-                    class: "absolute left-0 right-0 mt-1 rounded-lg border {theme::surface::CARD_BG} {theme::surface::CARD_BORDER} shadow-xl z-[3000]",
-                    style: "z-index: 3000;",
-                    button {
-                        class: "w-full text-left px-3 py-2 text-sm hover:bg-gray-700",
-                        onclick: move |_| {
-                            selected.set(Vec::new());
-                            open_dropdown.set(None);
-                        },
-                        "{all_label}"
-                    }
-                    for (option, option_label) in options.iter() {
-                        {
-                            let is_selected = selected.read().contains(option);
-                            let option_clone = option.clone();
-                            rsx! {
-                                button {
-                                    key: "{option_label}",
-                                    class: "w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-gray-700",
-                                    onclick: move |_| {
-                                        let mut next = selected.read().clone();
-                                        if next.contains(&option_clone) {
-                                            next.retain(|value| value != &option_clone);
-                                        } else {
-                                            next.push(option_clone.clone());
-                                        }
-                                        selected.set(next);
-                                    },
-                                    div {
-                                        class: "w-4 h-4 rounded border flex items-center justify-center",
-                                        class: if is_selected { "bg-blue-500 border-blue-500" } else { "border-gray-500" },
-                                        if is_selected {
-                                            svg {
-                                                class: "w-3 h-3 text-white",
-                                                fill: "none",
-                                                stroke: "currentColor",
-                                                view_box: "0 0 24 24",
-                                                path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "3", d: "M5 13l4 4L19 7" }
-                                            }
-                                        }
-                                    }
-                                    span { "{option_label}" }
-                                }
-                            }
-                        }
+                for (idx, (_, option_label)) in options.iter().enumerate() {
+                    option {
+                        key: "{option_label}",
+                        value: "{idx}",
+                        "{option_label}"
                     }
                 }
             }
