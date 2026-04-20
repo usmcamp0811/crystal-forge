@@ -1,10 +1,10 @@
 ---
 id: TASK-276
 title: Add systemd hardening scanner and dashboard view
-status: Review
+status: In Progress
 assignee: []
 created_date: '2026-04-19 02:43'
-updated_date: '2026-04-19 16:53'
+updated_date: '2026-04-20 20:36'
 labels:
   - feature
   - security
@@ -18,7 +18,7 @@ references:
     https://www.reddit.com/r/homelab/comments/1spgay2/is_anyone_else_a_stickler_for_systemd_hardening/
   - 'https://www.freedesktop.org/software/systemd/man/systemd.exec.html#Security'
 priority: high
-ordinal: 0
+ordinal: 3690
 ---
 
 ## Description
