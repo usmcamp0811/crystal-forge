@@ -70,42 +70,65 @@ pub fn SidebarNav() -> Element {
     let sidebar_ctx = use_context::<SidebarContext>();
     let is_collapsed = (sidebar_ctx.is_collapsed)();
 
-    // Responsive width logic:
-    // - Mobile (<480px): hidden, use drawer
-    // - Narrow desktop/tablet and up (>=480px): toggle between 4rem and 16rem
-    let nav_width = if is_collapsed { "4rem" } else { "16rem" };
-
-    let header_justify = if is_collapsed { "justify-center" } else { "" };
+    // Match design-example sizing for sidebar and rail mode.
+    let nav_width = if is_collapsed { "64px" } else { "240px" };
 
     #[cfg(debug_assertions)]
     let show_dev_tools = true;
     #[cfg(not(debug_assertions))]
     let show_dev_tools = false;
 
+    // Get user data for profile section
+    let user_initials = if let Some(name) = auth::user_short_name(&auth_context) {
+        name.chars().take(2).collect::<String>().to_uppercase()
+    } else {
+        "U".to_string()
+    };
+
+    let user_display_name =
+        auth::user_display_name(&auth_context).unwrap_or_else(|| "User".to_string());
+
+    let user_role_and_host = if auth_context.is_some() {
+        let role = if auth::is_admin(&auth_context) {
+            "admin"
+        } else {
+            "user"
+        };
+        format!("{} · acme-prod", role)
+    } else {
+        "guest".to_string()
+    };
+
     rsx! {
         nav {
             "data-testid": "sidebar-nav",
-            class: "cf-sidebar-shell relative z-20 {theme::surface::SIDEBAR_BG} flex-col transition-all duration-300 ease-in-out",
+            class: if is_collapsed {
+                "cf-sidebar-shell sidebar rail relative z-20 {theme::surface::SIDEBAR_BG} flex-col transition-all duration-300 ease-in-out"
+            } else {
+                "cf-sidebar-shell sidebar relative z-20 {theme::surface::SIDEBAR_BG} flex-col transition-all duration-300 ease-in-out"
+            },
             style: "border-right: 1px solid var(--cf-card-border); width: {nav_width};",
             div {
-                class: "flex items-center gap-3 min-h-[5rem] {header_justify}",
-                style: if is_collapsed { "padding: 1rem;" } else { "padding: 1.5rem;" },
-                img {
-                    class: "shrink-0 object-contain",
-                    style: "width: 2rem; height: 2rem;",
-                    src: asset!("assets/crystal-forge-icon.png"),
-                    alt: "Crystal Forge"
+                class: "sidebar-brand",
+                style: if is_collapsed { "justify-content: center;" } else { "" },
+                div {
+                    class: "brand-mark",
+                    img {
+                        src: asset!("assets/cf.png"),
+                        alt: "Crystal Forge logo",
+                        class: "brand-mark-img",
+                    }
                 }
-                // Show text only when sidebar is expanded
                 if !is_collapsed {
                     div {
-                        h1 {
-                            class: "text-xl font-bold {theme::text::PRIMARY}",
+                        style: "flex: 1; min-width: 0;",
+                        div {
+                            class: "brand-name",
                             "Crystal Forge"
                         }
-                        p {
-                            class: "text-xs {theme::text::MUTED} mt-1",
-                            "Fleet Management"
+                        div {
+                            class: "brand-sub",
+                            "v{env!(\"CARGO_PKG_VERSION\")} · dev"
                         }
                     }
                 }
@@ -114,7 +137,8 @@ pub fn SidebarNav() -> Element {
                 class: "flex-1 px-3 overflow-y-auto",
                 style: "padding-top: 0.25rem; padding-bottom: 0.25rem;",
 
-                // ── Overview ──────────────────────────────────────────────
+                // ── Fleet ─────────────────────────────────────────────────
+                NavSection { collapsed: is_collapsed, label: "Fleet" }
                 NavLink {
                     collapsed: is_collapsed,
                     to: Route::DashboardView {},
@@ -131,9 +155,6 @@ pub fn SidebarNav() -> Element {
                         }
                     )
                 }
-
-                // ── Fleet ─────────────────────────────────────────────────
-                NavSection { collapsed: is_collapsed, label: "Fleet" }
                 NavLink {
                     collapsed: is_collapsed,
                     to: Route::SystemsView {},
@@ -148,6 +169,23 @@ pub fn SidebarNav() -> Element {
                             rect { x: "3", y: "5", width: "18", height: "12", rx: "2" }
                             path { d: "M7 21h10" }
                             path { d: "M12 17v4" }
+                        }
+                    )
+                }
+                NavLink {
+                    collapsed: is_collapsed,
+                    to: Route::FlakesView {},
+                    label: "Flakes",
+                    icon: rsx!(
+                        svg {
+                            class: "w-4 h-4",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "1.75",
+                            view_box: "0 0 24 24",
+                            path { d: "M12 2L2 7l10 5 10-5-10-5z" }
+                            path { d: "M2 17l10 5 10-5" }
+                            path { d: "M2 12l10 5 10-5" }
                         }
                     )
                 }
@@ -169,25 +207,8 @@ pub fn SidebarNav() -> Element {
                     )
                 }
 
-                // ── Nix Pipeline ──────────────────────────────────────────
-                NavSection { collapsed: is_collapsed, label: "Nix Pipeline" }
-                NavLink {
-                    collapsed: is_collapsed,
-                    to: Route::FlakesView {},
-                    label: "Flakes",
-                    icon: rsx!(
-                        svg {
-                            class: "w-4 h-4",
-                            fill: "none",
-                            stroke: "currentColor",
-                            stroke_width: "1.75",
-                            view_box: "0 0 24 24",
-                            path { d: "M12 2L2 7l10 5 10-5-10-5z" }
-                            path { d: "M2 17l10 5 10-5" }
-                            path { d: "M2 12l10 5 10-5" }
-                        }
-                    )
-                }
+                // ── Pipeline ──────────────────────────────────────────────
+                NavSection { collapsed: is_collapsed, label: "Pipeline" }
                 NavLink {
                     collapsed: is_collapsed,
                     to: Route::EvaluationsView {},
@@ -220,9 +241,41 @@ pub fn SidebarNav() -> Element {
                         }
                     )
                 }
+                if show_admin {
+                    NavLink {
+                        collapsed: is_collapsed,
+                        to: Route::CvesView {},
+                        label: "CVEs",
+                        icon: rsx!(
+                            svg {
+                                class: "w-4 h-4",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "1.75",
+                                view_box: "0 0 24 24",
+                                path { d: "M12 3l7 3v6c0 5-3 7.5-7 9-4-1.5-7-4-7-9V6l7-3z" }
+                            }
+                        )
+                    }
+                }
 
-                // ── Infrastructure ────────────────────────────────────────
-                NavSection { collapsed: is_collapsed, label: "Infrastructure" }
+                // ── System ────────────────────────────────────────────────
+                NavSection { collapsed: is_collapsed, label: "System" }
+                NavLink {
+                    collapsed: is_collapsed,
+                    to: Route::PoliciesView {},
+                    label: "Policies",
+                    icon: rsx!(
+                        svg {
+                            class: "w-4 h-4",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "1.75",
+                            view_box: "0 0 24 24",
+                            path { d: "M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" }
+                        }
+                    )
+                }
                 NavLink {
                     collapsed: is_collapsed,
                     to: Route::BuildersView {},
@@ -257,49 +310,11 @@ pub fn SidebarNav() -> Element {
                         }
                     )
                 }
-
-                // ── Compliance ────────────────────────────────────────────
-                NavSection { collapsed: is_collapsed, label: "Compliance" }
                 if show_admin {
-                    NavLink {
-                        collapsed: is_collapsed,
-                        to: Route::CvesView {},
-                        label: "CVEs",
-                        icon: rsx!(
-                            svg {
-                                class: "w-4 h-4",
-                                fill: "none",
-                                stroke: "currentColor",
-                                stroke_width: "1.75",
-                                view_box: "0 0 24 24",
-                                path { d: "M12 3l7 3v6c0 5-3 7.5-7 9-4-1.5-7-4-7-9V6l7-3z" }
-                            }
-                        )
-                    }
-                }
-                NavLink {
-                    collapsed: is_collapsed,
-                    to: Route::PoliciesView {},
-                    label: "Deployment Policies",
-                    icon: rsx!(
-                        svg {
-                            class: "w-4 h-4",
-                            fill: "none",
-                            stroke: "currentColor",
-                            stroke_width: "1.75",
-                            view_box: "0 0 24 24",
-                            path { d: "M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" }
-                        }
-                    )
-                }
-
-                // ── Admin (role-gated) ────────────────────────────────────
-                if show_admin {
-                    NavSection { collapsed: is_collapsed, label: "Admin" }
                     NavLink {
                         collapsed: is_collapsed,
                         to: Route::AdminView {},
-                        label: "Server Management",
+                        label: "Server",
                         icon: rsx!(
                             svg {
                                 class: "w-4 h-4",
@@ -336,12 +351,26 @@ pub fn SidebarNav() -> Element {
                     }
                 }
             }
-            // Show footer only when not collapsed
-            if !is_collapsed {
+
+            // User profile section at bottom
+            div {
+                class: "sidebar-user",
                 div {
-                    class: "p-4 border-t text-xs {theme::text::MUTED}",
-                    style: "border-top-color: var(--cf-card-border);",
-                    "v{env!(\"CARGO_PKG_VERSION\")}"
+                    class: "user-avatar",
+                    {user_initials}
+                }
+                if !is_collapsed {
+                    div {
+                        style: "min-width: 0;",
+                        div {
+                            class: "user-name",
+                            {user_display_name}
+                        }
+                        div {
+                            class: "user-meta",
+                            {user_role_and_host}
+                        }
+                    }
                 }
             }
         }
@@ -362,6 +391,27 @@ pub fn MobileDrawer() -> Element {
     let show_dev_tools = true;
     #[cfg(not(debug_assertions))]
     let show_dev_tools = false;
+
+    // Get user data for profile section
+    let user_initials = if let Some(name) = auth::user_short_name(&auth_context) {
+        name.chars().take(2).collect::<String>().to_uppercase()
+    } else {
+        "U".to_string()
+    };
+
+    let user_display_name =
+        auth::user_display_name(&auth_context).unwrap_or_else(|| "User".to_string());
+
+    let user_role_and_host = if auth_context.is_some() {
+        let role = if auth::is_admin(&auth_context) {
+            "admin"
+        } else {
+            "user"
+        };
+        format!("{} · acme-prod", role)
+    } else {
+        "guest".to_string()
+    };
 
     if !is_mobile_drawer_open() {
         return rsx! { div { class: "hidden" } };
@@ -386,19 +436,15 @@ pub fn MobileDrawer() -> Element {
                 class: "p-6 flex items-center justify-between min-h-[5rem]",
                 div {
                     class: "flex items-center gap-3",
-                    img {
-                        class: "h-8 w-8 object-contain",
-                        src: asset!("assets/crystal-forge-icon.png"),
-                        alt: "Crystal Forge"
-                    }
+                    div { class: "brand-mark", "CF" }
                     div {
-                        h1 {
-                            class: "text-xl font-bold {theme::text::PRIMARY}",
+                        div {
+                            class: "brand-name",
                             "Crystal Forge"
                         }
-                        p {
-                            class: "text-xs {theme::text::MUTED} mt-1",
-                            "Fleet Management"
+                        div {
+                            class: "brand-sub",
+                            "v{env!(\"CARGO_PKG_VERSION\")} · dev"
                         }
                     }
                 }
@@ -602,7 +648,7 @@ pub fn MobileDrawer() -> Element {
                     NavLink {
                         collapsed: false,
                         to: Route::AdminView {},
-                        label: "Server Management",
+                        label: "Server",
                         icon: rsx!(
                             svg {
                                 class: "w-4 h-4",
@@ -639,10 +685,24 @@ pub fn MobileDrawer() -> Element {
                 }
             }
 
+            // User profile section at bottom
             div {
-                class: "p-4 border-t text-xs {theme::text::MUTED}",
-                style: "border-top-color: var(--cf-card-border);",
-                "v{env!(\"CARGO_PKG_VERSION\")}"
+                class: "sidebar-user",
+                div {
+                    class: "user-avatar",
+                    {user_initials}
+                }
+                div {
+                    style: "min-width: 0;",
+                    div {
+                        class: "user-name",
+                        {user_display_name}
+                    }
+                    div {
+                        class: "user-meta",
+                        {user_role_and_host}
+                    }
+                }
             }
         }
     }
@@ -661,37 +721,26 @@ fn NavLink(collapsed: bool, to: Route, label: &'static str, icon: Element) -> El
         is_mobile_drawer_open.set(false);
     };
 
-    let base_classes =
-        "flex items-center gap-3 px-3 py-2 rounded-lg transition-colors min-h-[44px]";
-    let position_classes = if collapsed {
-        "justify-center md:justify-center lg:justify-start"
+    let nav_class = if is_active {
+        "nav-item active focus-ring"
     } else {
-        ""
+        "nav-item focus-ring"
     };
-    let state_classes = if is_active {
-        "bg-violet-500/20 text-violet-300".to_string()
-    } else {
-        format!(
-            "{} {} cf-hover-text-primary",
-            theme::text::SECONDARY,
-            theme::interactive::HOVER_BG
-        )
-    };
-    let all_classes = format!("{} {} {}", base_classes, position_classes, state_classes);
 
     rsx! {
         Link {
             to,
             onclick: click_handler,
-            class: "{all_classes}",
+            class: "{nav_class}",
             title: if collapsed { label } else { "" },
             div {
-                class: "shrink-0",
+                class: "nav-icon",
                 {icon}
             }
             // Show label only when not collapsed
             if !collapsed {
                 span {
+                    class: "nav-label",
                     "{label}"
                 }
             }
@@ -706,13 +755,10 @@ fn NavLink(collapsed: bool, to: Route, label: &'static str, icon: Element) -> El
 #[component]
 fn NavSection(collapsed: bool, label: &'static str) -> Element {
     rsx! {
-        div {
-            class: "cf-nav-section",
-            if !collapsed {
-                span {
-                    class: "cf-nav-section-label",
-                    "{label}"
-                }
+        if !collapsed {
+            div {
+                class: "nav-section-label",
+                "{label}"
             }
         }
     }

@@ -59,7 +59,11 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
             page,
             50,
             status.as_deref(),
-            if flake.is_empty() { None } else { Some(flake.as_str()) },
+            if flake.is_empty() {
+                None
+            } else {
+                Some(flake.as_str())
+            },
         )
         .await
     });
