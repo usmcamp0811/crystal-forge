@@ -41,6 +41,9 @@ pub fn SystemsTable(
     /// Currently selected row (for preview drawer highlight)
     #[props(default = None)]
     selected_id: Option<Uuid>,
+    /// Whether to use compact density
+    #[props(default = false)]
+    compact: bool,
 ) -> Element {
     let mut sort_column = use_signal(|| None::<SystemsSortColumn>);
     let mut sort_direction = use_signal(|| SortDirection::Asc);
@@ -93,6 +96,11 @@ pub fn SystemsTable(
 
     let current_col = *sort_column.read();
     let current_dir = *sort_direction.read();
+    let table_class = if compact {
+        "sys-table compact"
+    } else {
+        "sys-table"
+    };
 
     rsx! {
         div {
@@ -102,7 +110,7 @@ pub fn SystemsTable(
                 class: "overflow-x-auto",
                 "data-testid": "systems-table",
                 table {
-                    class: "sys-table",
+                    class: "{table_class}",
                     thead {
                         tr {
                             // Host — 22% width matching design

@@ -1198,7 +1198,7 @@ fn OverviewTab(
                         class: "sd-callout sd-callout-danger",
                         style: "margin-top: 14px;",
                         svg {
-                            class: "w-3 h-3",
+                            class: "w-3.5 h-3.5",
                             fill: "none",
                             stroke: "currentColor",
                             stroke_width: "2",

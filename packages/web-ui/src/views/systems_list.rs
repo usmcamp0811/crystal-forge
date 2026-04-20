@@ -60,6 +60,17 @@ use systems_list_helpers::{
 };
 
 const VIEW_PREF_KEY: &str = "crystal_forge.systems.view";
+const DENSITY_KEY: &str = "cf.ui.density";
+
+fn load_density() -> bool {
+    web_sys::window()
+        .and_then(|w| w.local_storage().ok())
+        .flatten()
+        .and_then(|storage| storage.get_item(DENSITY_KEY).ok())
+        .flatten()
+        .map(|v| v == "compact")
+        .unwrap_or(false)
+}
 
 /// Systems list with toggles and filters.
 #[component]
@@ -71,6 +82,7 @@ pub fn SystemsListView() -> Element {
     let stored_view = LocalStorage::get::<String>(VIEW_PREF_KEY).ok();
     let mut view_mode = use_signal(|| ViewMode::from_storage(stored_view));
     let query_view = prefers_view_from_query();
+    let mut is_compact = use_signal(load_density);
     let open_dropdown = use_signal(|| None::<String>);
     let container_id = use_memo(|| format!("systems-filters-{}", uuid::Uuid::new_v4()));
     let container_id_value = Rc::new(container_id.read().clone());
@@ -80,6 +92,19 @@ pub fn SystemsListView() -> Element {
             view_mode.set(mode);
             let _ = LocalStorage::set(VIEW_PREF_KEY, mode.as_storage());
         }
+    });
+
+    // Poll for density changes from topbar tweaks
+    use_effect(move || {
+        spawn(async move {
+            loop {
+                gloo_timers::future::TimeoutFuture::new(500).await;
+                let compact = load_density();
+                if compact != is_compact() {
+                    is_compact.set(compact);
+                }
+            }
+        });
     });
 
     // Close dropdown on outside click
@@ -737,7 +762,7 @@ pub fn SystemsListView() -> Element {
                     for system in filtered_systems.clone() {
                         SystemCardV2 {
                             system: system.clone(),
-                            compact: false,
+                            compact: *is_compact.read(),
                             on_open: move |_| {
                                 let mut preview_system = preview_system.clone();
                                 spawn(async move {
@@ -781,6 +806,7 @@ pub fn SystemsListView() -> Element {
             } else {
                 SystemsTable {
                     systems: filtered_systems.clone(),
+                    compact: *is_compact.read(),
                     on_remove: move |id| remove_system_by_id(local_systems, pending_remove, id),
                     on_update_key: move |id| update_key_for_system(local_systems, pending_update_key, id),
                     on_edit: move |id: uuid::Uuid| {
