@@ -164,6 +164,20 @@ pub fn SystemsTable(
                                 td {
                                     {
                                         let env = environment_label(&system);
+
+                                        // Debug: log environment value to console
+                                        #[cfg(debug_assertions)]
+                                        {
+                                            use wasm_bindgen::prelude::*;
+                                            #[wasm_bindgen]
+                                            extern "C" {
+                                                #[wasm_bindgen(js_namespace = console)]
+                                                fn log(s: &str);
+                                            }
+                                            log(&format!("SystemsTable: hostname={}, environment='{}' (raw: {:?})",
+                                                system.hostname, env, system.environment));
+                                        }
+
                                         let colors = env_colors(&env);
                                         rsx! {
                                             EnvBadge {

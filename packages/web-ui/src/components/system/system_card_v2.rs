@@ -101,6 +101,22 @@ pub fn SystemCardV2(
         .environment
         .clone()
         .unwrap_or_else(|| "unknown".to_string());
+
+    // Debug: log environment value to console
+    #[cfg(debug_assertions)]
+    {
+        use wasm_bindgen::prelude::*;
+        #[wasm_bindgen]
+        extern "C" {
+            #[wasm_bindgen(js_namespace = console)]
+            fn log(s: &str);
+        }
+        log(&format!(
+            "SystemCardV2: hostname={}, environment='{}' (raw: {:?})",
+            system.hostname, environment, system.environment
+        ));
+    }
+
     let env = env_colors(&environment);
     let status_col = status_color(&system.health_status);
 
