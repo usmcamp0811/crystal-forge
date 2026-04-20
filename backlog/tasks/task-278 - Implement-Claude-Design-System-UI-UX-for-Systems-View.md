@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@ai-agent'
 created_date: '2026-04-19 17:54'
-updated_date: '2026-04-20 00:35'
+updated_date: '2026-04-20 00:58'
 labels:
   - ui
   - systems
@@ -53,9 +53,9 @@ Implement the Claude Design System-inspired UI/UX for the Systems view (`/system
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Applied follow-up deploy/detail parity fix in commit 64e21322: removed branch dropdown, deduplicated deploy commit list by hash, changed commit list messaging away from configuration identity text, added hover titles for truncated commit fields, reduced policy-callout check icon size, and aligned metric strip to 5-card desktop layout with responsive breakpoints.
+Reviewed external handoff README and fully read `crystal-forge/project/Systems View.html` plus all imported files (`styles.css`, `data.js`, `components/Icon.jsx`, `components/Shell.jsx`, `components/Systems.jsx`, `components/SystemDetail.jsx`, `app.jsx`) before comparing against MR branch UI.
 
-Created follow-up backlog task TASK-278.1 to add real generation data in API/DTO so the metric strip can replace #— placeholder.
+Applied parity corrections in commit 21fa495a: restored Deploy branch selector, restored heartbeat label rendering in top metric strip, and matched callout check icon sizing to prototype. Kept recent de-duplication and hover-title improvements where they do not alter visual intent.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
