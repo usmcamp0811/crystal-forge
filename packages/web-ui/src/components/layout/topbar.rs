@@ -198,6 +198,10 @@ pub fn TopBar(title: String) -> Element {
 
             if tweaks_open() {
                 div {
+                    style: "position: fixed; inset: 0; z-index: 49;",
+                    onclick: move |_| tweaks_open.set(false),
+                }
+                div {
                     class: "cf-tweaks-menu",
                     div {
                         class: "cf-tweaks-head",
