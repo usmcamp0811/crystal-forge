@@ -1,11 +1,11 @@
 ---
 id: TASK-278
 title: Implement Claude Design System UI/UX for Systems View
-status: Review
+status: In Progress
 assignee:
   - ai-agent
 created_date: '2026-04-19 17:54'
-updated_date: '2026-04-19 21:33'
+updated_date: '2026-04-20 00:22'
 labels:
   - ui
   - systems
@@ -21,7 +21,7 @@ documentation:
     /home/mcamp/code/crystal-forge/design-example-systems/components/SystemDetail.jsx
   - /home/mcamp/code/crystal-forge/design-example-systems/styles.css
 priority: high
-ordinal: 2780
+ordinal: 3690
 ---
 
 ## Description
