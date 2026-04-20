@@ -46,7 +46,7 @@ Create a feature to scan NixOS system configurations for systemd service hardeni
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Rebased branch onto latest dev (includes TASK-278 Systems UI/UX parity merge), resolved conflicts in `packages/web-ui/src/views/system_detail.rs` and `packages/web-ui/src/components/layout/sidebar.rs`, and preserved hardening-tab behavior/style token alignment. Verification rerun: `nix develop -c cargo check` (packages/web-ui) and `nix build .#checks.x86_64-linux.web-ui --print-out-paths` (pass). Force-pushed updated branch: `92fd62c4`.
+LOCK: gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-276-systemd-hardening-scanner
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
