@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@ai-agent'
 created_date: '2026-04-19 17:54'
-updated_date: '2026-04-20 12:28'
+updated_date: '2026-04-20 12:37'
 labels:
   - ui
   - systems
@@ -72,6 +72,8 @@ Fixed fake flake and commit data (commit 4c457c17). Cards now show 'flake-{id}' 
 Fixed CVE exposure shield icon dimensions (commit 6b3678f0). Added explicit width='14' and height='14' attributes to SVG, changed stroke-width from '2' to '1.75' to match design example exactly.
 
 Fixed spark bar color rendering (commit 7b644934). Changed from inline style interpolation to format! macro for building style string. Added debug logging to console to show environment names and colors for each spark bar segment. Check browser console for 'SparkBar: env=...' messages to diagnose color mapping.
+
+Fixed runtime panic 'unreachable' error (commit 1aafab95). The issue was incorrect wasm_bindgen extern C blocks inside functions. Changed to use web_sys::console::log_1 which is the proper way to call console.log from Rust/WASM. Debug logging should now work correctly without crashing.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
