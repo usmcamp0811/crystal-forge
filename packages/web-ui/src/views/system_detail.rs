@@ -24,11 +24,11 @@ use crate::api::client::{
 };
 use crate::api::models::{
     BuildStatus, CommitInfo, CveScanEligibilityResponse, CveSeverity, CveSummary,
-    DeploymentStatus, HardeningJustificationResponse, HardeningScanEligibilityResponse,
-    HardeningServiceResultResponse, HealthStatus, LogLevel, PipelineStage,
-    SaveHardeningJustificationRequest, SystemAgentEvent, SystemCommitHistory, SystemDetail,
-    SystemHardwareInfo, SystemHistoryEntry, SystemNetworkInfo, SystemRollbackRequest,
-    SystemSecurityInfo, SystemVulnerability,
+    DeploymentLogEntry, DeploymentStatus, HardeningJustificationResponse,
+    HardeningScanEligibilityResponse, HardeningServiceResultResponse, HealthStatus, LogLevel,
+    PipelineStage, SaveHardeningJustificationRequest, SystemAgentEvent, SystemCommitHistory,
+    SystemDetail, SystemHardwareInfo, SystemHistoryEntry, SystemNetworkInfo,
+    SystemRollbackRequest, SystemSecurityInfo, SystemVulnerability,
 };
 use crate::components::cve::CvesTab;
 use crate::components::diff::DiffViewer;
@@ -2670,7 +2670,7 @@ fn HardeningTab(
                                         .clone()
                                         .unwrap_or_else(|| "system".to_string());
                                     let row_highlight = if matches!(service.risk_level.as_str(), "vulnerable" | "poorly_hardened") {
-                                        "bg-red-500/[0.05]"
+                                        theme::health::CRITICAL_BG
                                     } else {
                                         ""
                                     };
@@ -2678,7 +2678,7 @@ fn HardeningTab(
                                     rsx! {
                                         tr {
                                             key: "svc-{service.id}",
-                                            class: "border-b {theme::surface::DIVIDER} hover:bg-gray-800/30 {row_highlight}",
+                                            class: "border-b {theme::surface::DIVIDER} {theme::interactive::HOVER_BG} {row_highlight}",
                                             td { class: "px-2 py-1.5",
                                                 span {
                                                     class: "inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide {risk_chip}",
@@ -2752,7 +2752,7 @@ fn HardeningTab(
                 div {
                     class: "w-full max-w-4xl rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-5 space-y-4",
                     onclick: move |evt| evt.stop_propagation(),
-                    h3 { class: "text-lg font-semibold text-white", "Service hardening: {service.service_name}" }
+                    h3 { class: "text-lg font-semibold {theme::text::PRIMARY}", "Service hardening: {service.service_name}" }
                     p { class: "text-sm {theme::text::SECONDARY}", "Score: {service.hardening_score} · Risk: {service.risk_level}" }
 
                     div { class: "max-h-64 overflow-y-auto border {theme::surface::CARD_BORDER} rounded-md {theme::surface::SUBTLE_BG}",
@@ -2779,11 +2779,11 @@ fn HardeningTab(
                     }
 
                     div { class: "space-y-2",
-                        h4 { class: "font-medium text-white", "Justifications" }
+                        h4 { class: "font-medium {theme::text::PRIMARY}", "Justifications" }
                         for item in justifications.iter().filter(|j| j.service_name == service.service_name) {
                             div { class: "rounded-md border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} p-2 text-xs",
-                                p { class: "text-gray-200", "{item.category.clone().unwrap_or_else(|| \"uncategorized\".to_string())}" }
-                                p { class: "text-gray-300 mt-1", "{item.reason}" }
+                                p { class: "{theme::text::PRIMARY}", "{item.category.clone().unwrap_or_else(|| \"uncategorized\".to_string())}" }
+                                p { class: "{theme::text::SECONDARY} mt-1", "{item.reason}" }
                             }
                         }
                         if justifications.iter().all(|j| j.service_name != service.service_name) {
@@ -2793,7 +2793,7 @@ fn HardeningTab(
 
                     if allow_mutations {
                         div { class: "space-y-2 border-t {theme::surface::CARD_BORDER} pt-3",
-                            h4 { class: "font-medium text-white", "Add or update justification" }
+                            h4 { class: "font-medium {theme::text::PRIMARY}", "Add or update justification" }
                             div { class: "grid grid-cols-1 md:grid-cols-3 gap-2",
                                 input {
                                     class: "px-2 py-1 rounded text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
@@ -2849,7 +2849,7 @@ fn HardeningTab(
 
                     div { class: "flex justify-end",
                         button {
-                            class: "px-3 py-1.5 rounded border {theme::surface::CARD_BORDER} text-sm {theme::text::SECONDARY} hover:bg-gray-800/30",
+                            class: "px-3 py-1.5 rounded border {theme::surface::CARD_BORDER} text-sm {theme::text::SECONDARY} {theme::interactive::HOVER_BG}",
                             onclick: move |_| selected_service.set(None),
                             "Close"
                         }
@@ -3034,12 +3034,32 @@ fn short_risk_label(level: &str) -> &'static str {
     }
 }
 
-fn risk_level_compact_badge_class(level: &str) -> &'static str {
+fn risk_level_compact_badge_class(level: &str) -> String {
     match level {
-        "well_hardened" => "border border-emerald-400/30 bg-emerald-400/10 text-emerald-400",
-        "moderately_hardened" => "border border-amber-400/30 bg-amber-400/10 text-amber-400",
-        "poorly_hardened" => "border border-orange-400/30 bg-orange-400/10 text-orange-400",
-        _ => "border border-red-400/30 bg-red-400/10 text-red-400",
+        "well_hardened" => format!(
+            "border {} {} {}",
+            theme::health::HEALTHY_BORDER,
+            theme::health::HEALTHY_BG,
+            theme::health::HEALTHY_TEXT,
+        ),
+        "moderately_hardened" => format!(
+            "border {} {} {}",
+            theme::health::WARNING_BORDER,
+            theme::health::WARNING_BG,
+            theme::health::WARNING_TEXT,
+        ),
+        "poorly_hardened" => format!(
+            "border {} {} {}",
+            theme::health::WARNING_BORDER,
+            theme::health::WARNING_BG,
+            theme::health::WARNING_TEXT,
+        ),
+        _ => format!(
+            "border {} {} {}",
+            theme::health::CRITICAL_BORDER,
+            theme::health::CRITICAL_BG,
+            theme::health::CRITICAL_TEXT,
+        ),
     }
 }
 
