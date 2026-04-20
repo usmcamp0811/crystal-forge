@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@ai-agent'
 created_date: '2026-04-19 17:54'
-updated_date: '2026-04-20 12:12'
+updated_date: '2026-04-20 12:28'
 labels:
   - ui
   - systems
@@ -70,6 +70,8 @@ CVE tab table view: Current implementation uses expandable cards. To match desig
 Fixed fake flake and commit data (commit 4c457c17). Cards now show 'flake-{id}' instead of 'flake · main', commit shows '—' instead of fake hash. Table flake column simplified to show just 'flake-{id}'. Backend limitation: view_system_list only provides flake_id, not flake name or current commit. Added TODO comments for backend to extend the view with: (1) flake name by joining with flakes table, (2) current commit hash from latest system_state or deployment info.
 
 Fixed CVE exposure shield icon dimensions (commit 6b3678f0). Added explicit width='14' and height='14' attributes to SVG, changed stroke-width from '2' to '1.75' to match design example exactly.
+
+Fixed spark bar color rendering (commit 7b644934). Changed from inline style interpolation to format! macro for building style string. Added debug logging to console to show environment names and colors for each spark bar segment. Check browser console for 'SparkBar: env=...' messages to diagnose color mapping.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
