@@ -200,19 +200,17 @@ pub fn SystemsTable(
                                 // Flake · commit
                                 td {
                                     {
-                                        let flake_name = format!("flake-{}", system.flake_id.unwrap_or_default());
+                                        // TODO: Backend needs to include flake name and commit in SystemSummary/view_system_list
+                                        let flake_display = system.flake_id
+                                            .map(|id| format!("flake-{}", id))
+                                            .unwrap_or_else(|| "—".to_string());
                                         rsx! {
                                             div {
                                                 style: "display: flex; flex-direction: column; line-height: 1.3;",
                                                 span {
                                                     class: "mono",
-                                                    style: "font-size: 12px; color: var(--cf-text-primary)",
-                                                    "{flake_name}"
-                                                }
-                                                span {
-                                                    class: "mono",
-                                                    style: "font-size: 11px; color: var(--cf-text-muted)",
-                                                    "abc123de · main"
+                                                    style: "font-size: 12px; color: var(--cf-text-muted)",
+                                                    "{flake_display}"
                                                 }
                                             }
                                         }

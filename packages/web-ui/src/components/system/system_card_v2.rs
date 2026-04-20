@@ -121,11 +121,11 @@ pub fn SystemCardV2(
     let status_col = status_color(&system.health_status);
 
     // Get flake info
+    // TODO: Backend needs to include flake name in SystemSummary/view_system_list
     let flake_name = system
         .flake_id
-        .as_ref()
-        .map(|_| "flake")
-        .unwrap_or("unknown");
+        .map(|id| format!("flake-{}", id))
+        .unwrap_or_else(|| "unknown".to_string());
 
     // Format last seen as relative time
     let last_seen = system
@@ -214,7 +214,7 @@ pub fn SystemCardV2(
                         div {
                             class: "mono text-xs",
                             style: "color: var(--cf-text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
-                            "{flake_name} · main"
+                            "{flake_name}"
                         }
                     }
                     // Commit
@@ -226,8 +226,8 @@ pub fn SystemCardV2(
                         }
                         div {
                             class: "mono text-xs",
-                            style: "color: var(--cf-text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
-                            "abc123de"
+                            style: "color: var(--cf-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
+                            "—"
                         }
                     }
                     // Heartbeat
