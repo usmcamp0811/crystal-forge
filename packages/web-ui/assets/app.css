@@ -1208,6 +1208,12 @@ html, body {
   }
 }
 
+@media (min-width: 1024px) and (max-width: 1280px) {
+  .sd-metric-strip {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 720px) {
   .sd-metric-strip {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1448,6 +1454,10 @@ html, body {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 12px;
+}
+
+.sd-deploy-picker.single {
+  grid-template-columns: 1fr;
 }
 
 .sd-field {
@@ -2384,6 +2394,10 @@ html[data-theme="light"] .sd-nix {
   min-width: 0;
 }
 
+.sd-metric .hb-spinner {
+  width: 100%;
+}
+
 .hb-ring {
   position: relative;
   display: inline-flex;
@@ -2456,11 +2470,18 @@ html[data-theme="light"] .sd-nix {
 .hb-label-main {
   font-size: 12px;
   font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .hb-label-sub {
   font-size: 11px;
   color: var(--cf-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ===================================================================== */

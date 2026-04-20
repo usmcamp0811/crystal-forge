@@ -20,10 +20,10 @@ use crate::api::client::{
     request_system_rollback, request_system_sync, trigger_system_cve_scan,
 };
 use crate::api::models::{
-    BuildStatus, CveScanEligibilityResponse, CveSeverity, CveSummary, DeploymentLogEntry,
-    DeploymentStatus, HealthStatus, LogLevel, PipelineStage, SystemAgentEvent, SystemCommitHistory,
-    SystemDetail, SystemHardwareInfo, SystemHistoryEntry, SystemNetworkInfo, SystemRollbackRequest,
-    SystemSecurityInfo, SystemVulnerability,
+    BuildStatus, CommitInfo, CveScanEligibilityResponse, CveSeverity, CveSummary,
+    DeploymentLogEntry, DeploymentStatus, HealthStatus, LogLevel, PipelineStage, SystemAgentEvent,
+    SystemCommitHistory, SystemDetail, SystemHardwareInfo, SystemHistoryEntry, SystemNetworkInfo,
+    SystemRollbackRequest, SystemSecurityInfo, SystemVulnerability,
 };
 use crate::components::cve::CvesTab;
 use crate::components::diff::DiffViewer;
@@ -38,8 +38,8 @@ use crate::routes::Route;
 use crate::state::{app_state::AppState, auth};
 use crate::systems::adapter::{fallback_system_detail, load_system_detail_with_fallback};
 use crate::systems::adapter::{
-    load_system_agent_events_with_fallback, load_system_history_with_fallback,
-    update_system_via_api,
+    fetch_system_commits_via_api, load_system_agent_events_with_fallback,
+    load_system_history_with_fallback, update_system_via_api,
 };
 use crate::theme;
 #[cfg(target_arch = "wasm32")]
@@ -197,6 +197,18 @@ pub fn SystemDetailView(id: String) -> Element {
         }
     });
 
+    let id_for_commits = id.clone();
+    let commits_resource = use_resource(move || {
+        let id = id_for_commits.clone();
+        async move {
+            let Ok(system_id) = Uuid::parse_str(&id) else {
+                return None;
+            };
+
+            fetch_system_commits_via_api(system_id).await.ok()
+        }
+    });
+
     // Derive state from resource result
     let (system, api_notice, redirect_to_login, not_found) =
         match &*detail_resource.read_unchecked() {
@@ -243,7 +255,16 @@ pub fn SystemDetailView(id: String) -> Element {
         .read_unchecked()
         .clone()
         .unwrap_or_default();
-    let commit_history = map_history_entries_to_commit_history(&history_entries);
+    let history_commit_history = map_history_entries_to_commit_history(&history_entries);
+    let deploy_commit_history = commits_resource
+        .read_unchecked()
+        .clone()
+        .flatten()
+        .map(|response| {
+            map_commit_infos_to_commit_history(&response.commits, response.current_commit)
+        })
+        .filter(|commits| !commits.is_empty())
+        .unwrap_or_else(|| history_commit_history.clone());
     let vulnerabilities = match &*vulnerabilities_resource.read_unchecked() {
         Some(value) => value.clone(),
         None => mock_vulnerabilities(),
@@ -752,7 +773,7 @@ pub fn SystemDetailView(id: String) -> Element {
                     Tab::Deploy => rsx! {
                         DeployTab {
                             system: system.clone(),
-                            commits: commit_history.clone(),
+                            commits: deploy_commit_history.clone(),
                             allow_mutations: can_mutate,
                             on_deploy_commit: move |commit| {
                                 rollback_target.set(Some(commit));
@@ -762,7 +783,7 @@ pub fn SystemDetailView(id: String) -> Element {
                     },
                     Tab::History => rsx! {
                         HistoryTab {
-                            commits: commit_history.clone(),
+                            commits: history_commit_history.clone(),
                             deployment_policy: system.deployment_policy.clone(),
                             allow_mutations: can_mutate,
                             on_rollback: move |commit| {
@@ -1225,7 +1246,6 @@ fn DeployTab(
         .unwrap_or_default();
 
     let mut selected_commit = use_signal(|| default_commit);
-    let mut selected_branch = use_signal(|| "main".to_string());
     let mut show_diff = use_signal(|| false);
 
     let displayed_commits = {
@@ -1269,25 +1289,13 @@ fn DeployTab(
 
                 // Flake dropdown
                 div {
-                    class: "sd-deploy-picker",
+                    class: "sd-deploy-picker single",
                     div {
                         class: "sd-field",
                         label { "Flake" }
                         select {
                             class: "input filter-select focus-ring",
                             option { value: "{flake_name}", "{flake_name}" }
-                        }
-                    }
-                    div {
-                        class: "sd-field",
-                        label { "Branch" }
-                        select {
-                            class: "input filter-select focus-ring",
-                            value: "{selected_branch}",
-                            onchange: move |evt| selected_branch.set(evt.value()),
-                            option { value: "main", "main" }
-                            option { value: "staging", "staging" }
-                            option { value: "dev", "dev" }
                         }
                     }
                 }
@@ -1427,7 +1435,7 @@ fn DeployTab(
                                 class: "sd-callout sd-callout-info",
                                 // check icon
                                 svg {
-                                    class: "w-3.5 h-3.5",
+                                    class: "w-3 h-3",
                                     style: "color: #60a5fa; flex-shrink: 0; margin-top: 1px;",
                                     fill: "none",
                                     stroke: "currentColor",
@@ -3051,6 +3059,40 @@ fn map_history_entries_to_commit_history(
                 diff_summary: Some(status_fragments.join(" · ")),
                 flake_repo_url: entry.flake_repo_url.clone(),
                 config_identity,
+            }
+        })
+        .collect()
+}
+
+fn map_commit_infos_to_commit_history(
+    commits: &[CommitInfo],
+    current_commit: Option<String>,
+) -> Vec<SystemCommitHistory> {
+    commits
+        .iter()
+        .cloned()
+        .map(|commit| {
+            let committed_at = chrono::DateTime::parse_from_rfc3339(&commit.timestamp)
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+            let is_current = current_commit
+                .as_ref()
+                .map(|current| current == &commit.sha || current == &commit.short_sha)
+                .unwrap_or(false);
+
+            SystemCommitHistory {
+                hash: commit.sha,
+                message: commit.message,
+                author: commit.author,
+                committed_at,
+                was_deployed: is_current,
+                deployed_at: if is_current { Some(committed_at) } else { None },
+                is_current,
+                is_ready_to_deploy: !is_current,
+                build_status: None,
+                diff_summary: None,
+                flake_repo_url: None,
+                config_identity: None,
             }
         })
         .collect()
