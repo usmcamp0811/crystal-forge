@@ -4,7 +4,7 @@ title: Add systemd hardening scanner and dashboard view
 status: In Progress
 assignee: []
 created_date: '2026-04-19 02:43'
-updated_date: '2026-04-20 20:36'
+updated_date: '2026-04-20 20:37'
 labels:
   - feature
   - security
@@ -46,13 +46,7 @@ Create a feature to scan NixOS system configurations for systemd service hardeni
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Follow-up commit e3b207e5 aligns system hardening tab styling with theme/style-guide tokens and improves dense table formatting/alignment.
-
-Added style-guide showcase section 'Hardening Audit Widgets' in `packages/web-ui/src/views/style_guide.rs` for new summary-strip + dense audit-table pattern.
-
-Refreshed system hardening screenshot upload: ![28-system-hardening-tab](/uploads/0199fccd9e997a675ad42b0a6852f9f1/28-system-hardening-tab.png) and posted details in MR note https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/242#note_3264584528.
-
-Verification rerun after styling pass: `nix develop -c cargo check` (packages/web-ui), `nix build .#checks.x86_64-linux.web-ui --print-out-paths`, `nix flake check`.
+LOCK: gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-276-systemd-hardening-scanner
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
