@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@ai-agent'
 created_date: '2026-04-19 17:54'
-updated_date: '2026-04-20 03:41'
+updated_date: '2026-04-20 08:07'
 labels:
   - ui
   - systems
@@ -62,6 +62,10 @@ Fixed all reported issues in commits 620d16e5 and 1947e26d: 1) Density toggle no
 Verified environment badges are already using correct per-environment colors. The env_colors() function in SystemCardV2, SystemsTable, and env_colors_for_badge() in systems_list.rs all correctly map environments to their design system colors: production=red, staging=amber, dev=blue, edge=teal, lab=purple, unknown=gray. This was already implemented correctly in previous commits.
 
 Fixed spark bar in Total stat card (commit 469b1a25). The bar under the Total number now correctly shows environment distribution using per-environment colors. Changed inline style from 'background-color !important' to 'background' to properly apply environment colors (production=red, staging=amber, dev=blue, edge=teal, lab=purple).
+
+Added debug logging (commit 3e10621d) to trace environment values in browser console. This will help diagnose why environment badges show wrong colors for real backend data vs mock data. Check browser console for 'SystemCardV2: hostname=' and 'SystemsTable: hostname=' messages showing actual environment field values and how they're being mapped to colors.
+
+CVE tab table view: Current implementation uses expandable cards. To match design example, need to convert to table with clickable rows that expand to show justification form and NVD link inline. Keep existing justification workflow, NVD links, and affected packages list. Table columns: CVE | Severity | CVSS | Package | Version | Fix | Actions. Expanded row shows: NVD link, justification editor, affected packages.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
