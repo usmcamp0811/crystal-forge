@@ -1718,9 +1718,7 @@ html[data-theme="light"] .sd-nix {
 .brand-mark {
   width: 28px;
   height: 28px;
-  border-radius: 7px;
   overflow: hidden;
-  box-shadow: 0 4px 16px rgba(130, 105, 155, 0.35);
   flex-shrink: 0;
 }
 
