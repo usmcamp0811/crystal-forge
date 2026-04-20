@@ -367,7 +367,14 @@ pub fn SystemDetailView(id: String) -> Element {
                         nav.push(Route::SystemsView {});
                     },
                     "aria-label": "Back to systems",
-                    "← Back"
+                    svg {
+                        class: "w-3.5 h-3.5",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        view_box: "0 0 24 24",
+                        path { d: "M15 19l-7-7 7-7" }
+                    }
                 }
                 span {
                     class: "sd-crumb-text",
@@ -435,19 +442,6 @@ pub fn SystemDetailView(id: String) -> Element {
                                 path { d: "M9 14l-4-4 4-4M5 10h7a4 4 0 014 4v1" }
                             }
                             "Rollback"
-                        }
-                        // SSH
-                        button {
-                            class: "btn btn-ghost focus-ring",
-                            svg {
-                                class: "w-3.5 h-3.5",
-                                fill: "none",
-                                stroke: "currentColor",
-                                stroke_width: "2",
-                                view_box: "0 0 24 24",
-                                path { d: "M8 9l3 3-3 3m5 0h3M5 4h14a2 2 0 012 2v12a2 2 0 01-2 2H5a2 2 0 01-2-2V6a2 2 0 012-2z" }
-                            }
-                            "SSH"
                         }
                         // Deploy (primary)
                         button {
@@ -1010,22 +1004,6 @@ fn OverviewTab(
         .clone()
         .unwrap_or_else(|| "Unknown".to_string());
     let env_style = environment_style(&environment);
-    let heartbeat_text = system
-        .last_seen
-        .map(|dt| {
-            let duration = now.signed_duration_since(dt);
-            if duration.num_minutes() < 1 {
-                "Just now".to_string()
-            } else if duration.num_hours() < 1 {
-                format!("{}m ago", duration.num_minutes())
-            } else if duration.num_days() < 1 {
-                format!("{}h ago", duration.num_hours())
-            } else {
-                format!("{}d ago", duration.num_days())
-            }
-        })
-        .unwrap_or_else(|| "Never".to_string());
-
     let uptime = format_uptime(system.hardware.uptime_secs.unwrap_or_default());
     let kernel = system
         .kernel
@@ -1088,6 +1066,27 @@ fn OverviewTab(
     } else {
         format!("{} critical CVEs", critical)
     };
+
+    let mut recent_activity: Vec<(String, String, chrono::DateTime<chrono::Utc>)> = vec![
+        (
+            "System record updated".to_string(),
+            "#34d399".to_string(),
+            system.updated_at,
+        ),
+        (
+            "System registered".to_string(),
+            "#a78bfa".to_string(),
+            system.created_at,
+        ),
+    ];
+    if let Some(last_seen_at) = system.last_seen {
+        recent_activity.push((
+            "Heartbeat received".to_string(),
+            "#60a5fa".to_string(),
+            last_seen_at,
+        ));
+    }
+    recent_activity.sort_by(|a, b| b.2.cmp(&a.2));
 
     rsx! {
         div {
@@ -1236,31 +1235,15 @@ fn OverviewTab(
                 }
                 div {
                     class: "timeline sd-timeline",
-                    div {
-                        class: "tl-item",
-                        span { class: "tl-dot", style: "--status-color: #34d399;" }
+                    for (title, color, at) in recent_activity.iter().take(5) {
                         div {
-                            class: "tl-body",
-                            div { class: "tl-title", "Heartbeat received" }
-                            div { class: "tl-meta", "{heartbeat_text}" }
-                        }
-                    }
-                    div {
-                        class: "tl-item",
-                        span { class: "tl-dot", style: "--status-color: #60a5fa;" }
-                        div {
-                            class: "tl-body",
-                            div { class: "tl-title", "Policy check passed" }
-                            div { class: "tl-meta", "12m ago" }
-                        }
-                    }
-                    div {
-                        class: "tl-item",
-                        span { class: "tl-dot", style: "--status-color: #a78bfa;" }
-                        div {
-                            class: "tl-body",
-                            div { class: "tl-title", "Agent active" }
-                            div { class: "tl-meta", "yesterday" }
+                            class: "tl-item",
+                            span { class: "tl-dot", style: "--status-color: {color};" }
+                            div {
+                                class: "tl-body",
+                                div { class: "tl-title", "{title}" }
+                                div { class: "tl-meta", "{relative_time(*at)}" }
+                            }
                         }
                     }
                 }
