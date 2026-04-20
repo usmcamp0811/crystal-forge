@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@ai-agent'
 created_date: '2026-04-19 17:54'
-updated_date: '2026-04-20 02:09'
+updated_date: '2026-04-20 02:33'
 labels:
   - ui
   - systems
@@ -53,7 +53,7 @@ Implement the Claude Design System-inspired UI/UX for the Systems view (`/system
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Committed e81c5805 to move the sidebar collapse/expand control into the top-right topbar icon cluster, replacing the previous tweaks-position button and removing the duplicate brand-row control in the sidebar.
+Committed af7cfd8c to restore the prototype-style tweaks popup in the top-right topbar icon slot. The button now opens a tweaks menu with Theme, Density, Default view, and Sidebar controls; theme/sidebar are functional immediately and default view persists to the existing systems view preference key. This commit also slightly reduced the CVE exposure callout icon again per follow-up feedback.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
