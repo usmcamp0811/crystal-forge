@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@ai-agent'
 created_date: '2026-04-19 17:54'
-updated_date: '2026-04-20 01:48'
+updated_date: '2026-04-20 02:03'
 labels:
   - ui
   - systems
@@ -53,9 +53,7 @@ Implement the Claude Design System-inspired UI/UX for the Systems view (`/system
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Committed 977dbd29 for the specific deploy/metric issues you called out: removed branch dropdown again, reduced deploy-callout check icon size, preserved hover titles for truncated commit fields, switched Deploy tab to use real system commit API data when available so the second column shows actual commit messages and duplicate-looking history rows do not appear there, and tightened heartbeat label sizing/metric strip behavior to keep the top row in one desktop line more reliably.
-
-TASK-278.1 remains the backlog follow-up for real generation data; current UI still uses placeholder generation where backend data is unavailable.
+Committed 249ddbd6 to finish a broader System Detail parity sweep: Overview now uses current commit messaging where available and shows prototype-style chip/callout/button icons, FQDN formatting is closer to the handoff, Logs regained prototype-like tail/clear/download controls, and Config was reshaped toward the prototype's Rendered module + Drift sections.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
