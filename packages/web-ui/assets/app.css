@@ -1051,7 +1051,7 @@ html, body {
 .app {
   display: grid;
   grid-template-columns: var(--sidebar-w, 240px) 1fr;
-  min-height: 100vh;
+  height: 100vh;
   overflow: hidden;
 }
 
@@ -1072,6 +1072,7 @@ html, body {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  height: 100vh;
   overflow: hidden;
   background: var(--cf-page-bg);
 }
