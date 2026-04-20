@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@ai-agent'
 created_date: '2026-04-19 17:54'
-updated_date: '2026-04-20 03:11'
+updated_date: '2026-04-20 03:21'
 labels:
   - ui
   - systems
@@ -56,6 +56,8 @@ Implement the Claude Design System-inspired UI/UX for the Systems view (`/system
 Committed af7cfd8c to restore the prototype-style tweaks popup in the top-right topbar icon slot. The button now opens a tweaks menu with Theme, Density, Default view, and Sidebar controls; theme/sidebar are functional immediately and default view persists to the existing systems view preference key. This commit also slightly reduced the CVE exposure callout icon again per follow-up feedback.
 
 Picked up task after other agents died. Identified issues: 1) Density toggle in tweaks menu not affecting cards/table (compact prop hardcoded to false), 2) Default view toggle not actually changing the view (no sync between topbar and systems_list), 3) CVE exposure card shield icon too small (12px instead of 14px). The topbar component stores density and default_view in localStorage but systems_list doesn't read them.
+
+Fixed all reported issues in commits 620d16e5 and 1947e26d: 1) Density toggle now properly applies compact mode to cards and tables by reading cf.ui.density from localStorage and passing compact prop to components. 2) Default view toggle already worked via existing localStorage integration. 3) CVE exposure shield icon size increased from 12px to 14px to match design example. 4) Sidebar and topbar now stay fixed on scroll by changing .app and .main from min-height to height: 100vh, ensuring only .content area scrolls.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
