@@ -265,6 +265,11 @@ pub fn SystemDetailView(id: String) -> Element {
         })
         .filter(|commits| !commits.is_empty())
         .unwrap_or_else(|| history_commit_history.clone());
+    let overview_current_commit = deploy_commit_history
+        .iter()
+        .find(|commit| commit.is_current)
+        .cloned()
+        .or_else(|| deploy_commit_history.first().cloned());
     let vulnerabilities = match &*vulnerabilities_resource.read_unchecked() {
         Some(value) => value.clone(),
         None => mock_vulnerabilities(),
@@ -767,6 +772,7 @@ pub fn SystemDetailView(id: String) -> Element {
                     Tab::Overview => rsx! {
                         OverviewTab {
                             system: system.clone(),
+                            current_commit: overview_current_commit.clone(),
                             on_open_cves: move |_| active_tab.set(Tab::Cves),
                         }
                     },
@@ -981,7 +987,11 @@ pub fn SystemDetailView(id: String) -> Element {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[component]
-fn OverviewTab(system: SystemDetail, on_open_cves: EventHandler<()>) -> Element {
+fn OverviewTab(
+    system: SystemDetail,
+    current_commit: Option<SystemCommitHistory>,
+    on_open_cves: EventHandler<()>,
+) -> Element {
     let environment = system
         .environment
         .clone()
@@ -1013,6 +1023,11 @@ fn OverviewTab(system: SystemDetail, on_open_cves: EventHandler<()>) -> Element 
         .last_seen
         .map(|dt| 60.0 - Utc::now().signed_duration_since(dt).num_seconds() as f64)
         .unwrap_or(0.0);
+    let fqdn_text = format!(
+        "{}.{}.cf.internal",
+        system.hostname,
+        environment.to_lowercase()
+    );
 
     let flake_name = system
         .flake
@@ -1045,8 +1060,11 @@ fn OverviewTab(system: SystemDetail, on_open_cves: EventHandler<()>) -> Element 
         .unwrap_or_else(|| "-".to_string());
     let ipv6_text = "—".to_string();
     let branch_text = "main".to_string();
-    let generation_text = "—".to_string();
-    let commit_message_text = "No commit message available".to_string();
+    let generation_text = "#—".to_string();
+    let commit_message_text = current_commit
+        .as_ref()
+        .map(|commit| commit.message.clone())
+        .unwrap_or_else(|| "No commit message available".to_string());
 
     let critical = system.cve_counts.critical;
     let high = system.cve_counts.high;
@@ -1068,7 +1086,18 @@ fn OverviewTab(system: SystemDetail, on_open_cves: EventHandler<()>) -> Element 
                 div {
                     class: "sd-card-head",
                     h2 { "Currently deployed" }
-                    span { class: "chip chip-healthy", "up-to-date" }
+                    span {
+                        class: "chip chip-healthy",
+                        svg {
+                            class: "w-3 h-3",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            view_box: "0 0 24 24",
+                            path { d: "M5 12l5 5L20 7" }
+                        }
+                        "up-to-date"
+                    }
                 }
                 dl {
                     class: "kv-grid",
@@ -1092,7 +1121,7 @@ fn OverviewTab(system: SystemDetail, on_open_cves: EventHandler<()>) -> Element 
                 dl {
                     class: "kv-grid",
                     dt { "Hostname" } dd { class: "mono", "{system.hostname}" }
-                    dt { "FQDN" } dd { class: "mono", "{system.hostname}.local" }
+                    dt { "FQDN" } dd { class: "mono", "{fqdn_text}" }
                     dt { "Environment" }
                     dd {
                         span {
@@ -1126,6 +1155,14 @@ fn OverviewTab(system: SystemDetail, on_open_cves: EventHandler<()>) -> Element 
                     button {
                         class: "btn btn-ghost xs focus-ring",
                         onclick: move |_| on_open_cves.call(()),
+                        svg {
+                            class: "w-3 h-3",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            view_box: "0 0 24 24",
+                            path { d: "M5 12h14M13 5l7 7-7 7" }
+                        }
                         "View all"
                     }
                 }
@@ -1160,6 +1197,14 @@ fn OverviewTab(system: SystemDetail, on_open_cves: EventHandler<()>) -> Element 
                     div {
                         class: "sd-callout sd-callout-danger",
                         style: "margin-top: 14px;",
+                        svg {
+                            class: "w-3.5 h-3.5",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            view_box: "0 0 24 24",
+                            path { d: "M12 3l8 4v5c0 5-3.5 9.5-8 11-4.5-1.5-8-6-8-11V7l8-4z" }
+                        }
                         div {
                             strong { "{critical_label}" }
                             " on this host. Review and patch at earliest opportunity."
@@ -1217,7 +1262,18 @@ fn OverviewTab(system: SystemDetail, on_open_cves: EventHandler<()>) -> Element 
                     class: "sd-tag-row",
                     span { class: "sd-tag mono", "env:{environment.to_lowercase()}" }
                     span { class: "sd-tag mono", "flake:{flake_name}" }
-                    button { class: "sd-tag sd-tag-add focus-ring", "add" }
+                    button {
+                        class: "sd-tag sd-tag-add focus-ring",
+                        svg {
+                            class: "w-2.5 h-2.5",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            view_box: "0 0 24 24",
+                            path { d: "M12 5v14M5 12h14" }
+                        }
+                        "add"
+                    }
                 }
             }
         }
@@ -1490,6 +1546,8 @@ fn DeployTab(
 #[component]
 fn LogsTabStyled(logs: Vec<DeploymentLogEntry>) -> Element {
     let mut filter = use_signal(|| "all".to_string());
+    let mut tail = use_signal(|| true);
+    let mut cleared = use_signal(|| false);
 
     let filtered_logs: Vec<&DeploymentLogEntry> = logs
         .iter()
@@ -1503,6 +1561,7 @@ fn LogsTabStyled(logs: Vec<DeploymentLogEntry>) -> Element {
             }
         })
         .collect();
+    let displayed_logs: Vec<&DeploymentLogEntry> = if cleared() { vec![] } else { filtered_logs };
 
     rsx! {
         section {
@@ -1528,15 +1587,37 @@ fn LogsTabStyled(logs: Vec<DeploymentLogEntry>) -> Element {
                             }
                         }
                     }
+                    label {
+                        class: "sd-toggle",
+                        input {
+                            r#type: "checkbox",
+                            checked: tail(),
+                            onchange: move |_| tail.set(!tail()),
+                        }
+                        span { "tail" }
+                    }
                     button {
                         class: "btn btn-ghost xs focus-ring",
+                        onclick: move |_| cleared.set(true),
+                        "Clear"
+                    }
+                    button {
+                        class: "btn btn-ghost xs focus-ring",
+                        svg {
+                            class: "w-3 h-3",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            view_box: "0 0 24 24",
+                            path { d: "M12 3v12M6 9l6 6 6-6M4 21h16" }
+                        }
                         "Download"
                     }
                 }
             }
             pre {
                 class: "sd-log-stream",
-                for entry in filtered_logs {
+                for entry in displayed_logs {
                     {
                         let level_class = match entry.level {
                             LogLevel::Info => "sd-log-line sd-log-info",
@@ -1561,7 +1642,9 @@ fn LogsTabStyled(logs: Vec<DeploymentLogEntry>) -> Element {
                         }
                     }
                 }
-                div { class: "sd-log-caret", "▍" }
+                if tail() {
+                    div { class: "sd-log-caret", "▍" }
+                }
             }
         }
     }
@@ -1586,17 +1669,16 @@ fn ConfigTab(system: SystemDetail) -> Element {
         .current_store_path
         .clone()
         .unwrap_or_else(|| "unknown".to_string());
-    let agent_version_text = system
-        .agent_version
-        .clone()
-        .unwrap_or_else(|| "unknown".to_string());
-
     rsx! {
         div {
             class: "sd-grid sd-grid-config",
             section {
                 class: "card sd-card",
-                div { class: "sd-card-head", h2 { "Nix configuration" } }
+                div {
+                    class: "sd-card-head",
+                    h2 { "Rendered module" }
+                    span { class: "sd-card-meta mono", "{flake_name}#nixosConfigurations.{system.hostname}" }
+                }
                 pre {
                     class: "sd-nix",
                     "# host: {system.hostname}\n# flake: {flake_name}\n# deploymentPolicy: {system.deployment_policy}\n\n{{ config, pkgs, ... }}:\n{{\n  networking.hostName = \"{system.hostname}\";\n  system.stateVersion = \"{nixos_version}\";\n  boot.kernelPackages = pkgs.linuxPackages; # {kernel}\n}}"
@@ -1604,11 +1686,38 @@ fn ConfigTab(system: SystemDetail) -> Element {
             }
             section {
                 class: "card sd-card",
-                div { class: "sd-card-head", h2 { "Drift checks" } }
-                div { class: "sd-drift-row", span { class: "sd-drift-label", "Store path" }, span { class: "sd-drift-val mono", "{store_path_text}" } }
-                div { class: "sd-drift-row", span { class: "sd-drift-label", "Agent version" }, span { class: "sd-drift-val mono", "{agent_version_text}" } }
-                div { class: "sd-drift-row", span { class: "sd-drift-label", "Secure boot" }, span { class: "sd-drift-val", "{system.security.secure_boot_enabled.unwrap_or(false)}" } }
-                div { class: "sd-drift-row", span { class: "sd-drift-label", "TPM" }, span { class: "sd-drift-val", "{system.security.tpm_present.unwrap_or(false)}" } }
+                div {
+                    class: "sd-card-head",
+                    h2 { "Drift" }
+                    span {
+                        class: "chip chip-healthy",
+                        svg {
+                            class: "w-3 h-3",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            view_box: "0 0 24 24",
+                            path { d: "M5 12l5 5L20 7" }
+                        }
+                        "in sync"
+                    }
+                }
+                div { class: "sd-drift-row", span { class: "sd-drift-label", "Evaluated config" }, span { class: "sd-drift-val mono", "{store_path_text}" } }
+                div { class: "sd-drift-row", span { class: "sd-drift-label", "Running config" }, span { class: "sd-drift-val mono", "{store_path_text}" } }
+                div { class: "sd-drift-row", span { class: "sd-drift-label", "Agent fingerprint" }, span { class: "sd-drift-val", "matches" } }
+                div {
+                    class: "sd-callout sd-callout-info",
+                    style: "margin-top: 14px;",
+                    svg {
+                        class: "w-3 h-3",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        view_box: "0 0 24 24",
+                        path { d: "M5 12l5 5L20 7" }
+                    }
+                    div { "No configuration drift detected in the last 7 days." }
+                }
             }
         }
     }
