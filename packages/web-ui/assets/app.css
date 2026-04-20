@@ -1226,7 +1226,13 @@ html, body {
   border-bottom: 1px solid var(--cf-card-border);
   padding-bottom: 0;
   overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
   margin-top: 4px;
+}
+
+.sd-tabs::-webkit-scrollbar {
+  display: none;
 }
 
 .sd-tab {
