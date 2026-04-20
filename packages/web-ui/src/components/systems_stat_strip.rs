@@ -143,11 +143,26 @@ pub fn SystemsStatStrip(systems: Vec<SystemSummary>) -> Element {
                                 {
                                     let pct = (*count as f64 / stats.total as f64) * 100.0;
                                     let color = env_color(env);
+
+                                    // Debug: log spark bar segment data
+                                    #[cfg(debug_assertions)]
+                                    {
+                                        use wasm_bindgen::prelude::*;
+                                        #[wasm_bindgen]
+                                        extern "C" {
+                                            #[wasm_bindgen(js_namespace = console)]
+                                            fn log(s: &str);
+                                        }
+                                        log(&format!("SparkBar: env='{}' count={} pct={:.1}% color={}",
+                                            env, count, pct, color));
+                                    }
+
                                     let env_title = format!("{}: {}", env, count);
+                                    let segment_style = format!("width: {:.1}%; background: {};", pct, color);
                                     rsx! {
                                         div {
                                             class: "spark-seg",
-                                            style: "width: {pct}%; background: {color};",
+                                            style: "{segment_style}",
                                             title: "{env_title}"
                                         }
                                     }
