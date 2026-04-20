@@ -140,11 +140,11 @@ pub fn TopBar(title: String) -> Element {
                 }
             }
 
-            // Tweaks button
+            // Sidebar collapse/expand button
             button {
                 class: "btn-icon focus-ring",
-                "aria-label": "Tweaks",
-                title: "Tweaks",
+                "aria-label": if is_collapsed() { "Expand sidebar" } else { "Collapse sidebar" },
+                title: if is_collapsed() { "Expand sidebar" } else { "Collapse sidebar" },
                 onclick: move |_| {
                     is_collapsed.set(!is_collapsed());
                 },
@@ -152,11 +152,10 @@ pub fn TopBar(title: String) -> Element {
                     class: "w-4 h-4",
                     fill: "none",
                     stroke: "currentColor",
-                    stroke_width: "2",
+                    stroke_width: "1.75",
                     view_box: "0 0 24 24",
-                    path {
-                        d: "M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"
-                    }
+                    rect { x: "3", y: "3", width: "18", height: "18", rx: "2" }
+                    path { d: "M9 3v18" }
                 }
             }
         }

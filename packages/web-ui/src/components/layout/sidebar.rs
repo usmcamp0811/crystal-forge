@@ -127,39 +127,6 @@ pub fn SidebarNav() -> Element {
                             "v{env!(\"CARGO_PKG_VERSION\")} · dev"
                         }
                     }
-                    // Collapse toggle in brand row — layout/panels icon
-                    {
-                        let mut sidebar_ctx2 = use_context::<SidebarContext>();
-                        let toggle = move |_| {
-                            let new_state = !(sidebar_ctx2.is_collapsed)();
-                            sidebar_ctx2.is_collapsed.set(new_state);
-                            if let Some(window) = web_sys::window() {
-                                if let Ok(Some(storage)) = window.local_storage() {
-                                    let _ = storage.set_item(
-                                        "cf-sidebar-collapsed",
-                                        if new_state { "true" } else { "false" },
-                                    );
-                                }
-                            }
-                        };
-                        rsx! {
-                            button {
-                                class: "btn-icon focus-ring",
-                                "aria-label": "Collapse sidebar",
-                                onclick: toggle,
-                                // panels/layout icon matching design
-                                svg {
-                                    class: "w-4 h-4",
-                                    fill: "none",
-                                    stroke: "currentColor",
-                                    stroke_width: "1.75",
-                                    view_box: "0 0 24 24",
-                                    rect { x: "3", y: "3", width: "18", height: "18", rx: "2" }
-                                    path { d: "M9 3v18" }
-                                }
-                            }
-                        }
-                    }
                 }
             }
             div {
