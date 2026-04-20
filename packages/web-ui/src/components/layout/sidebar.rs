@@ -113,7 +113,11 @@ pub fn SidebarNav() -> Element {
                 style: if is_collapsed { "justify-content: center;" } else { "" },
                 div {
                     class: "brand-mark",
-                    "CF"
+                    img {
+                        src: asset!("assets/cf.png"),
+                        alt: "Crystal Forge logo",
+                        class: "brand-mark-img",
+                    }
                 }
                 if !is_collapsed {
                     div {

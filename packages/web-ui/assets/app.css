@@ -1719,15 +1719,16 @@ html[data-theme="light"] .sd-nix {
   width: 28px;
   height: 28px;
   border-radius: 7px;
-  background: linear-gradient(135deg, #a78bc4 0%, #654a84 100%);
-  display: grid;
-  place-items: center;
-  color: #fff;
-  font-weight: 700;
-  font-size: 12px;
-  letter-spacing: 0.5px;
+  overflow: hidden;
   box-shadow: 0 4px 16px rgba(130, 105, 155, 0.35);
   flex-shrink: 0;
+}
+
+.brand-mark-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
 }
 
 .brand-name {
