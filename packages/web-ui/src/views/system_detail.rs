@@ -138,6 +138,18 @@ pub fn SystemDetailView(id: String) -> Element {
     // Toast notification state
     let mut toast_message: Signal<Option<(String, bool)>> = use_signal(|| None); // (message, is_success)
 
+    // Live clock tick for relative timers/heartbeat countdowns while page is open.
+    let mut now_tick = use_signal(Utc::now);
+    use_effect(move || {
+        spawn(async move {
+            loop {
+                gloo_timers::future::TimeoutFuture::new(1000).await;
+                now_tick.set(Utc::now());
+            }
+        });
+    });
+    let now = now_tick();
+
     // System data state — use_resource keyed on id prevents repeated fetches.
     let id_for_detail = id.clone();
     let mut detail_resource = use_resource(move || {
@@ -320,7 +332,6 @@ pub fn SystemDetailView(id: String) -> Element {
     let last_seen_text = system
         .last_seen
         .map(|dt| {
-            let now = Utc::now();
             let duration = now.signed_duration_since(dt);
             if duration.num_minutes() < 1 {
                 "Just now".to_string()
@@ -610,7 +621,7 @@ pub fn SystemDetailView(id: String) -> Element {
                 let heartbeat_interval_sec = 60_i64;
                 let heartbeat_next_in_sec = system
                     .last_seen
-                    .map(|dt| 60.0 - Utc::now().signed_duration_since(dt).num_seconds() as f64)
+                    .map(|dt| 60.0 - now.signed_duration_since(dt).num_seconds() as f64)
                     .unwrap_or(0.0);
                 let uptime_str = format_uptime(system.hardware.uptime_secs.unwrap_or(0));
                 let kernel_str = system.kernel.clone().unwrap_or_else(|| "unknown".to_string());
@@ -772,6 +783,7 @@ pub fn SystemDetailView(id: String) -> Element {
                     Tab::Overview => rsx! {
                         OverviewTab {
                             system: system.clone(),
+                            now: now,
                             current_commit: overview_current_commit.clone(),
                             on_open_cves: move |_| active_tab.set(Tab::Cves),
                         }
@@ -989,6 +1001,7 @@ pub fn SystemDetailView(id: String) -> Element {
 #[component]
 fn OverviewTab(
     system: SystemDetail,
+    now: chrono::DateTime<chrono::Utc>,
     current_commit: Option<SystemCommitHistory>,
     on_open_cves: EventHandler<()>,
 ) -> Element {
@@ -1000,7 +1013,6 @@ fn OverviewTab(
     let heartbeat_text = system
         .last_seen
         .map(|dt| {
-            let now = Utc::now();
             let duration = now.signed_duration_since(dt);
             if duration.num_minutes() < 1 {
                 "Just now".to_string()
@@ -1021,7 +1033,7 @@ fn OverviewTab(
         .unwrap_or_else(|| "unknown".to_string());
     let heartbeat_next_in_sec = system
         .last_seen
-        .map(|dt| 60.0 - Utc::now().signed_duration_since(dt).num_seconds() as f64)
+        .map(|dt| 60.0 - now.signed_duration_since(dt).num_seconds() as f64)
         .unwrap_or(0.0);
     let fqdn_text = format!(
         "{}.{}.cf.internal",
