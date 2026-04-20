@@ -119,8 +119,8 @@ pub fn OnboardingCoachPanel() -> Element {
         Some(Err(_)) => {
             return rsx! {
                 aside {
-                    class: "rounded-xl border p-3",
-                    style: "position:fixed; top:var(--coach-top, 64px); right:1rem; z-index:40; width:min(340px, calc(100vw - 2rem)); border:1px solid rgba(239,68,68,0.5); background:rgba(127,29,29,0.92);",
+                    class: "cf-coach-drawer p-3",
+                    style: "--coach-top: var(--coach-top, 64px); border:1px solid rgba(239,68,68,0.5); background:rgba(127,29,29,0.92);",
                     p { class: "text-sm text-red-100", "Onboarding coach unavailable (failed to load progress)." }
                 }
             };
@@ -128,8 +128,8 @@ pub fn OnboardingCoachPanel() -> Element {
         None => {
             return rsx! {
                 aside {
-                    class: "rounded-xl border p-3",
-                    style: "position:fixed; top:var(--coach-top, 64px); right:1rem; z-index:40; width:min(340px, calc(100vw - 2rem)); border:1px solid rgba(100,116,139,0.45); background:rgba(15,23,42,0.94);",
+                    class: "cf-coach-drawer p-3",
+                    style: "--coach-top: var(--coach-top, 64px); border:1px solid rgba(100,116,139,0.45); background:rgba(15,23,42,0.94);",
                     p { class: "text-sm text-slate-200", "Loading onboarding coach..." }
                 }
             };
@@ -159,12 +159,13 @@ pub fn OnboardingCoachPanel() -> Element {
     if collapsed() {
         return rsx! {
             button {
+                class: "cf-coach-tab",
                 "data-testid": "onboarding-coach-panel",
                 onclick: move |_| {
                     collapsed.set(false);
                     store_collapsed(false);
                 },
-                style: "position:fixed; top:var(--coach-top, 64px); right:0; z-index:50; display:flex; align-items:center; gap:6px; padding:6px 12px 6px 10px; border-radius:0 0 0 10px; background:linear-gradient(135deg, rgba(124,58,237,0.95), rgba(59,130,246,0.92)); border:1px solid rgba(167,139,250,0.7); border-right:none; border-top:none; box-shadow:0 4px 16px rgba(124,58,237,0.4); cursor:pointer;",
+                style: "--coach-top: var(--coach-top, 64px);",
                 span { style: "font-size:13px; line-height:1;", "🧭" }
                 span { style: "font-size:12px; font-weight:700; color:#ffffff; line-height:1; white-space:nowrap;", "Setup Guide" }
                 span { style: "font-size:11px; font-weight:600; color:rgba(255,255,255,0.75); line-height:1; white-space:nowrap;", "{required_completed}/6" }
@@ -174,9 +175,9 @@ pub fn OnboardingCoachPanel() -> Element {
 
     rsx! {
         aside {
-            class: "rounded-xl border shadow-2xl",
+            class: "cf-coach-drawer border shadow-2xl",
             "data-testid": "onboarding-coach-panel",
-            style: "position:fixed; top:var(--coach-top, 64px); right:1rem; z-index:50; width:min(280px, calc(100vw - 2rem)); border:1px solid rgba(124,58,237,0.45); background:rgba(15,23,42,0.96);",
+            style: "--coach-top: var(--coach-top, 64px); border:1px solid rgba(124,58,237,0.45); background:rgba(15,23,42,0.96);",
 
             div {
                 class: "flex items-center justify-between px-3 py-2 border-b",
