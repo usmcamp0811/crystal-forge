@@ -778,6 +778,7 @@ pub fn SystemsListView() -> Element {
                         SystemCardV2 {
                             system: system.clone(),
                             compact: *is_compact.read(),
+                            environment_colors: environment_color_pairs.clone(),
                             on_open: move |_| {
                                 let mut preview_system = preview_system.clone();
                                 spawn(async move {
@@ -822,6 +823,7 @@ pub fn SystemsListView() -> Element {
                 SystemsTable {
                     systems: filtered_systems.clone(),
                     compact: *is_compact.read(),
+                    environment_colors: environment_color_pairs.clone(),
                     on_remove: move |id| remove_system_by_id(local_systems, pending_remove, id),
                     on_update_key: move |id| update_key_for_system(local_systems, pending_update_key, id),
                     on_edit: move |id: uuid::Uuid| {

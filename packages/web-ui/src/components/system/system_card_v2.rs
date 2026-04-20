@@ -11,46 +11,59 @@ use dioxus::prelude::*;
 
 use crate::api::models::{HealthStatus, SystemSummary};
 use crate::components::chips::{Chip, ChipVariant, EnvBadge, StatusDot};
+use crate::components::environments::{normalize_color_hex, with_alpha};
 use crate::components::heartbeat_spinner::HeartbeatSpinner;
 
 /// Environment color configuration for badges and styling.
 struct EnvColors {
-    fg: &'static str,
-    bg: &'static str,
-    border: &'static str,
+    fg: String,
+    bg: String,
+    border: String,
 }
 
-fn env_colors(env_name: &str) -> EnvColors {
+fn env_colors(env_name: &str, environment_colors: &[(String, String)]) -> EnvColors {
+    if let Some((_, color_hex)) = environment_colors
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(env_name))
+    {
+        let fg = normalize_color_hex(color_hex);
+        return EnvColors {
+            bg: with_alpha(&fg, 0.10),
+            border: with_alpha(&fg, 0.25),
+            fg,
+        };
+    }
+
     match env_name.to_lowercase().as_str() {
         "production" | "prod" => EnvColors {
-            fg: "#f87171",
-            bg: "rgba(220,38,38,0.10)",
-            border: "rgba(248,113,113,0.25)",
+            fg: "#f87171".to_string(),
+            bg: "rgba(220,38,38,0.10)".to_string(),
+            border: "rgba(248,113,113,0.25)".to_string(),
         },
         "staging" | "stage" => EnvColors {
-            fg: "#fbbf24",
-            bg: "rgba(217,119,6,0.10)",
-            border: "rgba(251,191,36,0.25)",
+            fg: "#fbbf24".to_string(),
+            bg: "rgba(217,119,6,0.10)".to_string(),
+            border: "rgba(251,191,36,0.25)".to_string(),
         },
         "dev" | "development" => EnvColors {
-            fg: "#60a5fa",
-            bg: "rgba(37,99,235,0.10)",
-            border: "rgba(96,165,250,0.25)",
+            fg: "#60a5fa".to_string(),
+            bg: "rgba(37,99,235,0.10)".to_string(),
+            border: "rgba(96,165,250,0.25)".to_string(),
         },
         "edge" => EnvColors {
-            fg: "#2dd4bf",
-            bg: "rgba(15,118,110,0.12)",
-            border: "rgba(45,212,191,0.25)",
+            fg: "#2dd4bf".to_string(),
+            bg: "rgba(15,118,110,0.12)".to_string(),
+            border: "rgba(45,212,191,0.25)".to_string(),
         },
         "lab" => EnvColors {
-            fg: "#a78bfa",
-            bg: "rgba(124,58,237,0.10)",
-            border: "rgba(167,139,250,0.25)",
+            fg: "#a78bfa".to_string(),
+            bg: "rgba(124,58,237,0.10)".to_string(),
+            border: "rgba(167,139,250,0.25)".to_string(),
         },
         _ => EnvColors {
-            fg: "#6b7280",
-            bg: "rgba(107,114,128,0.16)",
-            border: "rgba(107,114,128,0.25)",
+            fg: "#6b7280".to_string(),
+            bg: "rgba(107,114,128,0.16)".to_string(),
+            border: "rgba(107,114,128,0.25)".to_string(),
         },
     }
 }
@@ -91,6 +104,7 @@ fn deployment_chip_variant(status: &crate::api::models::DeploymentStatus) -> Chi
 pub fn SystemCardV2(
     system: SystemSummary,
     #[props(default = false)] compact: bool,
+    #[props(default)] environment_colors: Vec<(String, String)>,
     on_open: EventHandler<()>,
     on_remove: EventHandler<()>,
     on_update_key: EventHandler<()>,
@@ -112,7 +126,7 @@ pub fn SystemCardV2(
         web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&msg));
     }
 
-    let env = env_colors(&environment);
+    let env = env_colors(&environment, &environment_colors);
     let status_col = status_color(&system.health_status);
 
     // Get flake info
@@ -189,9 +203,9 @@ pub fn SystemCardV2(
                 }
                 EnvBadge {
                     name: environment.clone(),
-                    fg: env.fg.to_string(),
-                    bg: env.bg.to_string(),
-                    border: env.border.to_string(),
+                    fg: env.fg,
+                    bg: env.bg,
+                    border: env.border,
                 }
             }
 
