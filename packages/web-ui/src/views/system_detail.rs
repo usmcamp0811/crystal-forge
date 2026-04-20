@@ -1728,6 +1728,8 @@ fn HistoryTab(
     on_rollback: EventHandler<SystemCommitHistory>,
 ) -> Element {
     let rows = commits;
+    let committed_timestamps: Vec<chrono::DateTime<chrono::Utc>> =
+        rows.iter().map(|c| c.committed_at).collect();
 
     let status_chip = move |commit: &SystemCommitHistory| {
         if commit.is_current || commit.was_deployed {
@@ -1772,7 +1774,7 @@ fn HistoryTab(
                     }
                 }
                 tbody {
-                    for commit in rows {
+                    for (idx, commit) in rows.into_iter().enumerate() {
                         {
                             let short_hash = commit.hash.chars().take(7).collect::<String>();
                             let when_text = relative_time(commit.committed_at);
@@ -1782,12 +1784,27 @@ fn HistoryTab(
                             } else {
                                 "—".to_string()
                             };
-                            let duration = commit
+                            let deploy_duration_secs = commit
                                 .deployed_at
-                                .map(|deployed| {
-                                    let secs = deployed.signed_duration_since(commit.committed_at).num_seconds().abs();
-                                    format!("{}m {}s", secs / 60, secs % 60)
+                                .map(|deployed| deployed.signed_duration_since(commit.committed_at).num_seconds())
+                                .filter(|secs| *secs > 0);
+
+                            // Fallback when deployed_at equals committed_at (common in current API mapping):
+                            // derive a real timeline duration from adjacent deployment timestamps.
+                            let timeline_duration_secs = if idx == 0 {
+                                Some(Utc::now().signed_duration_since(commit.committed_at).num_seconds().max(0))
+                            } else {
+                                committed_timestamps.get(idx.saturating_sub(1)).map(|newer| {
+                                    newer
+                                        .signed_duration_since(commit.committed_at)
+                                        .num_seconds()
+                                        .max(0)
                                 })
+                            };
+
+                            let duration = deploy_duration_secs
+                                .or(timeline_duration_secs)
+                                .map(format_duration_compact)
                                 .unwrap_or_else(|| "—".to_string());
 
                             rsx! {
@@ -1863,6 +1880,22 @@ fn relative_time(at: chrono::DateTime<chrono::Utc>) -> String {
         format!("{}d ago", d.num_days())
     } else {
         at.format("%b %d").to_string()
+    }
+}
+
+fn format_duration_compact(total_seconds: i64) -> String {
+    let secs = total_seconds.max(0);
+    let days = secs / 86_400;
+    let hours = (secs % 86_400) / 3_600;
+    let minutes = (secs % 3_600) / 60;
+    let seconds = secs % 60;
+
+    if days > 0 {
+        format!("{}d {}h", days, hours)
+    } else if hours > 0 {
+        format!("{}h {}m", hours, minutes)
+    } else {
+        format!("{}m {}s", minutes, seconds)
     }
 }
 

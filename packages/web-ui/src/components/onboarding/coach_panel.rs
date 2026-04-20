@@ -119,8 +119,8 @@ pub fn OnboardingCoachPanel() -> Element {
         Some(Err(_)) => {
             return rsx! {
                 aside {
-                    class: "fixed z-40 top-20 right-4 w-[340px] rounded-xl border p-3",
-                    style: "border:1px solid rgba(239,68,68,0.5); background:rgba(127,29,29,0.92);",
+                    class: "rounded-xl border p-3",
+                    style: "position:fixed; top:var(--coach-top, 64px); right:1rem; z-index:40; width:min(340px, calc(100vw - 2rem)); border:1px solid rgba(239,68,68,0.5); background:rgba(127,29,29,0.92);",
                     p { class: "text-sm text-red-100", "Onboarding coach unavailable (failed to load progress)." }
                 }
             };
@@ -128,8 +128,8 @@ pub fn OnboardingCoachPanel() -> Element {
         None => {
             return rsx! {
                 aside {
-                    class: "fixed z-40 top-20 right-4 w-[340px] rounded-xl border p-3",
-                    style: "border:1px solid rgba(100,116,139,0.45); background:rgba(15,23,42,0.94);",
+                    class: "rounded-xl border p-3",
+                    style: "position:fixed; top:var(--coach-top, 64px); right:1rem; z-index:40; width:min(340px, calc(100vw - 2rem)); border:1px solid rgba(100,116,139,0.45); background:rgba(15,23,42,0.94);",
                     p { class: "text-sm text-slate-200", "Loading onboarding coach..." }
                 }
             };
@@ -174,9 +174,9 @@ pub fn OnboardingCoachPanel() -> Element {
 
     rsx! {
         aside {
-            class: "fixed z-50 rounded-xl border shadow-2xl",
+            class: "rounded-xl border shadow-2xl",
             "data-testid": "onboarding-coach-panel",
-            style: "top:var(--coach-top, 64px); right:1rem; width:min(280px, calc(100vw - 2rem)); border:1px solid rgba(124,58,237,0.45); background:rgba(15,23,42,0.96);",
+            style: "position:fixed; top:var(--coach-top, 64px); right:1rem; z-index:50; width:min(280px, calc(100vw - 2rem)); border:1px solid rgba(124,58,237,0.45); background:rgba(15,23,42,0.96);",
 
             div {
                 class: "flex items-center justify-between px-3 py-2 border-b",
