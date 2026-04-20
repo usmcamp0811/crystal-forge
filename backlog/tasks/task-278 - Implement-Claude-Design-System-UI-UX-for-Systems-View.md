@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@ai-agent'
 created_date: '2026-04-19 17:54'
-updated_date: '2026-04-20 08:07'
+updated_date: '2026-04-20 12:09'
 labels:
   - ui
   - systems
@@ -66,6 +66,8 @@ Fixed spark bar in Total stat card (commit 469b1a25). The bar under the Total nu
 Added debug logging (commit 3e10621d) to trace environment values in browser console. This will help diagnose why environment badges show wrong colors for real backend data vs mock data. Check browser console for 'SystemCardV2: hostname=' and 'SystemsTable: hostname=' messages showing actual environment field values and how they're being mapped to colors.
 
 CVE tab table view: Current implementation uses expandable cards. To match design example, need to convert to table with clickable rows that expand to show justification form and NVD link inline. Keep existing justification workflow, NVD links, and affected packages list. Table columns: CVE | Severity | CVSS | Package | Version | Fix | Actions. Expanded row shows: NVD link, justification editor, affected packages.
+
+Fixed fake flake and commit data (commit 4c457c17). Cards now show 'flake-{id}' instead of 'flake · main', commit shows '—' instead of fake hash. Table flake column simplified to show just 'flake-{id}'. Backend limitation: view_system_list only provides flake_id, not flake name or current commit. Added TODO comments for backend to extend the view with: (1) flake name by joining with flakes table, (2) current commit hash from latest system_state or deployment info.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
