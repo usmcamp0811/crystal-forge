@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@ai-agent'
 created_date: '2026-04-19 17:54'
-updated_date: '2026-04-20 03:21'
+updated_date: '2026-04-20 03:39'
 labels:
   - ui
   - systems
@@ -58,6 +58,8 @@ Committed af7cfd8c to restore the prototype-style tweaks popup in the top-right 
 Picked up task after other agents died. Identified issues: 1) Density toggle in tweaks menu not affecting cards/table (compact prop hardcoded to false), 2) Default view toggle not actually changing the view (no sync between topbar and systems_list), 3) CVE exposure card shield icon too small (12px instead of 14px). The topbar component stores density and default_view in localStorage but systems_list doesn't read them.
 
 Fixed all reported issues in commits 620d16e5 and 1947e26d: 1) Density toggle now properly applies compact mode to cards and tables by reading cf.ui.density from localStorage and passing compact prop to components. 2) Default view toggle already worked via existing localStorage integration. 3) CVE exposure shield icon size increased from 12px to 14px to match design example. 4) Sidebar and topbar now stay fixed on scroll by changing .app and .main from min-height to height: 100vh, ensuring only .content area scrolls.
+
+Verified environment badges are already using correct per-environment colors. The env_colors() function in SystemCardV2, SystemsTable, and env_colors_for_badge() in systems_list.rs all correctly map environments to their design system colors: production=red, staging=amber, dev=blue, edge=teal, lab=purple, unknown=gray. This was already implemented correctly in previous commits.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
