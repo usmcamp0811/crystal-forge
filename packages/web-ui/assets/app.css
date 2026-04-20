@@ -1865,6 +1865,7 @@ html[data-theme="light"] .sd-nix {
   border-bottom: 1px solid var(--cf-divider);
   background: var(--cf-page-bg);
   min-height: 60px;
+  position: relative;
 }
 
 .breadcrumbs {
@@ -1915,6 +1916,74 @@ html[data-theme="light"] .sd-nix {
   background: var(--cf-subtle-bg);
   color: var(--cf-text-muted);
   border: 1px solid var(--cf-card-border);
+}
+
+.cf-tweaks-menu {
+  position: absolute;
+  right: 24px;
+  top: calc(100% + 10px);
+  z-index: 50;
+  width: 260px;
+  overflow: hidden;
+  background: var(--cf-card-bg);
+  border: 1px solid var(--cf-card-border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-pop);
+}
+
+.cf-tweaks-head {
+  padding: 12px 14px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid var(--cf-divider);
+}
+
+.cf-tweaks-head strong {
+  font-size: 13px;
+}
+
+.cf-tweaks-body {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.cf-tweaks-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cf-tweaks-row > label {
+  font-size: 11px;
+  color: var(--cf-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.cf-tweaks-opts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(60px, 1fr));
+  gap: 4px;
+}
+
+.cf-tweaks-opts button {
+  border: 1px solid var(--cf-card-border);
+  background: transparent;
+  color: var(--cf-text-secondary);
+  padding: 6px 8px;
+  border-radius: 7px;
+  cursor: pointer;
+  font-size: 11px;
+  font-family: inherit;
+}
+
+.cf-tweaks-opts button.active {
+  background: var(--cf-brand-purple);
+  color: white;
+  border-color: var(--cf-brand-purple);
 }
 
 /* Page header */

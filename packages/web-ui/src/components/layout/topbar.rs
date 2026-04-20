@@ -5,6 +5,35 @@ use crate::state::theme::UiTheme;
 use crate::theme;
 use dioxus::prelude::*;
 
+const DENSITY_KEY: &str = "cf.ui.density";
+const SYSTEMS_VIEW_KEY: &str = "crystal_forge.systems.view";
+
+fn load_pref(key: &str, default: &str) -> String {
+    web_sys::window()
+        .and_then(|w| w.local_storage().ok())
+        .flatten()
+        .and_then(|storage| storage.get_item(key).ok())
+        .flatten()
+        .unwrap_or_else(|| default.to_string())
+}
+
+fn store_pref(key: &str, value: &str) {
+    if let Some(storage) = web_sys::window()
+        .and_then(|w| w.local_storage().ok())
+        .flatten()
+    {
+        let _ = storage.set_item(key, value);
+    }
+}
+
+fn set_root_attr(name: &str, value: &str) {
+    if let Some(document) = web_sys::window().and_then(|w| w.document()) {
+        if let Some(root) = document.document_element() {
+            let _ = root.set_attribute(name, value);
+        }
+    }
+}
+
 /// Header bar displaying the current page title and optional actions.
 #[component]
 pub fn TopBar(title: String) -> Element {
@@ -13,6 +42,9 @@ pub fn TopBar(title: String) -> Element {
     let sidebar_ctx = use_context::<SidebarContext>();
     let mut is_mobile_drawer_open = sidebar_ctx.is_mobile_drawer_open;
     let mut is_collapsed = sidebar_ctx.is_collapsed;
+    let mut tweaks_open = use_signal(|| false);
+    let mut density = use_signal(|| load_pref(DENSITY_KEY, "comfortable"));
+    let mut default_view = use_signal(|| load_pref(SYSTEMS_VIEW_KEY, "cards"));
 
     let toggle_drawer = move |_| {
         is_mobile_drawer_open.set(!is_mobile_drawer_open());
@@ -31,6 +63,10 @@ pub fn TopBar(title: String) -> Element {
                 } \
             })()",
         );
+    });
+
+    use_effect(move || {
+        set_root_attr("data-density", &density());
     });
 
     rsx! {
@@ -140,22 +176,112 @@ pub fn TopBar(title: String) -> Element {
                 }
             }
 
-            // Sidebar collapse/expand button
+            // Tweaks button
             button {
                 class: "btn-icon focus-ring",
-                "aria-label": if is_collapsed() { "Expand sidebar" } else { "Collapse sidebar" },
-                title: if is_collapsed() { "Expand sidebar" } else { "Collapse sidebar" },
+                "aria-label": "Tweaks",
+                title: "Tweaks",
                 onclick: move |_| {
-                    is_collapsed.set(!is_collapsed());
+                    tweaks_open.set(!tweaks_open());
                 },
                 svg {
                     class: "w-4 h-4",
                     fill: "none",
                     stroke: "currentColor",
-                    stroke_width: "1.75",
+                    stroke_width: "2",
                     view_box: "0 0 24 24",
-                    rect { x: "3", y: "3", width: "18", height: "18", rx: "2" }
-                    path { d: "M9 3v18" }
+                    path {
+                        d: "M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"
+                    }
+                }
+            }
+
+            if tweaks_open() {
+                div {
+                    class: "cf-tweaks-menu",
+                    div {
+                        class: "cf-tweaks-head",
+                        strong { "Tweaks" }
+                        button {
+                            class: "btn-icon focus-ring",
+                            "aria-label": "Close tweaks",
+                            onclick: move |_| tweaks_open.set(false),
+                            svg {
+                                class: "w-3.5 h-3.5",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                view_box: "0 0 24 24",
+                                path { d: "M6 6l12 12M18 6L6 18" }
+                            }
+                        }
+                    }
+                    div {
+                        class: "cf-tweaks-body",
+                        TweakRow {
+                            label: "Theme",
+                            options: vec![("dark", "Dark"), ("light", "Light")],
+                            value: ui_theme().as_attr().to_string(),
+                            on_change: move |value: String| {
+                                let next = if value == "light" { UiTheme::Light } else { UiTheme::Dark };
+                                ui_theme.set(next);
+                            }
+                        }
+                        TweakRow {
+                            label: "Density",
+                            options: vec![("comfortable", "Comfort"), ("compact", "Compact")],
+                            value: density(),
+                            on_change: move |value: String| {
+                                density.set(value.clone());
+                                store_pref(DENSITY_KEY, &value);
+                                set_root_attr("data-density", &value);
+                            }
+                        }
+                        TweakRow {
+                            label: "Default view",
+                            options: vec![("cards", "Cards"), ("table", "Table")],
+                            value: default_view(),
+                            on_change: move |value: String| {
+                                default_view.set(value.clone());
+                                store_pref(SYSTEMS_VIEW_KEY, &value);
+                            }
+                        }
+                        TweakRow {
+                            label: "Sidebar",
+                            options: vec![("full", "Full"), ("rail", "Rail")],
+                            value: if is_collapsed() { "rail".to_string() } else { "full".to_string() },
+                            on_change: move |value: String| {
+                                let collapsed = value == "rail";
+                                is_collapsed.set(collapsed);
+                                store_pref("cf-sidebar-collapsed", if collapsed { "true" } else { "false" });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn TweakRow(
+    label: String,
+    options: Vec<(&'static str, &'static str)>,
+    value: String,
+    on_change: EventHandler<String>,
+) -> Element {
+    rsx! {
+        div {
+            class: "cf-tweaks-row",
+            label { "{label}" }
+            div {
+                class: "cf-tweaks-opts",
+                for (option_value, option_label) in options {
+                    button {
+                        class: if value == option_value { "active" } else { "" },
+                        onclick: move |_| on_change.call(option_value.to_string()),
+                        "{option_label}"
+                    }
                 }
             }
         }
