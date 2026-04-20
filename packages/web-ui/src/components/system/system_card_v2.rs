@@ -105,6 +105,7 @@ pub fn SystemCardV2(
     system: SystemSummary,
     #[props(default = false)] compact: bool,
     #[props(default)] environment_colors: Vec<(String, String)>,
+    #[props(default)] flake_context: Vec<(i32, String, Option<String>)>,
     on_open: EventHandler<()>,
     on_remove: EventHandler<()>,
     on_update_key: EventHandler<()>,
@@ -129,12 +130,20 @@ pub fn SystemCardV2(
     let env = env_colors(&environment, &environment_colors);
     let status_col = status_color(&system.health_status);
 
-    // Get flake info
-    // TODO: Backend needs to include flake name in SystemSummary/view_system_list
-    let flake_name = system
+    // Get flake info from loaded flake context.
+    let (flake_name, flake_commit) = system
         .flake_id
-        .map(|id| format!("flake-{}", id))
-        .unwrap_or_else(|| "unknown".to_string());
+        .and_then(|id| {
+            flake_context
+                .iter()
+                .find(|(flake_id, _, _)| *flake_id == id)
+                .map(|(_, name, latest_commit)| (name.clone(), latest_commit.clone()))
+        })
+        .unwrap_or_else(|| ("—".to_string(), None));
+    let flake_commit_short = flake_commit
+        .as_deref()
+        .map(|hash| hash.chars().take(8).collect::<String>())
+        .unwrap_or_else(|| "—".to_string());
 
     // Format last seen as relative time
     let last_seen = system
@@ -213,12 +222,12 @@ pub fn SystemCardV2(
             if !compact {
                 div {
                     class: "grid grid-cols-2 gap-x-4 gap-y-3 text-xs",
-                    // Flake · branch
+                    // Flake
                     div {
                         div {
                             class: "text-[11px] uppercase tracking-wider mb-1",
                             style: "color: var(--cf-text-muted); letter-spacing: 0.06em;",
-                            "Flake · branch"
+                            "Flake"
                         }
                         div {
                             class: "mono text-xs",
@@ -235,8 +244,8 @@ pub fn SystemCardV2(
                         }
                         div {
                             class: "mono text-xs",
-                            style: "color: var(--cf-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
-                            "—"
+                            style: "color: var(--cf-text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
+                            "{flake_commit_short}"
                         }
                     }
                     // Heartbeat

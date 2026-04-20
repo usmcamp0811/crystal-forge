@@ -48,6 +48,9 @@ pub fn SystemsTable(
     /// Optional environment name -> color hex mappings from environments API
     #[props(default)]
     environment_colors: Vec<(String, String)>,
+    /// Optional flake context tuples (flake_id, name, latest_commit)
+    #[props(default)]
+    flake_context: Vec<(i32, String, Option<String>)>,
 ) -> Element {
     let mut sort_column = use_signal(|| None::<SystemsSortColumn>);
     let mut sort_direction = use_signal(|| SortDirection::Asc);
@@ -199,17 +202,33 @@ pub fn SystemsTable(
                                 // Flake · commit
                                 td {
                                     {
-                                        // TODO: Backend needs to include flake name and commit in SystemSummary/view_system_list
-                                        let flake_display = system.flake_id
-                                            .map(|id| format!("flake-{}", id))
+                                        let (flake_name, flake_commit) = system
+                                            .flake_id
+                                            .and_then(|id| {
+                                                flake_context
+                                                    .iter()
+                                                    .find(|(flake_id, _, _)| *flake_id == id)
+                                                    .map(|(_, name, latest_commit)| {
+                                                        (name.clone(), latest_commit.clone())
+                                                    })
+                                            })
+                                            .unwrap_or_else(|| ("—".to_string(), None));
+                                        let flake_commit_short = flake_commit
+                                            .as_deref()
+                                            .map(|hash| hash.chars().take(8).collect::<String>())
                                             .unwrap_or_else(|| "—".to_string());
                                         rsx! {
                                             div {
                                                 style: "display: flex; flex-direction: column; line-height: 1.3;",
                                                 span {
                                                     class: "mono",
-                                                    style: "font-size: 12px; color: var(--cf-text-muted)",
-                                                    "{flake_display}"
+                                                    style: "font-size: 12px; color: var(--cf-text-primary)",
+                                                    "{flake_name}"
+                                                }
+                                                span {
+                                                    class: "mono",
+                                                    style: "font-size: 11px; color: var(--cf-text-muted)",
+                                                    "{flake_commit_short}"
                                                 }
                                             }
                                         }

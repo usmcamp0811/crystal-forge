@@ -16,15 +16,16 @@ use chrono::{Duration, Utc};
 use uuid::Uuid;
 
 use crate::api::client::{
-    ApiClientError, create_system, deactivate_system, deploy_system, fetch_flakes, fetch_system,
-    fetch_system_agent_events, fetch_system_commits, fetch_system_history, fetch_systems,
-    update_system, update_system_public_key,
+    ApiClientError, create_system, deactivate_system, deploy_system, fetch_flake_timelines,
+    fetch_flakes, fetch_system, fetch_system_agent_events, fetch_system_commits,
+    fetch_system_history, fetch_systems, update_system, update_system_public_key,
 };
 use crate::api::models::{
     CommitInfo, CreateSystemRequest, CveSummary, DeploySystemRequest, DeploymentStatus,
-    HealthStatus, PaginatedResponse, PipelineStage, SystemAgentEvent, SystemCommitsResponse,
-    SystemDetail, SystemHardwareInfo, SystemHistoryEntry, SystemNetworkInfo, SystemSecurityInfo,
-    SystemSummary, SystemsListParams, UpdateSystemPublicKeyRequest, UpdateSystemRequest,
+    FlakeRegistryItem, HealthStatus, PaginatedResponse, PipelineStage, SystemAgentEvent,
+    SystemCommitsResponse, SystemDetail, SystemHardwareInfo, SystemHistoryEntry, SystemNetworkInfo,
+    SystemSecurityInfo, SystemSummary, SystemsListParams, UpdateSystemPublicKeyRequest,
+    UpdateSystemRequest,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -57,6 +58,14 @@ pub struct SystemDetailLoadResult {
 #[derive(Debug, Clone)]
 pub struct FlakeNamesLoadResult {
     pub names: Vec<String>,
+    pub notice: Option<String>,
+    pub redirect_to_login: bool,
+}
+
+/// Result of loading flake context for system list/card display.
+#[derive(Debug, Clone)]
+pub struct FlakeContextLoadResult {
+    pub flakes: Vec<(i32, String, Option<String>)>,
     pub notice: Option<String>,
     pub redirect_to_login: bool,
 }
@@ -152,6 +161,55 @@ pub async fn load_flake_names_with_fallback() -> FlakeNamesLoadResult {
         },
         Err(error) => FlakeNamesLoadResult {
             names: vec![],
+            notice: Some(format!("Flakes API unavailable: {error}")),
+            redirect_to_login: false,
+        },
+    }
+}
+
+/// Fetch flake metadata for UI display (name + latest commit).
+pub async fn load_flake_context_with_fallback() -> FlakeContextLoadResult {
+    match fetch_flakes().await {
+        Ok(flakes) => {
+            let timeline_hashes = fetch_flake_timelines()
+                .await
+                .ok()
+                .map(|timelines| {
+                    let mut out = std::collections::HashMap::new();
+                    for timeline in timelines {
+                        let latest = timeline
+                            .commits
+                            .iter()
+                            .find(|c| c.commits_behind == 0)
+                            .or_else(|| timeline.commits.first())
+                            .map(|c| c.hash.clone());
+                        out.insert(timeline.flake_id, latest);
+                    }
+                    out
+                })
+                .unwrap_or_default();
+
+            let mapped = flakes
+                .into_iter()
+                .map(|f: FlakeRegistryItem| {
+                    let latest = timeline_hashes.get(&f.id).cloned().flatten();
+                    (f.id, f.name, latest)
+                })
+                .collect();
+
+            FlakeContextLoadResult {
+                flakes: mapped,
+                notice: None,
+                redirect_to_login: false,
+            }
+        }
+        Err(error) if should_redirect_to_login(&error) => FlakeContextLoadResult {
+            flakes: vec![],
+            notice: None,
+            redirect_to_login: true,
+        },
+        Err(error) => FlakeContextLoadResult {
+            flakes: vec![],
             notice: Some(format!("Flakes API unavailable: {error}")),
             redirect_to_login: false,
         },

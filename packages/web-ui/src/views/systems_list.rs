@@ -34,9 +34,9 @@ use crate::state::app_state::AppState;
 use crate::state::auth;
 use crate::systems::adapter::{
     create_system_via_api, deactivate_system_via_api, deploy_system_via_api, fallback_flake_names,
-    fallback_systems, fetch_system_commits_via_api, load_flake_names_with_fallback,
-    load_system_detail_with_fallback, load_systems_with_fallback, update_system_public_key_via_api,
-    update_system_via_api,
+    fallback_systems, fetch_system_commits_via_api, load_flake_context_with_fallback,
+    load_flake_names_with_fallback, load_system_detail_with_fallback, load_systems_with_fallback,
+    update_system_public_key_via_api, update_system_via_api,
 };
 use crate::theme;
 
@@ -166,6 +166,8 @@ pub fn SystemsListView() -> Element {
         use_resource(move || async move { load_environment_colors_with_fallback().await });
     let flake_names_resource =
         use_resource(move || async move { load_flake_names_with_fallback().await });
+    let flake_context_resource =
+        use_resource(move || async move { load_flake_context_with_fallback().await });
 
     // Local mutable state for systems (allows client-side add/remove until backend supports it)
     let mut local_systems = use_signal(fallback_systems);
@@ -203,6 +205,11 @@ pub fn SystemsListView() -> Element {
             .map(|r| r.redirect_to_login)
             .unwrap_or(false)
         || environment_colors_resource
+            .read_unchecked()
+            .as_ref()
+            .map(|r| r.redirect_to_login)
+            .unwrap_or(false)
+        || flake_context_resource
             .read_unchecked()
             .as_ref()
             .map(|r| r.redirect_to_login)
@@ -254,6 +261,11 @@ pub fn SystemsListView() -> Element {
         .as_ref()
         .map(|r| r.names.clone())
         .unwrap_or_else(fallback_flake_names);
+    let flake_context = flake_context_resource
+        .read_unchecked()
+        .as_ref()
+        .map(|r| r.flakes.clone())
+        .unwrap_or_default();
     let environment_color_pairs = environment_colors_resource
         .read_unchecked()
         .as_ref()
@@ -780,6 +792,7 @@ pub fn SystemsListView() -> Element {
                             system: system.clone(),
                             compact: *is_compact.read(),
                             environment_colors: environment_color_pairs.clone(),
+                            flake_context: flake_context.clone(),
                             on_open: move |_| {
                                 let mut preview_system = preview_system.clone();
                                 spawn(async move {
@@ -825,6 +838,7 @@ pub fn SystemsListView() -> Element {
                     systems: filtered_systems.clone(),
                     compact: *is_compact.read(),
                     environment_colors: environment_color_pairs.clone(),
+                    flake_context: flake_context.clone(),
                     on_remove: move |id| remove_system_by_id(local_systems, pending_remove, id),
                     on_update_key: move |id| update_key_for_system(local_systems, pending_update_key, id),
                     on_edit: move |id: uuid::Uuid| {
