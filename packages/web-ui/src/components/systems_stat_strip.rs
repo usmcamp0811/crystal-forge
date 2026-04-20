@@ -147,7 +147,7 @@ pub fn SystemsStatStrip(systems: Vec<SystemSummary>) -> Element {
                                     rsx! {
                                         div {
                                             class: "spark-seg",
-                                            style: "width: {pct}%; background-color: {color} !important;",
+                                            style: "width: {pct}%; background: {color};",
                                             title: "{env_title}"
                                         }
                                     }
