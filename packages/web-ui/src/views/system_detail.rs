@@ -1201,8 +1201,10 @@ fn OverviewTab(
                             class: "w-3.5 h-3.5",
                             fill: "none",
                             stroke: "currentColor",
-                            stroke_width: "2",
+                            stroke_width: "1.75",
                             view_box: "0 0 24 24",
+                            width: "14",
+                            height: "14",
                             path { d: "M12 3l8 4v5c0 5-3.5 9.5-8 11-4.5-1.5-8-6-8-11V7l8-4z" }
                         }
                         div {
