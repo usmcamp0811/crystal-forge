@@ -11,6 +11,7 @@ use crate::api::client::set_setup_wizard_agent_acknowledged;
 use crate::api::models::{
     DeploymentStatus, HealthStatus, SystemDetail, SystemSummary, SystemsListParams,
 };
+use crate::components::environments::{normalize_color_hex, with_alpha};
 use crate::components::filters::{
     DeploymentFilterDropdown, EnvironmentFilterDropdown, HealthFilterDropdown, ViewMode, ViewToggle,
 };
@@ -868,6 +869,7 @@ pub fn SystemsListView() -> Element {
             if let Some(detail) = preview_system.read().clone() {
                 SystemPreviewPanel {
                     detail: detail.clone(),
+                    environment_colors: environment_color_pairs.clone(),
                     on_close: move |_| preview_system.set(None),
                     on_open_detail: move |_| {
                         preview_system.set(None);
@@ -1030,6 +1032,7 @@ pub fn SystemsListView() -> Element {
 #[component]
 fn SystemPreviewPanel(
     detail: SystemDetail,
+    #[props(default)] environment_colors: Vec<(String, String)>,
     on_close: EventHandler<()>,
     on_open_detail: EventHandler<()>,
     on_deploy: EventHandler<()>,
@@ -1063,8 +1066,10 @@ fn SystemPreviewPanel(
         .map(|dt| format_relative_time_from(now, dt))
         .unwrap_or_else(|| "Never".to_string());
 
-    let (env_fg, env_bg, env_border) =
-        env_colors_for_badge(detail.environment.as_deref().unwrap_or("unknown"));
+    let (env_fg, env_bg, env_border) = env_colors_for_badge(
+        detail.environment.as_deref().unwrap_or("unknown"),
+        &environment_colors,
+    );
 
     let flake_name = detail
         .flake
@@ -1183,9 +1188,9 @@ fn SystemPreviewPanel(
                         style: "display: flex; gap: 8px; flex-wrap: wrap;",
                         EnvBadge {
                             name: detail.environment.clone().unwrap_or_else(|| "unknown".to_string()),
-                            fg: env_fg.to_string(),
-                            bg: env_bg.to_string(),
-                            border: env_border.to_string(),
+                            fg: env_fg,
+                            bg: env_bg,
+                            border: env_border,
                         }
                         Chip {
                             variant: deploy_variant,
@@ -1337,17 +1342,48 @@ fn format_relative_time_from(
     }
 }
 
-fn env_colors_for_badge(env_name: &str) -> (&'static str, &'static str, &'static str) {
+fn env_colors_for_badge(
+    env_name: &str,
+    environment_colors: &[(String, String)],
+) -> (String, String, String) {
+    if let Some((_, color_hex)) = environment_colors
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(env_name))
+    {
+        let fg = normalize_color_hex(color_hex);
+        return (fg.clone(), with_alpha(&fg, 0.10), with_alpha(&fg, 0.25));
+    }
+
     match env_name.to_lowercase().as_str() {
-        "production" | "prod" => ("#f87171", "rgba(220,38,38,0.10)", "rgba(248,113,113,0.25)"),
-        "staging" | "stage" => ("#fbbf24", "rgba(217,119,6,0.10)", "rgba(251,191,36,0.25)"),
-        "dev" | "development" => ("#60a5fa", "rgba(37,99,235,0.10)", "rgba(96,165,250,0.25)"),
-        "edge" => ("#2dd4bf", "rgba(15,118,110,0.12)", "rgba(45,212,191,0.25)"),
-        "lab" => ("#a78bfa", "rgba(124,58,237,0.10)", "rgba(167,139,250,0.25)"),
+        "production" | "prod" => (
+            "#f87171".to_string(),
+            "rgba(220,38,38,0.10)".to_string(),
+            "rgba(248,113,113,0.25)".to_string(),
+        ),
+        "staging" | "stage" => (
+            "#fbbf24".to_string(),
+            "rgba(217,119,6,0.10)".to_string(),
+            "rgba(251,191,36,0.25)".to_string(),
+        ),
+        "dev" | "development" => (
+            "#60a5fa".to_string(),
+            "rgba(37,99,235,0.10)".to_string(),
+            "rgba(96,165,250,0.25)".to_string(),
+        ),
+        "edge" => (
+            "#2dd4bf".to_string(),
+            "rgba(15,118,110,0.12)".to_string(),
+            "rgba(45,212,191,0.25)".to_string(),
+        ),
+        "lab" => (
+            "#a78bfa".to_string(),
+            "rgba(124,58,237,0.10)".to_string(),
+            "rgba(167,139,250,0.25)".to_string(),
+        ),
         _ => (
-            "#6b7280",
-            "rgba(107,114,128,0.16)",
-            "rgba(107,114,128,0.25)",
+            "#6b7280".to_string(),
+            "rgba(107,114,128,0.16)".to_string(),
+            "rgba(107,114,128,0.25)".to_string(),
         ),
     }
 }
