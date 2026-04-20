@@ -5,7 +5,7 @@
 
 use dioxus::prelude::*;
 
-use crate::api::models::{HealthStatus, SystemSummary};
+use crate::api::models::{DeploymentStatus, HealthStatus, SystemSummary};
 
 /// Systems statistics calculated from the systems list.
 #[derive(Clone, PartialEq)]
@@ -29,7 +29,10 @@ impl SystemsStats {
             .count();
         let warning = systems
             .iter()
-            .filter(|s| s.health_status == HealthStatus::Warning)
+            .filter(|s| {
+                s.health_status == HealthStatus::Warning
+                    || s.deployment_status == DeploymentStatus::Behind
+            })
             .count();
         let critical = systems
             .iter()

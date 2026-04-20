@@ -512,7 +512,7 @@ pub fn SystemsListView() -> Element {
 
             // Statistics Strip
             SystemsStatStrip {
-                systems: local_systems.read().clone(),
+                systems: filtered_systems.clone(),
                 environment_colors: environment_color_pairs.clone(),
             }
 
