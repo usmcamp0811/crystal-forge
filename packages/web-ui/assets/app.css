@@ -1438,10 +1438,6 @@ html, body {
   gap: 12px;
 }
 
-.sd-deploy-picker.single {
-  grid-template-columns: 1fr;
-}
-
 .sd-field {
   display: flex;
   flex-direction: column;

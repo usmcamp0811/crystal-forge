@@ -607,7 +607,6 @@ pub fn SystemDetailView(id: String) -> Element {
                                     interval_sec: heartbeat_interval_sec,
                                     next_in_sec: heartbeat_next_in_sec,
                                     size: 36,
-                                    show_label: false,
                                 }
                             }
                         }
@@ -1232,6 +1231,7 @@ fn DeployTab(
         .unwrap_or_default();
 
     let mut selected_commit = use_signal(|| default_commit);
+    let mut selected_branch = use_signal(|| "main".to_string());
     let mut show_diff = use_signal(|| false);
 
     let displayed_commits = {
@@ -1275,13 +1275,25 @@ fn DeployTab(
 
                 // Flake dropdown
                 div {
-                    class: "sd-deploy-picker single",
+                    class: "sd-deploy-picker",
                     div {
                         class: "sd-field",
                         label { "Flake" }
                         select {
                             class: "input filter-select focus-ring",
                             option { value: "{flake_name}", "{flake_name}" }
+                        }
+                    }
+                    div {
+                        class: "sd-field",
+                        label { "Branch" }
+                        select {
+                            class: "input filter-select focus-ring",
+                            value: "{selected_branch}",
+                            onchange: move |evt| selected_branch.set(evt.value()),
+                            option { value: "main", "main" }
+                            option { value: "staging", "staging" }
+                            option { value: "dev", "dev" }
                         }
                     }
                 }
@@ -1421,7 +1433,7 @@ fn DeployTab(
                                 class: "sd-callout sd-callout-info",
                                 // check icon
                                 svg {
-                                    class: "w-3 h-3",
+                                    class: "w-3.5 h-3.5",
                                     style: "color: #60a5fa; flex-shrink: 0; margin-top: 1px;",
                                     fill: "none",
                                     stroke: "currentColor",
