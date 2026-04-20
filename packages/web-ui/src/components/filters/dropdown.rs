@@ -55,6 +55,10 @@ pub fn MultiSelectDropdown<T: Clone + PartialEq + 'static>(
 
             if is_open {
                 div {
+                    class: "fixed inset-0 z-[2999]",
+                    onclick: move |_| open_dropdown.set(None),
+                }
+                div {
                     class: "absolute left-0 right-0 mt-1 rounded-lg border {theme::surface::CARD_BG} {theme::surface::CARD_BORDER} shadow-xl z-[3000]",
                     button {
                         class: "w-full text-left px-3 py-2 text-sm hover:bg-gray-700",
