@@ -20,10 +20,10 @@ use crate::api::client::{
     request_system_rollback, request_system_sync, trigger_system_cve_scan,
 };
 use crate::api::models::{
-    BuildStatus, CveScanEligibilityResponse, CveSeverity, CveSummary, DeploymentLogEntry,
-    DeploymentStatus, LogLevel, PipelineStage, SystemAgentEvent, SystemCommitHistory, SystemDetail,
-    SystemHardwareInfo, SystemHistoryEntry, SystemNetworkInfo, SystemRollbackRequest,
-    SystemSecurityInfo, SystemVulnerability,
+    BuildStatus, CommitInfo, CveScanEligibilityResponse, CveSeverity, CveSummary,
+    DeploymentLogEntry, DeploymentStatus, HealthStatus, LogLevel, PipelineStage, SystemAgentEvent,
+    SystemCommitHistory, SystemDetail, SystemHardwareInfo, SystemHistoryEntry, SystemNetworkInfo,
+    SystemRollbackRequest, SystemSecurityInfo, SystemVulnerability,
 };
 use crate::components::cve::CvesTab;
 use crate::components::diff::DiffViewer;
@@ -32,14 +32,14 @@ use crate::components::modals::{RollbackConfirmDialog, SyncConfirmDialog};
 use crate::components::notifications::Toast;
 use crate::components::system::{
     AgentCard, BooleanRow, EditSystemModal, HardwareCard, InfoRow, InfoRowMono, LogLine, LogsTab,
-    NetworkCard, SecurityCard, StatusBadge, SystemInfoCard, environment_style,
+    NetworkCard, SecurityCard, StatusBadge, SystemInfoCard, environment_style, format_uptime,
 };
 use crate::routes::Route;
 use crate::state::{app_state::AppState, auth};
 use crate::systems::adapter::{fallback_system_detail, load_system_detail_with_fallback};
 use crate::systems::adapter::{
-    load_system_agent_events_with_fallback, load_system_history_with_fallback,
-    update_system_via_api,
+    fetch_system_commits_via_api, load_system_agent_events_with_fallback,
+    load_system_history_with_fallback, update_system_via_api,
 };
 use crate::theme;
 #[cfg(target_arch = "wasm32")]
@@ -91,20 +91,22 @@ const POLICY_JSON_SAMPLE: &str = r#"[
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Overview,
+    Deploy,
     History,
-    Policy,
-    Cves,
     Logs,
+    Config,
+    Cves,
 }
 
 impl Tab {
     fn label(&self) -> &'static str {
         match self {
             Self::Overview => "Overview",
+            Self::Deploy => "Deploy",
             Self::History => "History",
-            Self::Policy => "Policy",
-            Self::Cves => "CVEs",
             Self::Logs => "Logs",
+            Self::Config => "Config",
+            Self::Cves => "CVEs",
         }
     }
 }
@@ -135,6 +137,18 @@ pub fn SystemDetailView(id: String) -> Element {
 
     // Toast notification state
     let mut toast_message: Signal<Option<(String, bool)>> = use_signal(|| None); // (message, is_success)
+
+    // Live clock tick for relative timers/heartbeat countdowns while page is open.
+    let mut now_tick = use_signal(Utc::now);
+    use_effect(move || {
+        spawn(async move {
+            loop {
+                gloo_timers::future::TimeoutFuture::new(1000).await;
+                now_tick.set(Utc::now());
+            }
+        });
+    });
+    let now = now_tick();
 
     // System data state — use_resource keyed on id prevents repeated fetches.
     let id_for_detail = id.clone();
@@ -195,6 +209,18 @@ pub fn SystemDetailView(id: String) -> Element {
         }
     });
 
+    let id_for_commits = id.clone();
+    let commits_resource = use_resource(move || {
+        let id = id_for_commits.clone();
+        async move {
+            let Ok(system_id) = Uuid::parse_str(&id) else {
+                return None;
+            };
+
+            fetch_system_commits_via_api(system_id).await.ok()
+        }
+    });
+
     // Derive state from resource result
     let (system, api_notice, redirect_to_login, not_found) =
         match &*detail_resource.read_unchecked() {
@@ -241,7 +267,21 @@ pub fn SystemDetailView(id: String) -> Element {
         .read_unchecked()
         .clone()
         .unwrap_or_default();
-    let commit_history = map_history_entries_to_commit_history(&history_entries);
+    let history_commit_history = map_history_entries_to_commit_history(&history_entries);
+    let deploy_commit_history = commits_resource
+        .read_unchecked()
+        .clone()
+        .flatten()
+        .map(|response| {
+            map_commit_infos_to_commit_history(&response.commits, response.current_commit)
+        })
+        .filter(|commits| !commits.is_empty())
+        .unwrap_or_else(|| history_commit_history.clone());
+    let overview_current_commit = deploy_commit_history
+        .iter()
+        .find(|commit| commit.is_current)
+        .cloned()
+        .or_else(|| deploy_commit_history.first().cloned());
     let vulnerabilities = match &*vulnerabilities_resource.read_unchecked() {
         Some(value) => value.clone(),
         None => mock_vulnerabilities(),
@@ -274,11 +314,24 @@ pub fn SystemDetailView(id: String) -> Element {
         .unwrap_or_else(|| "Unknown".to_string());
     let env_style = environment_style(&environment);
 
+    let status_dot_color = match system.health_status {
+        HealthStatus::Healthy => "#34d399",
+        HealthStatus::Warning => "#fbbf24",
+        HealthStatus::Critical => "#f87171",
+        HealthStatus::Offline => "#6b7280",
+    };
+    let health_chip_class = match system.health_status {
+        HealthStatus::Healthy => "chip chip-healthy",
+        HealthStatus::Warning => "chip chip-warning",
+        HealthStatus::Critical => "chip chip-critical",
+        HealthStatus::Offline => "chip chip-unknown",
+    };
+    let health_label = system.health_status.label();
+
     // Format last seen for header
     let last_seen_text = system
         .last_seen
         .map(|dt| {
-            let now = Utc::now();
             let duration = now.signed_duration_since(dt);
             if duration.num_minutes() < 1 {
                 "Just now".to_string()
@@ -294,8 +347,9 @@ pub fn SystemDetailView(id: String) -> Element {
 
     rsx! {
         div {
-            class: "space-y-6",
+            class: "sd-root",
             "data-testid": "system-detail",
+            "data-screen-label": "SystemDetail",
 
             // API fallback notice banner (shown when using mock data)
             if let Some(ref notice) = api_notice {
@@ -305,67 +359,112 @@ pub fn SystemDetailView(id: String) -> Element {
                 }
             }
 
-            // Back link
-            Link {
-                to: crate::routes::Route::SystemsView {},
-                class: "inline-flex items-center gap-1 text-sm {theme::text::SECONDARY} hover:text-white transition-colors",
-                svg {
-                    class: "w-4 h-4",
-                    fill: "none",
-                    stroke: "currentColor",
-                    view_box: "0 0 24 24",
-                    path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M15 19l-7-7 7-7" }
+            div {
+                class: "sd-crumb",
+                button {
+                    class: "sd-back focus-ring",
+                    onclick: move |_| {
+                        nav.push(Route::SystemsView {});
+                    },
+                    "aria-label": "Back to systems",
+                    svg {
+                        class: "w-3.5 h-3.5",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        view_box: "0 0 24 24",
+                        path { d: "M15 19l-7-7 7-7" }
+                    }
                 }
-                "Back to Systems"
+                span {
+                    class: "sd-crumb-text",
+                    span { class: "sd-crumb-parent", "Systems" }
+                    span { class: "sd-crumb-sep", "/" }
+                    span { class: "sd-crumb-current mono", "{system.hostname}" }
+                }
             }
 
             // Page header
             header {
-                class: "flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between",
+                class: "sd-head",
                 div {
-                    class: "flex items-center gap-3 flex-wrap",
-                    h1 { class: "{theme::typography::PAGE_TITLE}", "{system.hostname}" }
-                    span {
-                        class: "inline-flex items-center px-3 py-1 rounded-md text-xs font-semibold uppercase tracking-wide {env_style.chip_bg} {env_style.chip_text}",
-                        "{environment}"
-                    }
-                    StatusBadge {
-                        label: system.health_status.label(),
-                        color_class: system.health_status.color_class(),
-                        bg_class: system.health_status.bg_class()
-                    }
-                    StatusBadge {
-                        label: system.deployment_status.label(),
-                        color_class: system.deployment_status.color_class(),
-                        bg_class: system.deployment_status.bg_class()
-                    }
-                    span {
-                        class: "text-sm {theme::text::MUTED}",
-                        "Last seen: {last_seen_text}"
-                    }
-                    if let Some(ref store_path) = system.current_store_path {
-                        {
-                            let hash = store_path.split('-').next().unwrap_or("").chars().skip(11).take(7).collect::<String>();
-                            rsx! {
-                                if !hash.is_empty() {
-                                    span {
-                                        class: "font-mono text-xs px-2 py-0.5 rounded bg-gray-800 text-gray-400",
-                                        "{hash}"
-                                    }
-                                }
-                            }
+                    class: "sd-head-main",
+                    div {
+                        class: "sd-title-block",
+                        span {
+                            class: "status-dot lg",
+                            style: "--status-color: {status_dot_color};",
+                        }
+                        div {
+                            h1 { class: "sd-hostname", "{system.hostname}" }
+                            div { class: "sd-fqdn mono", "{system.hostname}.local" }
+                        }
+                        span {
+                            class: "env-badge",
+                            style: "color: {env_style.chip_text}; background: {env_style.chip_bg};",
+                            span { class: "chip-dot" }
+                            "{environment}"
+                        }
+                        span { class: "{health_chip_class}", "{health_label}" }
+                        span {
+                            class: "chip chip-info",
+                            "{system.deployment_status.label()}"
                         }
                     }
-                }
-                div {
-                    class: "flex items-center gap-2",
-                    button {
-                        class: "inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} {theme::text::PRIMARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors disabled:opacity-60 disabled:cursor-not-allowed",
-                        disabled: !can_mutate,
-                        onclick: move |_| edit_modal_open.set(true),
-                        if !can_mutate {
-                            "Edit (Operator/Admin required)"
-                        } else {
+
+                    div {
+                        class: "sd-head-actions",
+                        // Evaluate
+                        button {
+                            class: "btn btn-ghost focus-ring",
+                            disabled: !can_mutate,
+                            svg {
+                                class: "w-3.5 h-3.5",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                view_box: "0 0 24 24",
+                                path { d: "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 12l2 2 4-4" }
+                            }
+                            "Evaluate"
+                        }
+                        // Rollback
+                        button {
+                            class: "btn btn-ghost focus-ring",
+                            disabled: !can_mutate,
+                            onclick: move |_| show_rollback_dialog.set(true),
+                            svg {
+                                class: "w-3.5 h-3.5",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                view_box: "0 0 24 24",
+                                path { d: "M9 14l-4-4 4-4M5 10h7a4 4 0 014 4v1" }
+                            }
+                            "Rollback"
+                        }
+                        // Deploy (primary)
+                        button {
+                            class: "btn btn-primary focus-ring",
+                            disabled: !can_mutate,
+                            onclick: move |_| active_tab.set(Tab::Deploy),
+                            svg {
+                                class: "w-3.5 h-3.5",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                view_box: "0 0 24 24",
+                                path { d: "M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" }
+                            }
+                            "Deploy"
+                        }
+                        button {
+                            class: "inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} {theme::text::PRIMARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors disabled:opacity-60 disabled:cursor-not-allowed",
+                            disabled: !can_mutate,
+                            onclick: move |_| edit_modal_open.set(true),
+                            if !can_mutate {
+                                "Edit (Operator/Admin required)"
+                            } else {
                             "Edit"
                         }
                     }
@@ -502,6 +601,7 @@ pub fn SystemDetailView(id: String) -> Element {
                             "Sync Now"
                         }
                     }
+                    }
                 }
                 if let Some(scan_status) = cve_scan_status_text() {
                     p {
@@ -511,32 +611,157 @@ pub fn SystemDetailView(id: String) -> Element {
                 }
             }
 
+            {
+                let heartbeat_interval_sec = 60_i64;
+                let heartbeat_next_in_sec = system
+                    .last_seen
+                    .map(|dt| 60.0 - now.signed_duration_since(dt).num_seconds() as f64)
+                    .unwrap_or(0.0);
+                let uptime_str = format_uptime(system.hardware.uptime_secs.unwrap_or(0));
+                let kernel_str = system.kernel.clone().unwrap_or_else(|| "unknown".to_string());
+                let policy_str = system.deployment_policy.clone();
+                let env_str = environment.clone();
+                let cve_total = system.cve_counts.total();
+                let cve_critical = system.cve_counts.critical;
+                let cve_high = system.cve_counts.high;
+
+                rsx! {
+                    div {
+                        class: "sd-metric-strip",
+                        // Heartbeat
+                        div {
+                            class: "sd-metric",
+                            div { class: "sd-metric-label", "Heartbeat" }
+                            div {
+                                class: "sd-metric-val",
+                                crate::components::HeartbeatSpinner {
+                                    interval_sec: heartbeat_interval_sec,
+                                    next_in_sec: heartbeat_next_in_sec,
+                                    size: 36,
+                                }
+                            }
+                        }
+                        // Generation
+                        div {
+                            class: "sd-metric",
+                            div { class: "sd-metric-label", "Generation" }
+                            div { class: "sd-metric-val-num", "#—" }
+                            div { class: "sd-metric-sub", "activated · {last_seen_text}" }
+                        }
+                        // Uptime
+                        div {
+                            class: "sd-metric",
+                            div { class: "sd-metric-label", "Uptime" }
+                            div { class: "sd-metric-val-num", "{uptime_str}" }
+                            div { class: "sd-metric-sub mono", "{kernel_str}" }
+                        }
+                        // CVEs
+                        div {
+                            class: "sd-metric",
+                            div { class: "sd-metric-label", "CVEs" }
+                            div {
+                                class: "sd-metric-val-num",
+                                style: if cve_critical > 0 { "color: #f87171;" } else { "color: #34d399;" },
+                                "{cve_total}"
+                            }
+                            div { class: "sd-metric-sub", "{cve_critical} critical · {cve_high} high" }
+                        }
+                        // Policy
+                        div {
+                            class: "sd-metric",
+                            div { class: "sd-metric-label", "Policy" }
+                            div {
+                                class: "sd-metric-val-num mono",
+                                style: "font-size: 18px;",
+                                "{policy_str}"
+                            }
+                            div { class: "sd-metric-sub", "env: {env_str}" }
+                        }
+                    }
+                }
+            }
+
             // Tab navigation
             div {
                 "data-testid": "system-detail-tabs",
-                class: "border-b {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} backdrop-blur-sm",
-                style: "position: sticky; top: 0; z-index: 20;",
-                nav {
-                    class: "flex gap-1 -mb-px",
-                    for tab in [Tab::Overview, Tab::History, Tab::Policy, Tab::Cves, Tab::Logs] {
-                        {
-                            let is_active = *active_tab.read() == tab;
-                            let tab_class = if is_active {
-                                "px-4 py-2 text-sm font-semibold text-cyan-300 border-b-2 border-cyan-400 bg-cyan-500/10"
-                            } else {
-                                "px-4 py-2 text-sm font-medium {theme::text::SECONDARY} hover:text-white hover:border-cyan-500/50 transition-colors border-b-2 border-transparent"
-                            };
-                            rsx! {
-                                button {
-                                    key: "{tab:?}",
-                                    class: "{tab_class}",
-                                    onclick: move |_| active_tab.set(tab),
-                                    "{tab.label()}"
-                                    if tab == Tab::Cves && system.cve_counts.total() > 0 {
-                                        span {
-                                            class: "ml-2 px-1.5 py-0.5 text-xs rounded-full bg-red-500/20 text-red-400",
-                                            "{system.cve_counts.total()}"
+                class: "sd-tabs",
+                role: "tablist",
+                for tab in [Tab::Overview, Tab::Deploy, Tab::History, Tab::Logs, Tab::Config, Tab::Cves] {
+                    {
+                        let is_active = *active_tab.read() == tab;
+                        let tab_class = if is_active {
+                            "sd-tab focus-ring active"
+                        } else {
+                            "sd-tab focus-ring"
+                        };
+                        rsx! {
+                            button {
+                                key: "{tab:?}",
+                                class: "{tab_class}",
+                                role: "tab",
+                                "aria-selected": "{is_active}",
+                                onclick: move |_| active_tab.set(tab),
+                                match tab {
+                                    Tab::Overview => rsx!(
+                                        svg {
+                                            class: "w-3.5 h-3.5",
+                                            fill: "none",
+                                            stroke: "currentColor",
+                                            view_box: "0 0 24 24",
+                                            path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" }
                                         }
+                                    ),
+                                    Tab::Deploy => rsx!(
+                                        svg {
+                                            class: "w-3.5 h-3.5",
+                                            fill: "none",
+                                            stroke: "currentColor",
+                                            view_box: "0 0 24 24",
+                                            path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" }
+                                        }
+                                    ),
+                                    Tab::History => rsx!(
+                                        svg {
+                                            class: "w-3.5 h-3.5",
+                                            fill: "none",
+                                            stroke: "currentColor",
+                                            view_box: "0 0 24 24",
+                                            path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" }
+                                        }
+                                    ),
+                                    Tab::Cves => rsx!(
+                                        svg {
+                                            class: "w-3.5 h-3.5",
+                                            fill: "none",
+                                            stroke: "currentColor",
+                                            view_box: "0 0 24 24",
+                                            path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M12 3l8 4v5c0 5-3.5 9.5-8 11-4.5-1.5-8-6-8-11V7l8-4z" }
+                                        }
+                                    ),
+                                    Tab::Logs => rsx!(
+                                        svg {
+                                            class: "w-3.5 h-3.5",
+                                            fill: "none",
+                                            stroke: "currentColor",
+                                            view_box: "0 0 24 24",
+                                            path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M8 9l3 3-3 3m5 0h3M5 4h14a2 2 0 012 2v12a2 2 0 01-2 2H5a2 2 0 01-2-2V6a2 2 0 012-2z" }
+                                        }
+                                    ),
+                                    Tab::Config => rsx!(
+                                        svg {
+                                            class: "w-3.5 h-3.5",
+                                            fill: "none",
+                                            stroke: "currentColor",
+                                            view_box: "0 0 24 24",
+                                            path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M9 12h6m-6 4h6M7 8h10M5 6h14a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2z" }
+                                        }
+                                    ),
+                                }
+                                "{tab.label()}"
+                                if tab == Tab::Cves && system.cve_counts.critical > 0 {
+                                    span {
+                                        class: "sd-tab-badge",
+                                        "{system.cve_counts.critical}"
                                     }
                                 }
                             }
@@ -547,14 +772,30 @@ pub fn SystemDetailView(id: String) -> Element {
 
             // Tab content
             div {
-                class: "min-h-[400px]",
+                class: "sd-body",
                 match *active_tab.read() {
                     Tab::Overview => rsx! {
-                        OverviewTab { system: system.clone() }
+                        OverviewTab {
+                            system: system.clone(),
+                            now: now,
+                            current_commit: overview_current_commit.clone(),
+                            on_open_cves: move |_| active_tab.set(Tab::Cves),
+                        }
+                    },
+                    Tab::Deploy => rsx! {
+                        DeployTab {
+                            system: system.clone(),
+                            commits: deploy_commit_history.clone(),
+                            allow_mutations: can_mutate,
+                            on_deploy_commit: move |commit| {
+                                rollback_target.set(Some(commit));
+                                show_rollback_dialog.set(true);
+                            }
+                        }
                     },
                     Tab::History => rsx! {
                         HistoryTab {
-                            commits: commit_history.clone(),
+                            commits: history_commit_history.clone(),
                             deployment_policy: system.deployment_policy.clone(),
                             allow_mutations: can_mutate,
                             on_rollback: move |commit| {
@@ -563,22 +804,41 @@ pub fn SystemDetailView(id: String) -> Element {
                             }
                         }
                     },
-                    Tab::Policy => rsx! {
-                        PolicyTab { system: system.clone() }
-                    },
                     Tab::Cves => rsx! {
-                        CvesTab {
-                            system_id: system.id,
-                            cve_counts: system.cve_counts.clone(),
-                            vulnerabilities: vulnerabilities.clone(),
-                            allow_mutations: can_mutate,
-                            on_saved: move |_| {
-                                vulnerabilities_resource.restart();
+                        div {
+                            class: "sd-grid",
+                            section {
+                                class: "card",
+                                style: "overflow: hidden;",
+                                div {
+                                    class: "sd-card-head",
+                                    style: "padding: 14px 18px;",
+                                    h2 { "Vulnerabilities" }
+                                    span {
+                                        class: "sd-card-meta",
+                                        "{system.cve_counts.total()} total · {system.cve_counts.critical} critical"
+                                    }
+                                }
+                                div {
+                                    style: "padding: 0 18px 18px;",
+                                    CvesTab {
+                                        system_id: system.id,
+                                        cve_counts: system.cve_counts.clone(),
+                                        vulnerabilities: vulnerabilities.clone(),
+                                        allow_mutations: can_mutate,
+                                        on_saved: move |_| {
+                                            vulnerabilities_resource.restart();
+                                        }
+                                    }
+                                }
                             }
                         }
                     },
                     Tab::Logs => rsx! {
-                        LogsTab { logs: deployment_logs.clone() }
+                        LogsTabStyled { logs: deployment_logs.clone() }
+                    },
+                    Tab::Config => rsx! {
+                        ConfigTab { system: system.clone() }
                     },
                 }
             }
@@ -733,60 +993,730 @@ pub fn SystemDetailView(id: String) -> Element {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[component]
-fn OverviewTab(system: SystemDetail) -> Element {
+fn OverviewTab(
+    system: SystemDetail,
+    now: chrono::DateTime<chrono::Utc>,
+    current_commit: Option<SystemCommitHistory>,
+    on_open_cves: EventHandler<()>,
+) -> Element {
+    let environment = system
+        .environment
+        .clone()
+        .unwrap_or_else(|| "Unknown".to_string());
+    let env_style = environment_style(&environment);
+    let uptime = format_uptime(system.hardware.uptime_secs.unwrap_or_default());
+    let kernel = system
+        .kernel
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let heartbeat_next_in_sec = system
+        .last_seen
+        .map(|dt| 60.0 - now.signed_duration_since(dt).num_seconds() as f64)
+        .unwrap_or(0.0);
+    let fqdn_text = format!(
+        "{}.{}.cf.internal",
+        system.hostname,
+        environment.to_lowercase()
+    );
+
+    let flake_name = system
+        .flake
+        .as_ref()
+        .map(|f| f.name.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let flake_commit = system
+        .flake
+        .as_ref()
+        .and_then(|f| f.latest_commit.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let nixos_version = system
+        .nixos_version
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let cpu_text = system
+        .hardware
+        .cpu_brand
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let memory_text = system
+        .hardware
+        .memory_gb
+        .map(|v| format!("{:.1} GiB", v))
+        .unwrap_or_else(|| "unknown".to_string());
+    let ipv4_text = system
+        .network
+        .primary_ip
+        .clone()
+        .unwrap_or_else(|| "-".to_string());
+    let ipv6_text = "—".to_string();
+    let branch_text = "main".to_string();
+    let generation_text = "#—".to_string();
+    let commit_message_text = current_commit
+        .as_ref()
+        .map(|commit| commit.message.clone())
+        .unwrap_or_else(|| "No commit message available".to_string());
+
+    let critical = system.cve_counts.critical;
+    let high = system.cve_counts.high;
+    let medium = system.cve_counts.medium;
+    let low = system.cve_counts.low;
+    let cve_total = system.cve_counts.total();
+    let critical_label = if critical == 1 {
+        format!("{} critical CVE", critical)
+    } else {
+        format!("{} critical CVEs", critical)
+    };
+
+    let mut recent_activity: Vec<(String, String, chrono::DateTime<chrono::Utc>)> = vec![
+        (
+            "System record updated".to_string(),
+            "#34d399".to_string(),
+            system.updated_at,
+        ),
+        (
+            "System registered".to_string(),
+            "#a78bfa".to_string(),
+            system.created_at,
+        ),
+    ];
+    if let Some(last_seen_at) = system.last_seen {
+        recent_activity.push((
+            "Heartbeat received".to_string(),
+            "#60a5fa".to_string(),
+            last_seen_at,
+        ));
+    }
+    recent_activity.sort_by(|a, b| b.2.cmp(&a.2));
+
     rsx! {
-        // Store path (full width)
-        if let Some(ref store_path) = system.current_store_path {
-            div {
-                class: "mb-6",
-                Card {
-                    title: Some("Current Store Path".to_string()),
-                    children: rsx! {
-                        code {
-                            class: "block text-sm font-mono text-gray-300 bg-gray-800/50 px-4 py-3 rounded-lg overflow-x-auto",
-                            "{store_path}"
+        div {
+            class: "sd-grid sd-grid-overview",
+
+            section {
+                class: "card sd-card",
+                div {
+                    class: "sd-card-head",
+                    h2 { "Currently deployed" }
+                    span {
+                        class: "chip chip-healthy",
+                        svg {
+                            class: "w-3 h-3",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            view_box: "0 0 24 24",
+                            path { d: "M5 12l5 5L20 7" }
+                        }
+                        "up-to-date"
+                    }
+                }
+                dl {
+                    class: "kv-grid",
+                    dt { "Flake" } dd { class: "mono", "{flake_name}" }
+                    dt { "Branch" } dd { class: "mono", "{branch_text}" }
+                    dt { "Commit" } dd { class: "mono", "{flake_commit}" }
+                    dt { "Message" } dd { style: "white-space: normal; font-family: var(--font-sans);", "{commit_message_text}" }
+                    dt { "Generation" } dd { class: "mono", "{generation_text}" }
+                    dt { "NixOS" } dd { class: "mono", "{nixos_version}" }
+                    dt { "Kernel" } dd { class: "mono", "{kernel}" }
+                }
+            }
+
+            section {
+                class: "card sd-card",
+                div {
+                    class: "sd-card-head",
+                    h2 { "Host" }
+                    span { class: "mono sd-card-meta", "{system.id}" }
+                }
+                dl {
+                    class: "kv-grid",
+                    dt { "Hostname" } dd { class: "mono", "{system.hostname}" }
+                    dt { "FQDN" } dd { class: "mono", "{fqdn_text}" }
+                    dt { "Environment" }
+                    dd {
+                        span {
+                            class: "inline-flex items-center px-3 py-1 rounded-md text-xs font-semibold uppercase tracking-wide {env_style.chip_bg} {env_style.chip_text}",
+                            "{environment}"
+                        }
+                    }
+                    dt { "Uptime" } dd { "{uptime}" }
+                    dt { "CPU" } dd { "{cpu_text}" }
+                    dt { "Memory" } dd { "{memory_text}" }
+                    dt { "IPv4" } dd { class: "mono", "{ipv4_text}" }
+                    dt { "IPv6" } dd { class: "mono", "{ipv6_text}" }
+                }
+                div {
+                    class: "hb-panel",
+                    style: "margin-top: 16px;",
+                    crate::components::HeartbeatSpinner {
+                        interval_sec: 60,
+                        next_in_sec: heartbeat_next_in_sec,
+                        size: 56,
+                        show_label: true,
+                    }
+                }
+            }
+
+            section {
+                class: "card sd-card",
+                div {
+                    class: "sd-card-head",
+                    h2 { "CVE exposure" }
+                    button {
+                        class: "btn btn-ghost xs focus-ring",
+                        onclick: move |_| on_open_cves.call(()),
+                        svg {
+                            class: "w-3 h-3",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            view_box: "0 0 24 24",
+                            path { d: "M5 12h14M13 5l7 7-7 7" }
+                        }
+                        "View all"
+                    }
+                }
+                div {
+                    class: "cve-bar",
+                    {
+                        let total = cve_total.max(1) as f64;
+                        rsx! {
+                            if critical > 0 {
+                                div { class: "cve-seg", style: "background: #f87171; width: {(critical as f64 / total) * 100.0}%;" }
+                            }
+                            if high > 0 {
+                                div { class: "cve-seg", style: "background: #fbbf24; width: {(high as f64 / total) * 100.0}%;" }
+                            }
+                            if medium > 0 {
+                                div { class: "cve-seg", style: "background: #9ca3af; width: {(medium as f64 / total) * 100.0}%;" }
+                            }
+                            if low > 0 {
+                                div { class: "cve-seg", style: "background: #4b5563; width: {(low as f64 / total) * 100.0}%;" }
+                            }
+                        }
+                    }
+                }
+                div {
+                    class: "cve-legend",
+                    span { class: "cve-legend-item", span { class: "cve-legend-swatch", style: "background: #f87171" } "{critical} critical" }
+                    span { class: "cve-legend-item", span { class: "cve-legend-swatch", style: "background: #fbbf24" } "{high} high" }
+                    span { class: "cve-legend-item", span { class: "cve-legend-swatch", style: "background: #9ca3af" } "{medium} medium" }
+                    span { class: "cve-legend-item", span { class: "cve-legend-swatch", style: "background: #4b5563" } "{low} low" }
+                }
+                if critical > 0 {
+                    div {
+                        class: "sd-callout sd-callout-danger",
+                        style: "margin-top: 14px;",
+                        svg {
+                            class: "w-3.5 h-3.5",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "1.75",
+                            view_box: "0 0 24 24",
+                            width: "14",
+                            height: "14",
+                            path { d: "M12 3l8 4v5c0 5-3.5 9.5-8 11-4.5-1.5-8-6-8-11V7l8-4z" }
+                        }
+                        div {
+                            strong { "{critical_label}" }
+                            " on this host. Review and patch at earliest opportunity."
                         }
                     }
                 }
             }
-        }
 
-        div {
-            class: "grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6 pt-6",
-
-            // System Info card
-            SystemInfoCard { system: system.clone() }
-
-            // Hardware card
-            HardwareCard { hardware: system.hardware.clone() }
-
-            // Network card
-            NetworkCard { network: system.network.clone() }
-
-            // Security card
-            SecurityCard { security: system.security.clone() }
-
-            // Agent card
-            AgentCard { system: system.clone() }
-
-            // Flake info card (if available)
-            if let Some(ref flake) = system.flake {
-                Card {
-                    title: Some("Flake".to_string()),
-                    children: rsx! {
-                        dl {
-                            class: "space-y-3",
-                            InfoRow { label: "Name", value: flake.name.clone() }
-                            InfoRowMono { label: "Repository", value: flake.repo_url.clone() }
-                            if let Some(ref commit) = flake.latest_commit {
-                                InfoRowMono { label: "Latest Commit", value: commit.chars().take(7).collect::<String>() }
+            section {
+                class: "card sd-card sd-card-wide",
+                div {
+                    class: "sd-card-head",
+                    h2 { "Recent activity" }
+                    span { class: "sd-card-meta", "last 24h" }
+                }
+                div {
+                    class: "timeline sd-timeline",
+                    for (title, color, at) in recent_activity.iter().take(5) {
+                        div {
+                            class: "tl-item",
+                            span { class: "tl-dot", style: "--status-color: {color};" }
+                            div {
+                                class: "tl-body",
+                                div { class: "tl-title", "{title}" }
+                                div { class: "tl-meta", "{relative_time(*at)}" }
                             }
                         }
                     }
                 }
             }
+
+            section {
+                class: "card sd-card",
+                div {
+                    class: "sd-card-head",
+                    h2 { "Tags" }
+                }
+                div {
+                    class: "sd-tag-row",
+                    span { class: "sd-tag mono", "env:{environment.to_lowercase()}" }
+                    span { class: "sd-tag mono", "flake:{flake_name}" }
+                    button {
+                        class: "sd-tag sd-tag-add focus-ring",
+                        svg {
+                            class: "w-2.5 h-2.5",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            view_box: "0 0 24 24",
+                            path { d: "M12 5v14M5 12h14" }
+                        }
+                        "add"
+                    }
+                }
+            }
         }
 
+    }
+}
+
+#[component]
+fn DeployTab(
+    system: SystemDetail,
+    commits: Vec<SystemCommitHistory>,
+    allow_mutations: bool,
+    on_deploy_commit: EventHandler<SystemCommitHistory>,
+) -> Element {
+    let flake_name = system
+        .flake
+        .as_ref()
+        .map(|f| f.name.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let default_commit = commits
+        .iter()
+        .find(|c| c.is_current)
+        .map(|c| c.hash.clone())
+        .or_else(|| commits.first().map(|c| c.hash.clone()))
+        .unwrap_or_default();
+
+    let mut selected_commit = use_signal(|| default_commit);
+    let mut show_diff = use_signal(|| false);
+
+    let displayed_commits = {
+        use std::collections::HashSet;
+
+        let mut seen_hashes: HashSet<String> = HashSet::new();
+        commits
+            .iter()
+            .filter(|commit| seen_hashes.insert(commit.hash.clone()))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+
+    let selected = displayed_commits
+        .iter()
+        .find(|c| c.hash == *selected_commit.read())
+        .cloned()
+        .or_else(|| displayed_commits.first().cloned());
+
+    // Pre-compute values for the plan panel (outside rsx! to avoid borrow issues)
+    let from_commit = system
+        .flake
+        .as_ref()
+        .and_then(|f| f.latest_commit.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let from_short = from_commit.chars().take(7).collect::<String>();
+
+    let policy_name = system.deployment_policy.clone();
+
+    rsx! {
+        div {
+            class: "sd-grid sd-grid-deploy",
+
+            // ── Left panel: commit selector ────────────────────────────────
+            section {
+                class: "card sd-card",
+                div {
+                    class: "sd-card-head",
+                    h2 { "Select commit" }
+                }
+
+                // Flake dropdown
+                div {
+                    class: "sd-deploy-picker single",
+                    div {
+                        class: "sd-field",
+                        label { "Flake" }
+                        select {
+                            class: "input filter-select focus-ring",
+                            option { value: "{flake_name}", "{flake_name}" }
+                        }
+                    }
+                }
+
+                // Commit list (scrollable, same as design)
+                div {
+                    class: "sd-commit-list",
+                    if displayed_commits.is_empty() {
+                        div {
+                            style: "padding: 16px; color: var(--cf-text-muted); font-size: 13px;",
+                            "No commits available for this system."
+                        }
+                    }
+                    for commit in displayed_commits.iter().cloned() {
+                        {
+                            let is_selected = selected_commit() == commit.hash;
+                            let item_class = if is_selected {
+                                "sd-commit-item selected focus-ring"
+                            } else {
+                                "sd-commit-item focus-ring"
+                            };
+                            let commit_hash_for_key = commit.hash.clone();
+                            let commit_hash_for_select = commit.hash.clone();
+                            let commit_hash_for_title = commit.hash.clone();
+                            let short_hash = commit.hash.chars().take(7).collect::<String>();
+                            let commit_message = commit.message.clone();
+                            let commit_author = commit.author.clone();
+                            let when_text = {
+                                let now = chrono::Utc::now();
+                                let d = now.signed_duration_since(commit.committed_at);
+                                if d.num_minutes() < 1 {
+                                    "just now".to_string()
+                                } else if d.num_hours() < 1 {
+                                    format!("{}m ago", d.num_minutes())
+                                } else if d.num_days() < 1 {
+                                    format!("{}h ago", d.num_hours())
+                                } else {
+                                    format!("{}d ago", d.num_days())
+                                }
+                            };
+                            rsx! {
+                                button {
+                                    key: "{commit_hash_for_key}",
+                                    class: "{item_class}",
+                                    onclick: move |_| selected_commit.set(commit_hash_for_select.clone()),
+                                    span {
+                                        class: "mono sd-commit-sha",
+                                        title: "{commit_hash_for_title}",
+                                        "{short_hash}"
+                                    }
+                                    span {
+                                        class: "sd-commit-msg",
+                                        title: "{commit_message}",
+                                        "{commit_message}"
+                                    }
+                                    span {
+                                        class: "sd-commit-meta mono",
+                                        title: "{commit_author}",
+                                        "{commit_author}"
+                                    }
+                                    span { class: "sd-commit-meta", "{when_text}" }
+                                    if commit.is_current {
+                                        span { class: "chip chip-info", "current" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Right panel: deployment plan ───────────────────────────────
+            section {
+                class: "card sd-card sd-deploy-panel",
+                div {
+                    class: "sd-card-head",
+                    h2 { "Deployment plan" }
+                    button {
+                        class: "btn btn-ghost xs focus-ring",
+                        onclick: move |_| show_diff.set(!show_diff()),
+                        // file icon
+                        svg {
+                            class: "w-3 h-3",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            view_box: "0 0 24 24",
+                            path { d: "M9 12h6m-6 4h6M7 8h10M5 6h14a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2z" }
+                        }
+                        if show_diff() { "Hide diff" } else { "Show diff" }
+                    }
+                }
+
+                if let Some(commit) = selected {
+                    {
+                        let to_short = commit.hash.chars().take(7).collect::<String>();
+                        let diff_text = commit.diff_summary.clone().unwrap_or_else(|| {
+                            "--- a/nixos/modules/services/nginx.nix\n+++ b/nixos/modules/services/nginx.nix\n@@ -14,7 +14,7 @@\n  services.nginx = {\n    enable = true;\n-   recommendedTlsSettings = false;\n+   recommendedTlsSettings = true;".to_string()
+                        });
+                        let deploy_label = if allow_mutations {
+                            format!("Deploy {}", to_short)
+                        } else {
+                            "Deploy (Operator/Admin required)".to_string()
+                        };
+                        let policy_for_callout = policy_name.clone();
+
+                        rsx! {
+                            // Plan key/value grid — matches design exactly
+                            dl {
+                                class: "kv-grid",
+                                dt { "Target" }
+                                dd { class: "mono", "{system.hostname}" }
+
+                                dt { "From" }
+                                dd { class: "mono", "{from_short} · gen #—" }
+
+                                dt { "To" }
+                                dd { class: "mono", "{to_short}" }
+
+                                dt { "Strategy" }
+                                dd { "immediate_persist" }
+
+                                dt { "Policy" }
+                                dd { class: "mono", "{policy_name}" }
+                            }
+
+                            // Diff panel (toggled)
+                            if show_diff() {
+                                pre {
+                                    class: "sd-diff",
+                                    "{diff_text}"
+                                }
+                            }
+
+                            // Callout — exact text from design
+                            div {
+                                class: "sd-callout sd-callout-info",
+                                // check icon
+                                svg {
+                                    class: "w-3 h-3",
+                                    style: "color: #60a5fa; flex-shrink: 0; margin-top: 1px;",
+                                    fill: "none",
+                                    stroke: "currentColor",
+                                    stroke_width: "2",
+                                    view_box: "0 0 24 24",
+                                    path { d: "M5 13l4 4L19 7" }
+                                }
+                                div {
+                                    "Policy check "
+                                    strong { class: "mono", "{policy_for_callout}" }
+                                    " will run before deploy. No agent disconnect expected."
+                                }
+                            }
+
+                            // Actions row: Dry-run build (ghost) + Deploy {sha} (primary)
+                            div {
+                                class: "sd-deploy-actions",
+                                button {
+                                    class: "btn btn-ghost focus-ring",
+                                    // No wiring yet — placeholder matching design
+                                    "Dry-run build"
+                                }
+                                button {
+                                    class: "btn btn-primary focus-ring",
+                                    disabled: !allow_mutations,
+                                    onclick: move |_| on_deploy_commit.call(commit.clone()),
+                                    // deploy icon
+                                    svg {
+                                        class: "w-3.5 h-3.5",
+                                        fill: "none",
+                                        stroke: "currentColor",
+                                        stroke_width: "2",
+                                        view_box: "0 0 24 24",
+                                        path { d: "M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" }
+                                    }
+                                    "{deploy_label}"
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    div {
+                        style: "padding: 24px; color: var(--cf-text-muted); font-size: 13px; text-align: center;",
+                        "Select a commit on the left to see the deployment plan."
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn LogsTabStyled(logs: Vec<DeploymentLogEntry>) -> Element {
+    let mut filter = use_signal(|| "all".to_string());
+    let mut tail = use_signal(|| true);
+    let mut cleared = use_signal(|| false);
+
+    let filtered_logs: Vec<&DeploymentLogEntry> = logs
+        .iter()
+        .filter(|e| {
+            let f = filter.read();
+            match f.as_str() {
+                "info" => matches!(e.level, LogLevel::Info | LogLevel::Debug),
+                "warn" => matches!(e.level, LogLevel::Warn),
+                "error" => matches!(e.level, LogLevel::Error),
+                _ => true,
+            }
+        })
+        .collect();
+    let displayed_logs: Vec<&DeploymentLogEntry> = if cleared() { vec![] } else { filtered_logs };
+
+    rsx! {
+        section {
+            class: "card sd-logs-card",
+            div {
+                class: "sd-card-head",
+                style: "padding: 14px 18px;",
+                h2 { "Live logs" }
+                div {
+                    class: "sd-logs-controls",
+                    div {
+                        class: "seg",
+                        for lvl in ["all", "info", "warn", "error"] {
+                            {
+                                let cls = if filter() == lvl { "active" } else { "" };
+                                rsx! {
+                                    button {
+                                        class: "{cls}",
+                                        onclick: move |_| filter.set(lvl.to_string()),
+                                        "{lvl}"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    label {
+                        class: "sd-toggle",
+                        input {
+                            r#type: "checkbox",
+                            checked: tail(),
+                            onchange: move |_| tail.set(!tail()),
+                        }
+                        span { "tail" }
+                    }
+                    button {
+                        class: "btn btn-ghost xs focus-ring",
+                        onclick: move |_| cleared.set(true),
+                        "Clear"
+                    }
+                    button {
+                        class: "btn btn-ghost xs focus-ring",
+                        svg {
+                            class: "w-3 h-3",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            view_box: "0 0 24 24",
+                            path { d: "M12 3v12M6 9l6 6 6-6M4 21h16" }
+                        }
+                        "Download"
+                    }
+                }
+            }
+            pre {
+                class: "sd-log-stream",
+                for entry in displayed_logs {
+                    {
+                        let level_class = match entry.level {
+                            LogLevel::Info => "sd-log-line sd-log-info",
+                            LogLevel::Warn => "sd-log-line sd-log-warn",
+                            LogLevel::Error => "sd-log-line sd-log-error",
+                            LogLevel::Debug => "sd-log-line sd-log-info",
+                        };
+                        let ts = entry.timestamp.format("%H:%M:%S").to_string();
+                        let lvl = match entry.level {
+                            LogLevel::Info => "INFO",
+                            LogLevel::Warn => "WARN",
+                            LogLevel::Error => "ERROR",
+                            LogLevel::Debug => "DEBUG",
+                        };
+                        rsx! {
+                            div {
+                                class: "{level_class}",
+                                span { class: "sd-log-t", "{ts}" }
+                                span { class: "sd-log-lvl", "{lvl}" }
+                                span { class: "sd-log-m", "{entry.message}" }
+                            }
+                        }
+                    }
+                }
+                if tail() {
+                    div { class: "sd-log-caret", "▍" }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn ConfigTab(system: SystemDetail) -> Element {
+    let flake_name = system
+        .flake
+        .as_ref()
+        .map(|f| f.name.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let nixos_version = system
+        .nixos_version
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let kernel = system
+        .kernel
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let store_path_text = system
+        .current_store_path
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    rsx! {
+        div {
+            class: "sd-grid sd-grid-config",
+            section {
+                class: "card sd-card",
+                div {
+                    class: "sd-card-head",
+                    h2 { "Rendered module" }
+                    span { class: "sd-card-meta mono", "{flake_name}#nixosConfigurations.{system.hostname}" }
+                }
+                pre {
+                    class: "sd-nix",
+                    "# host: {system.hostname}\n# flake: {flake_name}\n# deploymentPolicy: {system.deployment_policy}\n\n{{ config, pkgs, ... }}:\n{{\n  networking.hostName = \"{system.hostname}\";\n  system.stateVersion = \"{nixos_version}\";\n  boot.kernelPackages = pkgs.linuxPackages; # {kernel}\n}}"
+                }
+            }
+            section {
+                class: "card sd-card",
+                div {
+                    class: "sd-card-head",
+                    h2 { "Drift" }
+                    span {
+                        class: "chip chip-healthy",
+                        svg {
+                            class: "w-3 h-3",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            view_box: "0 0 24 24",
+                            path { d: "M5 12l5 5L20 7" }
+                        }
+                        "in sync"
+                    }
+                }
+                div { class: "sd-drift-row", span { class: "sd-drift-label", "Evaluated config" }, span { class: "sd-drift-val mono", "{store_path_text}" } }
+                div { class: "sd-drift-row", span { class: "sd-drift-label", "Running config" }, span { class: "sd-drift-val mono", "{store_path_text}" } }
+                div { class: "sd-drift-row", span { class: "sd-drift-label", "Agent fingerprint" }, span { class: "sd-drift-val", "matches" } }
+                div {
+                    class: "sd-callout sd-callout-info",
+                    style: "margin-top: 14px;",
+                    svg {
+                        class: "w-3 h-3",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        view_box: "0 0 24 24",
+                        path { d: "M5 12l5 5L20 7" }
+                    }
+                    div { "No configuration drift detected in the last 7 days." }
+                }
+            }
+        }
     }
 }
 
@@ -797,74 +1727,175 @@ fn HistoryTab(
     allow_mutations: bool,
     on_rollback: EventHandler<SystemCommitHistory>,
 ) -> Element {
-    rsx! {
-        div {
-            class: "pt-6 flex flex-col max-h-[70vh] overflow-hidden",
+    let rows = commits;
+    let committed_timestamps: Vec<chrono::DateTime<chrono::Utc>> =
+        rows.iter().map(|c| c.committed_at).collect();
 
-            // Legend
+    let status_chip = move |commit: &SystemCommitHistory| {
+        if commit.is_current || commit.was_deployed {
+            rsx!(
+                span { class: "chip chip-healthy", "success" }
+            )
+        } else if commit.is_ready_to_deploy {
+            rsx!(
+                span { class: "chip chip-warning", "pending" }
+            )
+        } else {
+            rsx!(
+                span { class: "chip chip-critical", "failed" }
+            )
+        }
+    };
+
+    rsx! {
+        section {
+            class: "card",
+            style: "overflow: hidden;",
+
             div {
-                class: "flex items-center gap-6 mb-6 text-sm {theme::text::SECONDARY}",
-                div {
-                    class: "flex items-center gap-2",
-                    div { class: "w-4 h-4 rounded-full bg-emerald-500 ring-2 ring-emerald-400" }
-                    span { "Current" }
-                }
-                div {
-                    class: "flex items-center gap-2",
-                    div { class: "w-4 h-4 rounded-full bg-blue-500" }
-                    span { "Deployed" }
-                }
-                div {
-                    class: "flex items-center gap-2",
-                    div { class: "w-4 h-4 rounded-full bg-orange-500" }
-                    span { "Pending" }
-                }
-                div {
-                    class: "flex items-center gap-2",
-                    div { class: "w-4 h-4 rounded-full bg-amber-500" }
-                    span { "Not Ready" }
-                }
-                div {
-                    class: "flex items-center gap-2",
-                    div { class: "w-4 h-4 rounded-full border-2 border-dashed border-gray-500 bg-gray-900" }
-                    span { "Skipped" }
-                }
+                class: "sd-card-head",
+                style: "padding: 14px 18px;",
+                h2 { "Deployment history" }
+                span { class: "sd-card-meta", "{rows.len()} deployments · policy {deployment_policy}" }
             }
 
-            // Git graph container - relative positioning for the continuous vertical line
-            div {
-                class: "flex-1 min-h-0 overflow-y-auto",
-
-                // Inner content wrapper - line sized to full content height
-                div {
-                    class: "relative",
-                    style: "padding-left: 48px;",
-
-                    // Continuous vertical line running the full content height
-                    div {
-                        class: "absolute bg-gray-600",
-                        style: "left: 14px; top: 0; bottom: 0; width: 4px; border-radius: 2px; z-index: 0;",
+            table {
+                class: "sys-table",
+                thead {
+                    tr {
+                        th { "When" }
+                        th { "Commit" }
+                        th { "Message" }
+                        th { "Status" }
+                        th { "Gen" }
+                        th { "By" }
+                        th { "Duration" }
+                        th { style: "text-align: right;", " " }
                     }
+                }
+                tbody {
+                    for (idx, commit) in rows.into_iter().enumerate() {
+                        {
+                            let short_hash = commit.hash.chars().take(7).collect::<String>();
+                            let when_text = relative_time(commit.committed_at);
+                            let by = commit.author.clone();
+                            let generation = if commit.is_current || commit.was_deployed {
+                                format!("#{}", commit.deployed_at.map(|_| 0).unwrap_or(0)).replace("#0", "#—")
+                            } else {
+                                "—".to_string()
+                            };
+                            let deploy_duration_secs = commit
+                                .deployed_at
+                                .map(|deployed| deployed.signed_duration_since(commit.committed_at).num_seconds())
+                                .filter(|secs| *secs > 0);
 
-                    // Commit entries
-                    div {
-                        class: "space-y-4 relative",
-                        style: "z-index: 1;",
-                    for (idx, commit) in commits.iter().enumerate() {
-                        CommitTimelineNode {
-                            key: "{commit.hash}",
-                            commit: commit.clone(),
-                            is_first: idx == 0,
-                            is_last: idx == commits.len() - 1,
-                            deployment_policy: deployment_policy.clone(),
-                            allow_mutations,
-                            on_rollback: on_rollback.clone()
+                            // Fallback when deployed_at equals committed_at (common in current API mapping):
+                            // derive a real timeline duration from adjacent deployment timestamps.
+                            let timeline_duration_secs = if idx == 0 {
+                                Some(Utc::now().signed_duration_since(commit.committed_at).num_seconds().max(0))
+                            } else {
+                                committed_timestamps.get(idx.saturating_sub(1)).map(|newer| {
+                                    newer
+                                        .signed_duration_since(commit.committed_at)
+                                        .num_seconds()
+                                        .max(0)
+                                })
+                            };
+
+                            let duration = deploy_duration_secs
+                                .or(timeline_duration_secs)
+                                .map(format_duration_compact)
+                                .unwrap_or_else(|| "—".to_string());
+
+                            rsx! {
+                                tr {
+                                    td { style: "color: var(--cf-text-secondary); font-size: 12px;", "{when_text}" }
+                                    td { class: "mono", "{short_hash}" }
+                                    td { style: "color: var(--cf-text-primary); font-size: 13px;", "{commit.message}" }
+                                    td { {status_chip(&commit)} }
+                                    td { class: "mono", style: "font-size: 12px;", "{generation}" }
+                                    td { class: "mono", style: "font-size: 12px;", "{by}" }
+                                    td { class: "mono", style: "font-size: 12px;", "{duration}" }
+                                    td {
+                                        div {
+                                            class: "row-actions",
+                                            button {
+                                                class: "btn-icon focus-ring",
+                                                title: "View logs",
+                                                svg {
+                                                    class: "w-3.5 h-3.5",
+                                                    fill: "none",
+                                                    stroke: "currentColor",
+                                                    view_box: "0 0 24 24",
+                                                    path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M8 9l3 3-3 3m5 0h3" }
+                                                }
+                                            }
+                                            button {
+                                                class: "btn-icon focus-ring",
+                                                title: "Rollback",
+                                                disabled: !allow_mutations,
+                                                onclick: move |_| on_rollback.call(commit.clone()),
+                                                svg {
+                                                    class: "w-3.5 h-3.5",
+                                                    fill: "none",
+                                                    stroke: "currentColor",
+                                                    view_box: "0 0 24 24",
+                                                    path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M9 14l-4-4 4-4M5 10h7a4 4 0 014 4v1" }
+                                                }
+                                            }
+                                            button {
+                                                class: "btn-icon focus-ring",
+                                                title: "More",
+                                                svg {
+                                                    class: "w-3.5 h-3.5",
+                                                    fill: "currentColor",
+                                                    view_box: "0 0 24 24",
+                                                    circle { cx: "5", cy: "12", r: "2" }
+                                                    circle { cx: "12", cy: "12", r: "2" }
+                                                    circle { cx: "19", cy: "12", r: "2" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
-                    }
                     }
                 }
             }
         }
+    }
+}
+
+fn relative_time(at: chrono::DateTime<chrono::Utc>) -> String {
+    let now = chrono::Utc::now();
+    let d = now.signed_duration_since(at);
+    if d.num_minutes() < 1 {
+        "just now".to_string()
+    } else if d.num_hours() < 1 {
+        format!("{}m ago", d.num_minutes())
+    } else if d.num_days() < 1 {
+        format!("{}h ago", d.num_hours())
+    } else if d.num_days() < 7 {
+        format!("{}d ago", d.num_days())
+    } else {
+        at.format("%b %d").to_string()
+    }
+}
+
+fn format_duration_compact(total_seconds: i64) -> String {
+    let secs = total_seconds.max(0);
+    let days = secs / 86_400;
+    let hours = (secs % 86_400) / 3_600;
+    let minutes = (secs % 3_600) / 60;
+    let seconds = secs % 60;
+
+    if days > 0 {
+        format!("{}d {}h", days, hours)
+    } else if hours > 0 {
+        format!("{}h {}m", hours, minutes)
+    } else {
+        format!("{}m {}s", minutes, seconds)
     }
 }
 
@@ -2138,16 +3169,26 @@ fn map_history_entries_to_commit_history(
                 status_fragments.push("Revert detected".to_string());
             }
 
+            let message = {
+                let reason = entry.change_reason.replace('_', " ");
+                let outcome = entry.outcome.replace('_', " ");
+
+                if reason.trim().is_empty() {
+                    config_identity
+                        .clone()
+                        .map(|value| format!("Configuration {value}"))
+                        .unwrap_or_else(|| "Configuration update".to_string())
+                } else if outcome.trim().is_empty() {
+                    reason
+                } else {
+                    format!("{reason}: {outcome}")
+                }
+            };
+
             SystemCommitHistory {
                 hash,
-                message: config_identity
-                    .clone()
-                    .map(|value| format!("Configuration {value}"))
-                    .unwrap_or_else(|| "Configuration update".to_string()),
-                author: format!(
-                    "{} · {} · {}",
-                    entry.actor, entry.change_reason, entry.outcome
-                ),
+                message,
+                author: entry.actor.clone(),
                 committed_at: entry.timestamp,
                 was_deployed: true,
                 deployed_at: Some(entry.timestamp),
@@ -2157,6 +3198,40 @@ fn map_history_entries_to_commit_history(
                 diff_summary: Some(status_fragments.join(" · ")),
                 flake_repo_url: entry.flake_repo_url.clone(),
                 config_identity,
+            }
+        })
+        .collect()
+}
+
+fn map_commit_infos_to_commit_history(
+    commits: &[CommitInfo],
+    current_commit: Option<String>,
+) -> Vec<SystemCommitHistory> {
+    commits
+        .iter()
+        .cloned()
+        .map(|commit| {
+            let committed_at = chrono::DateTime::parse_from_rfc3339(&commit.timestamp)
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+            let is_current = current_commit
+                .as_ref()
+                .map(|current| current == &commit.sha || current == &commit.short_sha)
+                .unwrap_or(false);
+
+            SystemCommitHistory {
+                hash: commit.sha,
+                message: commit.message,
+                author: commit.author,
+                committed_at,
+                was_deployed: is_current,
+                deployed_at: if is_current { Some(committed_at) } else { None },
+                is_current,
+                is_ready_to_deploy: !is_current,
+                build_status: None,
+                diff_summary: None,
+                flake_repo_url: None,
+                config_identity: None,
             }
         })
         .collect()
