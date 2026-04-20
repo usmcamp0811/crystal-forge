@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@ai-agent'
 created_date: '2026-04-19 17:54'
-updated_date: '2026-04-20 03:39'
+updated_date: '2026-04-20 03:41'
 labels:
   - ui
   - systems
@@ -60,6 +60,8 @@ Picked up task after other agents died. Identified issues: 1) Density toggle in 
 Fixed all reported issues in commits 620d16e5 and 1947e26d: 1) Density toggle now properly applies compact mode to cards and tables by reading cf.ui.density from localStorage and passing compact prop to components. 2) Default view toggle already worked via existing localStorage integration. 3) CVE exposure shield icon size increased from 12px to 14px to match design example. 4) Sidebar and topbar now stay fixed on scroll by changing .app and .main from min-height to height: 100vh, ensuring only .content area scrolls.
 
 Verified environment badges are already using correct per-environment colors. The env_colors() function in SystemCardV2, SystemsTable, and env_colors_for_badge() in systems_list.rs all correctly map environments to their design system colors: production=red, staging=amber, dev=blue, edge=teal, lab=purple, unknown=gray. This was already implemented correctly in previous commits.
+
+Fixed spark bar in Total stat card (commit 469b1a25). The bar under the Total number now correctly shows environment distribution using per-environment colors. Changed inline style from 'background-color !important' to 'background' to properly apply environment colors (production=red, staging=amber, dev=blue, edge=teal, lab=purple).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
