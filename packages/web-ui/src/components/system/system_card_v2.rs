@@ -105,16 +105,11 @@ pub fn SystemCardV2(
     // Debug: log environment value to console
     #[cfg(debug_assertions)]
     {
-        use wasm_bindgen::prelude::*;
-        #[wasm_bindgen]
-        extern "C" {
-            #[wasm_bindgen(js_namespace = console)]
-            fn log(s: &str);
-        }
-        log(&format!(
+        let msg = format!(
             "SystemCardV2: hostname={}, environment='{}' (raw: {:?})",
             system.hostname, environment, system.environment
-        ));
+        );
+        web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&msg));
     }
 
     let env = env_colors(&environment);

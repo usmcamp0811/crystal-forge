@@ -147,14 +147,9 @@ pub fn SystemsStatStrip(systems: Vec<SystemSummary>) -> Element {
                                     // Debug: log spark bar segment data
                                     #[cfg(debug_assertions)]
                                     {
-                                        use wasm_bindgen::prelude::*;
-                                        #[wasm_bindgen]
-                                        extern "C" {
-                                            #[wasm_bindgen(js_namespace = console)]
-                                            fn log(s: &str);
-                                        }
-                                        log(&format!("SparkBar: env='{}' count={} pct={:.1}% color={}",
-                                            env, count, pct, color));
+                                        let msg = format!("SparkBar: env='{}' count={} pct={:.1}% color={}",
+                                            env, count, pct, color);
+                                        web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&msg));
                                     }
 
                                     let env_title = format!("{}: {}", env, count);

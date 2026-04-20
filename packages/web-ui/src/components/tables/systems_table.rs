@@ -168,14 +168,9 @@ pub fn SystemsTable(
                                         // Debug: log environment value to console
                                         #[cfg(debug_assertions)]
                                         {
-                                            use wasm_bindgen::prelude::*;
-                                            #[wasm_bindgen]
-                                            extern "C" {
-                                                #[wasm_bindgen(js_namespace = console)]
-                                                fn log(s: &str);
-                                            }
-                                            log(&format!("SystemsTable: hostname={}, environment='{}' (raw: {:?})",
-                                                system.hostname, env, system.environment));
+                                            let msg = format!("SystemsTable: hostname={}, environment='{}' (raw: {:?})",
+                                                system.hostname, env, system.environment);
+                                            web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&msg));
                                         }
 
                                         let colors = env_colors(&env);
