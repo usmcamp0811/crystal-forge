@@ -2803,12 +2803,11 @@ fn HardeningTab(
         // Modal - rendered as sibling to main content for proper overlay
         if let Some(service) = selected_service() {
             div {
-                class: "fixed inset-0 z-[90] flex items-center justify-center p-4 md:p-6",
-                style: "position: fixed; inset: 0; z-index: 90; display: flex; align-items: center; justify-content: center; background: rgba(3, 7, 18, 0.46); backdrop-filter: blur(2px);",
+                class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
                 onclick: move |_| selected_service.set(None),
 
                 div {
-                    class: "w-full max-w-xl rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} shadow-2xl cursor-default overflow-hidden",
+                    class: "relative w-full cf-modal-panel-30 {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl shadow-2xl cursor-default overflow-hidden",
                     style: "max-height: 76vh; display: flex; flex-direction: column;",
                     onclick: move |evt| evt.stop_propagation(),
 
