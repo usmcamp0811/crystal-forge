@@ -61,6 +61,51 @@ impl HardeningScanner {
                 "--json",
                 "--no-write-lock-file",
                 "--accept-flake-config",
+                "--apply",
+                r#"
+                    services:
+                      builtins.listToAttrs (
+                        builtins.concatMap
+                          (name:
+                            let
+                              attempted = builtins.tryEval services.${name};
+                            in
+                              if attempted.success then
+                                let
+                                  svc = attempted.value;
+                                  serviceConfigAttempt = builtins.tryEval (svc.serviceConfig or {});
+                                  typeAttempt = builtins.tryEval (svc.Type or null);
+                                  descriptionAttempt = builtins.tryEval (svc.description or null);
+                                  enableAttempt = builtins.tryEval (svc.enable or null);
+                                in
+                                  [
+                                    {
+                                      inherit name;
+                                      value = {
+                                        serviceConfig =
+                                          if serviceConfigAttempt.success
+                                          then serviceConfigAttempt.value
+                                          else {};
+                                        Type =
+                                          if typeAttempt.success
+                                          then typeAttempt.value
+                                          else null;
+                                        description =
+                                          if descriptionAttempt.success
+                                          then descriptionAttempt.value
+                                          else null;
+                                        enable =
+                                          if enableAttempt.success
+                                          then enableAttempt.value
+                                          else null;
+                                      };
+                                    }
+                                  ]
+                              else
+                                [])
+                          (builtins.attrNames services)
+                      )
+                "#,
                 &target,
             ])
             .stdout(Stdio::piped())
