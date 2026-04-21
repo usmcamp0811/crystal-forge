@@ -43,7 +43,7 @@ pub fn HardeningView() -> Element {
                         value: summary.total_systems_scanned.to_string(),
                     }
                     StatCard {
-                        label: "Average Fleet Score".to_string(),
+                        label: "Average Fleet Score / 100".to_string(),
                         value: summary
                             .avg_fleet_score
                             .map(|v| format!("{v:.1}"))
