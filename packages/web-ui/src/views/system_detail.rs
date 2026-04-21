@@ -2613,24 +2613,17 @@ fn HardeningTab(
             div { class: "flex flex-wrap items-center gap-2.5 mb-3.5",
                 // Search input with icon (flex-1 with min/max width)
                 div { 
-                    class: "relative flex-1",
-                    style: "min-width: 220px; max-width: 360px;",
-                    // Search icon
-                    svg {
-                        class: "absolute left-2.5 top-1/2 w-3.5 h-3.5 {theme::text::MUTED} pointer-events-none",
+                    class: "relative",
+                    style: "flex: 1 1 auto; min-width: 220px; max-width: 360px;",
+                    // Search icon (using simple text character instead of SVG for reliability)
+                    span {
+                        class: "absolute left-3 top-1/2 {theme::text::MUTED} pointer-events-none text-sm",
                         style: "transform: translateY(-50%);",
-                        fill: "none",
-                        stroke: "currentColor",
-                        stroke_width: "2",
-                        stroke_linecap: "round",
-                        stroke_linejoin: "round",
-                        view_box: "0 0 24 24",
-                        circle { cx: "11", cy: "11", r: "8" }
-                        path { d: "m21 21-4.35-4.35" }
+                        "🔍"
                     }
                     input {
-                        class: "{theme::interactive::INPUT} h-10 w-full",
-                        style: "padding-left: 32px;",
+                        class: "{theme::interactive::INPUT} {theme::interactive::FOCUS_RING} h-10 w-full rounded-lg",
+                        style: "padding-left: 2.25rem;",
                         placeholder: "Filter by service name or type…",
                         value: "{search_query}",
                         oninput: move |evt| search_query.set(evt.value()),
@@ -2639,8 +2632,7 @@ fn HardeningTab(
                 
                 // Severity filter dropdown
                 select {
-                    class: "{theme::interactive::INPUT} h-10",
-                    style: "width: auto;",
+                    class: "{theme::interactive::INPUT} {theme::interactive::FOCUS_RING} h-10 rounded-lg px-3",
                     value: "{severity_filter}",
                     onchange: move |evt| severity_filter.set(evt.value()),
                     option { value: "all", "All severities" }
@@ -2653,7 +2645,7 @@ fn HardeningTab(
                 
                 // High risk toggle button
                 button {
-                    class: "h-10 rounded-md border px-3 text-xs font-medium whitespace-nowrap transition-colors {risky_toggle_class.as_str()}",
+                    class: "h-10 rounded-lg px-3 text-xs font-medium whitespace-nowrap transition-colors {theme::interactive::FOCUS_RING} {risky_toggle_class.as_str()}",
                     onclick: move |_| {
                         let current = *risky_only.read();
                         risky_only.set(!current);
@@ -2667,15 +2659,15 @@ fn HardeningTab(
                 
                 // Results count chip
                 div {
-                    class: "text-xs px-2 py-1 rounded-md border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} {theme::text::MUTED}",
-                    style: "font-size: 12px;",
+                    class: "px-2.5 py-2 rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} {theme::text::MUTED}",
+                    style: "font-size: 12px; line-height: 1;",
                     "{filtered_count} shown"
                 }
                 
                 // Reset button (only show when filters active)
                 if has_active_filters {
                     button {
-                        class: "px-3 py-1.5 h-10 rounded-md border {theme::surface::CARD_BORDER} text-xs font-medium {theme::text::SECONDARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors",
+                        class: "px-3 h-10 rounded-lg border {theme::surface::CARD_BORDER} text-xs font-medium {theme::text::SECONDARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors",
                         onclick: move |_| {
                             search_query.set(String::new());
                             severity_filter.set("all".to_string());
@@ -2850,12 +2842,13 @@ fn HardeningTab(
         // Modal - rendered as sibling to main content for proper overlay
         if let Some(service) = selected_service() {
             div {
-                class: "fixed inset-0 z-[90] grid place-items-center p-8",
+                class: "fixed inset-0 z-[90] flex items-center justify-center p-8",
                 style: "background: rgba(3, 7, 18, 0.7); backdrop-filter: blur(3px);",
                 onclick: move |_| selected_service.set(None),
 
                 div {
                     class: "w-full max-w-4xl max-h-[85vh] overflow-y-auto rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} shadow-2xl",
+                    style: "pointer-events: auto;",
                     onclick: move |evt| evt.stop_propagation(),
                     
                     // Modal content wrapper with padding
