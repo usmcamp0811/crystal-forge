@@ -2808,7 +2808,7 @@ fn HardeningTab(
 
                 div {
                     class: "relative w-full cf-modal-panel-30 {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl shadow-2xl cursor-default overflow-hidden",
-                    style: "max-height: 76vh; display: flex; flex-direction: column;",
+                    style: "width: 100%; max-width: 30rem; max-height: 76vh; display: flex; flex-direction: column;",
                     onclick: move |evt| evt.stop_propagation(),
 
                     // Header
