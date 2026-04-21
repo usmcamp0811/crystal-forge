@@ -2610,11 +2610,12 @@ fn HardeningTab(
             }
 
             // Filter bar (matching design standards)
-            div { class: "flex flex-wrap items-center gap-2.5 mb-3.5",
+            div { class: "flex flex-wrap items-center gap-3.5 mb-4 mt-1",
+                style: "row-gap: 0.75rem;",
                 // Search input with icon (flex-1 with min/max width)
                 div {
                     class: "relative",
-                    style: "position: relative; flex: 1 1 auto; min-width: 220px; max-width: 360px;",
+                    style: "position: relative; flex: 1 1 auto; min-width: 240px; max-width: 420px;",
                     // Search icon (using simple text character instead of SVG for reliability)
                     span {
                         class: "{theme::text::MUTED}",
@@ -2632,7 +2633,7 @@ fn HardeningTab(
                 
                 // Severity filter dropdown
                 select {
-                    class: "{theme::interactive::INPUT} {theme::interactive::FOCUS_RING} h-10 rounded-lg px-3",
+                    class: "{theme::interactive::INPUT} {theme::interactive::FOCUS_RING} h-10 rounded-lg px-3 min-w-[170px]",
                     style: "min-height: 2.5rem;",
                     value: "{severity_filter}",
                     onchange: move |evt| severity_filter.set(evt.value()),
@@ -2660,7 +2661,7 @@ fn HardeningTab(
                 
                 // Results count chip
                 div {
-                    class: "px-2.5 py-2 rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} {theme::text::MUTED}",
+                    class: "ml-1 px-2.5 py-2 rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} {theme::text::MUTED}",
                     style: "font-size: 12px; line-height: 1;",
                     "{filtered_count} shown"
                 }
@@ -2668,7 +2669,7 @@ fn HardeningTab(
                 // Reset button (only show when filters active)
                 if has_active_filters {
                     button {
-                        class: "px-3 h-10 rounded-lg border {theme::surface::CARD_BORDER} text-xs font-medium {theme::text::SECONDARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors",
+                        class: "ml-1 px-3 h-10 rounded-lg border {theme::surface::CARD_BORDER} text-xs font-medium {theme::text::SECONDARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors",
                         onclick: move |_| {
                             search_query.set(String::new());
                             severity_filter.set("all".to_string());
@@ -2843,19 +2844,19 @@ fn HardeningTab(
         // Modal - rendered as sibling to main content for proper overlay
         if let Some(service) = selected_service() {
             div {
-                class: "fixed inset-0 z-[90] flex items-center justify-center p-4 md:p-8 cursor-pointer",
-                style: "position: fixed; inset: 0; z-index: 90; display: flex; align-items: center; justify-content: center; background: rgba(3, 7, 18, 0.7); backdrop-filter: blur(3px);",
+                class: "fixed inset-0 z-[90] flex items-center justify-center p-4 md:p-6",
+                style: "position: fixed; inset: 0; z-index: 90; display: flex; align-items: center; justify-content: center; background: rgba(3, 7, 18, 0.48); backdrop-filter: blur(2px);",
                 onclick: move |_| selected_service.set(None),
 
                 div {
-                    class: "w-full max-w-4xl rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} shadow-2xl cursor-default",
-                    style: "max-height: 85vh; display: flex; flex-direction: column;",
+                    class: "w-full max-w-3xl rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} shadow-2xl cursor-default",
+                    style: "max-height: 78vh; display: flex; flex-direction: column;",
                     onclick: move |evt| evt.stop_propagation(),
                     
                     // Modal content wrapper with padding and scroll
                     div {
                         class: "p-5 md:p-6 space-y-4 overflow-y-auto",
-                        div { class: "flex items-start justify-between gap-3",
+                        div { class: "flex items-start justify-between gap-3 pb-3 border-b {theme::surface::DIVIDER}",
                             div {
                                 h3 { class: "text-lg font-semibold {theme::text::PRIMARY}", "Service hardening: {service.service_name}" }
                                 p { class: "text-sm {theme::text::SECONDARY}", "Score: {service.hardening_score} · Risk: {service.risk_level}" }
