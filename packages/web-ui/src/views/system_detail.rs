@@ -2627,7 +2627,26 @@ fn HardeningTab(
             }
 
             if results.is_empty() {
-                p { class: "{theme::text::SECONDARY}", "No hardening scan results available yet. Trigger a hardening scan to populate this tab." }
+                div { class: "{theme::presets::CARD} p-8 text-center space-y-3",
+                    svg {
+                        class: "w-16 h-16 mx-auto {theme::text::MUTED}",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "1.5",
+                        view_box: "0 0 24 24",
+                        path {
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            d: "M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z"
+                        }
+                    }
+                    h3 { class: "text-lg font-semibold {theme::text::PRIMARY}", "No scan results yet" }
+                    p { class: "{theme::text::SECONDARY}",
+                        "Run a hardening scan using the ",
+                        span { class: "font-semibold {theme::text::PRIMARY}", "\"Run Hardening Scan\"" },
+                        " button above to analyze systemd service security configurations."
+                    }
+                }
             } else {
                 div { class: "{theme::presets::TABLE_CONTAINER}",
                     div { class: "overflow-x-auto",
