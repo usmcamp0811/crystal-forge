@@ -628,12 +628,14 @@ pub fn SystemDetailView(id: String) -> Element {
                         }
                     }
                     button {
-                        class: "inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-white bg-violet-600 hover:bg-violet-500 {theme::interactive::FOCUS_RING} transition-colors disabled:opacity-60 disabled:cursor-not-allowed",
+                        class: "inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING} transition-colors disabled:opacity-60 disabled:cursor-not-allowed",
                         disabled: *hardening_scan_in_progress.read() || !can_mutate || !hardening_scan_eligible,
-                        title: if hardening_scan_eligible {
-                            Some("Run hardening scan immediately for this system configuration")
-                        } else {
+                        title: if !hardening_scan_eligible {
                             Some(hardening_scan_blocked_reason.as_str())
+                        } else if !can_mutate {
+                            Some("Operator or Admin role required to run scans")
+                        } else {
+                            Some("Run hardening scan immediately for this system configuration")
                         },
                         onclick: {
                             let system_id = system.id;
@@ -707,10 +709,24 @@ pub fn SystemDetailView(id: String) -> Element {
                             }
                         },
 
+                        svg {
+                            class: "w-4 h-4",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            view_box: "0 0 24 24",
+                            path {
+                                stroke_linecap: "round",
+                                stroke_linejoin: "round",
+                                d: "M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z"
+                            }
+                        }
                         if *hardening_scan_in_progress.read() {
                             "Scanning..."
                         } else if !can_mutate {
                             "Run Hardening Scan (Operator/Admin required)"
+                        } else if !hardening_scan_eligible {
+                            "Run Hardening Scan (unavailable)"
                         } else {
                             "Run Hardening Scan"
                         }
