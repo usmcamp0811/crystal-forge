@@ -2629,7 +2629,7 @@ fn HardeningTab(
                 // Reset button (only show when filters active)
                 if has_active_filters {
                     button {
-                        class: "px-3 h-10 rounded-lg border {theme::surface::CARD_BORDER} text-xs font-medium {theme::text::SECONDARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors",
+                        class: "ml-auto px-3 h-10 rounded-lg border {theme::surface::CARD_BORDER} text-xs font-medium {theme::text::SECONDARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors",
                         onclick: move |_| {
                             search_query.set(String::new());
                             severity_filter.set("all".to_string());
@@ -2804,21 +2804,31 @@ fn HardeningTab(
         if let Some(service) = selected_service() {
             div {
                 class: "fixed inset-0 z-[90] flex items-center justify-center p-4 md:p-6",
-                style: "position: fixed; inset: 0; z-index: 90; display: flex; align-items: center; justify-content: center; background: rgba(3, 7, 18, 0.48); backdrop-filter: blur(2px);",
+                style: "position: fixed; inset: 0; z-index: 90; display: flex; align-items: center; justify-content: center; background: rgba(3, 7, 18, 0.46); backdrop-filter: blur(2px);",
                 onclick: move |_| selected_service.set(None),
 
                 div {
-                    class: "w-full max-w-3xl rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} shadow-2xl cursor-default",
-                    style: "max-height: 78vh; display: flex; flex-direction: column;",
+                    class: "w-full max-w-2xl rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} shadow-2xl cursor-default overflow-hidden",
+                    style: "max-height: 76vh; display: flex; flex-direction: column;",
                     onclick: move |evt| evt.stop_propagation(),
-                    
-                    // Modal content wrapper with padding and scroll
-                    div {
-                        class: "p-5 md:p-6 space-y-4 overflow-y-auto",
-                        div { class: "flex items-start justify-between gap-3 pb-3 border-b {theme::surface::DIVIDER}",
-                            div {
-                                h3 { class: "text-lg font-semibold {theme::text::PRIMARY}", "Service hardening: {service.service_name}" }
-                                p { class: "text-sm {theme::text::SECONDARY}", "Score: {service.hardening_score} · Risk: {service.risk_level}" }
+
+                    // Header
+                    div { class: "px-5 md:px-6 py-4 border-b {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG}",
+                        div { class: "flex items-start justify-between gap-3",
+                            div { class: "space-y-1",
+                                div { class: "flex items-center gap-2 flex-wrap",
+                                    h3 { class: "text-base md:text-lg font-semibold {theme::text::PRIMARY}", "Service hardening" }
+                                    span {
+                                        class: "inline-flex px-2 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide {risk_level_compact_badge_class(&service.risk_level)}",
+                                        "{short_risk_label(&service.risk_level)}"
+                                    }
+                                }
+                                p { class: "text-sm {theme::text::SECONDARY}",
+                                    span { class: "font-mono {theme::text::PRIMARY}", "{service.service_name}" }
+                                }
+                                p { class: "text-xs {theme::text::MUTED}",
+                                    "Score {service.hardening_score} · Missing {service.missing_directives_count} · Disabled {service.disabled_directives_count}"
+                                }
                             }
                             button {
                                 class: "px-3 py-1.5 rounded-lg border {theme::surface::CARD_BORDER} text-xs font-medium {theme::text::SECONDARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors",
@@ -2826,102 +2836,108 @@ fn HardeningTab(
                                 "Close"
                             }
                         }
+                    }
 
-                        div { class: "max-h-64 overflow-y-auto border {theme::surface::CARD_BORDER} rounded-md {theme::surface::SUBTLE_BG}",
-                        table { class: "min-w-full text-xs",
-                            thead {
-                                tr { class: "border-b {theme::surface::CARD_BORDER} text-left {theme::text::SECONDARY}",
-                                    th { class: "py-2 px-3", "Directive" }
-                                    th { class: "py-2 px-3", "Enabled" }
-                                    th { class: "py-2 px-3", "Points" }
-                                }
-                            }
-                            tbody {
-                                if let Some(directives) = service.directives_detail.as_array() {
-                                    for item in directives {
-                                        tr { class: "border-b {theme::surface::DIVIDER}",
-                                            td { class: "py-2 px-3 font-mono", "{item.get(\"name\").and_then(|v| v.as_str()).unwrap_or(\"\")}" }
-                                            td { class: "py-2 px-3", {if item.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) { "yes" } else { "no" }} }
-                                            td { class: "py-2 px-3", "{item.get(\"points\").and_then(|v| v.as_i64()).unwrap_or(0)}/{item.get(\"max_points\").and_then(|v| v.as_i64()).unwrap_or(0)}" }
+                    // Body
+                    div { class: "px-5 md:px-6 py-4 space-y-4 overflow-y-auto",
+                        section { class: "space-y-2",
+                            h4 { class: "text-sm font-semibold {theme::text::PRIMARY}", "Directive breakdown" }
+                            div { class: "max-h-56 overflow-y-auto border {theme::surface::CARD_BORDER} rounded-md {theme::surface::SUBTLE_BG}",
+                                table { class: "min-w-full text-xs",
+                                    thead {
+                                        tr { class: "border-b {theme::surface::CARD_BORDER} text-left {theme::text::SECONDARY}",
+                                            th { class: "py-2 px-3", "Directive" }
+                                            th { class: "py-2 px-3", "Enabled" }
+                                            th { class: "py-2 px-3", "Points" }
+                                        }
+                                    }
+                                    tbody {
+                                        if let Some(directives) = service.directives_detail.as_array() {
+                                            for item in directives {
+                                                tr { class: "border-b {theme::surface::DIVIDER}",
+                                                    td { class: "py-2 px-3 font-mono", "{item.get(\"name\").and_then(|v| v.as_str()).unwrap_or(\"\")}" }
+                                                    td { class: "py-2 px-3", {if item.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) { "yes" } else { "no" }} }
+                                                    td { class: "py-2 px-3", "{item.get(\"points\").and_then(|v| v.as_i64()).unwrap_or(0)}/{item.get(\"max_points\").and_then(|v| v.as_i64()).unwrap_or(0)}" }
+                                                }
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
-                    }
 
-                        div { class: "space-y-2",
-                        h4 { class: "font-medium {theme::text::PRIMARY}", "Justifications" }
-                        for item in justifications.iter().filter(|j| j.service_name == service.service_name) {
-                            div { class: "rounded-md border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} p-2 text-xs",
-                                p { class: "{theme::text::PRIMARY}", "{item.category.clone().unwrap_or_else(|| \"uncategorized\".to_string())}" }
-                                p { class: "{theme::text::SECONDARY} mt-1", "{item.reason}" }
+                        section { class: "space-y-2",
+                            h4 { class: "text-sm font-semibold {theme::text::PRIMARY}", "Justifications" }
+                            for item in justifications.iter().filter(|j| j.service_name == service.service_name) {
+                                div { class: "rounded-md border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} p-2 text-xs",
+                                    p { class: "{theme::text::PRIMARY}", "{item.category.clone().unwrap_or_else(|| \"uncategorized\".to_string())}" }
+                                    p { class: "{theme::text::SECONDARY} mt-1", "{item.reason}" }
+                                }
+                            }
+                            if justifications.iter().all(|j| j.service_name != service.service_name) {
+                                p { class: "text-xs {theme::text::SECONDARY}", "No justifications yet." }
                             }
                         }
-                        if justifications.iter().all(|j| j.service_name != service.service_name) {
-                            p { class: "text-xs {theme::text::SECONDARY}", "No justifications yet." }
-                        }
-                    }
 
                         if allow_mutations {
-                            div { class: "space-y-2 border-t {theme::surface::CARD_BORDER} pt-3",
-                            h4 { class: "font-medium {theme::text::PRIMARY}", "Add or update justification" }
-                            div { class: "grid grid-cols-1 md:grid-cols-3 gap-2",
-                                input {
-                                    class: "px-2 py-1 rounded text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
-                                    placeholder: "Category (optional)",
-                                    value: "{category}",
-                                    oninput: move |evt| category.set(evt.value()),
-                                }
-                                input {
-                                    class: "px-2 py-1 rounded text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
-                                    placeholder: "Directive (optional)",
-                                    value: "{directive_name}",
-                                    oninput: move |evt| directive_name.set(evt.value()),
-                                }
-                            }
-                            textarea {
-                                class: "w-full min-h-[72px] px-2 py-1 rounded text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
-                                placeholder: "Reason",
-                                value: "{reason}",
-                                oninput: move |evt| reason.set(evt.value()),
-                            }
-                            button {
-                                class: "px-3 py-1.5 rounded {theme::interactive::PRIMARY_BTN} text-sm",
-                                onclick: {
-                                    let service_name = service.service_name.clone();
-                                    let on_saved = on_saved.clone();
-                                    move |_| {
-                                        let reason_value = reason();
-                                        if reason_value.trim().is_empty() {
-                                            return;
-                                        }
-
-                                        let request = SaveHardeningJustificationRequest {
-                                            directive_name: non_empty(directive_name()),
-                                            category: non_empty(category()),
-                                            reason: reason_value,
-                                        };
-                                        let service_name_for_request = service_name.clone();
-
-                                        spawn(async move {
-                                            if save_system_hardening_justification(&system_id, &service_name_for_request, &request)
-                                                .await
-                                                .is_ok()
-                                            {
-                                                on_saved.call(());
-                                            }
-                                        });
+                            section { class: "space-y-2 border-t {theme::surface::CARD_BORDER} pt-3",
+                                h4 { class: "text-sm font-semibold {theme::text::PRIMARY}", "Add or update justification" }
+                                div { class: "grid grid-cols-1 md:grid-cols-3 gap-2",
+                                    input {
+                                        class: "px-2 py-1 rounded text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                        placeholder: "Category (optional)",
+                                        value: "{category}",
+                                        oninput: move |evt| category.set(evt.value()),
                                     }
-                                },
-                                "Save justification"
+                                    input {
+                                        class: "px-2 py-1 rounded text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                        placeholder: "Directive (optional)",
+                                        value: "{directive_name}",
+                                        oninput: move |evt| directive_name.set(evt.value()),
+                                    }
+                                }
+                                textarea {
+                                    class: "w-full min-h-[72px] px-2 py-1 rounded text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                    placeholder: "Reason",
+                                    value: "{reason}",
+                                    oninput: move |evt| reason.set(evt.value()),
+                                }
+                                button {
+                                    class: "px-3 py-1.5 rounded {theme::interactive::PRIMARY_BTN} text-sm",
+                                    onclick: {
+                                        let service_name = service.service_name.clone();
+                                        let on_saved = on_saved.clone();
+                                        move |_| {
+                                            let reason_value = reason();
+                                            if reason_value.trim().is_empty() {
+                                                return;
+                                            }
+
+                                            let request = SaveHardeningJustificationRequest {
+                                                directive_name: non_empty(directive_name()),
+                                                category: non_empty(category()),
+                                                reason: reason_value,
+                                            };
+                                            let service_name_for_request = service_name.clone();
+
+                                            spawn(async move {
+                                                if save_system_hardening_justification(&system_id, &service_name_for_request, &request)
+                                                    .await
+                                                    .is_ok()
+                                                {
+                                                    on_saved.call(());
+                                                }
+                                            });
+                                        }
+                                    },
+                                    "Save justification"
+                                }
                             }
                         }
-                        }  // Close: if allow_mutations (add justification section)
-                    }  // Close: Modal content wrapper div (p-5 md:p-6 space-y-4)
-                }  // Close: Modal container div (max-w-4xl)
-            }  // Close: Backdrop div (fixed inset-0)
-        }  // Close: if let Some(service)
+                    }
+                }
+            }
+        }
     }  // Close: rsx!
 }
 
