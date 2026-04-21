@@ -2586,30 +2586,30 @@ fn HardeningTab(
 
     rsx! {
         div { class: "space-y-4",
-            div { class: "{theme::presets::CARD} p-4",
-                h3 { class: "{theme::typography::SECTION_TITLE} {theme::text::PRIMARY}", "Systemd Security Risk Dashboard" }
-                p {
-                    class: "mt-1 text-sm {theme::text::SECONDARY}",
-                    "Audit of service sandboxing, namespace isolation, capabilities, syscall filtering, and runtime exposure for this system."
+            div { class: "overflow-x-auto",
+                div { class: "grid min-w-[980px] grid-cols-5 gap-2",
+                    CompactMetricCard { label: "Scanned services", value: format!("{}", total_services), tone: "neutral" }
+                    CompactMetricCard { label: "Average score", value: format!("{avg_score:.1}"), tone: "neutral" }
+                    CompactMetricCard { label: "High risk services", value: format!("{}", high_risk_count), tone: "danger" }
+                    CompactMetricCard { label: "Cumulative exposure", value: format!("{}", cumulative_exposure), tone: "warning" }
+                    CompactMetricCard { label: "Showing", value: format!("{}", filtered_count), tone: "neutral" }
                 }
             }
 
-            div { class: "grid grid-cols-5 gap-2",
-                CompactMetricCard { label: "Scanned services", value: format!("{}", total_services), tone: "neutral" }
-                CompactMetricCard { label: "Average score", value: format!("{avg_score:.1}"), tone: "neutral" }
-                CompactMetricCard { label: "High risk services", value: format!("{}", high_risk_count), tone: "danger" }
-                CompactMetricCard { label: "Cumulative exposure", value: format!("{}", cumulative_exposure), tone: "warning" }
-                CompactMetricCard { label: "Showing", value: format!("{}", filtered_count), tone: "neutral" }
-            }
-
-            div { class: "{theme::presets::CARD} p-3 flex flex-col xl:flex-row gap-2 xl:items-center xl:justify-between",
-                div { class: "flex flex-1 flex-col sm:flex-row gap-2",
+            div { class: "{theme::presets::CARD} p-3",
+                div { class: "flex flex-col 2xl:flex-row gap-2 2xl:items-end 2xl:justify-between",
+                    div { class: "grid gap-2 md:grid-cols-2 xl:grid-cols-3 2xl:flex 2xl:flex-1",
+                        div { class: "space-y-1",
+                            p { class: "text-[10px] uppercase tracking-wide {theme::text::MUTED}", "Search" }
                     input {
                         class: "w-full sm:max-w-xs rounded px-2 py-1.5 text-xs {theme::text::PRIMARY} {theme::interactive::INPUT}",
                         placeholder: "Search service or identity",
                         value: "{search_query}",
                         oninput: move |evt| search_query.set(evt.value()),
                     }
+                        }
+                        div { class: "space-y-1",
+                            p { class: "text-[10px] uppercase tracking-wide {theme::text::MUTED}", "Severity" }
                     select {
                         class: "rounded px-2 py-1.5 text-xs {theme::text::PRIMARY} {theme::interactive::INPUT}",
                         value: "{severity_filter}",
@@ -2621,6 +2621,9 @@ fn HardeningTab(
                         option { value: "moderately_hardened", "Moderately hardened" }
                         option { value: "well_hardened", "Well hardened" }
                     }
+                        }
+                        div { class: "space-y-1",
+                            p { class: "text-[10px] uppercase tracking-wide {theme::text::MUTED}", "Sort" }
                     select {
                         class: "rounded px-2 py-1.5 text-xs {theme::text::PRIMARY} {theme::interactive::INPUT}",
                         value: "{sort_mode}",
@@ -2630,9 +2633,10 @@ fn HardeningTab(
                         option { value: "score_desc", "Sort: score desc" }
                         option { value: "service_asc", "Sort: service" }
                     }
+                        }
                 }
                 button {
-                    class: "rounded border px-2 py-1.5 text-xs font-medium {risky_toggle_class.as_str()}",
+                    class: "rounded border px-3 py-1.5 text-xs font-medium whitespace-nowrap {risky_toggle_class.as_str()}",
                     onclick: move |_| {
                         let current = *risky_only.read();
                         risky_only.set(!current);
@@ -2643,6 +2647,7 @@ fn HardeningTab(
                         "Only risky: OFF"
                     }
                 }
+            }
             }
 
             if results.is_empty() {
