@@ -2461,9 +2461,9 @@ fn HardeningTab(
     let active_sort = sort_mode.read().clone();
     let only_risky = *risky_only.read();
     let risky_toggle_class = if only_risky {
-        "border-red-400/50 bg-red-500/10 text-red-200"
+        format!("border {} {} {}", theme::health::CRITICAL_BORDER, theme::health::CRITICAL_BG, theme::health::CRITICAL_TEXT)
     } else {
-        "border cf-card-border cf-text-secondary cf-hover-bg"
+        format!("border {} {} {}", theme::surface::CARD_BORDER, theme::text::SECONDARY, theme::interactive::HOVER_BG)
     };
 
     let mut filtered_results = results
@@ -2613,7 +2613,7 @@ fn HardeningTab(
                     }
                 }
                 button {
-                    class: "rounded border px-2 py-1.5 text-xs font-medium {risky_toggle_class}",
+                    class: "rounded border px-2 py-1.5 text-xs font-medium {risky_toggle_class.as_str()}",
                     onclick: move |_| {
                         let current = *risky_only.read();
                         risky_only.set(!current);
@@ -2815,7 +2815,7 @@ fn HardeningTab(
                                 oninput: move |evt| reason.set(evt.value()),
                             }
                             button {
-                                class: "px-3 py-1.5 rounded bg-violet-600 hover:bg-violet-500 text-sm text-white",
+                                class: "px-3 py-1.5 rounded {theme::interactive::PRIMARY_BTN} text-sm",
                                 onclick: {
                                     let service_name = service.service_name.clone();
                                     let on_saved = on_saved.clone();
@@ -2863,15 +2863,15 @@ fn HardeningTab(
 #[component]
 fn CompactMetricCard(label: String, value: String, tone: &'static str) -> Element {
     let tone_class = match tone {
-        "danger" => "border {theme::health::CRITICAL_BORDER} {theme::health::CRITICAL_BG}",
-        "warning" => "border {theme::health::WARNING_BORDER} {theme::health::WARNING_BG}",
-        _ => "border cf-card-border cf-subtle-bg",
+        "danger" => format!("border {} {}", theme::health::CRITICAL_BORDER, theme::health::CRITICAL_BG),
+        "warning" => format!("border {} {}", theme::health::WARNING_BORDER, theme::health::WARNING_BG),
+        _ => format!("border {} {}", theme::surface::CARD_BORDER, theme::surface::SUBTLE_BG),
     };
 
     rsx! {
         div { class: "rounded-md border {tone_class} px-2.5 py-2",
             p { class: "text-[10px] uppercase tracking-wide {theme::text::MUTED}", "{label}" }
-            p { class: "mt-0.5 text-base font-semibold text-white", "{value}" }
+            p { class: "mt-0.5 text-base font-semibold {theme::text::PRIMARY}", "{value}" }
         }
     }
 }

@@ -51,12 +51,12 @@ pub fn HardeningView() -> Element {
                     StatCard {
                         label: "Vulnerable Services".to_string(),
                         value: summary.total_vulnerable_services.to_string(),
-                        color_class: "text-red-300".to_string(),
+                        color_class: theme::health::CRITICAL_TEXT.to_string(),
                     }
                     StatCard {
                         label: "Well Hardened".to_string(),
                         value: summary.total_well_hardened_services.to_string(),
-                        color_class: "text-emerald-300".to_string(),
+                        color_class: theme::health::HEALTHY_TEXT.to_string(),
                     }
                 }
 
@@ -118,7 +118,7 @@ fn render_top_services(rows: &[HardeningTopServiceResponse]) -> Element {
         div { class: "overflow-x-auto",
             table { class: "min-w-full text-sm",
                 thead {
-                    tr { class: "border-b border-white/10 text-left {theme::text::SECONDARY}",
+                    tr { class: "border-b {theme::surface::CARD_BORDER} text-left {theme::text::SECONDARY}",
                         th { class: "py-2 pr-3", "Service" }
                         th { class: "py-2 pr-3", "Affected Systems" }
                         th { class: "py-2 pr-3", "Avg Score" }
@@ -127,11 +127,11 @@ fn render_top_services(rows: &[HardeningTopServiceResponse]) -> Element {
                 }
                 tbody {
                     for row in rows {
-                        tr { class: "border-b border-white/5",
-                            td { class: "py-2 pr-3 font-mono", "{row.service_name}" }
-                            td { class: "py-2 pr-3", "{row.affected_systems_count}" }
-                            td { class: "py-2 pr-3", {format!("{:.1}", row.avg_score)} }
-                            td { class: "py-2 pr-3", "{row.min_score} - {row.max_score}" }
+                        tr { class: "border-b {theme::surface::DIVIDER}",
+                            td { class: "py-2 pr-3 font-mono {theme::text::PRIMARY}", "{row.service_name}" }
+                            td { class: "py-2 pr-3 {theme::text::PRIMARY}", "{row.affected_systems_count}" }
+                            td { class: "py-2 pr-3 {theme::text::PRIMARY}", {format!("{:.1}", row.avg_score)} }
+                            td { class: "py-2 pr-3 {theme::text::SECONDARY}", "{row.min_score} - {row.max_score}" }
                         }
                     }
                 }
@@ -149,7 +149,7 @@ fn render_system_posture(rows: &[HardeningSystemPostureResponse]) -> Element {
         div { class: "overflow-x-auto",
             table { class: "min-w-full text-sm",
                 thead {
-                    tr { class: "border-b border-white/10 text-left {theme::text::SECONDARY}",
+                    tr { class: "border-b {theme::surface::CARD_BORDER} text-left {theme::text::SECONDARY}",
                         th { class: "py-2 pr-3", "System" }
                         th { class: "py-2 pr-3", "Config" }
                         th { class: "py-2 pr-3", "Score" }
@@ -159,22 +159,22 @@ fn render_system_posture(rows: &[HardeningSystemPostureResponse]) -> Element {
                 }
                 tbody {
                     for row in rows {
-                        tr { class: "border-b border-white/5",
+                        tr { class: "border-b {theme::surface::DIVIDER}",
                             td { class: "py-2 pr-3",
                                 if let Some(system_id) = row.system_id {
                                     Link {
-                                        class: "text-cyan-300 hover:text-cyan-200",
+                                        class: "{theme::deployment::AHEAD_TEXT} hover:underline",
                                         to: Route::SystemDetailView { id: system_id.to_string() },
                                         "{row.hostname.clone().unwrap_or_else(|| row.config_name.clone())}"
                                     }
                                 } else {
-                                    span { "{row.hostname.clone().unwrap_or_else(|| row.config_name.clone())}" }
+                                    span { class: "{theme::text::PRIMARY}", "{row.hostname.clone().unwrap_or_else(|| row.config_name.clone())}" }
                                 }
                             }
-                            td { class: "py-2 pr-3 font-mono", "{row.config_name}" }
-                            td { class: "py-2 pr-3", "{row.overall_score.map(|v| v.to_string()).unwrap_or_else(|| \"n/a\".to_string())}" }
-                            td { class: "py-2 pr-3", "{row.risk_level.clone().unwrap_or_else(|| \"unknown\".to_string())}" }
-                            td { class: "py-2 pr-3", "{row.total_services.map(|v| v.to_string()).unwrap_or_else(|| \"0\".to_string())}" }
+                            td { class: "py-2 pr-3 font-mono {theme::text::SECONDARY}", "{row.config_name}" }
+                            td { class: "py-2 pr-3 {theme::text::PRIMARY}", "{row.overall_score.map(|v| v.to_string()).unwrap_or_else(|| \"n/a\".to_string())}" }
+                            td { class: "py-2 pr-3 {theme::text::SECONDARY}", "{row.risk_level.clone().unwrap_or_else(|| \"unknown\".to_string())}" }
+                            td { class: "py-2 pr-3 {theme::text::SECONDARY}", "{row.total_services.map(|v| v.to_string()).unwrap_or_else(|| \"0\".to_string())}" }
                         }
                     }
                 }
