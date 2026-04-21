@@ -2803,16 +2803,27 @@ fn HardeningTab(
 
         if let Some(service) = selected_service() {
             div {
-                class: "fixed inset-0 bg-black/60 z-40 flex items-center justify-center p-4",
+                class: "fixed inset-0 z-[90] bg-black/70 overflow-y-auto",
                 onclick: move |_| selected_service.set(None),
 
                 div {
-                    class: "w-full max-w-4xl rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-5 space-y-4",
-                    onclick: move |evt| evt.stop_propagation(),
-                    h3 { class: "text-lg font-semibold {theme::text::PRIMARY}", "Service hardening: {service.service_name}" }
-                    p { class: "text-sm {theme::text::SECONDARY}", "Score: {service.hardening_score} · Risk: {service.risk_level}" }
+                    class: "min-h-full w-full flex items-center justify-center p-4",
+                    div {
+                        class: "w-full max-w-5xl rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} shadow-2xl p-5 md:p-6 space-y-4",
+                        onclick: move |evt| evt.stop_propagation(),
+                        div { class: "flex items-start justify-between gap-3",
+                            div {
+                                h3 { class: "text-lg font-semibold {theme::text::PRIMARY}", "Service hardening: {service.service_name}" }
+                                p { class: "text-sm {theme::text::SECONDARY}", "Score: {service.hardening_score} · Risk: {service.risk_level}" }
+                            }
+                            button {
+                                class: "px-2.5 py-1.5 rounded border {theme::surface::CARD_BORDER} text-xs {theme::text::SECONDARY} {theme::interactive::HOVER_BG}",
+                                onclick: move |_| selected_service.set(None),
+                                "Close"
+                            }
+                        }
 
-                    div { class: "max-h-64 overflow-y-auto border {theme::surface::CARD_BORDER} rounded-md {theme::surface::SUBTLE_BG}",
+                        div { class: "max-h-64 overflow-y-auto border {theme::surface::CARD_BORDER} rounded-md {theme::surface::SUBTLE_BG}",
                         table { class: "min-w-full text-xs",
                             thead {
                                 tr { class: "border-b {theme::surface::CARD_BORDER} text-left {theme::text::SECONDARY}",
@@ -2835,7 +2846,7 @@ fn HardeningTab(
                         }
                     }
 
-                    div { class: "space-y-2",
+                        div { class: "space-y-2",
                         h4 { class: "font-medium {theme::text::PRIMARY}", "Justifications" }
                         for item in justifications.iter().filter(|j| j.service_name == service.service_name) {
                             div { class: "rounded-md border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} p-2 text-xs",
@@ -2848,8 +2859,8 @@ fn HardeningTab(
                         }
                     }
 
-                    if allow_mutations {
-                        div { class: "space-y-2 border-t {theme::surface::CARD_BORDER} pt-3",
+                        if allow_mutations {
+                            div { class: "space-y-2 border-t {theme::surface::CARD_BORDER} pt-3",
                             h4 { class: "font-medium {theme::text::PRIMARY}", "Add or update justification" }
                             div { class: "grid grid-cols-1 md:grid-cols-3 gap-2",
                                 input {
@@ -2902,13 +2913,6 @@ fn HardeningTab(
                                 "Save justification"
                             }
                         }
-                    }
-
-                    div { class: "flex justify-end",
-                        button {
-                            class: "px-3 py-1.5 rounded border {theme::surface::CARD_BORDER} text-sm {theme::text::SECONDARY} {theme::interactive::HOVER_BG}",
-                            onclick: move |_| selected_service.set(None),
-                            "Close"
                         }
                     }
                 }
