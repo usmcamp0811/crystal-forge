@@ -491,42 +491,36 @@ pub async fn evaluate_with_nix_eval_jobs(
 
                                                         // ── AUTOMATIC HARDENING SCAN ─────────────────────
                                                         // Trigger hardening scan automatically after successful eval
-                                                        let scan_pool = pool.clone();
-                                                        let scan_flake_ref = flake_ref.clone();
-                                                        let scan_config_name = system_name.clone();
-                                                        let scan_commit_id = commit.id;
-                                                        let scan_cf_state = cf_state.cloned();
-                                                        tokio::spawn(async move {
-                                                            match trigger_immediate_hardening_scan(
-                                                                scan_pool,
-                                                                deriv.id,
-                                                                &scan_flake_ref,
-                                                                &scan_config_name,
-                                                            )
-                                                            .await
-                                                            {
-                                                                Ok(scan_id) => {
-                                                                    debug!(
-                                                                        "🔒 Automatically triggered hardening scan {} for {}",
-                                                                        scan_id, scan_config_name
-                                                                    );
-                                                                    if let Some(state) = scan_cf_state {
-                                                                        crate::handlers::api::commits::broadcast_eval_log(
-                                                                            &state,
-                                                                            scan_commit_id,
-                                                                            format!("🔒 {}: hardening scan queued", scan_config_name),
-                                                                        )
-                                                                        .await;
-                                                                    }
-                                                                }
-                                                                Err(e) => {
-                                                                    warn!(
-                                                                        "⚠️  Failed to trigger automatic hardening scan for {}: {}",
-                                                                        scan_config_name, e
-                                                                    );
+                                                        // Note: trigger_immediate_hardening_scan spawns its own background task
+                                                        match trigger_immediate_hardening_scan(
+                                                            pool.clone(),
+                                                            deriv.id,
+                                                            &flake_ref,
+                                                            &system_name,
+                                                        )
+                                                        .await
+                                                        {
+                                                            Ok(scan_id) => {
+                                                                debug!(
+                                                                    "🔒 Automatically triggered hardening scan {} for {}",
+                                                                    scan_id, system_name
+                                                                );
+                                                                if let Some(state) = cf_state {
+                                                                    crate::handlers::api::commits::broadcast_eval_log(
+                                                                        state,
+                                                                        commit.id,
+                                                                        format!("🔒 {}: hardening scan queued", system_name),
+                                                                    )
+                                                                    .await;
                                                                 }
                                                             }
-                                                        });
+                                                            Err(e) => {
+                                                                warn!(
+                                                                    "⚠️  Failed to trigger automatic hardening scan for {}: {}",
+                                                                    system_name, e
+                                                                );
+                                                            }
+                                                        }
                                                         // ─────────────────────────────────────────────────
 
                                                         // ── INCREMENTAL BUILD QUEUE ──────────────────────
