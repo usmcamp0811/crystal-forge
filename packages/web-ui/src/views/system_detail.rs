@@ -2808,7 +2808,7 @@ fn HardeningTab(
                 onclick: move |_| selected_service.set(None),
 
                 div {
-                    class: "w-full max-w-2xl rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} shadow-2xl cursor-default overflow-hidden",
+                    class: "w-full max-w-xl rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} shadow-2xl cursor-default overflow-hidden",
                     style: "max-height: 76vh; display: flex; flex-direction: column;",
                     onclick: move |evt| evt.stop_propagation(),
 
