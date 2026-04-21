@@ -2442,7 +2442,6 @@ fn HardeningTab(
     let mut search_query = use_signal(String::new);
     let mut severity_filter = use_signal(|| "all".to_string());
     let mut sort_mode = use_signal(|| "risk_desc".to_string());
-    let mut risky_only = use_signal(|| false);
 
     let total_services = results.len();
     let avg_score = if total_services > 0 {
@@ -2478,12 +2477,6 @@ fn HardeningTab(
     let query = search_query.read().trim().to_lowercase();
     let active_severity = severity_filter.read().clone();
     let active_sort = sort_mode.read().clone();
-    let only_risky = *risky_only.read();
-    let risky_toggle_class = if only_risky {
-        format!("border {} {} {}", theme::health::CRITICAL_BORDER, theme::health::CRITICAL_BG, theme::health::CRITICAL_TEXT)
-    } else {
-        format!("border {} {} {}", theme::surface::CARD_BORDER, theme::text::SECONDARY, theme::interactive::HOVER_BG)
-    };
 
     let mut filtered_results = results
         .iter()
@@ -2499,15 +2492,6 @@ fn HardeningTab(
                 if !service_match && !type_match {
                     return false;
                 }
-            }
-
-            if only_risky
-                && !matches!(
-                    service.risk_level.as_str(),
-                    "vulnerable" | "poorly_hardened"
-                )
-            {
-                return false;
             }
 
             severity_matches(service, &active_severity)
@@ -2536,10 +2520,7 @@ fn HardeningTab(
     }
 
     let filtered_count = filtered_results.len();
-    let has_active_filters = !query.is_empty()
-        || active_severity != "all"
-        || active_sort != "risk_desc"
-        || only_risky;
+    let has_active_filters = !query.is_empty() || active_severity != "all" || active_sort != "risk_desc";
 
     let directive_groups: Vec<(&str, Vec<(&str, &str)>)> = vec![
         (
@@ -2610,7 +2591,7 @@ fn HardeningTab(
             }
 
             // Filter bar (matching design standards)
-            div { class: "flex flex-wrap items-center gap-3.5 mb-4 mt-1",
+            div { class: "flex flex-wrap items-center gap-4 mb-4 mt-1",
                 style: "row-gap: 0.75rem;",
                 // Search input with icon (flex-1 with min/max width)
                 div {
@@ -2645,36 +2626,14 @@ fn HardeningTab(
                     option { value: "well_hardened", "Well hardened" }
                 }
                 
-                // High risk toggle button
-                button {
-                    class: "h-10 rounded-lg px-3 text-xs font-medium whitespace-nowrap transition-colors {theme::interactive::FOCUS_RING} {risky_toggle_class.as_str()}",
-                    onclick: move |_| {
-                        let current = *risky_only.read();
-                        risky_only.set(!current);
-                    },
-                    if only_risky {
-                        "High risk only ✓"
-                    } else {
-                        "High risk only"
-                    }
-                }
-                
-                // Results count chip
-                div {
-                    class: "ml-1 px-2.5 py-2 rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} {theme::text::MUTED}",
-                    style: "font-size: 12px; line-height: 1;",
-                    "{filtered_count} shown"
-                }
-                
                 // Reset button (only show when filters active)
                 if has_active_filters {
                     button {
-                        class: "ml-1 px-3 h-10 rounded-lg border {theme::surface::CARD_BORDER} text-xs font-medium {theme::text::SECONDARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors",
+                        class: "px-3 h-10 rounded-lg border {theme::surface::CARD_BORDER} text-xs font-medium {theme::text::SECONDARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors",
                         onclick: move |_| {
                             search_query.set(String::new());
                             severity_filter.set("all".to_string());
                             sort_mode.set("risk_desc".to_string());
-                            risky_only.set(false);
                         },
                         "Reset"
                     }
