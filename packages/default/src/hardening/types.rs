@@ -236,6 +236,7 @@ pub struct SystemHardeningPosture {
     pub config_name: String,
     pub system_id: Option<Uuid>,
     pub hostname: Option<String>,
+    pub environment_name: Option<String>,
     pub latest_scan_id: Option<Uuid>,
     pub overall_score: Option<i32>,
     pub risk_level: Option<RiskLevel>,

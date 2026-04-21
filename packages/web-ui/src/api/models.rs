@@ -1006,6 +1006,7 @@ pub struct HardeningSystemPostureResponse {
     pub derivation_id: i32,
     pub config_name: String,
     pub hostname: Option<String>,
+    pub environment_name: Option<String>,
     pub latest_scan_id: Option<Uuid>,
     pub overall_score: Option<i32>,
     pub risk_level: Option<String>,

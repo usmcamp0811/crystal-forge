@@ -484,6 +484,7 @@ fn map_posture(
         derivation_id: item.derivation_id,
         config_name: item.config_name,
         hostname: item.hostname,
+        environment_name: item.environment_name,
         latest_scan_id: item.latest_scan_id,
         overall_score: item.overall_score,
         risk_level: item.risk_level.map(risk_level_string),

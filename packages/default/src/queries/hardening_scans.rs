@@ -350,23 +350,26 @@ pub async fn list_system_postures(pool: &PgPool) -> Result<Vec<SystemHardeningPo
     let rows = sqlx::query_as::<_, SystemHardeningPosture>(
         r#"
         SELECT
-            derivation_id,
-            config_name,
-            system_id,
-            hostname,
-            latest_scan_id,
-            overall_score,
-            risk_level,
-            total_services,
-            well_hardened_count,
-            moderately_hardened_count,
-            poorly_hardened_count,
-            vulnerable_count,
-            last_scan_at,
-            scan_duration_ms
-        FROM view_system_hardening_posture
-        WHERE latest_scan_id IS NOT NULL
-        ORDER BY overall_score ASC NULLS LAST, config_name ASC
+            v.derivation_id,
+            v.config_name,
+            v.system_id,
+            v.hostname,
+            e.name AS environment_name,
+            v.latest_scan_id,
+            v.overall_score,
+            v.risk_level,
+            v.total_services,
+            v.well_hardened_count,
+            v.moderately_hardened_count,
+            v.poorly_hardened_count,
+            v.vulnerable_count,
+            v.last_scan_at,
+            v.scan_duration_ms
+        FROM view_system_hardening_posture v
+        LEFT JOIN systems s ON s.id = v.system_id
+        LEFT JOIN environments e ON e.id = s.environment_id
+        WHERE v.latest_scan_id IS NOT NULL
+        ORDER BY v.overall_score ASC NULLS LAST, v.config_name ASC
         "#,
     )
     .fetch_all(pool)
@@ -383,23 +386,26 @@ pub async fn get_system_posture(
     let row = sqlx::query_as::<_, SystemHardeningPosture>(
         r#"
         SELECT
-            derivation_id,
-            config_name,
-            system_id,
-            hostname,
-            latest_scan_id,
-            overall_score,
-            risk_level,
-            total_services,
-            well_hardened_count,
-            moderately_hardened_count,
-            poorly_hardened_count,
-            vulnerable_count,
-            last_scan_at,
-            scan_duration_ms
-        FROM view_system_hardening_posture
-        WHERE system_id = $1
-        ORDER BY last_scan_at DESC NULLS LAST
+            v.derivation_id,
+            v.config_name,
+            v.system_id,
+            v.hostname,
+            e.name AS environment_name,
+            v.latest_scan_id,
+            v.overall_score,
+            v.risk_level,
+            v.total_services,
+            v.well_hardened_count,
+            v.moderately_hardened_count,
+            v.poorly_hardened_count,
+            v.vulnerable_count,
+            v.last_scan_at,
+            v.scan_duration_ms
+        FROM view_system_hardening_posture v
+        LEFT JOIN systems s ON s.id = v.system_id
+        LEFT JOIN environments e ON e.id = s.environment_id
+        WHERE v.system_id = $1
+        ORDER BY v.last_scan_at DESC NULLS LAST
         LIMIT 1
         "#,
     )
