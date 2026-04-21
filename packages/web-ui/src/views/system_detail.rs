@@ -2590,12 +2590,20 @@ fn HardeningTab(
 
     rsx! {
         div { class: "space-y-4",
-            div { class: "overflow-x-auto",
-                div { class: "grid min-w-[980px] grid-cols-5 gap-2",
+            div { class: "flex gap-2 overflow-x-auto pb-1",
+                div { class: "min-w-[168px] flex-1",
                     CompactMetricCard { label: "Scanned services", value: format!("{}", total_services), tone: "neutral" }
+                }
+                div { class: "min-w-[168px] flex-1",
                     CompactMetricCard { label: "Average score", value: format!("{avg_score:.1}"), tone: "neutral" }
+                }
+                div { class: "min-w-[168px] flex-1",
                     CompactMetricCard { label: "High risk services", value: format!("{}", high_risk_count), tone: "danger" }
+                }
+                div { class: "min-w-[168px] flex-1",
                     CompactMetricCard { label: "Cumulative exposure", value: format!("{}", cumulative_exposure), tone: "warning" }
+                }
+                div { class: "min-w-[168px] flex-1",
                     CompactMetricCard { label: "Showing", value: format!("{}", filtered_count), tone: "neutral" }
                 }
             }
@@ -2930,9 +2938,9 @@ fn CompactMetricCard(label: String, value: String, tone: &'static str) -> Elemen
     };
 
     rsx! {
-        div { class: "rounded-md border {tone_class} px-3 py-2.5 min-h-[74px] flex flex-col justify-between",
+        div { class: "rounded border {tone_class} px-2.5 py-2 min-h-[66px] flex flex-col justify-between",
             p { class: "text-[10px] uppercase tracking-wide {theme::text::MUTED}", "{label}" }
-            p { class: "mt-1 text-lg font-semibold leading-none {theme::text::PRIMARY}", "{value}" }
+            p { class: "mt-1 text-base font-semibold leading-none {theme::text::PRIMARY}", "{value}" }
         }
     }
 }
