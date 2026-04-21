@@ -448,6 +448,12 @@ pub async fn get_hardening_scan_status(
                 scan_id: scan.id,
                 derivation_id: scan.derivation_id,
                 status: scan.status.to_string(),
+                error_message: scan
+                    .scan_metadata
+                    .as_ref()
+                    .and_then(|meta| meta.get("error"))
+                    .and_then(|value| value.as_str())
+                    .map(|value| value.to_string()),
                 scheduled_at: scan.scheduled_at,
                 started_at: scan.started_at,
                 completed_at: scan.completed_at,

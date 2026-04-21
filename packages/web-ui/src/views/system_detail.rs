@@ -671,10 +671,13 @@ pub fn SystemDetailView(id: String) -> Element {
                                                         }
 
                                                         if normalized == "failed" {
-                                                            terminal_status = Some(
-                                                                "Hardening scan failed. Check server logs for details."
+                                                            terminal_status = Some(match status.error_message {
+                                                                Some(message) if !message.is_empty() => {
+                                                                    format!("Hardening scan failed: {}", message)
+                                                                }
+                                                                _ => "Hardening scan failed. Check server logs for details."
                                                                     .to_string(),
-                                                            );
+                                                            });
                                                             break;
                                                         }
                                                     }

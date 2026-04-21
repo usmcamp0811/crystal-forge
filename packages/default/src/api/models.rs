@@ -1004,6 +1004,7 @@ pub struct HardeningScanStatusResponse {
     pub scan_id: uuid::Uuid,
     pub derivation_id: i32,
     pub status: String,
+    pub error_message: Option<String>,
     pub scheduled_at: Option<DateTime<Utc>>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
