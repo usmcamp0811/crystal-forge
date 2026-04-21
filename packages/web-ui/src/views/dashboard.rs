@@ -140,7 +140,7 @@ fn default_widget_positions() -> Vec<WidgetPosition> {
             col: 0,
             row: 9,
             width: 2,
-            height: 3,
+            height: 4,
         },
         WidgetPosition {
             id: "hardening-environments",

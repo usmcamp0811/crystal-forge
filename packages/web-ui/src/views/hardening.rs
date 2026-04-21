@@ -122,14 +122,14 @@ pub fn render_top_services(rows: &[HardeningTopServiceResponse]) -> Element {
     }
 
     rsx! {
-        div { class: "overflow-x-auto",
+        div { class: "h-full min-h-0 overflow-auto",
             table { class: "min-w-full text-sm",
                 thead {
-                    tr { class: "border-b {theme::surface::CARD_BORDER} text-left {theme::text::SECONDARY}",
+                    tr { class: "sticky top-0 z-10 border-b {theme::surface::CARD_BORDER} text-left {theme::text::SECONDARY} {theme::surface::CARD_BG}",
                         th { class: "py-2 pr-3", "Service" }
                         th { class: "py-2 pr-3", "Affected Systems" }
                         th { class: "py-2 pr-3", "Avg Score" }
-                        th { class: "py-2 pr-3", "Range" }
+                        th { class: "py-2 pr-0", "Range" }
                     }
                 }
                 tbody {
@@ -138,7 +138,7 @@ pub fn render_top_services(rows: &[HardeningTopServiceResponse]) -> Element {
                             td { class: "py-2 pr-3 font-mono {theme::text::PRIMARY}", "{row.service_name}" }
                             td { class: "py-2 pr-3 {theme::text::PRIMARY}", "{row.affected_systems_count}" }
                             td { class: "py-2 pr-3 {theme::text::PRIMARY}", {format!("{:.1}", row.avg_score)} }
-                            td { class: "py-2 pr-3 {theme::text::SECONDARY}", "{row.min_score} - {row.max_score}" }
+                            td { class: "py-2 pr-0 {theme::text::SECONDARY}", "{row.min_score} - {row.max_score}" }
                         }
                     }
                 }
