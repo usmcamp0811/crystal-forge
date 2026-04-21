@@ -2833,16 +2833,16 @@ fn HardeningTab(
 
                     // Body
                     div { class: "px-[22px] py-5 overflow-y-auto flex flex-col gap-[14px]",
-                        div { class: "flex flex-wrap gap-2",
-                            div { class: "inline-flex items-center gap-1.5 rounded-md border {theme::surface::DIVIDER} px-2 py-0.5 text-[11px] {theme::text::SECONDARY}",
+                        div { class: "flex flex-wrap gap-1.5",
+                            div { class: "inline-flex items-center gap-1.5 rounded-md border {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG} px-2 py-0.5 text-[11px] {theme::text::SECONDARY}",
                                 span { class: "{theme::text::MUTED}", "Score" }
                                 span { class: "font-semibold {theme::text::PRIMARY}", "{service.hardening_score}" }
                             }
-                            div { class: "inline-flex items-center gap-1.5 rounded-md border {theme::surface::DIVIDER} px-2 py-0.5 text-[11px] {theme::text::SECONDARY}",
+                            div { class: "inline-flex items-center gap-1.5 rounded-md border {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG} px-2 py-0.5 text-[11px] {theme::text::SECONDARY}",
                                 span { class: "{theme::text::MUTED}", "Missing" }
                                 span { class: "font-semibold {theme::text::PRIMARY}", "{service.missing_directives_count}" }
                             }
-                            div { class: "inline-flex items-center gap-1.5 rounded-md border {theme::surface::DIVIDER} px-2 py-0.5 text-[11px] {theme::text::SECONDARY}",
+                            div { class: "inline-flex items-center gap-1.5 rounded-md border {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG} px-2 py-0.5 text-[11px] {theme::text::SECONDARY}",
                                 span { class: "{theme::text::MUTED}", "Disabled" }
                                 span { class: "font-semibold {theme::text::PRIMARY}", "{service.disabled_directives_count}" }
                             }
@@ -2852,28 +2852,29 @@ fn HardeningTab(
                             label { class: "text-xs {theme::text::SECONDARY}", "Directive breakdown" }
                             div {
                                 class: "border {theme::surface::CARD_BORDER} rounded-[10px] overflow-hidden",
-                                div { class: "grid grid-cols-[minmax(0,1fr)_84px_84px] items-center gap-2 px-[10px] py-2 text-[11px] font-medium {theme::text::MUTED} border-b {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG}",
-                                    div { "Directive" }
-                                    div { class: "text-center", "Enabled" }
-                                    div { class: "text-right", "Points" }
-                                }
-                                div { class: "max-h-56 overflow-y-auto flex flex-col",
+                                div { class: "max-h-56 overflow-y-auto",
                                     if let Some(directives) = service.directives_detail.as_array() {
-                                        for (idx, item) in directives.iter().enumerate() {
-                                            div {
-                                                class: if idx + 1 == directives.len() {
-                                                    "grid grid-cols-[minmax(0,1fr)_84px_84px] items-center gap-2 px-[10px] py-2"
-                                                } else {
-                                                    "grid grid-cols-[minmax(0,1fr)_84px_84px] items-center gap-2 px-[10px] py-2 border-b {theme::surface::DIVIDER}"
-                                                },
-                                                div { class: "min-w-0",
-                                                    p { class: "font-mono text-[11px] leading-5 {theme::text::PRIMARY}", "{item.get(\"name\").and_then(|v| v.as_str()).unwrap_or(\"\")}" }
+                                        table { class: "w-full text-xs table-fixed",
+                                            thead {
+                                                tr { class: "border-b {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG} text-left {theme::text::MUTED}",
+                                                    th { class: "px-3 py-2 w-[60%] font-medium", "Directive" }
+                                                    th { class: "px-3 py-2 w-[20%] text-center font-medium", "Enabled" }
+                                                    th { class: "px-3 py-2 w-[20%] text-right font-medium", "Points" }
                                                 }
-                                                div { class: "text-center text-[11px] {theme::text::SECONDARY}",
-                                                    {if item.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) { "yes" } else { "no" }}
-                                                }
-                                                div { class: "text-right font-mono text-[11px] {theme::text::SECONDARY}",
-                                                    "{item.get(\"points\").and_then(|v| v.as_i64()).unwrap_or(0)}/{item.get(\"max_points\").and_then(|v| v.as_i64()).unwrap_or(0)}"
+                                            }
+                                            tbody {
+                                                for item in directives {
+                                                    tr { class: "border-b {theme::surface::DIVIDER} last:border-b-0",
+                                                        td { class: "px-3 py-2 font-mono text-[11px] leading-5 align-top {theme::text::PRIMARY}",
+                                                            "{item.get(\"name\").and_then(|v| v.as_str()).unwrap_or(\"\")}" 
+                                                        }
+                                                        td { class: "px-3 py-2 text-center align-top text-[11px] {theme::text::SECONDARY}",
+                                                            {if item.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) { "yes" } else { "no" }}
+                                                        }
+                                                        td { class: "px-3 py-2 text-right align-top font-mono text-[11px] {theme::text::SECONDARY}",
+                                                            "{item.get(\"points\").and_then(|v| v.as_i64()).unwrap_or(0)}/{item.get(\"max_points\").and_then(|v| v.as_i64()).unwrap_or(0)}"
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
