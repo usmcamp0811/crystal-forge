@@ -4,7 +4,7 @@ title: Add systemd hardening scanner and dashboard view
 status: In Progress
 assignee: []
 created_date: '2026-04-19 02:43'
-updated_date: '2026-04-21 13:01'
+updated_date: '2026-04-21 13:09'
 labels:
   - feature
   - security
@@ -63,6 +63,16 @@ This means:
 3. Merge with dry-run evaluation flow (combine nix eval operations if possible)
 4. Update database workflow so hardening_scans are created automatically during eval
 5. UI should show hardening data as part of normal eval results
+
+---
+**UI Refinement Request (2026-04-21):**
+1. Service detail modal is rendering inline below table instead of as centered overlay
+   - Need to match design example modal pattern: backdrop with `display: grid; place-items: center`
+   - Remove `overflow-y-auto` from backdrop, add fixed max-width to modal
+2. Filter card on hardening tab should be streamlined:
+   - Consider making table headers clickable for sorting
+   - Condense filter controls or integrate into header area
+   - Review /home/mcamp/code/crystal-forge/design-example-systems for standards
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
