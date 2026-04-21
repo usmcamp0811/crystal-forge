@@ -2536,6 +2536,10 @@ fn HardeningTab(
     }
 
     let filtered_count = filtered_results.len();
+    let has_active_filters = !query.is_empty()
+        || active_severity != "all"
+        || active_sort != "risk_desc"
+        || only_risky;
 
     let directive_groups: Vec<(&str, Vec<(&str, &str)>)> = vec![
         (
@@ -2596,22 +2600,37 @@ fn HardeningTab(
                 }
             }
 
-            div { class: "{theme::presets::CARD} p-3",
-                div { class: "flex flex-col 2xl:flex-row gap-2 2xl:items-end 2xl:justify-between",
-                    div { class: "grid gap-2 md:grid-cols-2 xl:grid-cols-3 2xl:flex 2xl:flex-1",
-                        div { class: "space-y-1",
-                            p { class: "text-[10px] uppercase tracking-wide {theme::text::MUTED}", "Search" }
+            div { class: "{theme::presets::CARD} space-y-3",
+                div { class: "flex items-center justify-between gap-3 flex-wrap",
+                    div { class: "{theme::typography::TABLE_HEADER}", "Filters" }
+                    div { class: "flex items-center gap-2 flex-wrap",
+                        span {
+                            class: "text-[11px] px-2 py-0.5 rounded-md border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} {theme::text::SECONDARY}",
+                            "{filtered_count} shown"
+                        }
+                        button {
+                            class: "px-3 py-1.5 rounded-md border {theme::surface::CARD_BORDER} text-xs font-medium {theme::text::SECONDARY} {theme::interactive::HOVER_BG} transition-colors disabled:opacity-40 {theme::interactive::FOCUS_RING}",
+                            disabled: !has_active_filters,
+                            onclick: move |_| {
+                                search_query.set(String::new());
+                                severity_filter.set("all".to_string());
+                                sort_mode.set("risk_desc".to_string());
+                                risky_only.set(false);
+                            },
+                            "Reset filters"
+                        }
+                    }
+                }
+
+                div { class: "grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3",
                     input {
-                        class: "w-full sm:max-w-xs rounded px-2 py-1.5 text-xs {theme::text::PRIMARY} {theme::interactive::INPUT}",
+                        class: "{theme::interactive::INPUT} h-10",
                         placeholder: "Search service or identity",
                         value: "{search_query}",
                         oninput: move |evt| search_query.set(evt.value()),
                     }
-                        }
-                        div { class: "space-y-1",
-                            p { class: "text-[10px] uppercase tracking-wide {theme::text::MUTED}", "Severity" }
                     select {
-                        class: "rounded px-2 py-1.5 text-xs {theme::text::PRIMARY} {theme::interactive::INPUT}",
+                        class: "{theme::interactive::INPUT} h-10",
                         value: "{severity_filter}",
                         onchange: move |evt| severity_filter.set(evt.value()),
                         option { value: "all", "All severities" }
@@ -2621,11 +2640,8 @@ fn HardeningTab(
                         option { value: "moderately_hardened", "Moderately hardened" }
                         option { value: "well_hardened", "Well hardened" }
                     }
-                        }
-                        div { class: "space-y-1",
-                            p { class: "text-[10px] uppercase tracking-wide {theme::text::MUTED}", "Sort" }
                     select {
-                        class: "rounded px-2 py-1.5 text-xs {theme::text::PRIMARY} {theme::interactive::INPUT}",
+                        class: "{theme::interactive::INPUT} h-10",
                         value: "{sort_mode}",
                         onchange: move |evt| sort_mode.set(evt.value()),
                         option { value: "risk_desc", "Sort: highest risk" }
@@ -2633,21 +2649,19 @@ fn HardeningTab(
                         option { value: "score_desc", "Sort: score desc" }
                         option { value: "service_asc", "Sort: service" }
                     }
+                    button {
+                        class: "h-10 rounded-md border px-3 text-xs font-medium whitespace-nowrap {risky_toggle_class.as_str()}",
+                        onclick: move |_| {
+                            let current = *risky_only.read();
+                            risky_only.set(!current);
+                        },
+                        if only_risky {
+                            "Only risky: ON"
+                        } else {
+                            "Only risky: OFF"
                         }
-                }
-                button {
-                    class: "rounded border px-3 py-1.5 text-xs font-medium whitespace-nowrap {risky_toggle_class.as_str()}",
-                    onclick: move |_| {
-                        let current = *risky_only.read();
-                        risky_only.set(!current);
-                    },
-                    if only_risky {
-                        "Only risky: ON"
-                    } else {
-                        "Only risky: OFF"
                     }
                 }
-            }
             }
 
             if results.is_empty() {
@@ -2912,9 +2926,9 @@ fn CompactMetricCard(label: String, value: String, tone: &'static str) -> Elemen
     };
 
     rsx! {
-        div { class: "rounded-md border {tone_class} px-2.5 py-2",
+        div { class: "rounded-md border {tone_class} px-3 py-2.5 min-h-[74px] flex flex-col justify-between",
             p { class: "text-[10px] uppercase tracking-wide {theme::text::MUTED}", "{label}" }
-            p { class: "mt-0.5 text-base font-semibold {theme::text::PRIMARY}", "{value}" }
+            p { class: "mt-1 text-lg font-semibold leading-none {theme::text::PRIMARY}", "{value}" }
         }
     }
 }
