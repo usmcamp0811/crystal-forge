@@ -2612,18 +2612,18 @@ fn HardeningTab(
             // Filter bar (matching design standards)
             div { class: "flex flex-wrap items-center gap-2.5 mb-3.5",
                 // Search input with icon (flex-1 with min/max width)
-                div { 
+                div {
                     class: "relative",
-                    style: "flex: 1 1 auto; min-width: 220px; max-width: 360px;",
+                    style: "position: relative; flex: 1 1 auto; min-width: 220px; max-width: 360px;",
                     // Search icon (using simple text character instead of SVG for reliability)
                     span {
-                        class: "absolute left-3 top-1/2 {theme::text::MUTED} pointer-events-none text-sm",
-                        style: "transform: translateY(-50%);",
+                        class: "{theme::text::MUTED}",
+                        style: "position: absolute; left: 0.75rem; top: 50%; transform: translateY(-50%); pointer-events: none; font-size: 0.875rem; line-height: 1;",
                         "🔍"
                     }
                     input {
                         class: "{theme::interactive::INPUT} {theme::interactive::FOCUS_RING} h-10 w-full rounded-lg",
-                        style: "padding-left: 2.25rem;",
+                        style: "padding-left: 2.25rem; min-height: 2.5rem;",
                         placeholder: "Filter by service name or type…",
                         value: "{search_query}",
                         oninput: move |evt| search_query.set(evt.value()),
@@ -2633,6 +2633,7 @@ fn HardeningTab(
                 // Severity filter dropdown
                 select {
                     class: "{theme::interactive::INPUT} {theme::interactive::FOCUS_RING} h-10 rounded-lg px-3",
+                    style: "min-height: 2.5rem;",
                     value: "{severity_filter}",
                     onchange: move |evt| severity_filter.set(evt.value()),
                     option { value: "all", "All severities" }
@@ -2842,25 +2843,25 @@ fn HardeningTab(
         // Modal - rendered as sibling to main content for proper overlay
         if let Some(service) = selected_service() {
             div {
-                class: "fixed inset-0 z-[90] flex items-center justify-center p-8",
-                style: "background: rgba(3, 7, 18, 0.7); backdrop-filter: blur(3px);",
+                class: "fixed inset-0 z-[90] flex items-center justify-center p-4 md:p-8 cursor-pointer",
+                style: "position: fixed; inset: 0; z-index: 90; display: flex; align-items: center; justify-content: center; background: rgba(3, 7, 18, 0.7); backdrop-filter: blur(3px);",
                 onclick: move |_| selected_service.set(None),
 
                 div {
-                    class: "w-full max-w-4xl max-h-[85vh] overflow-y-auto rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} shadow-2xl",
-                    style: "pointer-events: auto;",
+                    class: "w-full max-w-4xl rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} shadow-2xl cursor-default",
+                    style: "max-height: 85vh; display: flex; flex-direction: column;",
                     onclick: move |evt| evt.stop_propagation(),
                     
-                    // Modal content wrapper with padding
+                    // Modal content wrapper with padding and scroll
                     div {
-                        class: "p-5 md:p-6 space-y-4",
+                        class: "p-5 md:p-6 space-y-4 overflow-y-auto",
                         div { class: "flex items-start justify-between gap-3",
                             div {
                                 h3 { class: "text-lg font-semibold {theme::text::PRIMARY}", "Service hardening: {service.service_name}" }
                                 p { class: "text-sm {theme::text::SECONDARY}", "Score: {service.hardening_score} · Risk: {service.risk_level}" }
                             }
                             button {
-                                class: "px-2.5 py-1.5 rounded border {theme::surface::CARD_BORDER} text-xs {theme::text::SECONDARY} {theme::interactive::HOVER_BG}",
+                                class: "px-3 py-1.5 rounded-lg border {theme::surface::CARD_BORDER} text-xs font-medium {theme::text::SECONDARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors",
                                 onclick: move |_| selected_service.set(None),
                                 "Close"
                             }
