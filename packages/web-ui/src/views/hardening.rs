@@ -61,15 +61,15 @@ pub fn HardeningView() -> Element {
                     }
                 }
 
-                div { class: "grid grid-cols-1 xl:grid-cols-[minmax(0,40rem)_minmax(0,1fr)] gap-6 items-start",
-                    div { class: "max-w-4xl",
+                div { class: "grid grid-cols-1 xl:grid-cols-2 gap-6 items-start",
+                    div {
                         Card {
                             title: Some("Top Vulnerable Services".to_string()),
                             children: rsx! { {top_services_card} }
                         }
                     }
 
-                    div { class: "max-w-5xl",
+                    div {
                         Card {
                             title: Some("Environment Hardening Posture".to_string()),
                             children: rsx! { {systems_card} }
@@ -161,7 +161,7 @@ fn render_environment_posture(rows: &[HardeningSystemPostureResponse]) -> Elemen
                 div { class: "space-y-1",
                     p { class: "text-sm {theme::text::PRIMARY}", "Posture rolled up by environment" }
                     p { class: "text-xs {theme::text::SECONDARY}",
-                        "Environment rows summarize the latest scan for each system and highlight where the riskiest posture is concentrated."
+                        "Each row summarizes the latest posture for systems in that environment and highlights where follow-up review is most needed."
                     }
                 }
                 span {
@@ -175,10 +175,10 @@ fn render_environment_posture(rows: &[HardeningSystemPostureResponse]) -> Elemen
                 thead {
                     tr { class: "border-b {theme::surface::CARD_BORDER} text-left {theme::text::SECONDARY}",
                         th { class: "py-2 pr-3", "Environment" }
-                        th { class: "py-2 pr-3", "Systems" }
-                        th { class: "py-2 pr-3", "Average posture" }
-                        th { class: "py-2 pr-3", "Exposure" }
-                        th { class: "py-2 pr-3", "Highest-risk systems" }
+                        th { class: "py-2 pr-3", "Coverage" }
+                        th { class: "py-2 pr-3", "Avg posture" }
+                        th { class: "py-2 pr-3", "Needs review" }
+                        th { class: "py-2 pr-3", "Watch list" }
                     }
                 }
                 tbody {
@@ -188,36 +188,40 @@ fn render_environment_posture(rows: &[HardeningSystemPostureResponse]) -> Elemen
                                 div { class: "space-y-1",
                                     span { class: "font-medium {theme::text::PRIMARY}", "{group.environment_name}" }
                                     p { class: "text-xs {theme::text::SECONDARY}",
-                                        "{group.snapshot_count} posture snapshots across {group.system_count} systems"
+                                        "{group.snapshot_count} scan snapshots represented"
                                     }
                                 }
                             }
                             td { class: "py-2 pr-3",
-                                div { class: "flex flex-wrap items-center gap-2",
-                                    span { class: "text-lg font-semibold {theme::text::PRIMARY}", "{group.system_count}" }
-                                    span {
-                                        class: "text-xs {theme::text::SECONDARY}",
-                                        "{group.service_count} services"
+                                div { class: "space-y-1 text-xs",
+                                    p {
+                                        span { class: "text-lg font-semibold {theme::text::PRIMARY}", "{group.system_count}" }
+                                        span { class: "ml-2 {theme::text::SECONDARY}", "systems" }
                                     }
+                                    p { class: "{theme::text::SECONDARY}", "{group.service_count} services scanned" }
                                 }
                             }
                             td { class: "py-2 pr-3",
-                                div { class: "flex flex-wrap items-center gap-2",
+                                div { class: "space-y-1",
+                                    div { class: "flex flex-wrap items-center gap-2",
                                     span { class: "text-lg font-semibold {theme::text::PRIMARY}", "{format_float(group.avg_score)}" }
                                     span {
                                         class: "inline-flex items-center rounded-md px-2 py-0.5 text-[11px] font-medium {risk_chip_class(Some(group.risk_band.as_str()))}",
                                         "{risk_label(Some(group.risk_band.as_str()))}"
                                     }
                                 }
+                                    p { class: "text-xs {theme::text::SECONDARY}", "Avg of latest system scans" }
+                                }
                             }
                             td { class: "py-2 pr-3",
                                 div { class: "space-y-1 text-xs {theme::text::SECONDARY}",
                                     p { "{group.vulnerable_services} vulnerable services" }
                                     p { "{group.poorly_hardened_services} poorly hardened services" }
+                                    p { class: "{theme::text::MUTED}", "{systems_needing_review(&group)} of {group.system_count} systems below target" }
                                 }
                             }
                             td { class: "py-2 pr-3",
-                                div { class: "space-y-1.5 min-w-[220px]",
+                                div { class: "space-y-1.5 min-w-[240px]",
                                     for system in group.worst_systems.iter().take(3) {
                                         div { class: "flex items-center gap-2 flex-wrap text-xs",
                                             if let Some(system_id) = system.system_id {
@@ -233,7 +237,11 @@ fn render_environment_posture(rows: &[HardeningSystemPostureResponse]) -> Elemen
                                                 class: "inline-flex items-center rounded-md px-2 py-0.5 text-[11px] font-medium {risk_chip_class(system.risk_level.as_deref())}",
                                                 "{score_label(system.overall_score)}"
                                             }
+                                            span { class: "{theme::text::MUTED}", "{system.config_name}" }
                                         }
+                                    }
+                                    if group.worst_systems.len() > 3 {
+                                        p { class: "text-xs {theme::text::MUTED}", "+{group.worst_systems.len() - 3} more systems" }
                                     }
                                 }
                             }
@@ -394,6 +402,14 @@ fn risk_band_from_score(score: f64) -> &'static str {
 
 fn format_float(value: f64) -> String {
     format!("{value:.1}")
+}
+
+fn systems_needing_review(group: &EnvironmentPostureGroup) -> usize {
+    group
+        .worst_systems
+        .iter()
+        .filter(|system| system.overall_score.unwrap_or(0) < 60)
+        .count()
 }
 
 fn score_label(score: Option<i32>) -> String {
