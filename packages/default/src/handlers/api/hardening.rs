@@ -364,45 +364,6 @@ pub async fn get_system_hardening_scan_eligibility(
         }
     };
 
-    let Some(caller_role) = highest_role(&roles) else {
-        return forbidden();
-    };
-
-    let environment_memberships = match get_user_environment_membership_ids(&pool, user_id).await {
-        Ok(value) => value,
-        Err(_) => return internal_error("Failed to load environment memberships"),
-    };
-
-    let row = match find_system_access_row(&pool, system_id).await {
-        Ok(Some(value)) => value,
-        Ok(None) => return not_found(),
-        Err(_) => return internal_error("Failed to load system"),
-    };
-
-    if !caller_role.can_access_system_environment(row.environment_id, &environment_memberships) {
-        return not_found();
-    }
-
-    let payload = match resolve_system_hardening_scan_target(&pool, system_id).await {
-        Ok(Some(target)) => HardeningScanEligibilityResponse {
-            eligible: target.blocked_reason.is_none(),
-            reason: target.blocked_reason,
-            derivation_id: Some(target.derivation_id),
-            config_name: Some(target.config_name),
-            hostname: Some(target.hostname),
-        },
-        Ok(None) => HardeningScanEligibilityResponse {
-            eligible: false,
-            reason: Some(
-                "No eligible derivation was found for this system configuration.".to_string(),
-            ),
-            derivation_id: None,
-            config_name: None,
-            hostname: None,
-        },
-        Err(_) => return internal_error("Failed to evaluate hardening scan eligibility"),
-    };
-
     (StatusCode::OK, Json(payload)).into_response()
 }
 
