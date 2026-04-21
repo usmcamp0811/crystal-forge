@@ -2608,65 +2608,62 @@ fn HardeningTab(
                 }
             }
 
-            div { class: "{theme::presets::CARD} space-y-3",
-                div { class: "flex items-center justify-between gap-3 flex-wrap",
-                    div { class: "{theme::typography::TABLE_HEADER}", "Filters" }
-                    div { class: "flex items-center gap-2 flex-wrap",
-                        span {
-                            class: "text-[11px] px-2 py-0.5 rounded-md border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} {theme::text::SECONDARY}",
-                            "{filtered_count} shown"
-                        }
+            // Streamlined filter bar (matching design standards)
+            div { class: "flex flex-wrap items-center gap-3 pb-3",
+                // Search input
+                div { class: "flex-1 min-w-[240px]",
+                    input {
+                        class: "{theme::interactive::INPUT} h-10 w-full",
+                        placeholder: "Filter by service name or type…",
+                        value: "{search_query}",
+                        oninput: move |evt| search_query.set(evt.value()),
+                    }
+                }
+                
+                // Severity filter
+                select {
+                    class: "{theme::interactive::INPUT} h-10",
+                    style: "width: auto;",
+                    value: "{severity_filter}",
+                    onchange: move |evt| severity_filter.set(evt.value()),
+                    option { value: "all", "All severities" }
+                    option { value: "high_risk", "High risk" }
+                    option { value: "vulnerable", "Vulnerable" }
+                    option { value: "poorly_hardened", "Poorly hardened" }
+                    option { value: "moderately_hardened", "Moderate" }
+                    option { value: "well_hardened", "Well hardened" }
+                }
+                
+                // Risky toggle
+                button {
+                    class: "h-10 rounded-md border px-3 text-xs font-medium whitespace-nowrap {risky_toggle_class.as_str()}",
+                    onclick: move |_| {
+                        let current = *risky_only.read();
+                        risky_only.set(!current);
+                    },
+                    if only_risky {
+                        "High risk only ✓"
+                    } else {
+                        "High risk only"
+                    }
+                }
+                
+                // Filter count and reset
+                div { class: "flex items-center gap-2 ml-auto",
+                    span {
+                        class: "text-xs px-2 py-1 rounded-md border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} {theme::text::SECONDARY}",
+                        "{filtered_count} shown"
+                    }
+                    if has_active_filters {
                         button {
-                            class: "px-3 py-1.5 rounded-md border {theme::surface::CARD_BORDER} text-xs font-medium {theme::text::SECONDARY} {theme::interactive::HOVER_BG} transition-colors disabled:opacity-40 {theme::interactive::FOCUS_RING}",
-                            disabled: !has_active_filters,
+                            class: "px-3 py-1.5 rounded-md border {theme::surface::CARD_BORDER} text-xs font-medium {theme::text::SECONDARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING}",
                             onclick: move |_| {
                                 search_query.set(String::new());
                                 severity_filter.set("all".to_string());
                                 sort_mode.set("risk_desc".to_string());
                                 risky_only.set(false);
                             },
-                            "Reset filters"
-                        }
-                    }
-                }
-
-                div { class: "grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3",
-                    input {
-                        class: "{theme::interactive::INPUT} h-10",
-                        placeholder: "Search service or identity",
-                        value: "{search_query}",
-                        oninput: move |evt| search_query.set(evt.value()),
-                    }
-                    select {
-                        class: "{theme::interactive::INPUT} h-10",
-                        value: "{severity_filter}",
-                        onchange: move |evt| severity_filter.set(evt.value()),
-                        option { value: "all", "All severities" }
-                        option { value: "high_risk", "High risk only" }
-                        option { value: "vulnerable", "Vulnerable" }
-                        option { value: "poorly_hardened", "Poorly hardened" }
-                        option { value: "moderately_hardened", "Moderately hardened" }
-                        option { value: "well_hardened", "Well hardened" }
-                    }
-                    select {
-                        class: "{theme::interactive::INPUT} h-10",
-                        value: "{sort_mode}",
-                        onchange: move |evt| sort_mode.set(evt.value()),
-                        option { value: "risk_desc", "Sort: highest risk" }
-                        option { value: "score_asc", "Sort: score asc" }
-                        option { value: "score_desc", "Sort: score desc" }
-                        option { value: "service_asc", "Sort: service" }
-                    }
-                    button {
-                        class: "h-10 rounded-md border px-3 text-xs font-medium whitespace-nowrap {risky_toggle_class.as_str()}",
-                        onclick: move |_| {
-                            let current = *risky_only.read();
-                            risky_only.set(!current);
-                        },
-                        if only_risky {
-                            "Only risky: ON"
-                        } else {
-                            "Only risky: OFF"
+                            "Reset"
                         }
                     }
                 }
@@ -2706,9 +2703,32 @@ fn HardeningTab(
                                 th { class: "sticky top-0 z-10 px-2 py-2 text-center", colspan: "2", "Audit" }
                             }
                             tr { class: "{theme::surface::CARD_BG} border-b {theme::surface::CARD_BORDER} text-left {theme::text::SECONDARY}",
-                                th { class: "sticky top-7 z-10 px-2 py-2 w-[68px]", "Risk" }
-                                th { class: "sticky top-7 z-10 px-2 py-2 w-[72px]", "Score" }
-                                th { class: "sticky top-7 z-10 px-2 py-2 w-[240px]", "Service unit" }
+                                th { 
+                                    class: "sticky top-7 z-10 px-2 py-2 w-[68px] cursor-pointer {theme::interactive::HOVER_BG}",
+                                    onclick: move |_| {
+                                        let current = sort_mode();
+                                        sort_mode.set(if current == "risk_desc" { "score_asc".to_string() } else { "risk_desc".to_string() });
+                                    },
+                                    "Risk "
+                                    {if sort_mode() == "risk_desc" { "↓" } else { "" }}
+                                }
+                                th { 
+                                    class: "sticky top-7 z-10 px-2 py-2 w-[72px] cursor-pointer {theme::interactive::HOVER_BG}",
+                                    onclick: move |_| {
+                                        let current = sort_mode();
+                                        sort_mode.set(if current == "score_desc" { "score_asc".to_string() } else { "score_desc".to_string() });
+                                    },
+                                    "Score "
+                                    {if sort_mode() == "score_desc" { "↓" } else if sort_mode() == "score_asc" { "↑" } else { "" }}
+                                }
+                                th { 
+                                    class: "sticky top-7 z-10 px-2 py-2 w-[240px] cursor-pointer {theme::interactive::HOVER_BG}",
+                                    onclick: move |_| {
+                                        sort_mode.set("service_asc".to_string());
+                                    },
+                                    "Service unit "
+                                    {if sort_mode() == "service_asc" { "↑" } else { "" }}
+                                }
                                 th { class: "sticky top-7 z-10 px-2 py-2 w-[120px]", "Identity" }
                                 th { class: "sticky top-7 z-10 px-2 py-2 w-[112px]", "Findings" }
                                 for (_, directives) in directive_groups.iter() {
@@ -2811,14 +2831,17 @@ fn HardeningTab(
 
         if let Some(service) = selected_service() {
             div {
-                class: "fixed inset-0 z-[90] bg-black/70 overflow-y-auto",
+                class: "fixed inset-0 z-[90] grid place-items-center p-8",
+                style: "background: rgba(3, 7, 18, 0.7); backdrop-filter: blur(3px);",
                 onclick: move |_| selected_service.set(None),
 
                 div {
-                    class: "min-h-full w-full flex items-center justify-center p-4",
+                    class: "w-full max-w-4xl max-h-[85vh] overflow-y-auto rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} shadow-2xl",
+                    onclick: move |evt| evt.stop_propagation(),
+                    
+                    // Modal content wrapper with padding
                     div {
-                        class: "w-full max-w-5xl rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} shadow-2xl p-5 md:p-6 space-y-4",
-                        onclick: move |evt| evt.stop_propagation(),
+                        class: "p-5 md:p-6 space-y-4",
                         div { class: "flex items-start justify-between gap-3",
                             div {
                                 h3 { class: "text-lg font-semibold {theme::text::PRIMARY}", "Service hardening: {service.service_name}" }
@@ -2921,12 +2944,12 @@ fn HardeningTab(
                                 "Save justification"
                             }
                         }
-                        }
-                    }
-                }
-            }
-        }
-    }
+                        }  // Close: if allow_mutations (add justification section)
+                    }  // Close: Modal content wrapper div (p-5 md:p-6 space-y-4)
+                }  // Close: Modal container div (max-w-4xl)
+            }  // Close: Backdrop div (fixed inset-0)
+        }  // Close: if let Some(service)
+    }  // Close: rsx! main div (space-y-4)
 }
 
 #[component]
