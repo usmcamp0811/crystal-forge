@@ -2575,7 +2575,7 @@ fn HardeningTab(
                 }
             }
 
-            div { class: "grid grid-cols-2 lg:grid-cols-5 gap-2",
+            div { class: "grid grid-cols-5 gap-2",
                 CompactMetricCard { label: "Scanned services", value: format!("{}", total_services), tone: "neutral" }
                 CompactMetricCard { label: "Average score", value: format!("{avg_score:.1}"), tone: "neutral" }
                 CompactMetricCard { label: "High risk services", value: format!("{}", high_risk_count), tone: "danger" }
