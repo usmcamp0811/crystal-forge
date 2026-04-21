@@ -4,7 +4,7 @@ title: Add systemd hardening scanner and dashboard view
 status: In Progress
 assignee: []
 created_date: '2026-04-19 02:43'
-updated_date: '2026-04-20 20:58'
+updated_date: '2026-04-21 13:01'
 labels:
   - feature
   - security
@@ -41,6 +41,9 @@ Create a feature to scan NixOS system configurations for systemd service hardeni
 - [ ] #10 Results integrate with existing system detail views (view_system_detail extended)
 - [ ] #11 Color-coded risk indicators (green/yellow/orange/red) based on hardening score ranges
 - [ ] #12 Scoring algorithm validated against Crystal Forge's own NixOS configurations
+- [ ] #13 Hardening scan is integrated into the automatic evaluation pipeline (runs during dry-run eval)
+- [ ] #14 Hardening data is available by default when a system is evaluated (no manual scan button needed)
+- [ ] #15 Evaluation pipeline combines hardening scan logic with existing nix-eval-jobs to minimize overhead
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -49,6 +52,17 @@ Create a feature to scan NixOS system configurations for systemd service hardeni
 LOCK: gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-276-systemd-hardening-scanner
 
 Rebased onto dev after TASK-278 merge, resolved conflicts, reran `nix develop -c cargo check` and `nix build .#checks.x86_64-linux.web-ui --print-out-paths`, then force-pushed branch at 92fd62c4.
+
+---
+**Architecture Change Request (2026-04-21):**
+Hardening scanning should happen automatically as part of the evaluation pipeline, not as a separate manual operation. Need to integrate with dry-run evaluation so that when a flake config is eval'd and ready to build, hardening data is already available.
+
+This means:
+1. Remove manual "Run Hardening Scan" button from UI
+2. Tie hardening scan into evaluation queue processing
+3. Merge with dry-run evaluation flow (combine nix eval operations if possible)
+4. Update database workflow so hardening_scans are created automatically during eval
+5. UI should show hardening data as part of normal eval results
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
