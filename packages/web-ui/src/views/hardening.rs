@@ -116,7 +116,7 @@ pub fn HardeningView() -> Element {
     }
 }
 
-fn render_top_services(rows: &[HardeningTopServiceResponse]) -> Element {
+pub fn render_top_services(rows: &[HardeningTopServiceResponse]) -> Element {
     if rows.is_empty() {
         return rsx! { p { class: "{theme::text::SECONDARY}", "No vulnerable services found." } };
     }
@@ -147,7 +147,7 @@ fn render_top_services(rows: &[HardeningTopServiceResponse]) -> Element {
     }
 }
 
-fn render_environment_posture(rows: &[HardeningSystemPostureResponse]) -> Element {
+pub fn render_environment_posture(rows: &[HardeningSystemPostureResponse]) -> Element {
     if rows.is_empty() {
         return rsx! { p { class: "{theme::text::SECONDARY}", "No environments have completed hardening scans yet." } };
     }

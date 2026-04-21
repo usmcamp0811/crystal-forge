@@ -310,25 +310,6 @@ pub fn SidebarNav() -> Element {
                         }
                     )
                 }
-                if show_admin {
-                    NavLink {
-                        collapsed: is_collapsed,
-                        to: Route::HardeningView {},
-                        label: "Hardening",
-                        icon: rsx!(
-                            svg {
-                                class: "w-4 h-4",
-                                fill: "none",
-                                stroke: "currentColor",
-                                stroke_width: "1.75",
-                                view_box: "0 0 24 24",
-                                path { d: "M12 3l8 4v5c0 5-3 8-8 9-5-1-8-4-8-9V7l8-4z" }
-                                path { d: "M9 12h6" }
-                            }
-                        )
-                    }
-                }
-
                 // ── Admin (role-gated) ────────────────────────────────────
                 if show_admin {
                     NavSection { collapsed: is_collapsed, label: "Admin" }
@@ -644,22 +625,6 @@ pub fn MobileDrawer() -> Element {
                                 stroke_width: "1.75",
                                 view_box: "0 0 24 24",
                                 path { d: "M12 3l7 3v6c0 5-3 7.5-7 9-4-1.5-7-4-7-9V6l7-3z" }
-                            }
-                        )
-                    }
-                    NavLink {
-                        collapsed: false,
-                        to: Route::HardeningView {},
-                        label: "Hardening",
-                        icon: rsx!(
-                            svg {
-                                class: "w-4 h-4",
-                                fill: "none",
-                                stroke: "currentColor",
-                                stroke_width: "1.75",
-                                view_box: "0 0 24 24",
-                                path { d: "M12 3l8 4v5c0 5-3 8-8 9-5-1-8-4-8-9V7l8-4z" }
-                                path { d: "M9 12h6" }
                             }
                         )
                     }
