@@ -563,10 +563,10 @@ pub async fn resolve_system_hardening_scan_target(
         )
         SELECT
             d.id AS derivation_id,
-            ss.config_name as "config_name!",
-            ss.hostname as "hostname!",
-            COALESCE(f.repo_url, '') as "repo_url!",
-            COALESCE(c.git_commit_hash, '') as "commit_hash!",
+            ss.config_name as config_name,
+            ss.hostname as hostname,
+            COALESCE(f.repo_url, '') as repo_url,
+            COALESCE(c.git_commit_hash, '') as commit_hash,
             CASE
                 WHEN f.repo_url IS NULL OR BTRIM(f.repo_url) = ''
                   OR c.git_commit_hash IS NULL OR BTRIM(c.git_commit_hash) = ''
