@@ -2807,9 +2807,11 @@ fn HardeningTab(
                 onclick: move |_| selected_service.set(None),
 
                 div {
-                    class: "relative w-full cf-modal-panel-30 {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl shadow-2xl cursor-default overflow-hidden",
-                    style: "width: 100%; max-width: 30rem; max-height: 82vh; display: flex; flex-direction: column;",
+                    class: "relative w-full cf-modal-panel-34 {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl shadow-2xl cursor-default overflow-hidden",
+                    style: "width: 100%; max-width: 34rem; max-height: 82vh; display: flex; flex-direction: column;",
                     onclick: move |evt| evt.stop_propagation(),
+                    role: "dialog",
+                    aria_modal: "true",
 
                     // Header
                     div { class: "px-[22px] py-[18px] border-b {theme::surface::DIVIDER}",
@@ -2832,15 +2834,15 @@ fn HardeningTab(
                     // Body
                     div { class: "px-[22px] py-5 overflow-y-auto flex flex-col gap-[14px]",
                         div { class: "flex flex-wrap gap-2",
-                            div { class: "inline-flex items-center gap-1.5 rounded-md border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-2.5 py-1 text-[11px] {theme::text::SECONDARY}",
+                            div { class: "inline-flex items-center gap-1.5 rounded-md border {theme::surface::DIVIDER} px-2 py-0.5 text-[11px] {theme::text::SECONDARY}",
                                 span { class: "{theme::text::MUTED}", "Score" }
                                 span { class: "font-semibold {theme::text::PRIMARY}", "{service.hardening_score}" }
                             }
-                            div { class: "inline-flex items-center gap-1.5 rounded-md border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-2.5 py-1 text-[11px] {theme::text::SECONDARY}",
+                            div { class: "inline-flex items-center gap-1.5 rounded-md border {theme::surface::DIVIDER} px-2 py-0.5 text-[11px] {theme::text::SECONDARY}",
                                 span { class: "{theme::text::MUTED}", "Missing" }
                                 span { class: "font-semibold {theme::text::PRIMARY}", "{service.missing_directives_count}" }
                             }
-                            div { class: "inline-flex items-center gap-1.5 rounded-md border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-2.5 py-1 text-[11px] {theme::text::SECONDARY}",
+                            div { class: "inline-flex items-center gap-1.5 rounded-md border {theme::surface::DIVIDER} px-2 py-0.5 text-[11px] {theme::text::SECONDARY}",
                                 span { class: "{theme::text::MUTED}", "Disabled" }
                                 span { class: "font-semibold {theme::text::PRIMARY}", "{service.disabled_directives_count}" }
                             }
@@ -2849,28 +2851,34 @@ fn HardeningTab(
                         section { class: "flex flex-col gap-[6px]",
                             label { class: "text-xs {theme::text::SECONDARY}", "Directive breakdown" }
                             div {
-                                class: "border {theme::surface::CARD_BORDER} rounded-[10px] p-[6px] flex flex-col gap-[6px]",
-                                if let Some(directives) = service.directives_detail.as_array() {
-                                    for item in directives {
-                                        div {
-                                            class: "grid grid-cols-[minmax(0,1fr)_72px_72px] items-center gap-2 rounded-lg px-[10px] py-2 {theme::interactive::HOVER_BG}",
-                                            div { class: "min-w-0",
-                                                p { class: "font-mono text-[12px] leading-5 break-words {theme::text::PRIMARY}", "{item.get(\"name\").and_then(|v| v.as_str()).unwrap_or(\"\")}" }
-                                            }
-                                            div { class: "text-center text-[11px] {theme::text::SECONDARY}",
-                                                {if item.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) { "yes" } else { "no" }}
-                                            }
-                                            div { class: "text-right font-mono text-[11px] {theme::text::SECONDARY}",
-                                                "{item.get(\"points\").and_then(|v| v.as_i64()).unwrap_or(0)}/{item.get(\"max_points\").and_then(|v| v.as_i64()).unwrap_or(0)}"
+                                class: "border {theme::surface::CARD_BORDER} rounded-[10px] overflow-hidden",
+                                div { class: "grid grid-cols-[minmax(0,1fr)_84px_84px] items-center gap-2 px-[10px] py-2 text-[11px] font-medium {theme::text::MUTED} border-b {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG}",
+                                    div { "Directive" }
+                                    div { class: "text-center", "Enabled" }
+                                    div { class: "text-right", "Points" }
+                                }
+                                div { class: "max-h-56 overflow-y-auto flex flex-col",
+                                    if let Some(directives) = service.directives_detail.as_array() {
+                                        for (idx, item) in directives.iter().enumerate() {
+                                            div {
+                                                class: if idx + 1 == directives.len() {
+                                                    "grid grid-cols-[minmax(0,1fr)_84px_84px] items-center gap-2 px-[10px] py-2"
+                                                } else {
+                                                    "grid grid-cols-[minmax(0,1fr)_84px_84px] items-center gap-2 px-[10px] py-2 border-b {theme::surface::DIVIDER}"
+                                                },
+                                                div { class: "min-w-0",
+                                                    p { class: "font-mono text-[11px] leading-5 {theme::text::PRIMARY}", "{item.get(\"name\").and_then(|v| v.as_str()).unwrap_or(\"\")}" }
+                                                }
+                                                div { class: "text-center text-[11px] {theme::text::SECONDARY}",
+                                                    {if item.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) { "yes" } else { "no" }}
+                                                }
+                                                div { class: "text-right font-mono text-[11px] {theme::text::SECONDARY}",
+                                                    "{item.get(\"points\").and_then(|v| v.as_i64()).unwrap_or(0)}/{item.get(\"max_points\").and_then(|v| v.as_i64()).unwrap_or(0)}"
+                                                }
                                             }
                                         }
                                     }
                                 }
-                            }
-                            div { class: "flex items-center gap-3 px-1 text-[11px] {theme::text::MUTED}",
-                                span { class: "font-medium", "Directive" }
-                                span { class: "ml-auto", "Enabled" }
-                                span { "Points" }
                             }
                         }
 
@@ -2951,7 +2959,7 @@ fn HardeningTab(
                     }
 
                     // Footer
-                    div { class: "px-5 md:px-6 py-3 border-t {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG} flex justify-end",
+                    div { class: "px-[22px] py-[14px] border-t {theme::surface::DIVIDER} flex justify-end gap-2",
                         button {
                             class: "px-3 py-1.5 rounded-lg border {theme::surface::CARD_BORDER} text-xs font-medium {theme::text::SECONDARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors",
                             onclick: move |_| selected_service.set(None),
