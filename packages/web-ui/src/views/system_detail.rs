@@ -2436,9 +2436,10 @@ fn HardeningTab(
     on_saved: EventHandler<()>,
 ) -> Element {
     let mut selected_service: Signal<Option<HardeningServiceResultResponse>> = use_signal(|| None);
-    let mut category = use_signal(String::new);
-    let mut directive_name = use_signal(String::new);
     let mut reason = use_signal(String::new);
+    let mut justification_error = use_signal(|| None::<String>);
+    let mut justification_notice = use_signal(|| None::<String>);
+    let mut is_saving_justification = use_signal(|| false);
     let mut search_query = use_signal(String::new);
     let mut severity_filter = use_signal(|| "all".to_string());
     let mut sort_mode = use_signal(|| "risk_desc".to_string());
@@ -2804,8 +2805,19 @@ fn HardeningTab(
         if let Some(service) = selected_service() {
             div {
                 class: "fixed inset-0 z-50 bg-black/65 backdrop-blur-[1px] p-4 cf-modal-overlay",
+                tabindex: "0",
                 style: "display: grid; place-items: center;",
-                onclick: move |_| selected_service.set(None),
+                onkeydown: move |evt| {
+                    if evt.key() == Key::Escape && confirm_discard_unsaved_justification(!reason.read().trim().is_empty()) {
+                        evt.prevent_default();
+                        selected_service.set(None);
+                    }
+                },
+                onclick: move |_| {
+                    if confirm_discard_unsaved_justification(!reason.read().trim().is_empty()) {
+                        selected_service.set(None);
+                    }
+                },
 
                 div {
                     class: "relative w-full cf-modal-panel-44 {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-2xl shadow-2xl cursor-default overflow-hidden",
@@ -2813,13 +2825,14 @@ fn HardeningTab(
                     onclick: move |evt| evt.stop_propagation(),
                     role: "dialog",
                     aria_modal: "true",
+                    aria_labelledby: "hardening-modal-title",
 
                     // Header
                     div { class: "px-5 py-4 border-b {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG}",
                         div { class: "flex items-start justify-between gap-3",
                             div { class: "space-y-1 min-w-0",
                                 div { class: "flex items-center gap-2 flex-wrap",
-                                    h3 { class: "text-base font-semibold tracking-tight {theme::text::PRIMARY}", "Service hardening" }
+                                    h3 { id: "hardening-modal-title", class: "text-base font-semibold tracking-tight {theme::text::PRIMARY}", "Service hardening" }
                                     span {
                                         class: "inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] font-semibold uppercase tracking-wide shadow-sm {risk_level_compact_badge_class(&service.risk_level)}",
                                         span { class: "h-1.5 w-1.5 rounded-full bg-current opacity-80" }
@@ -2835,7 +2848,12 @@ fn HardeningTab(
                             }
                             button {
                                 class: "shrink-0 h-8 w-8 rounded-lg border {theme::surface::CARD_BORDER} {theme::text::SECONDARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors shadow-sm",
-                                onclick: move |_| selected_service.set(None),
+                                autofocus: "true",
+                                onclick: move |_| {
+                                    if confirm_discard_unsaved_justification(!reason.read().trim().is_empty()) {
+                                        selected_service.set(None);
+                                    }
+                                },
                                 aria_label: "Close service hardening modal",
                                 "✕"
                             }
@@ -2875,13 +2893,13 @@ fn HardeningTab(
 
                         section { class: "space-y-2",
                             div { class: "flex items-center justify-between gap-2",
-                                p { class: "text-[10px] uppercase tracking-wide {theme::text::MUTED}", "Directive breakdown" }
-                                span { class: "text-[10px] {theme::text::MUTED}", "enabled controls and point contribution" }
+                                p { class: "text-[11px] uppercase tracking-wide {theme::text::MUTED}", "Directive breakdown" }
+                                span { class: "text-[11px] {theme::text::MUTED}", "enabled controls and point contribution" }
                             }
 
                             div {
                                 class: "border {theme::surface::CARD_BORDER} rounded-xl overflow-hidden",
-                                div { class: "max-h-64 overflow-y-auto",
+                                div {
                                     if let Some(directives) = service.directives_detail.as_array() {
                                         table { class: "w-full text-xs table-fixed",
                                             thead {
@@ -2931,7 +2949,7 @@ fn HardeningTab(
                         }
 
                         section { class: "space-y-2",
-                            p { class: "text-[10px] uppercase tracking-wide {theme::text::MUTED}", "Justifications" }
+                            p { class: "text-[11px] uppercase tracking-wide {theme::text::MUTED}", "Justifications" }
                             if justifications.iter().all(|j| j.service_name != service.service_name) {
                                 div { class: "rounded-xl border {theme::surface::CARD_BORDER} px-3 py-3 text-xs {theme::text::SECONDARY}",
                                     "No justifications yet."
@@ -2959,48 +2977,50 @@ fn HardeningTab(
                         if allow_mutations {
                             section { class: "space-y-2.5 pt-3 border-t {theme::surface::DIVIDER}",
                                 div { class: "space-y-1",
-                                    p { class: "text-[10px] uppercase tracking-wide {theme::text::MUTED}", "Add or update justification" }
-                                    p { class: "text-[11px] {theme::text::SECONDARY}",
-                                        "Reason is required. Category and directive are optional audit context."
-                                    }
-                                }
-                                div { class: "grid grid-cols-1 gap-2 sm:grid-cols-2",
-                                    input {
-                                        class: "h-9 px-3 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
-                                        placeholder: "Category (optional)",
-                                        value: "{category}",
-                                        oninput: move |evt| category.set(evt.value()),
-                                    }
-                                    input {
-                                        class: "h-9 px-3 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
-                                        placeholder: "Directive (optional)",
-                                        value: "{directive_name}",
-                                        oninput: move |evt| directive_name.set(evt.value()),
+                                    p { class: "text-[11px] uppercase tracking-wide {theme::text::MUTED}", "Add justification" }
+                                    p { class: "text-[12px] {theme::text::SECONDARY}",
+                                        "Add a concise audit note explaining why this service posture is acceptable or intentionally different."
                                     }
                                 }
                                 textarea {
-                                    class: "w-full min-h-[112px] max-h-40 px-3 py-2 rounded-lg text-sm resize-y overflow-y-auto {theme::interactive::INPUT} {theme::text::PRIMARY}",
-                                    style: "max-height: 10rem;",
-                                    placeholder: "Reason",
+                                    class: "w-full min-h-[104px] max-h-36 px-3 py-2.5 rounded-lg text-sm resize-none overflow-y-auto {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                    style: "max-height: 9rem;",
+                                    placeholder: "Explain the exception, mitigation, or compensating control…",
                                     value: "{reason}",
-                                    oninput: move |evt| reason.set(evt.value()),
+                                    oninput: move |evt| {
+                                        reason.set(evt.value());
+                                        justification_error.set(None);
+                                        justification_notice.set(None);
+                                    },
                                 }
-                                div { class: "sticky bottom-0 -mx-1 px-1 pt-2 pb-1 flex items-center justify-between gap-3 {theme::surface::CARD_BG}",
-                                    p { class: "text-[11px] {theme::text::MUTED}", "Use justifications to record intentional exceptions or mitigations." }
+                                if let Some(message) = justification_error() {
+                                    p { class: "text-[11px] {theme::health::CRITICAL_TEXT}", "{message}" }
+                                }
+                                if let Some(message) = justification_notice() {
+                                    p { class: "text-[11px] {theme::health::HEALTHY_TEXT}", "{message}" }
+                                }
+                                div { class: "flex items-center justify-between gap-3 pt-1",
+                                    p { class: "text-[11px] {theme::text::MUTED}", "Required for audit history." }
                                     button {
                                         class: "shrink-0 self-end h-9 px-3 rounded-lg {theme::interactive::PRIMARY_BTN} text-sm font-medium {theme::interactive::FOCUS_RING}",
+                                        disabled: is_saving_justification() || reason.read().trim().is_empty(),
                                         onclick: {
                                             let service_name = service.service_name.clone();
                                             let on_saved = on_saved.clone();
                                             move |_| {
                                                 let reason_value = reason();
                                                 if reason_value.trim().is_empty() {
+                                                    justification_error.set(Some("Justification is required.".to_string()));
                                                     return;
                                                 }
 
+                                                is_saving_justification.set(true);
+                                                justification_error.set(None);
+                                                justification_notice.set(None);
+
                                                 let request = SaveHardeningJustificationRequest {
-                                                    directive_name: non_empty(directive_name()),
-                                                    category: non_empty(category()),
+                                                    directive_name: None,
+                                                    category: None,
                                                     reason: reason_value,
                                                 };
                                                 let service_name_for_request = service_name.clone();
@@ -3010,12 +3030,21 @@ fn HardeningTab(
                                                         .await
                                                         .is_ok()
                                                     {
+                                                        reason.set(String::new());
+                                                        justification_notice.set(Some("Justification saved.".to_string()));
                                                         on_saved.call(());
+                                                    } else {
+                                                        justification_error.set(Some("Failed to save justification.".to_string()));
                                                     }
+                                                    is_saving_justification.set(false);
                                                 });
                                             }
                                         },
-                                        "Save justification"
+                                        if is_saving_justification() {
+                                            "Saving…"
+                                        } else {
+                                            "Save justification"
+                                        }
                                     }
                                 }
                             }
@@ -3026,7 +3055,11 @@ fn HardeningTab(
                     div { class: "px-5 py-3 border-t {theme::surface::DIVIDER} flex justify-end gap-2",
                         button {
                             class: "h-9 px-3 rounded-lg border {theme::surface::CARD_BORDER} text-xs font-medium {theme::text::SECONDARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors",
-                            onclick: move |_| selected_service.set(None),
+                            onclick: move |_| {
+                                if confirm_discard_unsaved_justification(!reason.read().trim().is_empty()) {
+                                    selected_service.set(None);
+                                }
+                            },
                             "Close"
                         }
                     }
@@ -3066,6 +3099,20 @@ fn HardeningSummaryChipCompact(label: String, value: String, tone: &'static str)
             span { class: "font-semibold {theme::text::PRIMARY}", "{value}" }
         }
     }
+}
+
+fn confirm_discard_unsaved_justification(is_dirty: bool) -> bool {
+    if !is_dirty {
+        return true;
+    }
+
+    web_sys::window()
+        .and_then(|window| {
+            window
+                .confirm_with_message("Discard unsaved justification?")
+                .ok()
+        })
+        .unwrap_or(false)
 }
 
 #[derive(Clone, Debug)]
@@ -3261,15 +3308,6 @@ fn risk_level_badge_class(level: &str) -> &'static str {
         "moderately_hardened" => "bg-yellow-500/20 text-yellow-300",
         "poorly_hardened" => "bg-orange-500/20 text-orange-300",
         _ => "bg-red-500/20 text-red-300",
-    }
-}
-
-fn non_empty(value: String) -> Option<String> {
-    let trimmed = value.trim().to_string();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed)
     }
 }
 
