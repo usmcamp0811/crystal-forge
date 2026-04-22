@@ -2803,98 +2803,151 @@ fn HardeningTab(
         // Modal - rendered as sibling to main content for proper overlay
         if let Some(service) = selected_service() {
             div {
-                class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
+                class: "fixed inset-0 z-50 bg-black/60 p-4 cf-modal-overlay",
+                style: "display: grid; place-items: center;",
                 onclick: move |_| selected_service.set(None),
 
                 div {
-                    class: "relative w-full cf-modal-panel-34 {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl shadow-2xl cursor-default overflow-hidden",
-                    style: "width: 100%; max-width: 34rem; max-height: 82vh; display: flex; flex-direction: column;",
+                    class: "relative w-full cf-modal-panel-44 {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-2xl shadow-2xl cursor-default overflow-hidden",
+                    style: "width: 100%; max-width: 44rem; max-height: 84vh; display: flex; flex-direction: column;",
                     onclick: move |evt| evt.stop_propagation(),
                     role: "dialog",
                     aria_modal: "true",
 
                     // Header
-                    div { class: "px-[22px] py-[18px] border-b {theme::surface::DIVIDER}",
-                        div { class: "space-y-1",
-                            div { class: "flex items-center gap-2 flex-wrap",
-                                h3 { class: "text-base font-semibold {theme::text::PRIMARY}", "Service hardening" }
-                                span {
-                                    class: "inline-flex px-2 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide {risk_level_compact_badge_class(&service.risk_level)}",
-                                    "{short_risk_label(&service.risk_level)}"
+                    div { class: "px-5 py-4 border-b {theme::surface::DIVIDER}",
+                        div { class: "flex items-start justify-between gap-3",
+                            div { class: "space-y-1 min-w-0",
+                                div { class: "flex items-center gap-2 flex-wrap",
+                                    h3 { class: "text-base font-semibold {theme::text::PRIMARY}", "Service hardening" }
+                                    span {
+                                        class: "inline-flex px-2 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide {risk_level_compact_badge_class(&service.risk_level)}",
+                                        "{short_risk_label(&service.risk_level)}"
+                                    }
+                                }
+                                p { class: "text-xs {theme::text::SECONDARY}",
+                                    "Review systemd hardening details for "
+                                    span { class: "font-mono {theme::text::PRIMARY}", "{service.service_name}" }
+                                    "."
                                 }
                             }
-                            p { class: "text-xs {theme::text::SECONDARY}",
-                                "Review systemd hardening details for "
-                                span { class: "font-mono {theme::text::PRIMARY}", "{service.service_name}" }
-                                "."
+                            button {
+                                class: "shrink-0 h-8 w-8 rounded-lg border {theme::surface::CARD_BORDER} {theme::text::SECONDARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors",
+                                onclick: move |_| selected_service.set(None),
+                                aria_label: "Close service hardening modal",
+                                "✕"
                             }
                         }
                     }
 
                     // Body
-                    div { class: "px-[22px] py-5 overflow-y-auto flex flex-col gap-[14px]",
-                        div { class: "flex flex-wrap gap-1.5",
-                            div { class: "inline-flex items-center gap-1.5 rounded-md border {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG} px-2 py-0.5 text-[11px] {theme::text::SECONDARY}",
-                                span { class: "{theme::text::MUTED}", "Score" }
-                                span { class: "font-semibold {theme::text::PRIMARY}", "{service.hardening_score}" }
+                    div { class: "px-5 py-4 overflow-y-auto flex flex-col gap-4",
+                        div { class: "grid grid-cols-2 md:grid-cols-4 gap-2",
+                            CompactMetricCard {
+                                label: "Score",
+                                value: format!("{}", service.hardening_score),
+                                tone: "neutral",
                             }
-                            div { class: "inline-flex items-center gap-1.5 rounded-md border {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG} px-2 py-0.5 text-[11px] {theme::text::SECONDARY}",
-                                span { class: "{theme::text::MUTED}", "Missing" }
-                                span { class: "font-semibold {theme::text::PRIMARY}", "{service.missing_directives_count}" }
+                            CompactMetricCard {
+                                label: "Missing",
+                                value: format!("{}", service.missing_directives_count),
+                                tone: "danger",
                             }
-                            div { class: "inline-flex items-center gap-1.5 rounded-md border {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG} px-2 py-0.5 text-[11px] {theme::text::SECONDARY}",
-                                span { class: "{theme::text::MUTED}", "Disabled" }
-                                span { class: "font-semibold {theme::text::PRIMARY}", "{service.disabled_directives_count}" }
+                            CompactMetricCard {
+                                label: "Disabled",
+                                value: format!("{}", service.disabled_directives_count),
+                                tone: "warning",
+                            }
+                            CompactMetricCard {
+                                label: "Justifications",
+                                value: format!(
+                                    "{}",
+                                    justifications
+                                        .iter()
+                                        .filter(|j| j.service_name == service.service_name)
+                                        .count()
+                                ),
+                                tone: "neutral",
                             }
                         }
 
-                        section { class: "flex flex-col gap-[6px]",
-                            label { class: "text-xs {theme::text::SECONDARY}", "Directive breakdown" }
+                        section { class: "space-y-2",
+                            div { class: "flex items-center justify-between gap-2",
+                                p { class: "text-[10px] uppercase tracking-wide {theme::text::MUTED}", "Directive breakdown" }
+                                span { class: "text-[10px] {theme::text::MUTED}", "enabled controls and point contribution" }
+                            }
+
                             div {
-                                class: "border {theme::surface::CARD_BORDER} rounded-[10px] overflow-hidden",
-                                div { class: "max-h-56 overflow-y-auto",
+                                class: "border {theme::surface::CARD_BORDER} rounded-xl overflow-hidden",
+                                div { class: "max-h-64 overflow-y-auto",
                                     if let Some(directives) = service.directives_detail.as_array() {
                                         table { class: "w-full text-xs table-fixed",
                                             thead {
-                                                tr { class: "border-b {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG} text-left {theme::text::MUTED}",
-                                                    th { class: "px-3 py-2 w-[60%] font-medium", "Directive" }
-                                                    th { class: "px-3 py-2 w-[20%] text-center font-medium", "Enabled" }
-                                                    th { class: "px-3 py-2 w-[20%] text-right font-medium", "Points" }
+                                                tr { class: "sticky top-0 z-10 border-b {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG} text-left {theme::text::MUTED}",
+                                                    th { class: "px-3 py-2.5 w-[56%] font-medium", "Directive" }
+                                                    th { class: "px-3 py-2.5 w-[20%] text-center font-medium", "Status" }
+                                                    th { class: "px-3 py-2.5 w-[24%] text-right font-medium", "Points" }
                                                 }
                                             }
                                             tbody {
                                                 for item in directives {
-                                                    tr { class: "border-b {theme::surface::DIVIDER} last:border-b-0",
-                                                        td { class: "px-3 py-2 font-mono text-[11px] leading-5 align-top {theme::text::PRIMARY}",
+                                                    tr { class: "border-b {theme::surface::DIVIDER} {theme::interactive::HOVER_BG} last:border-b-0",
+                                                        td { class: "px-3 py-2.5 font-mono text-[11px] leading-5 align-top {theme::text::PRIMARY}",
                                                             "{item.get(\"name\").and_then(|v| v.as_str()).unwrap_or(\"\")}" 
                                                         }
-                                                        td { class: "px-3 py-2 text-center align-top text-[11px] {theme::text::SECONDARY}",
-                                                            {if item.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) { "yes" } else { "no" }}
+                                                        td { class: "px-3 py-2.5 text-center align-top text-[11px]",
+                                                            {
+                                                                if item.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
+                                                                    rsx! {
+                                                                        span { class: "inline-flex rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide {theme::health::HEALTHY_BORDER} {theme::health::HEALTHY_BG} {theme::health::HEALTHY_TEXT}",
+                                                                            "on"
+                                                                        }
+                                                                    }
+                                                                } else {
+                                                                    rsx! {
+                                                                        span { class: "inline-flex rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide {theme::health::CRITICAL_BORDER} {theme::health::CRITICAL_BG} {theme::health::CRITICAL_TEXT}",
+                                                                            "off"
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
                                                         }
-                                                        td { class: "px-3 py-2 text-right align-top font-mono text-[11px] {theme::text::SECONDARY}",
+                                                        td { class: "px-3 py-2.5 text-right align-top font-mono text-[11px] {theme::text::SECONDARY}",
                                                             "{item.get(\"points\").and_then(|v| v.as_i64()).unwrap_or(0)}/{item.get(\"max_points\").and_then(|v| v.as_i64()).unwrap_or(0)}"
                                                         }
                                                     }
                                                 }
                                             }
                                         }
+                                    } else {
+                                        div { class: "px-3 py-4 text-xs {theme::text::SECONDARY}",
+                                            "No directive details were returned for this service."
+                                        }
                                     }
                                 }
                             }
                         }
 
-                        section { class: "flex flex-col gap-[6px]",
-                            label { class: "text-xs {theme::text::SECONDARY}", "Justifications" }
+                        section { class: "space-y-2",
+                            p { class: "text-[10px] uppercase tracking-wide {theme::text::MUTED}", "Justifications" }
                             if justifications.iter().all(|j| j.service_name != service.service_name) {
-                                div { class: "rounded-[10px] border {theme::surface::CARD_BORDER} px-3 py-3 text-xs {theme::text::SECONDARY}",
+                                div { class: "rounded-xl border {theme::surface::CARD_BORDER} px-3 py-3 text-xs {theme::text::SECONDARY}",
                                     "No justifications yet."
                                 }
                             } else {
-                                div { class: "flex flex-col gap-[6px]",
+                                div { class: "flex flex-col gap-2",
                                     for item in justifications.iter().filter(|j| j.service_name == service.service_name) {
-                                        div { class: "rounded-[10px] border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-3 py-2 text-xs",
-                                            p { class: "font-medium {theme::text::PRIMARY}", "{item.category.clone().unwrap_or_else(|| \"uncategorized\".to_string())}" }
-                                            p { class: "{theme::text::SECONDARY} mt-1 leading-5", "{item.reason}" }
+                                        div { class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-3 py-2.5 text-xs space-y-1.5",
+                                            div { class: "flex items-center gap-1.5 flex-wrap",
+                                                span {
+                                                    class: "inline-flex items-center rounded border {theme::surface::CARD_BORDER} px-1.5 py-0.5 text-[10px] font-medium {theme::text::SECONDARY}",
+                                                    "{item.category.clone().unwrap_or_else(|| \"uncategorized\".to_string())}"
+                                                }
+                                                if let Some(directive) = item.directive_name.clone() {
+                                                    span { class: "font-mono text-[10px] {theme::text::MUTED}", "{directive}" }
+                                                }
+                                            }
+                                            p { class: "{theme::text::SECONDARY} leading-5", "{item.reason}" }
                                         }
                                     }
                                 }
@@ -2902,31 +2955,31 @@ fn HardeningTab(
                         }
 
                         if allow_mutations {
-                            section { class: "flex flex-col gap-[6px] pt-2 border-t {theme::surface::DIVIDER}",
-                                label { class: "text-xs {theme::text::SECONDARY}", "Add or update justification" }
+                            section { class: "space-y-2.5 pt-3 border-t {theme::surface::DIVIDER}",
+                                p { class: "text-[10px] uppercase tracking-wide {theme::text::MUTED}", "Add or update justification" }
                                 div { class: "grid grid-cols-1 md:grid-cols-2 gap-2",
                                     input {
-                                        class: "px-3 py-2 rounded-[10px] text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                        class: "h-10 px-3 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
                                         placeholder: "Category (optional)",
                                         value: "{category}",
                                         oninput: move |evt| category.set(evt.value()),
                                     }
                                     input {
-                                        class: "px-3 py-2 rounded-[10px] text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                        class: "h-10 px-3 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
                                         placeholder: "Directive (optional)",
                                         value: "{directive_name}",
                                         oninput: move |evt| directive_name.set(evt.value()),
                                     }
                                 }
                                 textarea {
-                                    class: "w-full min-h-[88px] px-3 py-2 rounded-[10px] text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                    class: "w-full min-h-[92px] px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
                                     placeholder: "Reason",
                                     value: "{reason}",
                                     oninput: move |evt| reason.set(evt.value()),
                                 }
                                 p { class: "text-[11px] {theme::text::MUTED}", "Use justifications to record intentional exceptions or mitigations." }
                                 button {
-                                    class: "self-end px-3 py-1.5 rounded {theme::interactive::PRIMARY_BTN} text-sm",
+                                    class: "self-end h-9 px-3 rounded-lg {theme::interactive::PRIMARY_BTN} text-sm font-medium {theme::interactive::FOCUS_RING}",
                                     onclick: {
                                         let service_name = service.service_name.clone();
                                         let on_saved = on_saved.clone();
@@ -2960,9 +3013,9 @@ fn HardeningTab(
                     }
 
                     // Footer
-                    div { class: "px-[22px] py-[14px] border-t {theme::surface::DIVIDER} flex justify-end gap-2",
+                    div { class: "px-5 py-3 border-t {theme::surface::DIVIDER} flex justify-end gap-2",
                         button {
-                            class: "px-3 py-1.5 rounded-lg border {theme::surface::CARD_BORDER} text-xs font-medium {theme::text::SECONDARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors",
+                            class: "h-9 px-3 rounded-lg border {theme::surface::CARD_BORDER} text-xs font-medium {theme::text::SECONDARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors",
                             onclick: move |_| selected_service.set(None),
                             "Close"
                         }

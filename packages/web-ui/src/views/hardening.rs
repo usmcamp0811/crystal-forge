@@ -170,7 +170,7 @@ pub fn render_top_services_compact(rows: &[HardeningTopServiceResponse]) -> Elem
                     thead {
                         tr { class: "sticky top-0 z-10 border-b {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} text-left {theme::text::MUTED}",
                             th { class: "py-2 pr-2 w-[46%]", "Service" }
-                            th { class: "py-2 px-1 w-[16%] text-right", "Sys" }
+                            th { class: "py-2 px-1 w-[16%] text-right", "Systems" }
                             th { class: "py-2 px-1 w-[18%] text-right", "Score" }
                             th { class: "py-2 pl-2 w-[20%] text-right", "Range" }
                         }
@@ -331,15 +331,16 @@ pub fn render_environment_posture_compact(rows: &[HardeningSystemPostureResponse
         .iter()
         .map(|group| group.poorly_hardened_services)
         .sum();
+    let below_target_total: usize = environments.iter().map(systems_needing_review).sum();
 
     rsx! {
         div { class: "h-full min-h-0 flex flex-col overflow-hidden",
-            div { class: "mb-2 flex items-center justify-between gap-2 flex-wrap",
+            div { class: "mb-2 space-y-2",
                 p {
                     class: "text-xs {theme::text::SECONDARY}",
                     "Environment-level posture, ordered from most at risk to best hardened."
                 }
-                div { class: "inline-flex items-center gap-1.5 text-[10px]",
+                div { class: "flex flex-wrap items-center gap-1.5 text-[10px]",
                     span {
                         class: "inline-flex items-center rounded border {theme::health::CRITICAL_BORDER} {theme::health::CRITICAL_BG} px-1.5 py-0.5 {theme::health::CRITICAL_TEXT}",
                         "{vulnerable_total} vulnerable"
@@ -348,88 +349,100 @@ pub fn render_environment_posture_compact(rows: &[HardeningSystemPostureResponse
                         class: "inline-flex items-center rounded border border-orange-400/30 bg-orange-950/30 px-1.5 py-0.5 text-orange-200",
                         "{weak_total} weak"
                     }
+                    span {
+                        class: "inline-flex items-center rounded border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-1.5 py-0.5 {theme::text::SECONDARY}",
+                        "{below_target_total} below target"
+                    }
                 }
             }
 
-            div { class: "flex-1 min-h-0 overflow-y-auto pr-1 space-y-2",
-                for group in environments {
-                    {render_compact_environment_card(&group)}
+            div { class: "flex-1 min-h-0 overflow-y-auto pr-1",
+                div { class: "border {theme::surface::CARD_BORDER} rounded-lg overflow-hidden",
+                    div { class: "hidden lg:grid grid-cols-[minmax(0,2fr)_84px_104px_120px_minmax(0,1.2fr)] gap-2 px-3 py-2 text-[10px] uppercase tracking-wide {theme::text::MUTED} {theme::surface::SUBTLE_BG} border-b {theme::surface::DIVIDER}",
+                        p { "Environment" }
+                        p { class: "text-right", "Score" }
+                        p { class: "text-right", "Exposure" }
+                        p { class: "text-right", "Risk" }
+                        p { "Watch" }
+                    }
+
+                    div { class: "divide-y {theme::surface::DIVIDER}",
+                        for group in environments {
+                            {render_compact_environment_row(&group)}
+                        }
+                    }
                 }
             }
         }
     }
 }
 
-fn render_compact_environment_card(group: &EnvironmentPostureGroup) -> Element {
+fn render_compact_environment_row(group: &EnvironmentPostureGroup) -> Element {
     let below_target = systems_needing_review(group);
-    let watch_count = group.worst_systems.len().min(2);
+    let worst = group.worst_systems.first();
+    let additional_watch = group.worst_systems.len().saturating_sub(1);
 
     rsx! {
-        div { class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} p-2.5 space-y-2",
-            div { class: "flex items-start justify-between gap-2",
-                div { class: "min-w-0",
-                    p {
-                        class: "text-sm font-semibold {theme::text::PRIMARY} truncate",
-                        title: "{group.environment_name}",
+        div { class: "px-3 py-2.5 {theme::interactive::HOVER_BG}",
+            div { class: "grid grid-cols-1 lg:grid-cols-[minmax(0,2fr)_84px_104px_120px_minmax(0,1.2fr)] gap-2 lg:items-center",
+                div { class: "min-w-0 space-y-0.5",
+                    p { class: "text-sm font-semibold {theme::text::PRIMARY} truncate", title: "{group.environment_name}",
                         "{group.environment_name}"
                     }
                     p { class: "text-[11px] {theme::text::MUTED}",
-                        "{group.system_count} systems · {group.service_count} services"
+                        "{group.system_count} systems · {group.snapshot_count} scans · {group.service_count} services"
                     }
                 }
-                div { class: "text-right shrink-0",
-                    p { class: "text-sm font-semibold {theme::text::PRIMARY}", "{format_float(group.avg_score)}" }
+
+                div { class: "flex items-center justify-between lg:justify-end gap-2",
+                    p { class: "text-[10px] uppercase tracking-wide {theme::text::MUTED} lg:hidden", "Score" }
+                    p { class: "text-sm font-semibold tabular-nums {theme::text::PRIMARY}", "{format_float(group.avg_score)}" }
+                }
+
+                div { class: "flex items-center justify-between lg:justify-end gap-2",
+                    p { class: "text-[10px] uppercase tracking-wide {theme::text::MUTED} lg:hidden", "Exposure" }
+                    p { class: "text-xs tabular-nums {theme::text::SECONDARY}",
+                        span { class: "{theme::health::CRITICAL_TEXT}", "{group.vulnerable_services}" }
+                        span { class: "{theme::text::MUTED}", " / " }
+                        span { class: "text-orange-300", "{group.poorly_hardened_services}" }
+                        span { class: "{theme::text::MUTED}", " weak" }
+                    }
+                }
+
+                div { class: "flex items-center justify-between lg:justify-end gap-2",
+                    p { class: "text-[10px] uppercase tracking-wide {theme::text::MUTED} lg:hidden", "Risk" }
                     span {
-                        class: "inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-medium {compact_risk_chip_class(group.risk_band.as_str())}",
+                        class: "inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide {compact_risk_chip_class(group.risk_band.as_str())}",
                         "{risk_label(Some(group.risk_band.as_str()))}"
                     }
                 }
-            }
 
-            div { class: "flex flex-wrap gap-1.5 text-[10px]",
-                span {
-                    class: "inline-flex items-center rounded border {theme::health::CRITICAL_BORDER} {theme::health::CRITICAL_BG} px-1.5 py-0.5 {theme::health::CRITICAL_TEXT}",
-                    "{group.vulnerable_services} vulnerable"
-                }
-                span {
-                    class: "inline-flex items-center rounded border border-orange-400/30 bg-orange-950/30 px-1.5 py-0.5 text-orange-200",
-                    "{group.poorly_hardened_services} weak"
-                }
-                span {
-                    class: "inline-flex items-center rounded border {theme::surface::CARD_BORDER} px-1.5 py-0.5 {theme::text::SECONDARY}",
-                    "{below_target}/{group.system_count} below target"
-                }
-            }
+                div { class: "min-w-0 flex items-center justify-between gap-2",
+                    p { class: "text-[10px] uppercase tracking-wide {theme::text::MUTED} lg:hidden", "Watch" }
+                    div { class: "min-w-0 text-[11px] {theme::text::SECONDARY}",
+                        if let Some(system) = worst {
+                            if let Some(system_id) = system.system_id {
+                                Link {
+                                    class: "truncate {theme::deployment::AHEAD_TEXT} hover:underline font-medium",
+                                    to: Route::SystemDetailView { id: system_id.to_string() },
+                                    "{display_name(system)}"
+                                }
+                            } else {
+                                span { class: "truncate font-medium {theme::text::PRIMARY}", "{display_name(system)}" }
+                            }
+                        } else {
+                            span { class: "{theme::text::MUTED}", "No systems" }
+                        }
 
-            if watch_count > 0 {
-                div { class: "space-y-1",
-                    p { class: "text-[10px] uppercase tracking-wide {theme::text::MUTED}", "Watch list" }
-                    for system in group.worst_systems.iter().take(watch_count) {
-                        {render_compact_watch_system(system)}
+                        if additional_watch > 0 {
+                            span { class: "ml-1 {theme::text::MUTED}", "+{additional_watch}" }
+                        }
+                    }
+                    span {
+                        class: "shrink-0 inline-flex items-center rounded border {theme::surface::CARD_BORDER} px-1.5 py-0.5 text-[10px] {theme::text::MUTED}",
+                        "{below_target}/{group.system_count} below target"
                     }
                 }
-            }
-        }
-    }
-}
-
-fn render_compact_watch_system(system: &HardeningSystemPostureResponse) -> Element {
-    let system_risk_chip = compact_risk_chip_class(system.risk_level.as_deref().unwrap_or("vulnerable"));
-
-    rsx! {
-        div { class: "flex items-center justify-between gap-2 text-[11px]",
-            if let Some(system_id) = system.system_id {
-                Link {
-                    class: "truncate {theme::deployment::AHEAD_TEXT} hover:underline font-medium",
-                    to: Route::SystemDetailView { id: system_id.to_string() },
-                    "{display_name(system)}"
-                }
-            } else {
-                span { class: "truncate font-medium {theme::text::PRIMARY}", "{display_name(system)}" }
-            }
-            span {
-                class: "shrink-0 inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-medium {system_risk_chip}",
-                "{score_label(system.overall_score)}"
             }
         }
     }
