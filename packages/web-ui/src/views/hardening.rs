@@ -147,6 +147,71 @@ pub fn render_top_services(rows: &[HardeningTopServiceResponse]) -> Element {
     }
 }
 
+pub fn render_top_services_compact(rows: &[HardeningTopServiceResponse]) -> Element {
+    if rows.is_empty() {
+        return rsx! { p { class: "text-xs {theme::text::SECONDARY}", "No vulnerable services found." } };
+    }
+
+    rsx! {
+        div { class: "h-full min-h-0 flex flex-col overflow-hidden",
+            div { class: "mb-2 flex items-center justify-between gap-2",
+                p {
+                    class: "text-xs {theme::text::SECONDARY}",
+                    "Highest-risk services by average hardening score across evaluated systems."
+                }
+                span {
+                    class: "shrink-0 inline-flex items-center rounded border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-1.5 py-0.5 text-[10px] font-medium {theme::text::SECONDARY}",
+                    "top {rows.len()}"
+                }
+            }
+
+            div { class: "flex-1 min-h-0 overflow-y-auto pr-1",
+                table { class: "w-full table-fixed text-xs",
+                    thead {
+                        tr { class: "sticky top-0 z-10 border-b {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} text-left {theme::text::MUTED}",
+                            th { class: "py-2 pr-2 w-[46%]", "Service" }
+                            th { class: "py-2 px-1 w-[16%] text-right", "Sys" }
+                            th { class: "py-2 px-1 w-[18%] text-right", "Score" }
+                            th { class: "py-2 pl-2 w-[20%] text-right", "Range" }
+                        }
+                    }
+                    tbody {
+                        for row in rows {
+                            {
+                                let band = risk_band_from_score(row.avg_score);
+                                let chip = compact_risk_chip_class(band);
+                                rsx! {
+                                    tr { class: "border-b {theme::surface::DIVIDER} last:border-b-0 {theme::interactive::HOVER_BG}",
+                                        td { class: "py-2 pr-2 align-middle",
+                                            p {
+                                                class: "font-mono text-[11px] leading-5 {theme::text::PRIMARY} truncate",
+                                                title: "{row.service_name}",
+                                                "{row.service_name}"
+                                            }
+                                        }
+                                        td { class: "py-2 px-1 align-middle text-right font-mono text-[11px] {theme::text::PRIMARY}",
+                                            "{row.affected_systems_count}"
+                                        }
+                                        td { class: "py-2 px-1 align-middle text-right",
+                                            span {
+                                                class: "inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-semibold {chip}",
+                                                "{format_float(row.avg_score)}"
+                                            }
+                                        }
+                                        td { class: "py-2 pl-2 align-middle text-right text-[11px] font-mono {theme::text::SECONDARY}",
+                                            "{row.min_score}-{row.max_score}"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub fn render_environment_posture(rows: &[HardeningSystemPostureResponse]) -> Element {
     if rows.is_empty() {
         return rsx! { p { class: "{theme::text::SECONDARY}", "No environments have completed hardening scans yet." } };
@@ -250,6 +315,122 @@ pub fn render_environment_posture(rows: &[HardeningSystemPostureResponse]) -> El
                 }
             }
         }
+        }
+    }
+}
+
+pub fn render_environment_posture_compact(rows: &[HardeningSystemPostureResponse]) -> Element {
+    if rows.is_empty() {
+        return rsx! { p { class: "text-xs {theme::text::SECONDARY}", "No environments have completed hardening scans yet." } };
+    }
+
+    let grouped_rows = group_posture_rows(rows);
+    let environments = aggregate_environments(&grouped_rows);
+    let vulnerable_total: i32 = environments.iter().map(|group| group.vulnerable_services).sum();
+    let weak_total: i32 = environments
+        .iter()
+        .map(|group| group.poorly_hardened_services)
+        .sum();
+
+    rsx! {
+        div { class: "h-full min-h-0 flex flex-col overflow-hidden",
+            div { class: "mb-2 flex items-center justify-between gap-2 flex-wrap",
+                p {
+                    class: "text-xs {theme::text::SECONDARY}",
+                    "Environment-level posture, ordered from most at risk to best hardened."
+                }
+                div { class: "inline-flex items-center gap-1.5 text-[10px]",
+                    span {
+                        class: "inline-flex items-center rounded border {theme::health::CRITICAL_BORDER} {theme::health::CRITICAL_BG} px-1.5 py-0.5 {theme::health::CRITICAL_TEXT}",
+                        "{vulnerable_total} vulnerable"
+                    }
+                    span {
+                        class: "inline-flex items-center rounded border border-orange-400/30 bg-orange-950/30 px-1.5 py-0.5 text-orange-200",
+                        "{weak_total} weak"
+                    }
+                }
+            }
+
+            div { class: "flex-1 min-h-0 overflow-y-auto pr-1 space-y-2",
+                for group in environments {
+                    {render_compact_environment_card(&group)}
+                }
+            }
+        }
+    }
+}
+
+fn render_compact_environment_card(group: &EnvironmentPostureGroup) -> Element {
+    let below_target = systems_needing_review(group);
+    let watch_count = group.worst_systems.len().min(2);
+
+    rsx! {
+        div { class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} p-2.5 space-y-2",
+            div { class: "flex items-start justify-between gap-2",
+                div { class: "min-w-0",
+                    p {
+                        class: "text-sm font-semibold {theme::text::PRIMARY} truncate",
+                        title: "{group.environment_name}",
+                        "{group.environment_name}"
+                    }
+                    p { class: "text-[11px] {theme::text::MUTED}",
+                        "{group.system_count} systems · {group.service_count} services"
+                    }
+                }
+                div { class: "text-right shrink-0",
+                    p { class: "text-sm font-semibold {theme::text::PRIMARY}", "{format_float(group.avg_score)}" }
+                    span {
+                        class: "inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-medium {compact_risk_chip_class(group.risk_band.as_str())}",
+                        "{risk_label(Some(group.risk_band.as_str()))}"
+                    }
+                }
+            }
+
+            div { class: "flex flex-wrap gap-1.5 text-[10px]",
+                span {
+                    class: "inline-flex items-center rounded border {theme::health::CRITICAL_BORDER} {theme::health::CRITICAL_BG} px-1.5 py-0.5 {theme::health::CRITICAL_TEXT}",
+                    "{group.vulnerable_services} vulnerable"
+                }
+                span {
+                    class: "inline-flex items-center rounded border border-orange-400/30 bg-orange-950/30 px-1.5 py-0.5 text-orange-200",
+                    "{group.poorly_hardened_services} weak"
+                }
+                span {
+                    class: "inline-flex items-center rounded border {theme::surface::CARD_BORDER} px-1.5 py-0.5 {theme::text::SECONDARY}",
+                    "{below_target}/{group.system_count} below target"
+                }
+            }
+
+            if watch_count > 0 {
+                div { class: "space-y-1",
+                    p { class: "text-[10px] uppercase tracking-wide {theme::text::MUTED}", "Watch list" }
+                    for system in group.worst_systems.iter().take(watch_count) {
+                        {render_compact_watch_system(system)}
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn render_compact_watch_system(system: &HardeningSystemPostureResponse) -> Element {
+    let system_risk_chip = compact_risk_chip_class(system.risk_level.as_deref().unwrap_or("vulnerable"));
+
+    rsx! {
+        div { class: "flex items-center justify-between gap-2 text-[11px]",
+            if let Some(system_id) = system.system_id {
+                Link {
+                    class: "truncate {theme::deployment::AHEAD_TEXT} hover:underline font-medium",
+                    to: Route::SystemDetailView { id: system_id.to_string() },
+                    "{display_name(system)}"
+                }
+            } else {
+                span { class: "truncate font-medium {theme::text::PRIMARY}", "{display_name(system)}" }
+            }
+            span {
+                class: "shrink-0 inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-medium {system_risk_chip}",
+                "{score_label(system.overall_score)}"
+            }
         }
     }
 }
@@ -433,6 +614,36 @@ fn risk_chip_class(level: Option<&str>) -> String {
         "moderately_hardened" => format!("{} {} {}", theme::health::WARNING_BORDER, theme::health::WARNING_BG, theme::health::WARNING_TEXT),
         "poorly_hardened" | "vulnerable" => format!("{} {} {}", theme::health::CRITICAL_BORDER, theme::health::CRITICAL_BG, theme::health::CRITICAL_TEXT),
         _ => format!("{} {} {}", theme::surface::CARD_BORDER, theme::surface::SUBTLE_BG, theme::text::SECONDARY),
+    }
+}
+
+fn compact_risk_chip_class(level: &str) -> String {
+    match level {
+        "well_hardened" => format!(
+            "{} {} {}",
+            theme::health::HEALTHY_BORDER,
+            theme::health::HEALTHY_BG,
+            theme::health::HEALTHY_TEXT,
+        ),
+        "moderately_hardened" => format!(
+            "{} {} {}",
+            theme::health::WARNING_BORDER,
+            theme::health::WARNING_BG,
+            theme::health::WARNING_TEXT,
+        ),
+        "poorly_hardened" => "border-orange-400/30 bg-orange-950/30 text-orange-200".to_string(),
+        "vulnerable" => format!(
+            "{} {} {}",
+            theme::health::CRITICAL_BORDER,
+            theme::health::CRITICAL_BG,
+            theme::health::CRITICAL_TEXT,
+        ),
+        _ => format!(
+            "{} {} {}",
+            theme::surface::CARD_BORDER,
+            theme::surface::SUBTLE_BG,
+            theme::text::SECONDARY,
+        ),
     }
 }
 

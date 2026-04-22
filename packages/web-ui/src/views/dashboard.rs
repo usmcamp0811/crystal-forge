@@ -29,7 +29,7 @@ use crate::routes::Route;
 use crate::state::app_state::AppState;
 use crate::state::auth;
 use crate::theme;
-use crate::views::hardening::{render_environment_posture, render_top_services};
+use crate::views::hardening::{render_environment_posture_compact, render_top_services_compact};
 
 /// Global filter state for the dashboard - shared across all widgets.
 /// Supports multi-select: empty set means "all flakes", otherwise only selected flakes.
@@ -584,7 +584,7 @@ pub fn DashboardView() -> Element {
                     return rsx! {};
                 }
                 match &*hardening_top_services.read_unchecked() {
-                    Some(Some(Ok(rows))) => render_top_services(rows),
+                    Some(Some(Ok(rows))) => render_top_services_compact(rows),
                     Some(Some(Err(_))) => rsx! {
                         p { class: "text-xs {theme::text::SECONDARY}", "Unable to load hardening service risk data." }
                     },
@@ -598,7 +598,7 @@ pub fn DashboardView() -> Element {
                     return rsx! {};
                 }
                 match &*hardening_postures.read_unchecked() {
-                    Some(Some(Ok(rows))) => render_environment_posture(rows),
+                    Some(Some(Ok(rows))) => render_environment_posture_compact(rows),
                     Some(Some(Err(_))) => rsx! {
                         p { class: "text-xs {theme::text::SECONDARY}", "Unable to load environment hardening posture." }
                     },
