@@ -2844,23 +2844,23 @@ fn HardeningTab(
 
                     // Body
                     div { class: "px-5 py-4 overflow-y-auto flex flex-col gap-4",
-                        div { class: "grid grid-cols-2 md:grid-cols-4 gap-2",
-                            CompactMetricCard {
+                        div { class: "flex flex-wrap gap-1.5",
+                            HardeningSummaryChipCompact {
                                 label: "Score",
                                 value: format!("{}", service.hardening_score),
                                 tone: "neutral",
                             }
-                            CompactMetricCard {
+                            HardeningSummaryChipCompact {
                                 label: "Missing",
                                 value: format!("{}", service.missing_directives_count),
                                 tone: "danger",
                             }
-                            CompactMetricCard {
+                            HardeningSummaryChipCompact {
                                 label: "Disabled",
                                 value: format!("{}", service.disabled_directives_count),
                                 tone: "warning",
                             }
-                            CompactMetricCard {
+                            HardeningSummaryChipCompact {
                                 label: "Justifications",
                                 value: format!(
                                     "{}",
@@ -2958,57 +2958,65 @@ fn HardeningTab(
 
                         if allow_mutations {
                             section { class: "space-y-2.5 pt-3 border-t {theme::surface::DIVIDER}",
-                                p { class: "text-[10px] uppercase tracking-wide {theme::text::MUTED}", "Add or update justification" }
-                                div { class: "grid grid-cols-1 md:grid-cols-2 gap-2",
+                                div { class: "space-y-1",
+                                    p { class: "text-[10px] uppercase tracking-wide {theme::text::MUTED}", "Add or update justification" }
+                                    p { class: "text-[11px] {theme::text::SECONDARY}",
+                                        "Reason is required. Category and directive are optional audit context."
+                                    }
+                                }
+                                div { class: "grid grid-cols-1 gap-2 sm:grid-cols-2",
                                     input {
-                                        class: "h-10 px-3 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                        class: "h-9 px-3 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
                                         placeholder: "Category (optional)",
                                         value: "{category}",
                                         oninput: move |evt| category.set(evt.value()),
                                     }
                                     input {
-                                        class: "h-10 px-3 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                        class: "h-9 px-3 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
                                         placeholder: "Directive (optional)",
                                         value: "{directive_name}",
                                         oninput: move |evt| directive_name.set(evt.value()),
                                     }
                                 }
                                 textarea {
-                                    class: "w-full min-h-[92px] px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                    class: "w-full min-h-[112px] max-h-40 px-3 py-2 rounded-lg text-sm resize-y overflow-y-auto {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                    style: "max-height: 10rem;",
                                     placeholder: "Reason",
                                     value: "{reason}",
                                     oninput: move |evt| reason.set(evt.value()),
                                 }
-                                p { class: "text-[11px] {theme::text::MUTED}", "Use justifications to record intentional exceptions or mitigations." }
-                                button {
-                                    class: "self-end h-9 px-3 rounded-lg {theme::interactive::PRIMARY_BTN} text-sm font-medium {theme::interactive::FOCUS_RING}",
-                                    onclick: {
-                                        let service_name = service.service_name.clone();
-                                        let on_saved = on_saved.clone();
-                                        move |_| {
-                                            let reason_value = reason();
-                                            if reason_value.trim().is_empty() {
-                                                return;
-                                            }
-
-                                            let request = SaveHardeningJustificationRequest {
-                                                directive_name: non_empty(directive_name()),
-                                                category: non_empty(category()),
-                                                reason: reason_value,
-                                            };
-                                            let service_name_for_request = service_name.clone();
-
-                                            spawn(async move {
-                                                if save_system_hardening_justification(&system_id, &service_name_for_request, &request)
-                                                    .await
-                                                    .is_ok()
-                                                {
-                                                    on_saved.call(());
+                                div { class: "sticky bottom-0 -mx-1 px-1 pt-2 pb-1 flex items-center justify-between gap-3 {theme::surface::CARD_BG}",
+                                    p { class: "text-[11px] {theme::text::MUTED}", "Use justifications to record intentional exceptions or mitigations." }
+                                    button {
+                                        class: "shrink-0 self-end h-9 px-3 rounded-lg {theme::interactive::PRIMARY_BTN} text-sm font-medium {theme::interactive::FOCUS_RING}",
+                                        onclick: {
+                                            let service_name = service.service_name.clone();
+                                            let on_saved = on_saved.clone();
+                                            move |_| {
+                                                let reason_value = reason();
+                                                if reason_value.trim().is_empty() {
+                                                    return;
                                                 }
-                                            });
-                                        }
-                                    },
-                                    "Save justification"
+
+                                                let request = SaveHardeningJustificationRequest {
+                                                    directive_name: non_empty(directive_name()),
+                                                    category: non_empty(category()),
+                                                    reason: reason_value,
+                                                };
+                                                let service_name_for_request = service_name.clone();
+
+                                                spawn(async move {
+                                                    if save_system_hardening_justification(&system_id, &service_name_for_request, &request)
+                                                        .await
+                                                        .is_ok()
+                                                    {
+                                                        on_saved.call(());
+                                                    }
+                                                });
+                                            }
+                                        },
+                                        "Save justification"
+                                    }
                                 }
                             }
                         }
@@ -3040,6 +3048,22 @@ fn CompactMetricCard(label: String, value: String, tone: &'static str) -> Elemen
         div { class: "rounded border {tone_class} px-2.5 py-2 min-h-[66px] flex flex-col justify-between",
             p { class: "text-[10px] uppercase tracking-wide {theme::text::MUTED}", "{label}" }
             p { class: "mt-1 text-base font-semibold leading-none {theme::text::PRIMARY}", "{value}" }
+        }
+    }
+}
+
+#[component]
+fn HardeningSummaryChipCompact(label: String, value: String, tone: &'static str) -> Element {
+    let tone_class = match tone {
+        "danger" => format!("{} {} {}", theme::health::CRITICAL_BORDER, theme::health::CRITICAL_BG, theme::health::CRITICAL_TEXT),
+        "warning" => format!("{} {} {}", theme::health::WARNING_BORDER, theme::health::WARNING_BG, theme::health::WARNING_TEXT),
+        _ => format!("{} {} {}", theme::surface::CARD_BORDER, theme::surface::SUBTLE_BG, theme::text::SECONDARY),
+    };
+
+    rsx! {
+        div { class: "inline-flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px] {tone_class}",
+            span { class: "uppercase tracking-wide opacity-80", "{label}" }
+            span { class: "font-semibold {theme::text::PRIMARY}", "{value}" }
         }
     }
 }
