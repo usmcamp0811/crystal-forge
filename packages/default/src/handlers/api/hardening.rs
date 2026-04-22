@@ -18,7 +18,8 @@ use crate::handlers::api::rbac::{authenticated_user_roles, require_admin};
 use crate::models::auth_identity::AuthRole;
 use crate::queries::hardening_scans::{
     get_fleet_summary, get_justifications_for_system, get_scan_by_id, get_service_results,
-    get_system_posture, get_top_vulnerable_services, list_system_postures,
+    get_system_posture, get_top_vulnerable_services, list_scan_environment_ids,
+    list_system_postures,
     resolve_system_hardening_scan_target, upsert_justification,
 };
 use crate::queries::systems::{find_system_access_row, get_user_environment_membership_ids};
@@ -437,43 +438,81 @@ pub async fn get_hardening_scan_status(
     headers: HeaderMap,
     Path(scan_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    if authenticated_user_roles(&pool, &headers).await.is_none() {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
+    };
+
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+
+    let scan = match get_scan_by_id(&pool, scan_id).await {
+        Ok(Some(scan)) => scan,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiError {
+                    error: "not_found".to_string(),
+                    message: "Hardening scan not found".to_string(),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
+        Err(_) => return internal_error("Failed to load hardening scan status"),
+    };
+
+    if !matches!(caller_role, Role::Admin) {
+        let environment_memberships = match get_user_environment_membership_ids(&pool, user_id).await {
+            Ok(value) => value,
+            Err(_) => return internal_error("Failed to load environment memberships"),
+        };
+
+        let environment_ids = match list_scan_environment_ids(&pool, scan_id).await {
+            Ok(value) => value,
+            Err(_) => return internal_error("Failed to evaluate scan access"),
+        };
+
+        let can_access = environment_ids
+            .into_iter()
+            .any(|environment_id| {
+                caller_role.can_access_system_environment(environment_id, &environment_memberships)
+            });
+
+        if !can_access {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiError {
+                    error: "not_found".to_string(),
+                    message: "Hardening scan not found".to_string(),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
     }
 
-    match get_scan_by_id(&pool, scan_id).await {
-        Ok(Some(scan)) => (
-            StatusCode::OK,
-            Json(HardeningScanStatusResponse {
-                scan_id: scan.id,
-                derivation_id: scan.derivation_id,
-                status: scan.status.to_string(),
-                error_message: scan
-                    .scan_metadata
-                    .as_ref()
-                    .and_then(|meta| meta.get("error"))
-                    .and_then(|value| value.as_str())
-                    .map(|value| value.to_string()),
-                scheduled_at: scan.scheduled_at,
-                started_at: scan.started_at,
-                completed_at: scan.completed_at,
-                attempts: scan.attempts,
-                total_services: scan.total_services,
-                overall_score: scan.overall_score,
-            }),
-        )
-            .into_response(),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(ApiError {
-                error: "not_found".to_string(),
-                message: "Hardening scan not found".to_string(),
-                details: None,
-            }),
-        )
-            .into_response(),
-        Err(_) => internal_error("Failed to load hardening scan status"),
-    }
+    (
+        StatusCode::OK,
+        Json(HardeningScanStatusResponse {
+            scan_id: scan.id,
+            derivation_id: scan.derivation_id,
+            status: scan.status.to_string(),
+            error_message: scan
+                .scan_metadata
+                .as_ref()
+                .and_then(|meta| meta.get("error"))
+                .and_then(|value| value.as_str())
+                .map(|value| value.to_string()),
+            scheduled_at: scan.scheduled_at,
+            started_at: scan.started_at,
+            completed_at: scan.completed_at,
+            attempts: scan.attempts,
+            total_services: scan.total_services,
+            overall_score: scan.overall_score,
+        }),
+    )
+        .into_response()
 }
 
 fn map_posture(

@@ -200,6 +200,28 @@ pub async fn get_scan_by_id(pool: &PgPool, scan_id: Uuid) -> Result<Option<Harde
     Ok(scan)
 }
 
+/// List environment IDs for active systems associated with a hardening scan's derivation.
+pub async fn list_scan_environment_ids(pool: &PgPool, scan_id: Uuid) -> Result<Vec<Option<Uuid>>> {
+    let rows = sqlx::query_scalar::<_, Option<Uuid>>(
+        r#"
+        SELECT DISTINCT s.environment_id
+        FROM hardening_scans hs
+        JOIN derivations d ON d.id = hs.derivation_id
+        JOIN commits c ON c.id = d.commit_id
+        JOIN systems s
+          ON s.flake_id = c.flake_id
+         AND COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname) = d.derivation_name
+        WHERE hs.id = $1
+          AND s.is_active = TRUE
+        "#,
+    )
+    .bind(scan_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows)
+}
+
 /// Get the latest hardening scan for a derivation.
 pub async fn get_latest_scan(pool: &PgPool, derivation_id: i32) -> Result<Option<HardeningScan>> {
     let scan = sqlx::query_as!(
@@ -448,32 +470,60 @@ pub async fn upsert_justification(
     reason: &str,
     user_id: Option<Uuid>,
 ) -> Result<Uuid> {
-    let id = Uuid::new_v4();
+    let inserted_id = Uuid::new_v4();
 
-    sqlx::query!(
-        r#"
-        INSERT INTO hardening_justifications (
-            id, system_id, service_name, directive_name,
-            category, reason, created_by, updated_by
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
-        ON CONFLICT (system_id, service_name, directive_name) DO UPDATE SET
-            category = EXCLUDED.category,
-            reason = EXCLUDED.reason,
-            updated_by = EXCLUDED.updated_by,
-            updated_at = NOW()
-        "#,
-        id,
-        system_id,
-        service_name,
-        directive_name,
-        category,
-        reason,
-        user_id
-    )
-    .execute(pool)
-    .await?;
+    if let Some(directive_name) = directive_name {
+        let id = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            INSERT INTO hardening_justifications (
+                id, system_id, service_name, directive_name,
+                category, reason, created_by, updated_by
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+            ON CONFLICT (system_id, service_name, directive_name) WHERE directive_name IS NOT NULL DO UPDATE SET
+                category = EXCLUDED.category,
+                reason = EXCLUDED.reason,
+                updated_by = EXCLUDED.updated_by,
+                updated_at = NOW()
+            RETURNING id
+            "#,
+        )
+        .bind(inserted_id)
+        .bind(system_id)
+        .bind(service_name)
+        .bind(directive_name)
+        .bind(category)
+        .bind(reason)
+        .bind(user_id)
+        .fetch_one(pool)
+        .await?;
 
-    Ok(id)
+        Ok(id)
+    } else {
+        let id = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            INSERT INTO hardening_justifications (
+                id, system_id, service_name, directive_name,
+                category, reason, created_by, updated_by
+            ) VALUES ($1, $2, $3, NULL, $4, $5, $6, $6)
+            ON CONFLICT (system_id, service_name) WHERE directive_name IS NULL DO UPDATE SET
+                category = EXCLUDED.category,
+                reason = EXCLUDED.reason,
+                updated_by = EXCLUDED.updated_by,
+                updated_at = NOW()
+            RETURNING id
+            "#,
+        )
+        .bind(inserted_id)
+        .bind(system_id)
+        .bind(service_name)
+        .bind(category)
+        .bind(reason)
+        .bind(user_id)
+        .fetch_one(pool)
+        .await?;
+
+        Ok(id)
+    }
 }
 
 /// Get justifications for a system.
@@ -566,6 +616,13 @@ pub async fn resolve_system_hardening_scan_target(
             FROM systems s
             WHERE s.id = $1
               AND s.is_active = TRUE
+        ),
+        latest_state AS (
+            SELECT ss.store_path
+            FROM selected_system s
+            JOIN system_states ss ON ss.hostname = s.hostname
+            ORDER BY ss.timestamp DESC
+            LIMIT 1
         )
         SELECT
             d.id AS derivation_id,
@@ -580,12 +637,14 @@ pub async fn resolve_system_hardening_scan_target(
                 ELSE NULL
             END AS blocked_reason
         FROM selected_system ss
-        JOIN commits c ON c.flake_id = ss.flake_id
+        JOIN latest_state ls ON TRUE
+        JOIN derivations d
+          ON COALESCE(d.store_path, d.expected_store_path) = ls.store_path
+        JOIN commits c ON c.id = d.commit_id AND c.flake_id = ss.flake_id
         JOIN flakes f ON f.id = c.flake_id
-        JOIN derivations d ON d.commit_id = c.id
         WHERE d.derivation_type = 'nixos'
           AND d.derivation_name = ss.config_name
-        ORDER BY c.commit_timestamp DESC NULLS LAST, d.completed_at DESC NULLS LAST, d.id DESC
+        ORDER BY d.completed_at DESC NULLS LAST, d.id DESC
         LIMIT 1
         "#,
     )

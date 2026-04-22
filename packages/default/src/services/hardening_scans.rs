@@ -116,60 +116,70 @@ async fn run_hardening_scan(
     let scanner = HardeningScanner::new();
 
     // Run the scan
-    match scanner.scan_config(flake_ref, config_name).await {
-        Ok(scan_result) => {
-            let scan_duration_ms = start_time.elapsed().as_millis() as i32;
-
-            // Insert service results
-            for service in &scan_result.services {
-                let directives_json = serde_json::to_value(&service.score_result.directives)?;
-
-                insert_service_result(
-                    pool,
-                    scan_id,
-                    &service.name,
-                    service.service_type.as_deref(),
-                    service.score_result.score,
-                    service.score_result.risk_level,
-                    directives_json,
-                    service.score_result.enabled_count,
-                    service.score_result.disabled_count,
-                    service.score_result.missing_count,
-                )
-                .await?;
-            }
-
-            // Complete the scan
-            complete_hardening_scan(
-                pool,
-                scan_id,
-                scan_result.total_services,
-                scan_result.well_hardened_count,
-                scan_result.moderately_hardened_count,
-                scan_result.poorly_hardened_count,
-                scan_result.vulnerable_count,
-                scan_result.overall_score,
-                Some(scan_duration_ms),
-            )
-            .await?;
-
-            info!(
-                "Completed hardening scan {} for {}: {} services, overall score {}",
-                scan_id,
-                config_name,
-                scan_result.total_services,
-                scan_result
-                    .overall_score
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| "N/A".to_string())
-            );
-        }
+    let scan_result = match scanner.scan_config(flake_ref, config_name).await {
+        Ok(result) => result,
         Err(err) => {
             let error_message = format!("{err:#}");
             mark_scan_failed(pool, scan_id, &error_message).await?;
             return Err(err);
         }
+    };
+
+    let scan_duration_ms = start_time.elapsed().as_millis() as i32;
+    let persist_result: Result<()> = async {
+        // Insert service results
+        for service in &scan_result.services {
+            let directives_json = serde_json::to_value(&service.score_result.directives)?;
+
+            insert_service_result(
+                pool,
+                scan_id,
+                &service.name,
+                service.service_type.as_deref(),
+                service.score_result.score,
+                service.score_result.risk_level,
+                directives_json,
+                service.score_result.enabled_count,
+                service.score_result.disabled_count,
+                service.score_result.missing_count,
+            )
+            .await?;
+        }
+
+        // Complete the scan
+        complete_hardening_scan(
+            pool,
+            scan_id,
+            scan_result.total_services,
+            scan_result.well_hardened_count,
+            scan_result.moderately_hardened_count,
+            scan_result.poorly_hardened_count,
+            scan_result.vulnerable_count,
+            scan_result.overall_score,
+            Some(scan_duration_ms),
+        )
+        .await?;
+
+        Ok(())
     }
+    .await;
+
+    if let Err(err) = persist_result {
+        let error_message = format!("{err:#}");
+        mark_scan_failed(pool, scan_id, &error_message).await?;
+        return Err(err);
+    }
+
+    info!(
+        "Completed hardening scan {} for {}: {} services, overall score {}",
+        scan_id,
+        config_name,
+        scan_result.total_services,
+        scan_result
+            .overall_score
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "N/A".to_string())
+    );
 
     Ok(())
 }
