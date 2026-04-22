@@ -4,7 +4,7 @@ title: Add systemd hardening scanner and dashboard view
 status: In Progress
 assignee: []
 created_date: '2026-04-19 02:43'
-updated_date: '2026-04-22 12:38'
+updated_date: '2026-04-22 13:02'
 labels:
   - feature
   - security
@@ -46,21 +46,10 @@ Create a feature to scan NixOS system configurations for systemd service hardeni
 - [ ] #15 Evaluation pipeline combines hardening scan logic with existing nix-eval-jobs to minimize overhead
 <!-- AC:END -->
 
-## Implementation Plan
-
-<!-- SECTION:PLAN:BEGIN -->
-1) Update widget grid shell layout to ensure each widget card and content region uses flex + min-h-0 constraints so nested scroll containers work in all widget sizes.
-2) Introduce dashboard-specific hardening renderers:
-   - Top vulnerable services: width-constrained fixed table with truncation, count/score/range columns that do not overflow.
-   - Environment posture: compact risk-first rows with score, counts, and concise watchlist links suitable for 2x3 dashboard widget.
-3) Wire dashboard to new compact renderers while keeping full hardening page behavior intact.
-4) Run targeted web-ui compile/tests and web-ui check build to verify no regressions.
-<!-- SECTION:PLAN:END -->
-
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-2026-04-22: addressed MR blocker feedback with focused backend fixes. (1) Hardened `GET /api/v1/hardening-scans/{scan_id}` auth: endpoint now resolves caller role + memberships and enforces environment-scoped access for non-admins via scan→derivation→system mapping, returning not_found when inaccessible. (2) Corrected manual scan target resolution to use the system’s current deployed store path (latest `system_states`) matched to derivation store/expected store path, instead of newest flake commit for config name. (3) Fixed nullable justification uniqueness/upsert semantics by adding migration 0116: dedupe existing NULL-directive rows, drop old nullable unique constraint, add partial unique indexes for service-level NULL and directive-level non-NULL cases; updated upsert query logic to use matching conflict targets and return canonical row ID. (4) Hardened scan execution terminal-state handling: post-scan DB persistence failures now call `mark_scan_failed` so scans do not remain in_progress on insert/complete errors. Verification: `nix develop -c cargo check` in `packages/web-ui` passed; `nix build .#checks.x86_64-linux.web-ui --print-out-paths` passed. Backend `nix develop -c cargo check` in `packages/default` is still blocked in this environment due sqlx compile-time DB connection refused (local DB not reachable from command context).
+LOCK: gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-276-systemd-hardening-scanner
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
