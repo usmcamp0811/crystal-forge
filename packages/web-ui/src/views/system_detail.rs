@@ -2891,7 +2891,7 @@ fn HardeningTab(
                             }
                         }
 
-                        section { class: "space-y-2 rounded-xl border {theme::surface::CARD_BORDER} px-4 py-3",
+                        section { class: "space-y-2 rounded-xl border {theme::surface::CARD_BORDER} px-3.5 py-3",
                             div { class: "flex items-center justify-between gap-2",
                                 p { class: "text-sm font-medium {theme::text::PRIMARY}", "Directive breakdown" }
                                 span { class: "text-[11px] {theme::text::MUTED}", "enabled controls and point contribution" }
@@ -2948,7 +2948,7 @@ fn HardeningTab(
                             }
                         }
 
-                        section { class: "space-y-2 rounded-xl border {theme::surface::CARD_BORDER} px-4 py-3",
+                        section { class: "space-y-2 rounded-xl border {theme::surface::CARD_BORDER} px-3.5 py-3",
                             p { class: "text-sm font-medium {theme::text::PRIMARY}", "Justifications" }
                             if justifications.iter().all(|j| j.service_name != service.service_name) {
                                 div { class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-3 py-3 text-[12px] {theme::text::SECONDARY}",
@@ -2975,7 +2975,7 @@ fn HardeningTab(
                         }
 
                         if allow_mutations {
-                            section { class: "space-y-2.5 rounded-xl border {theme::surface::CARD_BORDER} px-4 py-3",
+                            section { class: "space-y-2.5 rounded-xl border {theme::surface::CARD_BORDER} px-3.5 py-3",
                                 div { class: "space-y-1",
                                     p { class: "text-sm font-medium {theme::text::PRIMARY}", "Add justification" }
                                     p { class: "text-[12px] {theme::text::SECONDARY}",
@@ -2999,10 +2999,10 @@ fn HardeningTab(
                                 if let Some(message) = justification_notice() {
                                     p { class: "text-[11px] {theme::health::HEALTHY_TEXT}", "{message}" }
                                 }
-                                div { class: "flex items-center justify-between gap-3 pt-1",
-                                    p { class: "text-[11px] {theme::text::MUTED}", "Required for audit history." }
+                                div { class: "flex flex-col items-stretch gap-2 pt-1 sm:flex-row sm:items-center sm:justify-between",
+                                    p { class: "text-[11px] leading-5 {theme::text::MUTED}", "Required for audit history." }
                                     button {
-                                        class: "shrink-0 self-end h-9 px-3 rounded-lg {theme::interactive::PRIMARY_BTN} text-xs font-medium {theme::interactive::FOCUS_RING}",
+                                        class: "h-9 px-3 rounded-lg {theme::interactive::PRIMARY_BTN} text-xs font-medium {theme::interactive::FOCUS_RING} self-start sm:self-auto",
                                         disabled: is_saving_justification() || reason.read().trim().is_empty(),
                                         onclick: {
                                             let service_name = service.service_name.clone();
