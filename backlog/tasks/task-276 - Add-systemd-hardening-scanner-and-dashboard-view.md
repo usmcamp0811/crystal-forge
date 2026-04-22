@@ -4,7 +4,7 @@ title: Add systemd hardening scanner and dashboard view
 status: In Progress
 assignee: []
 created_date: '2026-04-19 02:43'
-updated_date: '2026-04-22 01:20'
+updated_date: '2026-04-22 02:07'
 labels:
   - feature
   - security
@@ -60,7 +60,7 @@ Create a feature to scan NixOS system configurations for systemd service hardeni
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-2026-04-21: takeover pass approved by user for dashboard hardening widgets. Scoped implementation plan: (1) fix widget container sizing for reliable internal scrolling after drag/resize, (2) rework top vulnerable services widget table to fit widget width with fixed/truncated columns, (3) redesign environment hardening posture widget into compact dashboard-first layout aligned to existing design system cards/chips. Verification plan: nix develop -c cargo check -p web-ui; nix develop -c cargo test -p web-ui; nix build .#checks.x86_64-linux.web-ui --print-out-paths.
+2026-04-22: Implemented dashboard hardening UI pass with minimal scope in web-ui only. Changes: (a) widget shell updated to `flex` + `min-h-0` to fix nested widget scrolling behavior, (b) dashboard now uses compact hardening renderers, (c) top vulnerable services widget switched to width-constrained fixed table with truncation/chips, (d) environment posture widget redesigned into compact risk-first cards with watch-list links and explicit green/yellow/orange/red bands. Verification completed: `nix develop -c cargo check` (packages/web-ui), `nix develop -c cargo test` (packages/web-ui, 63 passed/0 failed/1 ignored), and `nix build .#checks.x86_64-linux.web-ui --print-out-paths` (pass).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
