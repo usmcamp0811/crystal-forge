@@ -4,7 +4,7 @@ title: Add systemd hardening scanner and dashboard view
 status: In Progress
 assignee: []
 created_date: '2026-04-19 02:43'
-updated_date: '2026-04-21 13:09'
+updated_date: '2026-04-22 01:20'
 labels:
   - feature
   - security
@@ -46,33 +46,21 @@ Create a feature to scan NixOS system configurations for systemd service hardeni
 - [ ] #15 Evaluation pipeline combines hardening scan logic with existing nix-eval-jobs to minimize overhead
 <!-- AC:END -->
 
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1) Update widget grid shell layout to ensure each widget card and content region uses flex + min-h-0 constraints so nested scroll containers work in all widget sizes.
+2) Introduce dashboard-specific hardening renderers:
+   - Top vulnerable services: width-constrained fixed table with truncation, count/score/range columns that do not overflow.
+   - Environment posture: compact risk-first rows with score, counts, and concise watchlist links suitable for 2x3 dashboard widget.
+3) Wire dashboard to new compact renderers while keeping full hardening page behavior intact.
+4) Run targeted web-ui compile/tests and web-ui check build to verify no regressions.
+<!-- SECTION:PLAN:END -->
+
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-LOCK: gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-276-systemd-hardening-scanner
-
-Rebased onto dev after TASK-278 merge, resolved conflicts, reran `nix develop -c cargo check` and `nix build .#checks.x86_64-linux.web-ui --print-out-paths`, then force-pushed branch at 92fd62c4.
-
----
-**Architecture Change Request (2026-04-21):**
-Hardening scanning should happen automatically as part of the evaluation pipeline, not as a separate manual operation. Need to integrate with dry-run evaluation so that when a flake config is eval'd and ready to build, hardening data is already available.
-
-This means:
-1. Remove manual "Run Hardening Scan" button from UI
-2. Tie hardening scan into evaluation queue processing
-3. Merge with dry-run evaluation flow (combine nix eval operations if possible)
-4. Update database workflow so hardening_scans are created automatically during eval
-5. UI should show hardening data as part of normal eval results
-
----
-**UI Refinement Request (2026-04-21):**
-1. Service detail modal is rendering inline below table instead of as centered overlay
-   - Need to match design example modal pattern: backdrop with `display: grid; place-items: center`
-   - Remove `overflow-y-auto` from backdrop, add fixed max-width to modal
-2. Filter card on hardening tab should be streamlined:
-   - Consider making table headers clickable for sorting
-   - Condense filter controls or integrate into header area
-   - Review /home/mcamp/code/crystal-forge/design-example-systems for standards
+2026-04-21: takeover pass approved by user for dashboard hardening widgets. Scoped implementation plan: (1) fix widget container sizing for reliable internal scrolling after drag/resize, (2) rework top vulnerable services widget table to fit widget width with fixed/truncated columns, (3) redesign environment hardening posture widget into compact dashboard-first layout aligned to existing design system cards/chips. Verification plan: nix develop -c cargo check -p web-ui; nix develop -c cargo test -p web-ui; nix build .#checks.x86_64-linux.web-ui --print-out-paths.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
