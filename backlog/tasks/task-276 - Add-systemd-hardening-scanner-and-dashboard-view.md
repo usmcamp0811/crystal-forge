@@ -4,7 +4,7 @@ title: Add systemd hardening scanner and dashboard view
 status: In Progress
 assignee: []
 created_date: '2026-04-19 02:43'
-updated_date: '2026-04-22 02:19'
+updated_date: '2026-04-22 03:11'
 labels:
   - feature
   - security
@@ -60,7 +60,7 @@ Create a feature to scan NixOS system configurations for systemd service hardeni
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-2026-04-22 (polish pass): tightened compact hardening widgets with improved header metadata chips, numeric alignment, row hover affordances, and environment roll-up totals while preserving same scoped architecture. Re-ran targeted verification (`cargo check`, `cargo test`, and `.#checks.x86_64-linux.web-ui`) successfully after polish.
+2026-04-22: corrected hardening top-services systems count semantics. Added migration 0115 to redefine `view_hardening_top_vulnerable_services` so counts are derived from latest completed scan per ACTIVE system/config only (not historical derivation scans). Also renamed compact widget header `Sys` -> `Systems` for clarity. Verification: `nix build .#checks.x86_64-linux.web-ui --print-out-paths` passed. Backend `nix develop -c cargo check` in packages/default could not complete because sqlx online checks require DB and local DB was not running (connection refused).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
