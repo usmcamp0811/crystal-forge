@@ -2820,7 +2820,7 @@ fn HardeningTab(
                 },
 
                 div {
-                    class: "relative w-full cf-modal-panel-44 {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-2xl shadow-2xl cursor-default overflow-hidden",
+                    class: "relative w-full cf-modal-panel-44 {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl shadow-2xl cursor-default overflow-hidden",
                     style: "width: 100%; max-width: 44rem; max-height: 84vh; display: flex; flex-direction: column;",
                     onclick: move |evt| evt.stop_propagation(),
                     role: "dialog",
@@ -2828,13 +2828,13 @@ fn HardeningTab(
                     aria_labelledby: "hardening-modal-title",
 
                     // Header
-                    div { class: "px-5 py-4 border-b {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG}",
+                    div { class: "px-[22px] py-[18px] border-b {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG}",
                         div { class: "flex items-start justify-between gap-3",
                             div { class: "space-y-1 min-w-0",
                                 div { class: "flex items-center gap-2 flex-wrap",
                                     h3 { id: "hardening-modal-title", class: "text-base font-semibold tracking-tight {theme::text::PRIMARY}", "Service hardening" }
                                     span {
-                                        class: "inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] font-semibold uppercase tracking-wide shadow-sm {risk_level_compact_badge_class(&service.risk_level)}",
+                                        class: "inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wide {risk_level_compact_badge_class(&service.risk_level)}",
                                         span { class: "h-1.5 w-1.5 rounded-full bg-current opacity-80" }
                                         "{short_risk_label(&service.risk_level)}"
                                     }
@@ -2842,12 +2842,12 @@ fn HardeningTab(
                                 p { class: "text-xs {theme::text::SECONDARY}",
                                     "Review systemd hardening details for"
                                 }
-                                p { class: "text-xs font-mono {theme::text::PRIMARY} break-all",
+                                p { class: "text-xs font-mono {theme::text::PRIMARY} break-words",
                                     "{service.service_name}"
                                 }
                             }
                             button {
-                                class: "shrink-0 h-8 w-8 rounded-lg border {theme::surface::CARD_BORDER} {theme::text::SECONDARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors shadow-sm",
+                                class: "shrink-0 h-8 w-8 rounded-lg border {theme::surface::CARD_BORDER} {theme::text::SECONDARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors",
                                 autofocus: "true",
                                 onclick: move |_| {
                                     if confirm_discard_unsaved_justification(!reason.read().trim().is_empty()) {
@@ -2861,7 +2861,7 @@ fn HardeningTab(
                     }
 
                     // Body
-                    div { class: "px-5 py-4 overflow-y-auto flex flex-col gap-4",
+                    div { class: "px-[22px] py-5 overflow-y-auto flex flex-col gap-[14px]",
                         div { class: "flex flex-wrap gap-1.5",
                             HardeningSummaryChipCompact {
                                 label: "Score",
@@ -2901,21 +2901,21 @@ fn HardeningTab(
                                 class: "border {theme::surface::CARD_BORDER} rounded-xl overflow-hidden",
                                 div {
                                     if let Some(directives) = service.directives_detail.as_array() {
-                                        table { class: "w-full text-xs table-fixed",
+                                        table { class: "w-full text-sm table-fixed",
                                             thead {
                                                 tr { class: "sticky top-0 z-10 border-b {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG} text-left {theme::text::MUTED}",
-                                                    th { class: "px-3 py-2.5 w-[56%] font-medium", "Directive" }
-                                                    th { class: "px-3 py-2.5 w-[20%] text-center font-medium", "Status" }
-                                                    th { class: "px-3 py-2.5 w-[24%] text-right font-medium", "Points" }
+                                                    th { class: "px-3 py-2.5 w-[56%] text-[12px] font-medium", "Directive" }
+                                                    th { class: "px-3 py-2.5 w-[20%] text-center text-[12px] font-medium", "Status" }
+                                                    th { class: "px-3 py-2.5 w-[24%] text-right text-[12px] font-medium", "Points" }
                                                 }
                                             }
                                             tbody {
                                                 for item in directives {
                                                     tr { class: "border-b {theme::surface::DIVIDER} {theme::interactive::HOVER_BG} last:border-b-0",
-                                                        td { class: "px-3 py-2.5 font-mono text-[11px] leading-5 align-top {theme::text::PRIMARY}",
+                                                        td { class: "px-3 py-2.5 font-mono text-[12px] leading-5 align-top {theme::text::PRIMARY}",
                                                             "{item.get(\"name\").and_then(|v| v.as_str()).unwrap_or(\"\")}" 
                                                         }
-                                                        td { class: "px-3 py-2.5 text-center align-top text-[11px]",
+                                                        td { class: "px-3 py-2.5 text-center align-top text-[12px]",
                                                             {
                                                                 if item.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
                                                                     rsx! {
@@ -2932,7 +2932,7 @@ fn HardeningTab(
                                                                 }
                                                             }
                                                         }
-                                                        td { class: "px-3 py-2.5 text-right align-top font-mono text-[11px] {theme::text::SECONDARY}",
+                                                        td { class: "px-3 py-2.5 text-right align-top font-mono text-[12px] {theme::text::SECONDARY}",
                                                             "{item.get(\"points\").and_then(|v| v.as_i64()).unwrap_or(0)}/{item.get(\"max_points\").and_then(|v| v.as_i64()).unwrap_or(0)}"
                                                         }
                                                     }
@@ -2951,13 +2951,13 @@ fn HardeningTab(
                         section { class: "space-y-2",
                             p { class: "text-[11px] uppercase tracking-wide {theme::text::MUTED}", "Justifications" }
                             if justifications.iter().all(|j| j.service_name != service.service_name) {
-                                div { class: "rounded-xl border {theme::surface::CARD_BORDER} px-3 py-3 text-xs {theme::text::SECONDARY}",
+                                div { class: "rounded-xl border {theme::surface::CARD_BORDER} px-3 py-3 text-[12px] {theme::text::SECONDARY}",
                                     "No justifications yet."
                                 }
                             } else {
                                 div { class: "flex flex-col gap-2",
                                     for item in justifications.iter().filter(|j| j.service_name == service.service_name) {
-                                        div { class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-3 py-2.5 text-xs space-y-1.5",
+                                        div { class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-3 py-2.5 text-[12px] space-y-1.5",
                                             div { class: "flex items-center gap-1.5 flex-wrap",
                                                 span {
                                                     class: "inline-flex items-center rounded border {theme::surface::CARD_BORDER} px-1.5 py-0.5 text-[10px] font-medium {theme::text::SECONDARY}",
@@ -2983,7 +2983,7 @@ fn HardeningTab(
                                     }
                                 }
                                 textarea {
-                                    class: "w-full min-h-[104px] max-h-36 px-3 py-2.5 rounded-lg text-sm resize-none overflow-y-auto {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                    class: "w-full min-h-[104px] max-h-36 px-3 py-2.5 rounded-lg text-[13px] leading-5 resize-none overflow-y-auto {theme::interactive::INPUT} {theme::text::PRIMARY}",
                                     style: "max-height: 9rem;",
                                     placeholder: "Explain the exception, mitigation, or compensating control…",
                                     value: "{reason}",
@@ -3002,7 +3002,7 @@ fn HardeningTab(
                                 div { class: "flex items-center justify-between gap-3 pt-1",
                                     p { class: "text-[11px] {theme::text::MUTED}", "Required for audit history." }
                                     button {
-                                        class: "shrink-0 self-end h-9 px-3 rounded-lg {theme::interactive::PRIMARY_BTN} text-sm font-medium {theme::interactive::FOCUS_RING}",
+                                        class: "shrink-0 self-end h-9 px-3 rounded-lg {theme::interactive::PRIMARY_BTN} text-xs font-medium {theme::interactive::FOCUS_RING}",
                                         disabled: is_saving_justification() || reason.read().trim().is_empty(),
                                         onclick: {
                                             let service_name = service.service_name.clone();
@@ -3052,7 +3052,7 @@ fn HardeningTab(
                     }
 
                     // Footer
-                    div { class: "px-5 py-3 border-t {theme::surface::DIVIDER} flex justify-end gap-2",
+                    div { class: "px-[22px] py-[14px] border-t {theme::surface::DIVIDER} flex justify-end gap-2",
                         button {
                             class: "h-9 px-3 rounded-lg border {theme::surface::CARD_BORDER} text-xs font-medium {theme::text::SECONDARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors",
                             onclick: move |_| {
@@ -3094,8 +3094,8 @@ fn HardeningSummaryChipCompact(label: String, value: String, tone: &'static str)
     };
 
     rsx! {
-        div { class: "inline-flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px] {tone_class}",
-            span { class: "uppercase tracking-wide opacity-80", "{label}" }
+        div { class: "inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[11px] {tone_class}",
+            span { class: "uppercase tracking-wide opacity-75", "{label}" }
             span { class: "font-semibold {theme::text::PRIMARY}", "{value}" }
         }
     }
