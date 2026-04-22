@@ -2891,14 +2891,14 @@ fn HardeningTab(
                             }
                         }
 
-                        section { class: "space-y-2",
+                        section { class: "space-y-2 rounded-xl border {theme::surface::CARD_BORDER} px-4 py-3",
                             div { class: "flex items-center justify-between gap-2",
-                                p { class: "text-[11px] uppercase tracking-wide {theme::text::MUTED}", "Directive breakdown" }
+                                p { class: "text-sm font-medium {theme::text::PRIMARY}", "Directive breakdown" }
                                 span { class: "text-[11px] {theme::text::MUTED}", "enabled controls and point contribution" }
                             }
 
                             div {
-                                class: "border {theme::surface::CARD_BORDER} rounded-xl overflow-hidden",
+                                class: "border {theme::surface::CARD_BORDER} rounded-xl overflow-hidden {theme::surface::SUBTLE_BG}",
                                 div {
                                     if let Some(directives) = service.directives_detail.as_array() {
                                         table { class: "w-full text-sm table-fixed",
@@ -2948,10 +2948,10 @@ fn HardeningTab(
                             }
                         }
 
-                        section { class: "space-y-2",
-                            p { class: "text-[11px] uppercase tracking-wide {theme::text::MUTED}", "Justifications" }
+                        section { class: "space-y-2 rounded-xl border {theme::surface::CARD_BORDER} px-4 py-3",
+                            p { class: "text-sm font-medium {theme::text::PRIMARY}", "Justifications" }
                             if justifications.iter().all(|j| j.service_name != service.service_name) {
-                                div { class: "rounded-xl border {theme::surface::CARD_BORDER} px-3 py-3 text-[12px] {theme::text::SECONDARY}",
+                                div { class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-3 py-3 text-[12px] {theme::text::SECONDARY}",
                                     "No justifications yet."
                                 }
                             } else {
@@ -2975,9 +2975,9 @@ fn HardeningTab(
                         }
 
                         if allow_mutations {
-                            section { class: "space-y-2.5 pt-3 border-t {theme::surface::DIVIDER}",
+                            section { class: "space-y-2.5 rounded-xl border {theme::surface::CARD_BORDER} px-4 py-3",
                                 div { class: "space-y-1",
-                                    p { class: "text-[11px] uppercase tracking-wide {theme::text::MUTED}", "Add justification" }
+                                    p { class: "text-sm font-medium {theme::text::PRIMARY}", "Add justification" }
                                     p { class: "text-[12px] {theme::text::SECONDARY}",
                                         "Add a concise audit note explaining why this service posture is acceptable or intentionally different."
                                     }
@@ -3088,15 +3088,21 @@ fn CompactMetricCard(label: String, value: String, tone: &'static str) -> Elemen
 #[component]
 fn HardeningSummaryChipCompact(label: String, value: String, tone: &'static str) -> Element {
     let tone_class = match tone {
-        "danger" => format!("{} {} {}", theme::health::CRITICAL_BORDER, theme::health::CRITICAL_BG, theme::health::CRITICAL_TEXT),
-        "warning" => format!("{} {} {}", theme::health::WARNING_BORDER, theme::health::WARNING_BG, theme::health::WARNING_TEXT),
-        _ => format!("{} {} {}", theme::surface::CARD_BORDER, theme::surface::SUBTLE_BG, theme::text::SECONDARY),
+        "danger" => format!("{} {}", theme::health::CRITICAL_BORDER, theme::surface::SUBTLE_BG),
+        "warning" => format!("{} {}", theme::health::WARNING_BORDER, theme::surface::SUBTLE_BG),
+        _ => format!("{} {}", theme::surface::CARD_BORDER, theme::surface::SUBTLE_BG),
+    };
+
+    let value_class = match tone {
+        "danger" => theme::health::CRITICAL_TEXT,
+        "warning" => theme::health::WARNING_TEXT,
+        _ => theme::text::PRIMARY,
     };
 
     rsx! {
-        div { class: "inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[11px] {tone_class}",
-            span { class: "uppercase tracking-wide opacity-75", "{label}" }
-            span { class: "font-semibold {theme::text::PRIMARY}", "{value}" }
+        div { class: "inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] {tone_class}",
+            span { class: "tracking-wide {theme::text::MUTED}", "{label}" }
+            span { class: "font-semibold {value_class}", "{value}" }
         }
     }
 }
