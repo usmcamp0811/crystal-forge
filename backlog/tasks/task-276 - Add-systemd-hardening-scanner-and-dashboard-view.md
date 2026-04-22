@@ -2,9 +2,10 @@
 id: TASK-276
 title: Add systemd hardening scanner and dashboard view
 status: In Progress
-assignee: []
+assignee:
+  - openai-gpt-5.4
 created_date: '2026-04-19 02:43'
-updated_date: '2026-04-22 19:24'
+updated_date: '2026-04-22 19:25'
 labels:
   - feature
   - security
@@ -53,14 +54,16 @@ Create a feature to scan NixOS system configurations for systemd service hardeni
 2) Add DB-backed regression test proving inactive systems and superseded derivations do not affect fleet summary aggregates.
 3) Apply requested small visual refinement to system hardening modal header styling.
 4) Run targeted backend/web verification and refresh sqlx metadata if required by query/schema changes.
+5) Rework the service hardening modal hierarchy so service identity and posture lead, directive detail is more curated for a modal, and the justification entry becomes the primary action area.
+6) Run targeted web-ui verification for the modal-only refinement.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Updated branch pushed with blocker fix commit: 436099cf
+LOCK: openai-gpt-5.4 on reckless in /home/mcamp/code/crystal-forge/TASK-276-systemd-hardening-scanner
 
-MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/242
+Focused follow-up: refine the service hardening modal hierarchy so it reads as service identity → key posture → concise directive detail → justification action → softer history, without expanding feature scope.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
