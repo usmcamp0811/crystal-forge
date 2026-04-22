@@ -4,7 +4,7 @@ title: Add systemd hardening scanner and dashboard view
 status: In Progress
 assignee: []
 created_date: '2026-04-19 02:43'
-updated_date: '2026-04-22 03:35'
+updated_date: '2026-04-22 12:38'
 labels:
   - feature
   - security
@@ -60,7 +60,7 @@ Create a feature to scan NixOS system configurations for systemd service hardeni
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-2026-04-22: per product direction, removed Environment Hardening Posture dashboard widget entirely from default layout and render/data-fetch paths; kept Top Vulnerable Services widget active. Verification: `nix develop -c cargo check` (packages/web-ui) and `nix build .#checks.x86_64-linux.web-ui --print-out-paths` both passed.
+2026-04-22: addressed MR blocker feedback with focused backend fixes. (1) Hardened `GET /api/v1/hardening-scans/{scan_id}` auth: endpoint now resolves caller role + memberships and enforces environment-scoped access for non-admins via scan→derivation→system mapping, returning not_found when inaccessible. (2) Corrected manual scan target resolution to use the system’s current deployed store path (latest `system_states`) matched to derivation store/expected store path, instead of newest flake commit for config name. (3) Fixed nullable justification uniqueness/upsert semantics by adding migration 0116: dedupe existing NULL-directive rows, drop old nullable unique constraint, add partial unique indexes for service-level NULL and directive-level non-NULL cases; updated upsert query logic to use matching conflict targets and return canonical row ID. (4) Hardened scan execution terminal-state handling: post-scan DB persistence failures now call `mark_scan_failed` so scans do not remain in_progress on insert/complete errors. Verification: `nix develop -c cargo check` in `packages/web-ui` passed; `nix build .#checks.x86_64-linux.web-ui --print-out-paths` passed. Backend `nix develop -c cargo check` in `packages/default` is still blocked in this environment due sqlx compile-time DB connection refused (local DB not reachable from command context).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
