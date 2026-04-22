@@ -46,11 +46,16 @@ Create a feature to scan NixOS system configurations for systemd service hardeni
 - [ ] #15 Evaluation pipeline combines hardening scan logic with existing nix-eval-jobs to minimize overhead
 <!-- AC:END -->
 
-## Implementation Notes
+## Implementation Plan
 
-<!-- SECTION:NOTES:BEGIN -->
-LOCK: gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-276-systemd-hardening-scanner
-<!-- SECTION:NOTES:END -->
+<!-- SECTION:PLAN:BEGIN -->
+1) Update widget grid shell layout to ensure each widget card and content region uses flex + min-h-0 constraints so nested scroll containers work in all widget sizes.
+2) Introduce dashboard-specific hardening renderers:
+   - Top vulnerable services: width-constrained fixed table with truncation, count/score/range columns that do not overflow.
+   - Environment posture: compact risk-first rows with score, counts, and concise watchlist links suitable for 2x3 dashboard widget.
+3) Wire dashboard to new compact renderers while keeping full hardening page behavior intact.
+4) Run targeted web-ui compile/tests and web-ui check build to verify no regressions.
+<!-- SECTION:PLAN:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
