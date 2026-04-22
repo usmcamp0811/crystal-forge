@@ -1,10 +1,10 @@
 ---
 id: TASK-276
 title: Add systemd hardening scanner and dashboard view
-status: Review
+status: In Progress
 assignee: []
 created_date: '2026-04-19 02:43'
-updated_date: '2026-04-22 13:37'
+updated_date: '2026-04-22 19:24'
 labels:
   - feature
   - security
