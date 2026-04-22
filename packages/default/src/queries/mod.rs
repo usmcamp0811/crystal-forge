@@ -25,3 +25,6 @@ pub mod users;
 
 #[cfg(test)]
 mod cve_scans_tests;
+
+#[cfg(test)]
+mod hardening_scans_tests;

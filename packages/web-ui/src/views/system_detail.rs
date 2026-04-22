@@ -2803,7 +2803,7 @@ fn HardeningTab(
         // Modal - rendered as sibling to main content for proper overlay
         if let Some(service) = selected_service() {
             div {
-                class: "fixed inset-0 z-50 bg-black/60 p-4 cf-modal-overlay",
+                class: "fixed inset-0 z-50 bg-black/65 backdrop-blur-[1px] p-4 cf-modal-overlay",
                 style: "display: grid; place-items: center;",
                 onclick: move |_| selected_service.set(None),
 
@@ -2815,24 +2815,26 @@ fn HardeningTab(
                     aria_modal: "true",
 
                     // Header
-                    div { class: "px-5 py-4 border-b {theme::surface::DIVIDER}",
+                    div { class: "px-5 py-4 border-b {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG}",
                         div { class: "flex items-start justify-between gap-3",
                             div { class: "space-y-1 min-w-0",
                                 div { class: "flex items-center gap-2 flex-wrap",
-                                    h3 { class: "text-base font-semibold {theme::text::PRIMARY}", "Service hardening" }
+                                    h3 { class: "text-base font-semibold tracking-tight {theme::text::PRIMARY}", "Service hardening" }
                                     span {
-                                        class: "inline-flex px-2 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide {risk_level_compact_badge_class(&service.risk_level)}",
+                                        class: "inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] font-semibold uppercase tracking-wide shadow-sm {risk_level_compact_badge_class(&service.risk_level)}",
+                                        span { class: "h-1.5 w-1.5 rounded-full bg-current opacity-80" }
                                         "{short_risk_label(&service.risk_level)}"
                                     }
                                 }
                                 p { class: "text-xs {theme::text::SECONDARY}",
-                                    "Review systemd hardening details for "
-                                    span { class: "font-mono {theme::text::PRIMARY}", "{service.service_name}" }
-                                    "."
+                                    "Review systemd hardening details for"
+                                }
+                                p { class: "text-xs font-mono {theme::text::PRIMARY} break-all",
+                                    "{service.service_name}"
                                 }
                             }
                             button {
-                                class: "shrink-0 h-8 w-8 rounded-lg border {theme::surface::CARD_BORDER} {theme::text::SECONDARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors",
+                                class: "shrink-0 h-8 w-8 rounded-lg border {theme::surface::CARD_BORDER} {theme::text::SECONDARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors shadow-sm",
                                 onclick: move |_| selected_service.set(None),
                                 aria_label: "Close service hardening modal",
                                 "✕"
