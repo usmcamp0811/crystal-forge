@@ -1,10 +1,10 @@
 ---
 id: TASK-276
 title: Add systemd hardening scanner and dashboard view
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-04-19 02:43'
-updated_date: '2026-04-22 13:02'
+updated_date: '2026-04-22 13:37'
 labels:
   - feature
   - security
@@ -49,13 +49,19 @@ Create a feature to scan NixOS system configurations for systemd service hardeni
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-1) Update widget grid shell layout to ensure each widget card and content region uses flex + min-h-0 constraints so nested scroll containers work in all widget sizes.
-2) Introduce dashboard-specific hardening renderers:
-   - Top vulnerable services: width-constrained fixed table with truncation, count/score/range columns that do not overflow.
-   - Environment posture: compact risk-first rows with score, counts, and concise watchlist links suitable for 2x3 dashboard widget.
-3) Wire dashboard to new compact renderers while keeping full hardening page behavior intact.
-4) Run targeted web-ui compile/tests and web-ui check build to verify no regressions.
+1) Add follow-up migration to scope hardening fleet summary view to active systems (latest completed scan per active system), mirroring the top-services scoping model.
+2) Add DB-backed regression test proving inactive systems and superseded derivations do not affect fleet summary aggregates.
+3) Apply requested small visual refinement to system hardening modal header styling.
+4) Run targeted backend/web verification and refresh sqlx metadata if required by query/schema changes.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Updated branch pushed with blocker fix commit: 436099cf
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/242
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
