@@ -1,11 +1,11 @@
 ---
 id: TASK-276
 title: Add systemd hardening scanner and dashboard view
-status: In Progress
+status: Done
 assignee:
   - openai-gpt-5.4
 created_date: '2026-04-19 02:43'
-updated_date: '2026-04-23 12:47'
+updated_date: '2026-04-23 13:25'
 labels:
   - feature
   - security
@@ -61,7 +61,9 @@ Create a feature to scan NixOS system configurations for systemd service hardeni
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Commit ca0898bc: put service name and Service hardening label on one header row, reduced justification helper copy size, and added explicit modal table scrollbar styling in assets/app.css (including webkit thumb/track) so scroll affordance is visible.
+Cleanup complete after merge: TASK-276 task worktree removed (`git worktree remove ../TASK-276-systemd-hardening-scanner`) and worktree list pruned.
+
+Follow-up backlog item created: TASK-276.1 for additional modal refinement polish.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
