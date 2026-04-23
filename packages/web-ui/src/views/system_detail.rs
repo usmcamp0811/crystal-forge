@@ -2872,62 +2872,18 @@ fn HardeningTab(
 
                     // Body
                     div { class: "px-5 py-4 overflow-y-auto flex flex-col gap-3",
-                        section { class: "space-y-3",
-                            div { class: "flex items-end justify-between gap-2 flex-wrap",
-                                div { class: "space-y-1",
-                                    p { class: "text-sm font-medium {theme::text::PRIMARY}", "Control detail" }
-                                    p { class: "text-[12px] leading-5 {theme::text::SECONDARY}",
-                                        "Showing the most relevant controls first so you can quickly understand why this service scored as it did."
-                                    }
-                                }
-                                span { class: "text-[11px] {theme::text::MUTED}", "status · points" }
-                            }
-
-                            if directive_cells(&service).is_empty() {
-                                div { class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-4 py-4 text-sm {theme::text::SECONDARY}",
-                                    "No directive details were returned for this service."
-                                }
-                            } else {
-                                div { class: "space-y-2 max-h-[220px] overflow-y-auto pr-1",
-                                    for directive in modal_focus_directives(&service) {
-                                        div { class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-3 py-2.5",
-                                            div { class: "flex items-start justify-between gap-3",
-                                                div { class: "min-w-0 space-y-1",
-                                                    div { class: "flex items-center gap-2 flex-wrap",
-                                                        p { class: "font-mono text-[12px] leading-5 {theme::text::PRIMARY} break-all", "{directive.name}" }
-                                                        span {
-                                                            class: "inline-flex rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide {directive_badge_content(Some(&directive)).class_name}",
-                                                            title: "{directive_badge_content(Some(&directive)).title}",
-                                                            "{directive_badge_content(Some(&directive)).label}"
-                                                        }
-                                                    }
-                                                    p { class: "text-[12px] leading-5 {theme::text::SECONDARY}", "{modal_directive_description(&directive)}" }
-                                                }
-                                                p { class: "shrink-0 font-mono text-[12px] {theme::text::SECONDARY}", "{directive.points}/{directive.max_points}" }
-                                            }
-                                        }
-                                    }
-                                    if modal_directives(&service).len() > modal_focus_directives(&service).len() {
-                                        p { class: "text-[11px] {theme::text::MUTED} px-1",
-                                            "Showing {modal_focus_directives(&service).len()} of {modal_directives(&service).len()} directives."
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
                         if allow_mutations {
                             section { class: "space-y-2.5 rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-3.5 py-3.5",
                                 div { class: "space-y-1",
                                     p { class: "text-sm font-semibold {theme::text::PRIMARY}", "Add justification" }
-                                    p { class: "text-[13px] leading-6 {theme::text::SECONDARY}",
-                                        "Use this when the current posture is acceptable for a documented reason, such as a compensating control, restricted runtime, or intentional service design."
+                                    p { class: "text-[13px] leading-5 {theme::text::SECONDARY}",
+                                        "Document why this service posture is acceptable (compensating controls, constrained runtime, or accepted risk)."
                                     }
                                 }
                                 textarea {
-                                    class: "w-full min-h-[96px] max-h-32 px-3 py-2.5 rounded-lg text-[13px] leading-5 resize-none overflow-y-auto {theme::interactive::INPUT} {theme::text::PRIMARY}",
-                                    style: "max-height: 8rem;",
-                                    placeholder: "Explain why this service posture is acceptable, what compensating control exists, or what risk is intentionally accepted…",
+                                    class: "w-full min-h-[108px] max-h-40 px-3 py-2.5 rounded-lg text-[13px] leading-5 resize-none overflow-y-auto {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                    style: "max-height: 10rem;",
+                                    placeholder: "Explain why this service posture is acceptable…",
                                     value: "{reason}",
                                     oninput: move |evt| {
                                         reason.set(evt.value());
@@ -2986,6 +2942,55 @@ fn HardeningTab(
                                             "Saving…"
                                         } else {
                                             "Save justification"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        section { class: "space-y-3",
+                            div { class: "flex items-end justify-between gap-2 flex-wrap",
+                                div { class: "space-y-1",
+                                    p { class: "text-sm font-medium {theme::text::PRIMARY}", "Control detail" }
+                                    p { class: "text-[12px] leading-5 {theme::text::SECONDARY}",
+                                        "Showing the most relevant controls first so you can quickly understand why this service scored as it did."
+                                    }
+                                }
+                                span { class: "text-[11px] {theme::text::MUTED}", "status · points" }
+                            }
+
+                            if directive_cells(&service).is_empty() {
+                                div { class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-4 py-4 text-sm {theme::text::SECONDARY}",
+                                    "No directive details were returned for this service."
+                                }
+                            } else {
+                                div { class: "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden",
+                                    div { class: "max-h-[260px] overflow-y-auto",
+                                        table { class: "w-full text-sm table-fixed",
+                                            thead {
+                                                tr { class: "sticky top-0 z-10 border-b {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG} text-left {theme::text::MUTED}",
+                                                    th { class: "px-3 py-2 text-[11px] font-medium w-[52%]", "Directive" }
+                                                    th { class: "px-3 py-2 text-[11px] font-medium text-center w-[22%]", "Status" }
+                                                    th { class: "px-3 py-2 text-[11px] font-medium text-right w-[26%]", "Points" }
+                                                }
+                                            }
+                                            tbody {
+                                                for directive in modal_directives(&service) {
+                                                    tr { class: "border-b {theme::surface::DIVIDER} {theme::interactive::HOVER_BG} last:border-b-0",
+                                                        td { class: "px-3 py-2 font-mono text-[12px] leading-5 {theme::text::PRIMARY} break-all", "{directive.name}" }
+                                                        td { class: "px-3 py-2 text-center",
+                                                            span {
+                                                                class: "inline-flex rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide {directive_badge_content(Some(&directive)).class_name}",
+                                                                title: "{directive_badge_content(Some(&directive)).title}",
+                                                                "{directive_badge_content(Some(&directive)).label}"
+                                                            }
+                                                        }
+                                                        td { class: "px-3 py-2 text-right font-mono text-[12px] {theme::text::SECONDARY}",
+                                                            "{directive.points}/{directive.max_points}"
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -3079,22 +3084,6 @@ fn modal_directives(service: &HardeningServiceResultResponse) -> Vec<DirectiveCe
     directives
 }
 
-fn modal_focus_directives(service: &HardeningServiceResultResponse) -> Vec<DirectiveCell> {
-    let prioritized = modal_directives(service);
-    let mut focused = prioritized
-        .iter()
-        .filter(|directive| modal_directive_rank(directive) < 2)
-        .take(8)
-        .cloned()
-        .collect::<Vec<_>>();
-
-    if focused.is_empty() {
-        focused = prioritized.into_iter().take(6).collect::<Vec<_>>();
-    }
-
-    focused
-}
-
 fn modal_directive_rank(directive: &DirectiveCell) -> i32 {
     if !directive.enabled || directive.points == 0 {
         0
@@ -3102,23 +3091,6 @@ fn modal_directive_rank(directive: &DirectiveCell) -> i32 {
         1
     } else {
         2
-    }
-}
-
-fn modal_directive_description(directive: &DirectiveCell) -> String {
-    let status = if !directive.enabled || directive.points == 0 {
-        "Not meaningfully enabled"
-    } else if directive.points < directive.max_points {
-        "Partially applied"
-    } else {
-        "Enabled"
-    };
-
-    let value = compact_directive_value(&directive.value);
-    if value == "unset" {
-        format!("{} · no explicit value returned by the scan.", status)
-    } else {
-        format!("{} · current value: {}.", status, value)
     }
 }
 
