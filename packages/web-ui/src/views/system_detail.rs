@@ -27,8 +27,8 @@ use crate::api::models::{
     DeploymentLogEntry, DeploymentStatus, HardeningJustificationResponse,
     HardeningScanEligibilityResponse, HardeningServiceResultResponse, HealthStatus, LogLevel,
     PipelineStage, SaveHardeningJustificationRequest, SystemAgentEvent, SystemCommitHistory,
-    SystemDetail, SystemHardwareInfo, SystemHistoryEntry, SystemNetworkInfo,
-    SystemRollbackRequest, SystemSecurityInfo, SystemVulnerability,
+    SystemDetail, SystemHardwareInfo, SystemHistoryEntry, SystemNetworkInfo, SystemRollbackRequest,
+    SystemSecurityInfo, SystemVulnerability,
 };
 use crate::components::cve::CvesTab;
 use crate::components::diff::DiffViewer;
@@ -2521,7 +2521,8 @@ fn HardeningTab(
     }
 
     let filtered_count = filtered_results.len();
-    let has_active_filters = !query.is_empty() || active_severity != "all" || active_sort != "risk_desc";
+    let has_active_filters =
+        !query.is_empty() || active_severity != "all" || active_sort != "risk_desc";
 
     let directive_groups: Vec<(&str, Vec<(&str, &str)>)> = vec![
         (
@@ -2612,7 +2613,7 @@ fn HardeningTab(
                         oninput: move |evt| search_query.set(evt.value()),
                     }
                 }
-                
+
                 // Severity filter dropdown
                 select {
                     class: "{theme::interactive::INPUT} {theme::interactive::FOCUS_RING} h-10 rounded-lg px-3 min-w-[170px]",
@@ -2626,7 +2627,7 @@ fn HardeningTab(
                     option { value: "moderately_hardened", "Moderate" }
                     option { value: "well_hardened", "Well hardened" }
                 }
-                
+
                 // Reset button (only show when filters active)
                 if has_active_filters {
                     button {
@@ -2675,7 +2676,7 @@ fn HardeningTab(
                                 th { class: "sticky top-0 z-10 px-2 py-2 text-center", colspan: "2", "Audit" }
                             }
                             tr { class: "{theme::surface::CARD_BG} border-b {theme::surface::CARD_BORDER} text-left {theme::text::SECONDARY}",
-                                th { 
+                                th {
                                     class: "sticky top-7 z-10 px-2 py-2 w-[68px] cursor-pointer {theme::interactive::HOVER_BG}",
                                     onclick: move |_| {
                                         let current = sort_mode();
@@ -2684,7 +2685,7 @@ fn HardeningTab(
                                     "Risk "
                                     {if sort_mode() == "risk_desc" { "↓" } else { "" }}
                                 }
-                                th { 
+                                th {
                                     class: "sticky top-7 z-10 px-2 py-2 w-[72px] cursor-pointer {theme::interactive::HOVER_BG}",
                                     onclick: move |_| {
                                         let current = sort_mode();
@@ -2693,7 +2694,7 @@ fn HardeningTab(
                                     "Score "
                                     {if sort_mode() == "score_desc" { "↓" } else if sort_mode() == "score_asc" { "↑" } else { "" }}
                                 }
-                                th { 
+                                th {
                                     class: "sticky top-7 z-10 px-2 py-2 w-[240px] cursor-pointer {theme::interactive::HOVER_BG}",
                                     onclick: move |_| {
                                         sort_mode.set("service_asc".to_string());
@@ -2830,20 +2831,55 @@ fn HardeningTab(
                     // Header
                     div { class: "px-[22px] py-[18px] border-b {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG}",
                         div { class: "flex items-start justify-between gap-3",
-                            div { class: "space-y-1 min-w-0",
+                            div { class: "space-y-3 min-w-0 flex-1",
                                 div { class: "flex items-center gap-2 flex-wrap",
-                                    h3 { id: "hardening-modal-title", class: "text-base font-semibold tracking-tight {theme::text::PRIMARY}", "Service hardening" }
+                                    span { class: "text-[11px] font-medium uppercase tracking-[0.18em] {theme::text::MUTED}", "Service hardening" }
                                     span {
                                         class: "inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wide {risk_level_compact_badge_class(&service.risk_level)}",
                                         span { class: "h-1.5 w-1.5 rounded-full bg-current opacity-80" }
                                         "{short_risk_label(&service.risk_level)}"
                                     }
                                 }
-                                p { class: "text-xs {theme::text::SECONDARY}",
-                                    "Review systemd hardening details for"
+                                div { class: "space-y-1 min-w-0",
+                                    h3 { id: "hardening-modal-title", class: "text-lg font-semibold leading-tight {theme::text::PRIMARY} break-words", "{service.service_name}" }
+                                    p { class: "text-sm {theme::text::SECONDARY}",
+                                        "Review the service posture, scan the most relevant control gaps, and document an exception only if this exposure is intentional."
+                                    }
                                 }
-                                p { class: "text-xs font-mono {theme::text::PRIMARY} break-words",
-                                    "{service.service_name}"
+                                div { class: "grid gap-2 sm:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)]",
+                                    div { class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-4 py-3 space-y-2",
+                                        p { class: "text-[11px] font-medium uppercase tracking-[0.16em] {theme::text::MUTED}", "Posture" }
+                                        div { class: "flex items-end gap-2 flex-wrap",
+                                            p { class: "text-3xl font-semibold leading-none {theme::text::PRIMARY}", "{service.hardening_score}" }
+                                            p { class: "pb-0.5 text-sm {theme::text::SECONDARY}", "/ 100 hardening score" }
+                                        }
+                                        p { class: "text-sm leading-6 {theme::text::SECONDARY}",
+                                            "{hardening_service_summary(&service, justifications.iter().filter(|j| j.service_name == service.service_name).count())}"
+                                        }
+                                    }
+                                    div { class: "grid grid-cols-3 gap-2",
+                                        CompactMetricCard {
+                                            label: "Missing".to_string(),
+                                            value: format!("{}", service.missing_directives_count),
+                                            tone: "danger",
+                                        }
+                                        CompactMetricCard {
+                                            label: "Disabled".to_string(),
+                                            value: format!("{}", service.disabled_directives_count),
+                                            tone: "warning",
+                                        }
+                                        CompactMetricCard {
+                                            label: "Notes".to_string(),
+                                            value: format!(
+                                                "{}",
+                                                justifications
+                                                    .iter()
+                                                    .filter(|j| j.service_name == service.service_name)
+                                                    .count()
+                                            ),
+                                            tone: "neutral",
+                                        }
+                                    }
                                 }
                             }
                             button {
@@ -2861,113 +2897,42 @@ fn HardeningTab(
                     }
 
                     // Body
-                    div { class: "px-[22px] py-5 overflow-y-auto flex flex-col gap-[14px]",
-                        div { class: "flex flex-wrap gap-1.5",
-                            HardeningSummaryChipCompact {
-                                label: "Score",
-                                value: format!("{}", service.hardening_score),
-                                tone: "neutral",
-                            }
-                            HardeningSummaryChipCompact {
-                                label: "Missing",
-                                value: format!("{}", service.missing_directives_count),
-                                tone: "danger",
-                            }
-                            HardeningSummaryChipCompact {
-                                label: "Disabled",
-                                value: format!("{}", service.disabled_directives_count),
-                                tone: "warning",
-                            }
-                            HardeningSummaryChipCompact {
-                                label: "Justifications",
-                                value: format!(
-                                    "{}",
-                                    justifications
-                                        .iter()
-                                        .filter(|j| j.service_name == service.service_name)
-                                        .count()
-                                ),
-                                tone: "neutral",
-                            }
-                        }
-
-                        section { class: "space-y-2 rounded-xl border {theme::surface::CARD_BORDER} px-3.5 py-3",
-                            div { class: "flex items-center justify-between gap-2",
-                                p { class: "text-sm font-medium {theme::text::PRIMARY}", "Directive breakdown" }
-                                span { class: "text-[11px] {theme::text::MUTED}", "enabled controls and point contribution" }
-                            }
-
-                            div {
-                                class: "border {theme::surface::CARD_BORDER} rounded-xl overflow-hidden {theme::surface::SUBTLE_BG}",
-                                div {
-                                    if let Some(directives) = service.directives_detail.as_array() {
-                                        table { class: "w-full text-sm table-fixed",
-                                            thead {
-                                                tr { class: "sticky top-0 z-10 border-b {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG} text-left {theme::text::MUTED}",
-                                                    th { class: "px-3 py-2.5 w-[56%] text-[12px] font-medium", "Directive" }
-                                                    th { class: "px-3 py-2.5 w-[20%] text-center text-[12px] font-medium", "Status" }
-                                                    th { class: "px-3 py-2.5 w-[24%] text-right text-[12px] font-medium", "Points" }
-                                                }
-                                            }
-                                            tbody {
-                                                for item in directives {
-                                                    tr { class: "border-b {theme::surface::DIVIDER} {theme::interactive::HOVER_BG} last:border-b-0",
-                                                        td { class: "px-3 py-2.5 font-mono text-[12px] leading-5 align-top {theme::text::PRIMARY}",
-                                                            "{item.get(\"name\").and_then(|v| v.as_str()).unwrap_or(\"\")}" 
-                                                        }
-                                                        td { class: "px-3 py-2.5 text-center align-top text-[12px]",
-                                                            {
-                                                                if item.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
-                                                                    rsx! {
-                                                                        span { class: "inline-flex rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide {theme::health::HEALTHY_BORDER} {theme::health::HEALTHY_BG} {theme::health::HEALTHY_TEXT}",
-                                                                            "on"
-                                                                        }
-                                                                    }
-                                                                } else {
-                                                                    rsx! {
-                                                                        span { class: "inline-flex rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide {theme::health::CRITICAL_BORDER} {theme::health::CRITICAL_BG} {theme::health::CRITICAL_TEXT}",
-                                                                            "off"
-                                                                        }
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                        td { class: "px-3 py-2.5 text-right align-top font-mono text-[12px] {theme::text::SECONDARY}",
-                                                            "{item.get(\"points\").and_then(|v| v.as_i64()).unwrap_or(0)}/{item.get(\"max_points\").and_then(|v| v.as_i64()).unwrap_or(0)}"
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    } else {
-                                        div { class: "px-3 py-4 text-xs {theme::text::SECONDARY}",
-                                            "No directive details were returned for this service."
-                                        }
+                    div { class: "px-[22px] py-5 overflow-y-auto flex flex-col gap-4",
+                        section { class: "space-y-3",
+                            div { class: "flex items-end justify-between gap-2 flex-wrap",
+                                div { class: "space-y-1",
+                                    p { class: "text-sm font-medium {theme::text::PRIMARY}", "Control detail" }
+                                    p { class: "text-[12px] leading-5 {theme::text::SECONDARY}",
+                                        "Failing and partially applied directives are surfaced first so you can see why the score landed here without scanning a wide table."
                                     }
                                 }
+                                span { class: "text-[11px] {theme::text::MUTED}", "status · points · current value" }
                             }
-                        }
 
-                        section { class: "space-y-2 rounded-xl border {theme::surface::CARD_BORDER} px-3.5 py-3",
-                            p { class: "text-sm font-medium {theme::text::PRIMARY}", "Justifications" }
-                            if justifications.iter().all(|j| j.service_name != service.service_name) {
-                                div { class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-3 py-3 text-[12px] {theme::text::SECONDARY}",
-                                    "No justifications yet."
+                            if directive_cells(&service).is_empty() {
+                                div { class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-4 py-4 text-sm {theme::text::SECONDARY}",
+                                    "No directive details were returned for this service."
                                 }
                             } else {
-                                div { class: "flex flex-col gap-2",
-                                    for item in justifications.iter().filter(|j| j.service_name == service.service_name) {
-                                        div { class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-3 py-2.5 text-[12px] space-y-1.5",
-                                            div { class: "flex items-center gap-1.5 flex-wrap",
-                                                span {
-                                                    class: "inline-flex items-center rounded border {theme::surface::CARD_BORDER} px-1.5 py-0.5 text-[10px] font-medium {theme::text::SECONDARY}",
-                                                    "{item.category.clone().unwrap_or_else(|| \"uncategorized\".to_string())}"
+                                div { class: "space-y-2",
+                                    for directive in modal_directives(&service) {
+                                        div { class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-3.5 py-3",
+                                            div { class: "flex items-start justify-between gap-3",
+                                                div { class: "min-w-0 space-y-1",
+                                                    div { class: "flex items-center gap-2 flex-wrap",
+                                                        p { class: "font-mono text-[12px] leading-5 {theme::text::PRIMARY} break-all", "{directive.name}" }
+                                                        span {
+                                                            class: "inline-flex rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide {directive_badge_content(Some(&directive)).class_name}",
+                                                            title: "{directive_badge_content(Some(&directive)).title}",
+                                                            "{directive_badge_content(Some(&directive)).label}"
+                                                        }
+                                                    }
+                                                    p { class: "text-[12px] leading-5 {theme::text::SECONDARY}",
+                                                        "{modal_directive_description(&directive)}"
+                                                    }
                                                 }
-                                                if let Some(directive) = item.directive_name.clone() {
-                                                    span { class: "font-mono text-[10px] {theme::text::MUTED}", "{directive}" }
-                                                }
+                                                p { class: "shrink-0 font-mono text-[12px] {theme::text::SECONDARY}", "{directive.points}/{directive.max_points}" }
                                             }
-                                            p { class: "{theme::text::SECONDARY} leading-5", "{item.reason}" }
                                         }
                                     }
                                 }
@@ -2975,17 +2940,17 @@ fn HardeningTab(
                         }
 
                         if allow_mutations {
-                            section { class: "space-y-2.5 rounded-xl border {theme::surface::CARD_BORDER} px-3.5 py-3",
+                            section { class: "space-y-3 rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-4 py-4",
                                 div { class: "space-y-1",
-                                    p { class: "text-sm font-medium {theme::text::PRIMARY}", "Add justification" }
-                                    p { class: "text-[12px] {theme::text::SECONDARY}",
-                                        "Add a concise audit note explaining why this service posture is acceptable or intentionally different."
+                                    p { class: "text-sm font-semibold {theme::text::PRIMARY}", "Add justification" }
+                                    p { class: "text-[13px] leading-6 {theme::text::SECONDARY}",
+                                        "Use this when the current posture is acceptable for a documented reason, such as a compensating control, restricted runtime, or intentional service design."
                                     }
                                 }
                                 textarea {
-                                    class: "w-full min-h-[104px] max-h-36 px-3 py-2.5 rounded-lg text-[13px] leading-5 resize-none overflow-y-auto {theme::interactive::INPUT} {theme::text::PRIMARY}",
-                                    style: "max-height: 9rem;",
-                                    placeholder: "Explain the exception, mitigation, or compensating control…",
+                                    class: "w-full min-h-[120px] max-h-40 px-3 py-3 rounded-lg text-[13px] leading-6 resize-none overflow-y-auto {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                    style: "max-height: 10rem;",
+                                    placeholder: "Explain why this service posture is acceptable, what compensating control exists, or what risk is intentionally accepted…",
                                     value: "{reason}",
                                     oninput: move |evt| {
                                         reason.set(evt.value());
@@ -3000,7 +2965,7 @@ fn HardeningTab(
                                     p { class: "text-[11px] {theme::health::HEALTHY_TEXT}", "{message}" }
                                 }
                                 div { class: "flex flex-col items-stretch gap-2 pt-1 sm:flex-row sm:items-center sm:justify-between",
-                                    p { class: "text-[11px] leading-5 {theme::text::MUTED}", "Required for audit history." }
+                                    p { class: "text-[11px] leading-5 {theme::text::MUTED}", "Required for audit history when accepting a weaker service posture." }
                                     button {
                                         class: "h-9 px-3 rounded-lg {theme::interactive::PRIMARY_BTN} text-xs font-medium {theme::interactive::FOCUS_RING} self-start sm:self-auto",
                                         disabled: is_saving_justification() || reason.read().trim().is_empty(),
@@ -3049,6 +3014,35 @@ fn HardeningTab(
                                 }
                             }
                         }
+
+                        section { class: "space-y-2.5",
+                            div { class: "space-y-1",
+                                p { class: "text-sm font-medium {theme::text::PRIMARY}", "Existing justification history" }
+                                p { class: "text-[12px] leading-5 {theme::text::MUTED}", "Previous notes are kept here for audit context." }
+                            }
+                            if justifications.iter().all(|j| j.service_name != service.service_name) {
+                                div { class: "rounded-xl border {theme::surface::CARD_BORDER} px-3 py-3 text-[12px] {theme::text::SECONDARY}",
+                                    "No justifications yet."
+                                }
+                            } else {
+                                div { class: "flex flex-col gap-2",
+                                    for item in justifications.iter().filter(|j| j.service_name == service.service_name) {
+                                        div { class: "rounded-xl border {theme::surface::CARD_BORDER} px-3 py-2.5 text-[12px] space-y-1.5",
+                                            div { class: "flex items-center gap-1.5 flex-wrap",
+                                                span {
+                                                    class: "inline-flex items-center rounded border {theme::surface::CARD_BORDER} px-1.5 py-0.5 text-[10px] font-medium {theme::text::SECONDARY}",
+                                                    "{item.category.clone().unwrap_or_else(|| \"uncategorized\".to_string())}"
+                                                }
+                                                if let Some(directive) = item.directive_name.clone() {
+                                                    span { class: "font-mono text-[10px] {theme::text::MUTED}", "{directive}" }
+                                                }
+                                            }
+                                            p { class: "{theme::text::SECONDARY} leading-5", "{item.reason}" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     // Footer
@@ -3066,15 +3060,27 @@ fn HardeningTab(
                 }
             }
         }
-    }  // Close: rsx!
+    } // Close: rsx!
 }
 
 #[component]
 fn CompactMetricCard(label: String, value: String, tone: &'static str) -> Element {
     let tone_class = match tone {
-        "danger" => format!("border {} {}", theme::health::CRITICAL_BORDER, theme::health::CRITICAL_BG),
-        "warning" => format!("border {} {}", theme::health::WARNING_BORDER, theme::health::WARNING_BG),
-        _ => format!("border {} {}", theme::surface::CARD_BORDER, theme::surface::SUBTLE_BG),
+        "danger" => format!(
+            "border {} {}",
+            theme::health::CRITICAL_BORDER,
+            theme::health::CRITICAL_BG
+        ),
+        "warning" => format!(
+            "border {} {}",
+            theme::health::WARNING_BORDER,
+            theme::health::WARNING_BG
+        ),
+        _ => format!(
+            "border {} {}",
+            theme::surface::CARD_BORDER,
+            theme::surface::SUBTLE_BG
+        ),
     };
 
     rsx! {
@@ -3085,25 +3091,71 @@ fn CompactMetricCard(label: String, value: String, tone: &'static str) -> Elemen
     }
 }
 
-#[component]
-fn HardeningSummaryChipCompact(label: String, value: String, tone: &'static str) -> Element {
-    let tone_class = match tone {
-        "danger" => format!("{} {}", theme::health::CRITICAL_BORDER, theme::surface::SUBTLE_BG),
-        "warning" => format!("{} {}", theme::health::WARNING_BORDER, theme::surface::SUBTLE_BG),
-        _ => format!("{} {}", theme::surface::CARD_BORDER, theme::surface::SUBTLE_BG),
+fn hardening_service_summary(
+    service: &HardeningServiceResultResponse,
+    justification_count: usize,
+) -> String {
+    let notes = if justification_count == 1 {
+        "1 saved justification".to_string()
+    } else {
+        format!("{} saved justifications", justification_count)
     };
 
-    let value_class = match tone {
-        "danger" => theme::health::CRITICAL_TEXT,
-        "warning" => theme::health::WARNING_TEXT,
-        _ => theme::text::PRIMARY,
+    match service.risk_level.as_str() {
+        "well_hardened" => format!(
+            "This service is generally well hardened. {} controls are still missing and {} are disabled; {}.",
+            service.missing_directives_count, service.disabled_directives_count, notes
+        ),
+        "moderately_hardened" => format!(
+            "This service has a mixed posture. {} controls are missing and {} are disabled; {}.",
+            service.missing_directives_count, service.disabled_directives_count, notes
+        ),
+        "poorly_hardened" => format!(
+            "This service needs attention. {} controls are missing and {} are disabled before any documented exception; {}.",
+            service.missing_directives_count, service.disabled_directives_count, notes
+        ),
+        _ => format!(
+            "This service is currently vulnerable. {} controls are missing and {} are disabled; {}.",
+            service.missing_directives_count, service.disabled_directives_count, notes
+        ),
+    }
+}
+
+fn modal_directives(service: &HardeningServiceResultResponse) -> Vec<DirectiveCell> {
+    let mut directives = directive_cells(service);
+    directives.sort_by(|a, b| {
+        modal_directive_rank(a)
+            .cmp(&modal_directive_rank(b))
+            .then_with(|| a.points.cmp(&b.points))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    directives
+}
+
+fn modal_directive_rank(directive: &DirectiveCell) -> i32 {
+    if !directive.enabled || directive.points == 0 {
+        0
+    } else if directive.points < directive.max_points {
+        1
+    } else {
+        2
+    }
+}
+
+fn modal_directive_description(directive: &DirectiveCell) -> String {
+    let status = if !directive.enabled || directive.points == 0 {
+        "Not meaningfully enabled"
+    } else if directive.points < directive.max_points {
+        "Partially applied"
+    } else {
+        "Enabled"
     };
 
-    rsx! {
-        div { class: "inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] {tone_class}",
-            span { class: "tracking-wide {theme::text::MUTED}", "{label}" }
-            span { class: "font-semibold {value_class}", "{value}" }
-        }
+    let value = compact_directive_value(&directive.value);
+    if value == "unset" {
+        format!("{} · no explicit value returned by the scan.", status)
+    } else {
+        format!("{} · current value: {}.", status, value)
     }
 }
 
