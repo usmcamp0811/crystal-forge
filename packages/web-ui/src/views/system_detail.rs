@@ -2831,7 +2831,7 @@ fn HardeningTab(
                     // Header
                     div { class: "px-[22px] py-[18px] border-b {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG}",
                         div { class: "flex items-start justify-between gap-3",
-                            div { class: "space-y-3 min-w-0 flex-1",
+                            div { class: "space-y-2 min-w-0 flex-1",
                                 div { class: "flex items-center gap-2 flex-wrap",
                                     span { class: "text-[11px] font-medium uppercase tracking-[0.18em] {theme::text::MUTED}", "Service hardening" }
                                     span {
@@ -2843,41 +2843,15 @@ fn HardeningTab(
                                 div { class: "space-y-1 min-w-0",
                                     h3 { id: "hardening-modal-title", class: "text-lg font-semibold leading-tight {theme::text::PRIMARY} break-words", "{service.service_name}" }
                                     p { class: "text-sm {theme::text::SECONDARY}",
-                                        "Review the service posture, scan the most relevant control gaps, and document an exception only if this exposure is intentional."
-                                    }
-                                }
-                                div { class: "grid gap-2 sm:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)]",
-                                    div { class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-4 py-3 space-y-2",
-                                        p { class: "text-[11px] font-medium uppercase tracking-[0.16em] {theme::text::MUTED}", "Posture" }
-                                        div { class: "flex items-end gap-2 flex-wrap",
-                                            p { class: "text-3xl font-semibold leading-none {theme::text::PRIMARY}", "{service.hardening_score}" }
-                                            p { class: "pb-0.5 text-sm {theme::text::SECONDARY}", "/ 100 hardening score" }
-                                        }
-                                        p { class: "text-sm leading-6 {theme::text::SECONDARY}",
-                                            "{hardening_service_summary(&service, justifications.iter().filter(|j| j.service_name == service.service_name).count())}"
-                                        }
-                                    }
-                                    div { class: "grid grid-cols-3 gap-2",
-                                        CompactMetricCard {
-                                            label: "Missing".to_string(),
-                                            value: format!("{}", service.missing_directives_count),
-                                            tone: "danger",
-                                        }
-                                        CompactMetricCard {
-                                            label: "Disabled".to_string(),
-                                            value: format!("{}", service.disabled_directives_count),
-                                            tone: "warning",
-                                        }
-                                        CompactMetricCard {
-                                            label: "Notes".to_string(),
-                                            value: format!(
-                                                "{}",
-                                                justifications
-                                                    .iter()
-                                                    .filter(|j| j.service_name == service.service_name)
-                                                    .count()
-                                            ),
-                                            tone: "neutral",
+                                        "Score "
+                                        span { class: "font-semibold {theme::text::PRIMARY}", "{service.hardening_score}/100" }
+                                        " · Missing "
+                                        span { class: "font-semibold {theme::health::CRITICAL_TEXT}", "{service.missing_directives_count}" }
+                                        " · Disabled "
+                                        span { class: "font-semibold {theme::health::WARNING_TEXT}", "{service.disabled_directives_count}" }
+                                        " · Notes "
+                                        span { class: "font-semibold {theme::text::PRIMARY}",
+                                            "{justifications.iter().filter(|j| j.service_name == service.service_name).count()}"
                                         }
                                     }
                                 }
@@ -2903,10 +2877,10 @@ fn HardeningTab(
                                 div { class: "space-y-1",
                                     p { class: "text-sm font-medium {theme::text::PRIMARY}", "Control detail" }
                                     p { class: "text-[12px] leading-5 {theme::text::SECONDARY}",
-                                        "Failing and partially applied directives are surfaced first so you can see why the score landed here without scanning a wide table."
+                                        "Showing the most relevant controls first so you can quickly understand why this service scored as it did."
                                     }
                                 }
-                                span { class: "text-[11px] {theme::text::MUTED}", "status · points · current value" }
+                                span { class: "text-[11px] {theme::text::MUTED}", "status · points" }
                             }
 
                             if directive_cells(&service).is_empty() {
@@ -2915,7 +2889,7 @@ fn HardeningTab(
                                 }
                             } else {
                                 div { class: "space-y-2",
-                                    for directive in modal_directives(&service) {
+                                    for directive in modal_focus_directives(&service) {
                                         div { class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-3.5 py-3",
                                             div { class: "flex items-start justify-between gap-3",
                                                 div { class: "min-w-0 space-y-1",
@@ -2927,12 +2901,15 @@ fn HardeningTab(
                                                             "{directive_badge_content(Some(&directive)).label}"
                                                         }
                                                     }
-                                                    p { class: "text-[12px] leading-5 {theme::text::SECONDARY}",
-                                                        "{modal_directive_description(&directive)}"
-                                                    }
+                                                    p { class: "text-[12px] leading-5 {theme::text::SECONDARY}", "{modal_directive_description(&directive)}" }
                                                 }
                                                 p { class: "shrink-0 font-mono text-[12px] {theme::text::SECONDARY}", "{directive.points}/{directive.max_points}" }
                                             }
+                                        }
+                                    }
+                                    if modal_directives(&service).len() > modal_focus_directives(&service).len() {
+                                        p { class: "text-[11px] {theme::text::MUTED} px-1",
+                                            "Showing {modal_focus_directives(&service).len()} of {modal_directives(&service).len()} directives."
                                         }
                                     }
                                 }
@@ -3091,36 +3068,6 @@ fn CompactMetricCard(label: String, value: String, tone: &'static str) -> Elemen
     }
 }
 
-fn hardening_service_summary(
-    service: &HardeningServiceResultResponse,
-    justification_count: usize,
-) -> String {
-    let notes = if justification_count == 1 {
-        "1 saved justification".to_string()
-    } else {
-        format!("{} saved justifications", justification_count)
-    };
-
-    match service.risk_level.as_str() {
-        "well_hardened" => format!(
-            "This service is generally well hardened. {} controls are still missing and {} are disabled; {}.",
-            service.missing_directives_count, service.disabled_directives_count, notes
-        ),
-        "moderately_hardened" => format!(
-            "This service has a mixed posture. {} controls are missing and {} are disabled; {}.",
-            service.missing_directives_count, service.disabled_directives_count, notes
-        ),
-        "poorly_hardened" => format!(
-            "This service needs attention. {} controls are missing and {} are disabled before any documented exception; {}.",
-            service.missing_directives_count, service.disabled_directives_count, notes
-        ),
-        _ => format!(
-            "This service is currently vulnerable. {} controls are missing and {} are disabled; {}.",
-            service.missing_directives_count, service.disabled_directives_count, notes
-        ),
-    }
-}
-
 fn modal_directives(service: &HardeningServiceResultResponse) -> Vec<DirectiveCell> {
     let mut directives = directive_cells(service);
     directives.sort_by(|a, b| {
@@ -3130,6 +3077,22 @@ fn modal_directives(service: &HardeningServiceResultResponse) -> Vec<DirectiveCe
             .then_with(|| a.name.cmp(&b.name))
     });
     directives
+}
+
+fn modal_focus_directives(service: &HardeningServiceResultResponse) -> Vec<DirectiveCell> {
+    let prioritized = modal_directives(service);
+    let mut focused = prioritized
+        .iter()
+        .filter(|directive| modal_directive_rank(directive) < 2)
+        .take(8)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if focused.is_empty() {
+        focused = prioritized.into_iter().take(6).collect::<Vec<_>>();
+    }
+
+    focused
 }
 
 fn modal_directive_rank(directive: &DirectiveCell) -> i32 {
