@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-gpt-5.4
 created_date: '2026-04-19 02:43'
-updated_date: '2026-04-23 02:49'
+updated_date: '2026-04-23 03:04'
 labels:
   - feature
   - security
@@ -61,7 +61,7 @@ Create a feature to scan NixOS system configurations for systemd service hardeni
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Follow-up commit 074ef5bb restores full directive table visibility in the modal (no capped 8-row list) and places justification entry before detail/history for easier access while keeping current styling improvements.
+Commit 4afc2341 applies requested typography/layout polish: service name moved to top header row to save vertical space and control-detail helper text reduced in size.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
