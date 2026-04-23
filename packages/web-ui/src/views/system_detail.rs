@@ -2832,27 +2832,25 @@ fn HardeningTab(
                     div { class: "px-5 py-4 border-b {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG}",
                         div { class: "flex items-start justify-between gap-3",
                             div { class: "space-y-2 min-w-0 flex-1",
+                                h3 { id: "hardening-modal-title", class: "text-lg font-semibold leading-tight {theme::text::PRIMARY} break-words", "{service.service_name}" }
                                 div { class: "flex items-center gap-2 flex-wrap",
-                                    span { class: "text-[11px] font-medium uppercase tracking-[0.18em] {theme::text::MUTED}", "Service hardening" }
+                                    span { class: "text-[10px] font-medium uppercase tracking-[0.16em] {theme::text::MUTED}", "Service hardening" }
                                     span {
                                         class: "inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wide {risk_level_compact_badge_class(&service.risk_level)}",
                                         span { class: "h-1.5 w-1.5 rounded-full bg-current opacity-80" }
                                         "{short_risk_label(&service.risk_level)}"
                                     }
                                 }
-                                div { class: "space-y-1 min-w-0",
-                                    h3 { id: "hardening-modal-title", class: "text-lg font-semibold leading-tight {theme::text::PRIMARY} break-words", "{service.service_name}" }
-                                    p { class: "text-sm {theme::text::SECONDARY}",
-                                        "Score "
-                                        span { class: "font-semibold {theme::text::PRIMARY}", "{service.hardening_score}/100" }
-                                        " · Missing "
-                                        span { class: "font-semibold {theme::health::CRITICAL_TEXT}", "{service.missing_directives_count}" }
-                                        " · Disabled "
-                                        span { class: "font-semibold {theme::health::WARNING_TEXT}", "{service.disabled_directives_count}" }
-                                        " · Notes "
-                                        span { class: "font-semibold {theme::text::PRIMARY}",
-                                            "{justifications.iter().filter(|j| j.service_name == service.service_name).count()}"
-                                        }
+                                p { class: "text-sm {theme::text::SECONDARY}",
+                                    "Score "
+                                    span { class: "font-semibold {theme::text::PRIMARY}", "{service.hardening_score}/100" }
+                                    " · Missing "
+                                    span { class: "font-semibold {theme::health::CRITICAL_TEXT}", "{service.missing_directives_count}" }
+                                    " · Disabled "
+                                    span { class: "font-semibold {theme::health::WARNING_TEXT}", "{service.disabled_directives_count}" }
+                                    " · Notes "
+                                    span { class: "font-semibold {theme::text::PRIMARY}",
+                                        "{justifications.iter().filter(|j| j.service_name == service.service_name).count()}"
                                     }
                                 }
                             }
@@ -2952,7 +2950,7 @@ fn HardeningTab(
                             div { class: "flex items-end justify-between gap-2 flex-wrap",
                                 div { class: "space-y-1",
                                     p { class: "text-sm font-medium {theme::text::PRIMARY}", "Control detail" }
-                                    p { class: "text-[12px] leading-5 {theme::text::SECONDARY}",
+                                    p { class: "text-[11px] leading-4 {theme::text::SECONDARY}",
                                         "Showing the most relevant controls first so you can quickly understand why this service scored as it did."
                                     }
                                 }
