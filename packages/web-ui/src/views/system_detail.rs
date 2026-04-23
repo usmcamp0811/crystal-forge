@@ -2874,7 +2874,7 @@ fn HardeningTab(
                             section { class: "space-y-2.5 rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-3.5 py-3.5",
                                 div { class: "space-y-1",
                                     p { class: "text-sm font-semibold {theme::text::PRIMARY}", "Add justification" }
-                                    p { class: "text-[13px] leading-5 {theme::text::SECONDARY}",
+                                    p { class: "text-[11px] leading-4 {theme::text::SECONDARY}",
                                         "Document why this service posture is acceptable (compensating controls, constrained runtime, or accepted risk)."
                                     }
                                 }
@@ -2963,7 +2963,8 @@ fn HardeningTab(
                                 }
                             } else {
                                 div { class: "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden",
-                                    div { class: "max-h-[260px] overflow-y-scroll pr-1",
+                                    div { class: "h-[260px] overflow-y-scroll pr-1",
+                                        style: "scrollbar-gutter: stable both-edges;",
                                         table { class: "w-full text-sm table-fixed",
                                             thead {
                                                 tr { class: "sticky top-0 z-10 border-b {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG} text-left {theme::text::MUTED}",
