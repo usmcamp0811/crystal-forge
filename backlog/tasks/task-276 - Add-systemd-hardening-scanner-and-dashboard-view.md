@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-gpt-5.4
 created_date: '2026-04-19 02:43'
-updated_date: '2026-04-23 03:34'
+updated_date: '2026-04-23 12:47'
 labels:
   - feature
   - security
@@ -61,7 +61,7 @@ Create a feature to scan NixOS system configurations for systemd service hardeni
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Commit 8d999874: reduced justification helper copy size and changed directive table viewport to fixed height with stable scrollbar gutter so table scrolling is explicit.
+Commit ca0898bc: put service name and Service hardening label on one header row, reduced justification helper copy size, and added explicit modal table scrollbar styling in assets/app.css (including webkit thumb/track) so scroll affordance is visible.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
