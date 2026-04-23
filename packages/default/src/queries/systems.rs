@@ -1092,9 +1092,7 @@ mod tests {
             join_count, 2,
             "cve_counts CTE must join systems in both views (got {join_count})"
         );
-        let active_count = migration
-            .matches("WHERE s.is_active = TRUE")
-            .count();
+        let active_count = migration.matches("WHERE s.is_active = TRUE").count();
         assert!(
             active_count >= 2,
             "cve_counts CTE must filter is_active = TRUE in both views (got {active_count})"
@@ -1106,7 +1104,6 @@ mod tests {
             "0112 must not touch system_cve_justifications"
         );
     }
-
 
     #[tokio::test]
     #[ignore = "requires live database connection"]

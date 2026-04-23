@@ -911,6 +911,109 @@ pub struct CveScanStatusResponse {
     pub low_count: i32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HardeningFleetSummaryResponse {
+    pub total_systems_scanned: i64,
+    pub avg_fleet_score: Option<f64>,
+    pub total_well_hardened_services: i64,
+    pub total_moderately_hardened_services: i64,
+    pub total_poorly_hardened_services: i64,
+    pub total_vulnerable_services: i64,
+    pub total_services_scanned: i64,
+    pub last_scan_completed: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HardeningTopServiceResponse {
+    pub service_name: String,
+    pub affected_systems_count: i64,
+    pub avg_score: f64,
+    pub min_score: i32,
+    pub max_score: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HardeningSystemPostureResponse {
+    pub system_id: Option<Uuid>,
+    pub derivation_id: i32,
+    pub config_name: String,
+    pub hostname: Option<String>,
+    pub environment_name: Option<String>,
+    pub latest_scan_id: Option<Uuid>,
+    pub overall_score: Option<i32>,
+    pub risk_level: Option<String>,
+    pub total_services: Option<i32>,
+    pub well_hardened_count: Option<i32>,
+    pub moderately_hardened_count: Option<i32>,
+    pub poorly_hardened_count: Option<i32>,
+    pub vulnerable_count: Option<i32>,
+    pub last_scan_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HardeningServiceResultResponse {
+    pub id: Uuid,
+    pub scan_id: Uuid,
+    pub service_name: String,
+    pub service_type: Option<String>,
+    pub hardening_score: i32,
+    pub risk_level: String,
+    pub directives_detail: serde_json::Value,
+    pub enabled_directives_count: i32,
+    pub disabled_directives_count: i32,
+    pub missing_directives_count: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaveHardeningJustificationRequest {
+    pub directive_name: Option<String>,
+    pub category: Option<String>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HardeningJustificationResponse {
+    pub id: Uuid,
+    pub system_id: Uuid,
+    pub service_name: String,
+    pub directive_name: Option<String>,
+    pub category: Option<String>,
+    pub reason: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HardeningScanEligibilityResponse {
+    pub eligible: bool,
+    pub reason: Option<String>,
+    pub derivation_id: Option<i32>,
+    pub config_name: Option<String>,
+    pub hostname: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HardeningScanTriggerResponse {
+    pub scan_id: uuid::Uuid,
+    pub status: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HardeningScanStatusResponse {
+    pub scan_id: uuid::Uuid,
+    pub derivation_id: i32,
+    pub status: String,
+    pub error_message: Option<String>,
+    pub scheduled_at: Option<DateTime<Utc>>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub attempts: i32,
+    pub total_services: i32,
+    pub overall_score: Option<i32>,
+}
+
 /// Sort direction for list queries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
