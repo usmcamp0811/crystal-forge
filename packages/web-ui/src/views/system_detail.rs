@@ -2831,9 +2831,9 @@ fn HardeningTab(
                     // Header
                     div { class: "px-5 py-4 border-b {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG}",
                         div { class: "flex items-start justify-between gap-3",
-                            div { class: "space-y-2 min-w-0 flex-1",
-                                h3 { id: "hardening-modal-title", class: "text-lg font-semibold leading-tight {theme::text::PRIMARY} break-words", "{service.service_name}" }
+                            div { class: "space-y-1.5 min-w-0 flex-1",
                                 div { class: "flex items-center gap-2 flex-wrap",
+                                    h3 { id: "hardening-modal-title", class: "text-lg font-semibold leading-tight {theme::text::PRIMARY} break-words", "{service.service_name}" }
                                     span { class: "text-[10px] font-medium uppercase tracking-[0.16em] {theme::text::MUTED}", "Service hardening" }
                                     span {
                                         class: "inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wide {risk_level_compact_badge_class(&service.risk_level)}",
@@ -2874,7 +2874,7 @@ fn HardeningTab(
                             section { class: "space-y-2.5 rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-3.5 py-3.5",
                                 div { class: "space-y-1",
                                     p { class: "text-sm font-semibold {theme::text::PRIMARY}", "Add justification" }
-                                    p { class: "text-[11px] leading-4 {theme::text::SECONDARY}",
+                                    p { class: "text-[10px] leading-4 {theme::text::SECONDARY}",
                                         "Document why this service posture is acceptable (compensating controls, constrained runtime, or accepted risk)."
                                     }
                                 }
@@ -2963,7 +2963,7 @@ fn HardeningTab(
                                 }
                             } else {
                                 div { class: "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden",
-                                    div { class: "h-[260px] overflow-y-scroll pr-1",
+                                    div { class: "h-[260px] overflow-y-scroll pr-1 cf-modal-table-scroll",
                                         style: "scrollbar-gutter: stable both-edges;",
                                         table { class: "w-full text-sm table-fixed",
                                             thead {
