@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-gpt-5.4
 created_date: '2026-04-19 02:43'
-updated_date: '2026-04-23 02:05'
+updated_date: '2026-04-23 02:27'
 labels:
   - feature
   - security
@@ -61,7 +61,7 @@ Create a feature to scan NixOS system configurations for systemd service hardeni
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Follow-up simplification pushed in commit 9d39bd3a after UX feedback: removed heavy header cards, condensed posture into a single line, and limited directive detail to focused high-signal rows.
+Additional fit pass pushed in commit 20a939a9: widened modal shell, increased viewport headroom, reduced internal spacing, and bounded directive/history list heights so controls remain visible.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
