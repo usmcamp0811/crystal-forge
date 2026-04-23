@@ -2950,7 +2950,7 @@ fn HardeningTab(
                             div { class: "flex items-end justify-between gap-2 flex-wrap",
                                 div { class: "space-y-1",
                                     p { class: "text-sm font-medium {theme::text::PRIMARY}", "Control detail" }
-                                    p { class: "text-[11px] leading-4 {theme::text::SECONDARY}",
+                                    p { class: "text-[10px] leading-4 {theme::text::SECONDARY}",
                                         "Showing the most relevant controls first so you can quickly understand why this service scored as it did."
                                     }
                                 }
@@ -2963,7 +2963,7 @@ fn HardeningTab(
                                 }
                             } else {
                                 div { class: "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden",
-                                    div { class: "max-h-[260px] overflow-y-auto",
+                                    div { class: "max-h-[260px] overflow-y-scroll pr-1",
                                         table { class: "w-full text-sm table-fixed",
                                             thead {
                                                 tr { class: "sticky top-0 z-10 border-b {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG} text-left {theme::text::MUTED}",
