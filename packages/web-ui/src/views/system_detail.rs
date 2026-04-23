@@ -2821,15 +2821,15 @@ fn HardeningTab(
                 },
 
                 div {
-                    class: "relative w-full cf-modal-panel-44 {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl shadow-2xl cursor-default overflow-hidden",
-                    style: "width: 100%; max-width: 44rem; max-height: 84vh; display: flex; flex-direction: column;",
+                    class: "relative w-full {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl shadow-2xl cursor-default overflow-hidden",
+                    style: "width: 100%; max-width: 52rem; max-height: 88vh; display: flex; flex-direction: column;",
                     onclick: move |evt| evt.stop_propagation(),
                     role: "dialog",
                     aria_modal: "true",
                     aria_labelledby: "hardening-modal-title",
 
                     // Header
-                    div { class: "px-[22px] py-[18px] border-b {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG}",
+                    div { class: "px-5 py-4 border-b {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG}",
                         div { class: "flex items-start justify-between gap-3",
                             div { class: "space-y-2 min-w-0 flex-1",
                                 div { class: "flex items-center gap-2 flex-wrap",
@@ -2871,7 +2871,7 @@ fn HardeningTab(
                     }
 
                     // Body
-                    div { class: "px-[22px] py-5 overflow-y-auto flex flex-col gap-4",
+                    div { class: "px-5 py-4 overflow-y-auto flex flex-col gap-3",
                         section { class: "space-y-3",
                             div { class: "flex items-end justify-between gap-2 flex-wrap",
                                 div { class: "space-y-1",
@@ -2888,9 +2888,9 @@ fn HardeningTab(
                                     "No directive details were returned for this service."
                                 }
                             } else {
-                                div { class: "space-y-2",
+                                div { class: "space-y-2 max-h-[220px] overflow-y-auto pr-1",
                                     for directive in modal_focus_directives(&service) {
-                                        div { class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-3.5 py-3",
+                                        div { class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-3 py-2.5",
                                             div { class: "flex items-start justify-between gap-3",
                                                 div { class: "min-w-0 space-y-1",
                                                     div { class: "flex items-center gap-2 flex-wrap",
@@ -2917,7 +2917,7 @@ fn HardeningTab(
                         }
 
                         if allow_mutations {
-                            section { class: "space-y-3 rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-4 py-4",
+                            section { class: "space-y-2.5 rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-3.5 py-3.5",
                                 div { class: "space-y-1",
                                     p { class: "text-sm font-semibold {theme::text::PRIMARY}", "Add justification" }
                                     p { class: "text-[13px] leading-6 {theme::text::SECONDARY}",
@@ -2925,8 +2925,8 @@ fn HardeningTab(
                                     }
                                 }
                                 textarea {
-                                    class: "w-full min-h-[120px] max-h-40 px-3 py-3 rounded-lg text-[13px] leading-6 resize-none overflow-y-auto {theme::interactive::INPUT} {theme::text::PRIMARY}",
-                                    style: "max-height: 10rem;",
+                                    class: "w-full min-h-[96px] max-h-32 px-3 py-2.5 rounded-lg text-[13px] leading-5 resize-none overflow-y-auto {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                    style: "max-height: 8rem;",
                                     placeholder: "Explain why this service posture is acceptable, what compensating control exists, or what risk is intentionally accepted…",
                                     value: "{reason}",
                                     oninput: move |evt| {
@@ -3002,7 +3002,7 @@ fn HardeningTab(
                                     "No justifications yet."
                                 }
                             } else {
-                                div { class: "flex flex-col gap-2",
+                                div { class: "flex flex-col gap-2 max-h-[170px] overflow-y-auto pr-1",
                                     for item in justifications.iter().filter(|j| j.service_name == service.service_name) {
                                         div { class: "rounded-xl border {theme::surface::CARD_BORDER} px-3 py-2.5 text-[12px] space-y-1.5",
                                             div { class: "flex items-center gap-1.5 flex-wrap",
@@ -3023,7 +3023,7 @@ fn HardeningTab(
                     }
 
                     // Footer
-                    div { class: "px-[22px] py-[14px] border-t {theme::surface::DIVIDER} flex justify-end gap-2",
+                    div { class: "px-5 py-3.5 border-t {theme::surface::DIVIDER} flex justify-end gap-2",
                         button {
                             class: "h-9 px-3 rounded-lg border {theme::surface::CARD_BORDER} text-xs font-medium {theme::text::SECONDARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors",
                             onclick: move |_| {
