@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-gpt-5.4
 created_date: '2026-04-19 02:43'
-updated_date: '2026-04-22 19:38'
+updated_date: '2026-04-23 02:00'
 labels:
   - feature
   - security
@@ -61,9 +61,7 @@ Create a feature to scan NixOS system configurations for systemd service hardeni
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Modal refinement applied in packages/web-ui/src/views/system_detail.rs: stronger service identity/posture header, curated directive list instead of dense table, justification entry promoted ahead of history, and existing notes visually de-emphasized.
-
-Verification: `nix develop -c cargo check` passed from `packages/web-ui`. `nix develop -c cargo fmt --all -- --check` from the crate was not a usable task signal because unrelated files in the worktree already have formatting drift; file-scoped `rustfmt --edition 2024 --check src/views/system_detail.rs` passed after formatting the edited file.
+Pushed modal refinement commit aef5dec4 to branch TASK-276-systemd-hardening-scanner and updated MR !242.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
