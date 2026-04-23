@@ -17,6 +17,7 @@ pub mod derivations;
 pub mod environments;
 pub mod flake_credentials;
 pub mod flakes;
+pub mod hardening_scans;
 pub mod status;
 pub mod system_states;
 pub mod systems;
@@ -24,3 +25,6 @@ pub mod users;
 
 #[cfg(test)]
 mod cve_scans_tests;
+
+#[cfg(test)]
+mod hardening_scans_tests;

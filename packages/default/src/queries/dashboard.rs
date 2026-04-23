@@ -730,7 +730,10 @@ mod tests {
         )
         .bind(commit_id)
         .bind(hostname)
-        .bind(format!("/nix/store/task272-dash-host-{}.drv", Uuid::new_v4()))
+        .bind(format!(
+            "/nix/store/task272-dash-host-{}.drv",
+            Uuid::new_v4()
+        ))
         .bind(complete_status_id)
         .fetch_one(pool)
         .await
@@ -758,21 +761,22 @@ mod tests {
         )
         .bind(commit_id)
         .bind(format!("openssl-{}", Uuid::new_v4()))
-        .bind(format!("/nix/store/task272-dash-pkg-{}.drv", Uuid::new_v4()))
+        .bind(format!(
+            "/nix/store/task272-dash-pkg-{}.drv",
+            Uuid::new_v4()
+        ))
         .bind(complete_status_id)
         .fetch_one(pool)
         .await
         .expect("insert pkg derivation");
 
-        sqlx::query(
-            "INSERT INTO scan_packages (id, scan_id, derivation_id) VALUES ($1, $2, $3)",
-        )
-        .bind(Uuid::new_v4())
-        .bind(scan_id)
-        .bind(pkg_deriv_id)
-        .execute(pool)
-        .await
-        .expect("link scan package");
+        sqlx::query("INSERT INTO scan_packages (id, scan_id, derivation_id) VALUES ($1, $2, $3)")
+            .bind(Uuid::new_v4())
+            .bind(scan_id)
+            .bind(pkg_deriv_id)
+            .execute(pool)
+            .await
+            .expect("link scan package");
 
         sqlx::query(
             "INSERT INTO package_vulnerabilities (derivation_id, cve_id, is_whitelisted, detection_method)

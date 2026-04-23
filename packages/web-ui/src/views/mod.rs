@@ -12,6 +12,7 @@ pub mod environments_list;
 pub mod evaluations;
 pub mod flakes;
 pub mod flakes_list;
+pub mod hardening;
 pub mod login;
 pub mod not_found;
 pub mod policies;

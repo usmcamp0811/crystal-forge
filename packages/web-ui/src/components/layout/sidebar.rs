@@ -310,7 +310,9 @@ pub fn SidebarNav() -> Element {
                         }
                     )
                 }
+                // ── Admin (role-gated) ────────────────────────────────────
                 if show_admin {
+                    NavSection { collapsed: is_collapsed, label: "Admin" }
                     NavLink {
                         collapsed: is_collapsed,
                         to: Route::AdminView {},

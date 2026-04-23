@@ -6,4 +6,5 @@
 
 pub mod cve_policy_gate;
 pub mod cve_scans;
+pub mod hardening_scans;
 pub mod systems;

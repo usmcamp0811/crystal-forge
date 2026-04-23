@@ -105,7 +105,7 @@ pub fn GridWidget(props: GridWidgetProps) -> Element {
 
     rsx! {
         div {
-            class: "{theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl overflow-hidden transition-all duration-150 {drag_class} {drop_class}",
+            class: "{theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl overflow-hidden transition-all duration-150 {drag_class} {drop_class} h-full min-h-0 flex flex-col",
             style: "grid-column: {grid_col}; grid-row: {grid_row};",
             "data-widget-id": "{id}",
             draggable: "true",
@@ -172,7 +172,7 @@ pub fn GridWidget(props: GridWidgetProps) -> Element {
 
             // Widget content
             div {
-                class: "p-4 h-full min-h-0 overflow-hidden",
+                class: "p-4 flex-1 min-h-0 overflow-hidden",
                 {children}
             }
         }

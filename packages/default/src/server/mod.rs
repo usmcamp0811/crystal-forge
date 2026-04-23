@@ -29,6 +29,7 @@ use crate::queries::commits::{
 };
 use crate::queries::deployment_policies::list_enabled_deployment_policies;
 use crate::queries::derivations::{cleanup_partial_derivations, reset_stuck_builds};
+use crate::services::hardening_scans::trigger_commit_hardening_scans;
 
 fn custom_field_name(name: &str, id: uuid::Uuid) -> String {
     let mut slug = name
@@ -739,6 +740,30 @@ async fn process_pending_commits(
                             commit.git_commit_hash, e
                         );
                         // Don't fail the whole evaluation if job creation fails
+                    }
+                }
+
+                match trigger_commit_hardening_scans(
+                    pool.clone(),
+                    commit.id,
+                    &flake.repo_url,
+                    &commit.git_commit_hash,
+                )
+                .await
+                {
+                    Ok(count) => {
+                        if count > 0 {
+                            info!(
+                                "🛡️ Queued {} hardening scans for commit {}",
+                                count, commit.git_commit_hash
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        warn!(
+                            "Failed to queue hardening scans for commit {}: {}",
+                            commit.git_commit_hash, err
+                        );
                     }
                 }
 

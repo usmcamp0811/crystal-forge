@@ -21,7 +21,7 @@ use crystal_forge::{
         api::{
             admin, auth_dev, auth_local, auth_oidc, auth_session, auth_status, auth_whoami,
             builders, caches, commits, config_health, dashboard, deployment_policies, environments,
-            flakes, setup_wizard, systems,
+            flakes, hardening, setup_wizard, systems,
         },
         status,
         webhook::webhook_handler,
@@ -183,6 +183,18 @@ async fn main() -> anyhow::Result<()> {
             get(dashboard::cve_scan_freshness),
         )
         .route(
+            "/api/v1/hardening/summary",
+            get(hardening::hardening_fleet_summary),
+        )
+        .route(
+            "/api/v1/hardening/top-services",
+            get(hardening::hardening_top_services),
+        )
+        .route(
+            "/api/v1/hardening/systems",
+            get(hardening::hardening_system_postures),
+        )
+        .route(
             "/api/v1/systems",
             get(systems::list_systems).post(systems::create_system),
         )
@@ -202,6 +214,26 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/systems/:id/cve-scan",
             post(systems::trigger_system_cve_scan),
+        )
+        .route(
+            "/api/v1/systems/:id/hardening",
+            get(hardening::get_system_hardening),
+        )
+        .route(
+            "/api/v1/systems/:id/hardening/justifications",
+            get(hardening::get_system_hardening_justifications),
+        )
+        .route(
+            "/api/v1/systems/:id/hardening/:service_name/justification",
+            put(hardening::save_hardening_justification),
+        )
+        .route(
+            "/api/v1/systems/:id/hardening-scan-eligibility",
+            get(hardening::get_system_hardening_scan_eligibility),
+        )
+        .route(
+            "/api/v1/systems/:id/hardening-scan",
+            post(hardening::trigger_system_hardening_scan_handler),
         )
         .route("/api/v1/systems/:id/sync", post(systems::sync_system))
         .route(
@@ -291,6 +323,10 @@ async fn main() -> anyhow::Result<()> {
             get(flakes::get_commit_diff_handler),
         )
         .route("/api/v1/cve-scans/:id", get(systems::get_cve_scan_status))
+        .route(
+            "/api/v1/hardening-scans/:id",
+            get(hardening::get_hardening_scan_status),
+        )
         // Builder management (admin endpoints)
         .route(
             "/api/v1/builders",

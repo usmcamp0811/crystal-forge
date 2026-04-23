@@ -82,6 +82,28 @@ pub async fn fetch_cve_scan_freshness() -> Result<Vec<CveScanFreshnessRow>, ApiC
     fetch_json(&url).await
 }
 
+pub async fn fetch_hardening_fleet_summary(
+) -> Result<HardeningFleetSummaryResponse, ApiClientError> {
+    let url = format!("{}/hardening/summary", base_url());
+    fetch_json(&url).await
+}
+
+pub async fn fetch_hardening_top_services(
+    limit: Option<i64>,
+) -> Result<Vec<HardeningTopServiceResponse>, ApiClientError> {
+    let mut url = format!("{}/hardening/top-services", base_url());
+    if let Some(limit) = limit {
+        url.push_str(&format!("?limit={}", limit.clamp(1, 50)));
+    }
+    fetch_json(&url).await
+}
+
+pub async fn fetch_hardening_system_postures(
+) -> Result<Vec<HardeningSystemPostureResponse>, ApiClientError> {
+    let url = format!("{}/hardening/systems", base_url());
+    fetch_json(&url).await
+}
+
 /// Fetch admin-only CVE dashboard drill-down vulnerabilities with filters.
 pub async fn fetch_cve_dashboard_vulnerabilities(
     params: &CveDashboardVulnerabilityParams,
@@ -167,6 +189,56 @@ pub async fn fetch_system_cves(
     id: &uuid::Uuid,
 ) -> Result<Vec<SystemVulnerability>, ApiClientError> {
     let url = format!("{}/systems/{}/cves", base_url(), id);
+    fetch_json(&url).await
+}
+
+pub async fn fetch_system_hardening(
+    id: &uuid::Uuid,
+) -> Result<Vec<HardeningServiceResultResponse>, ApiClientError> {
+    let url = format!("{}/systems/{}/hardening", base_url(), id);
+    fetch_json(&url).await
+}
+
+pub async fn fetch_system_hardening_justifications(
+    id: &uuid::Uuid,
+) -> Result<Vec<HardeningJustificationResponse>, ApiClientError> {
+    let url = format!("{}/systems/{}/hardening/justifications", base_url(), id);
+    fetch_json(&url).await
+}
+
+pub async fn save_system_hardening_justification(
+    id: &uuid::Uuid,
+    service_name: &str,
+    request: &SaveHardeningJustificationRequest,
+) -> Result<SystemMutationResponse, ApiClientError> {
+    let encoded_service: String = js_sys::encode_uri_component(service_name).into();
+    let url = format!(
+        "{}/systems/{}/hardening/{}/justification",
+        base_url(),
+        id,
+        encoded_service
+    );
+    send_json_with_csrf("PUT", &url, Some(request)).await
+}
+
+pub async fn fetch_system_hardening_scan_eligibility(
+    id: &uuid::Uuid,
+) -> Result<HardeningScanEligibilityResponse, ApiClientError> {
+    let url = format!("{}/systems/{}/hardening-scan-eligibility", base_url(), id);
+    fetch_json(&url).await
+}
+
+pub async fn trigger_system_hardening_scan(
+    id: &uuid::Uuid,
+) -> Result<HardeningScanTriggerResponse, ApiClientError> {
+    let url = format!("{}/systems/{}/hardening-scan", base_url(), id);
+    send_json_with_csrf("POST", &url, None::<&()>).await
+}
+
+pub async fn fetch_hardening_scan_status(
+    scan_id: &uuid::Uuid,
+) -> Result<HardeningScanStatusResponse, ApiClientError> {
+    let url = format!("{}/hardening-scans/{}", base_url(), scan_id);
     fetch_json(&url).await
 }
 

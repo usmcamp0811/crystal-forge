@@ -182,6 +182,16 @@ pub fn StyleGuideView() -> Element {
             }
 
             ShowcaseSection {
+                title: "Hardening Audit Widgets",
+                description: "Dense security-audit presentation patterns used by the System Hardening dashboard.",
+                ResponsivePreview {
+                    label: "wide desktop (1200px)",
+                    width_class: WIDE_WIDTH,
+                    HardeningAuditPreview {}
+                }
+            }
+
+            ShowcaseSection {
                 title: "Interactive Components",
                 description: "Components with user interaction patterns, demonstrated with state management.",
                 VariantGroup { title: "View Toggle States",
@@ -847,5 +857,92 @@ fn ViewToggleDemo(initial_mode: ViewMode) -> Element {
                 "Current: {mode_text}"
             }
         }
+    }
+}
+
+#[component]
+fn HardeningAuditPreview() -> Element {
+    rsx! {
+        div { class: "space-y-3",
+            div { class: "grid grid-cols-5 gap-2",
+                HardeningSummaryChip { label: "Scanned", value: "42", tone: "neutral" }
+                HardeningSummaryChip { label: "Avg score", value: "61.4", tone: "neutral" }
+                HardeningSummaryChip { label: "High risk", value: "17", tone: "danger" }
+                HardeningSummaryChip { label: "Exposure", value: "133", tone: "warning" }
+                HardeningSummaryChip { label: "Visible", value: "20", tone: "neutral" }
+            }
+
+            div { class: "{theme::presets::TABLE_CONTAINER}",
+                div { class: "overflow-x-auto",
+                    table { class: "w-full min-w-[960px] text-xs",
+                        thead {
+                            tr { class: "{theme::surface::SUBTLE_BG} border-b {theme::surface::CARD_BORDER} {theme::text::MUTED} uppercase tracking-wide",
+                                th { class: "px-2 py-2 text-left", colspan: "4", "Target" }
+                                th { class: "px-2 py-2 text-center", colspan: "5", "Isolation" }
+                                th { class: "px-2 py-2 text-center", colspan: "2", "Audit" }
+                            }
+                            tr { class: "{theme::surface::CARD_BG} border-b {theme::surface::CARD_BORDER} {theme::text::SECONDARY}",
+                                th { class: "px-2 py-2", "Risk" }
+                                th { class: "px-2 py-2", "Score" }
+                                th { class: "px-2 py-2", "Service" }
+                                th { class: "px-2 py-2", "Identity" }
+                                th { class: "px-1 py-2 text-center font-mono", "Tmp" }
+                                th { class: "px-1 py-2 text-center font-mono", "Dev" }
+                                th { class: "px-1 py-2 text-center font-mono", "Net" }
+                                th { class: "px-1 py-2 text-center font-mono", "Usr" }
+                                th { class: "px-1 py-2 text-center font-mono", "PSys" }
+                                th { class: "px-2 py-2 text-center", "J" }
+                                th { class: "px-2 py-2 text-center", "Detail" }
+                            }
+                        }
+                        tbody {
+                            tr { class: "border-b {theme::surface::DIVIDER}",
+                                td { class: "px-2 py-1.5", HardeningCellBadge { label: "VULN", tone: "danger" } }
+                                td { class: "px-2 py-1.5 font-semibold text-white", "34" }
+                                td { class: "px-2 py-1.5 font-mono {theme::text::PRIMARY}", "nginx.service" }
+                                td { class: "px-2 py-1.5 {theme::text::SECONDARY}", "simple" }
+                                td { class: "px-1 py-1 text-center", HardeningCellBadge { label: "OFF", tone: "danger" } }
+                                td { class: "px-1 py-1 text-center", HardeningCellBadge { label: "OFF", tone: "danger" } }
+                                td { class: "px-1 py-1 text-center", HardeningCellBadge { label: "PAR", tone: "warning" } }
+                                td { class: "px-1 py-1 text-center", HardeningCellBadge { label: "OFF", tone: "danger" } }
+                                td { class: "px-1 py-1 text-center", HardeningCellBadge { label: "OFF", tone: "danger" } }
+                                td { class: "px-2 py-1.5 text-center {theme::text::PRIMARY}", "1" }
+                                td { class: "px-2 py-1.5 text-center", HardeningCellBadge { label: "Open", tone: "neutral" } }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn HardeningSummaryChip(label: &'static str, value: &'static str, tone: &'static str) -> Element {
+    let tone_class = match tone {
+        "danger" => "border-red-500/30 bg-red-500/10",
+        "warning" => "border-amber-500/30 bg-amber-500/10",
+        _ => "border cf-card-border cf-subtle-bg",
+    };
+
+    rsx! {
+        div { class: "rounded-md border {tone_class} px-2 py-1.5",
+            p { class: "text-[10px] uppercase tracking-wide {theme::text::MUTED}", "{label}" }
+            p { class: "text-base font-semibold {theme::text::PRIMARY}", "{value}" }
+        }
+    }
+}
+
+#[component]
+fn HardeningCellBadge(label: &'static str, tone: &'static str) -> Element {
+    let class_name = match tone {
+        "danger" => "border-red-500/40 bg-red-500/20 text-red-100",
+        "warning" => "border-amber-500/40 bg-amber-500/20 text-amber-100",
+        "neutral" => "border cf-card-border cf-subtle-bg cf-text-secondary",
+        _ => "border-emerald-500/40 bg-emerald-500/20 text-emerald-100",
+    };
+
+    rsx! {
+        span { class: "inline-flex min-w-[34px] justify-center rounded border px-1 py-0.5 text-[10px] font-semibold {class_name}", "{label}" }
     }
 }
