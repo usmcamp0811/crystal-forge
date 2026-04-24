@@ -430,7 +430,15 @@ pub async fn finalize_cancelled_job(
 
     builders::finalize_cancelled_job(&state.pool, &job_id, &builder_id)
         .await
-        .map_err(|_| StatusCode::CONFLICT)?;
+        .map_err(|err| {
+            tracing::warn!(
+                builder_id = %builder_id,
+                job_id = %job_id,
+                error = %err,
+                "Rejected finalize-cancelled transition due to lease/state mismatch"
+            );
+            StatusCode::CONFLICT
+        })?;
 
     cleanup_build_log_channel(&state, job_id).await;
     Ok(StatusCode::OK)
@@ -716,7 +724,15 @@ pub async fn complete_job(
     // Mark job as complete
     builders::mark_job_complete(&state.pool, &job_id, &builder_id)
         .await
-        .map_err(|_| StatusCode::CONFLICT)?;
+        .map_err(|err| {
+            tracing::warn!(
+                builder_id = %builder_id,
+                job_id = %job_id,
+                error = %err,
+                "Rejected complete transition due to lease/state mismatch"
+            );
+            StatusCode::CONFLICT
+        })?;
 
     cleanup_build_log_channel(&state, job_id).await;
 
@@ -765,7 +781,15 @@ pub async fn fail_job(
         request.error_message.as_deref(),
     )
     .await
-    .map_err(|_| StatusCode::CONFLICT)?;
+    .map_err(|err| {
+        tracing::warn!(
+            builder_id = %builder_id,
+            job_id = %job_id,
+            error = %err,
+            "Rejected fail transition due to lease/state mismatch"
+        );
+        StatusCode::CONFLICT
+    })?;
 
     // Return 200 for re-queued jobs, 202 for permanently failed jobs
     if updated_job.status == "queued" {

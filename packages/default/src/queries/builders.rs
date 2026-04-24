@@ -777,7 +777,7 @@ pub async fn mark_job_complete(
     job_id: &Uuid,
     builder_id: &Uuid,
 ) -> Result<BuildJob> {
-    let job = sqlx::query_as::<_, BuildJob>(
+    let result = sqlx::query(
         r#"
         UPDATE build_jobs
         SET status = 'success',
@@ -786,16 +786,20 @@ pub async fn mark_job_complete(
         WHERE id = $1
           AND builder_id = $2
           AND status = 'building'
-        RETURNING *
         "#,
     )
     .bind(job_id)
     .bind(builder_id)
-    .fetch_optional(pool)
+    .execute(pool)
     .await
-    .context("Failed to mark job as complete")?
-    .ok_or_else(|| {
-        anyhow::anyhow!("Build job not found or no longer owned by this builder in building status")
+    .context("Failed to mark job as complete")?;
+
+    if result.rows_affected() == 0 {
+        bail!("Build job not found or no longer owned by this builder in building status");
+    }
+
+    let job = get_build_job_by_id(pool, job_id).await?.ok_or_else(|| {
+        anyhow::anyhow!("Build job disappeared after successful complete transition")
     })?;
 
     Ok(job)
@@ -992,7 +996,7 @@ pub async fn mark_job_failed_with_retry(
         // Slightly reduce priority weight on retry (newer commits stay higher priority)
         let new_priority = job.priority_weight * 0.95;
 
-        let updated_job = sqlx::query_as::<_, BuildJob>(
+        let updated_job = sqlx::query(
             r#"
             UPDATE build_jobs
             SET status = 'queued',
@@ -1005,25 +1009,27 @@ pub async fn mark_job_failed_with_retry(
             WHERE id = $1
               AND builder_id = $3
               AND status = 'building'
-            RETURNING *
             "#,
         )
         .bind(job_id)
         .bind(new_priority)
         .bind(builder_id)
-        .fetch_optional(pool)
+        .execute(pool)
         .await
-        .context("Failed to re-queue job for retry")?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Build job ownership/status changed before retry transition could be applied"
-            )
+        .context("Failed to re-queue job for retry")?;
+
+        if updated_job.rows_affected() == 0 {
+            bail!("Build job ownership/status changed before retry transition could be applied");
+        }
+
+        let updated_job = get_build_job_by_id(pool, job_id).await?.ok_or_else(|| {
+            anyhow::anyhow!("Build job disappeared after successful retry transition")
         })?;
 
         Ok(updated_job)
     } else {
         // Permanently failed - exceeded max retries
-        let failed_job = sqlx::query_as::<_, BuildJob>(
+        let failed_job = sqlx::query(
             r#"
             UPDATE build_jobs
             SET status = 'failed',
@@ -1032,18 +1038,20 @@ pub async fn mark_job_failed_with_retry(
             WHERE id = $1
               AND builder_id = $2
               AND status = 'building'
-            RETURNING *
             "#,
         )
         .bind(job_id)
         .bind(builder_id)
-        .fetch_optional(pool)
+        .execute(pool)
         .await
-        .context("Failed to mark job as permanently failed")?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Build job ownership/status changed before fail transition could be applied"
-            )
+        .context("Failed to mark job as permanently failed")?;
+
+        if failed_job.rows_affected() == 0 {
+            bail!("Build job ownership/status changed before fail transition could be applied");
+        }
+
+        let failed_job = get_build_job_by_id(pool, job_id).await?.ok_or_else(|| {
+            anyhow::anyhow!("Build job disappeared after successful fail transition")
         })?;
 
         Ok(failed_job)
@@ -1171,7 +1179,7 @@ pub async fn finalize_cancelled_job(
     job_id: &Uuid,
     builder_id: &Uuid,
 ) -> Result<BuildJob> {
-    let job = sqlx::query_as::<_, BuildJob>(
+    let result = sqlx::query(
         r#"
         UPDATE build_jobs
         SET status       = 'cancelled',
@@ -1180,18 +1188,20 @@ pub async fn finalize_cancelled_job(
         WHERE id = $1
           AND builder_id = $2
           AND status IN ('cancelling', 'cancelled')
-        RETURNING *
         "#,
     )
     .bind(job_id)
     .bind(builder_id)
-    .fetch_optional(pool)
+    .execute(pool)
     .await
-    .context("Failed to finalize cancelled job")?
-    .ok_or_else(|| {
-        anyhow::anyhow!(
-            "Build job not found or no longer owned by this builder in cancellable state"
-        )
+    .context("Failed to finalize cancelled job")?;
+
+    if result.rows_affected() == 0 {
+        bail!("Build job not found or no longer owned by this builder in cancellable state");
+    }
+
+    let job = get_build_job_by_id(pool, job_id).await?.ok_or_else(|| {
+        anyhow::anyhow!("Build job disappeared after successful finalize-cancelled transition")
     })?;
 
     Ok(job)
