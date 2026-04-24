@@ -503,6 +503,42 @@ pub async fn mark_stale_builders_offline(pool: &PgPool, timeout_seconds: i64) ->
     Ok(result.rows_affected() as i64)
 }
 
+/// Re-queue orphaned jobs stuck in `building` with no active builder.
+///
+/// A job is considered orphaned when it is `building` and:
+/// - `builder_id` is NULL, or
+/// - the referenced builder row is missing, or
+/// - the referenced builder is not `active` (e.g. offline/inactive).
+pub async fn requeue_orphaned_building_jobs(pool: &PgPool) -> Result<Vec<BuildJob>> {
+    let recovered = sqlx::query_as::<_, BuildJob>(
+        r#"
+        UPDATE build_jobs bj
+        SET status = 'queued',
+            builder_id = NULL,
+            started_at = NULL,
+            updated_at = now()
+        WHERE bj.status = 'building'
+          AND (
+                bj.builder_id IS NULL
+                OR NOT EXISTS (
+                    SELECT 1 FROM builders b WHERE b.id = bj.builder_id
+                )
+                OR EXISTS (
+                    SELECT 1 FROM builders b
+                    WHERE b.id = bj.builder_id
+                      AND b.status <> 'active'
+                )
+          )
+        RETURNING bj.*
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .context("Failed to re-queue orphaned building jobs")?;
+
+    Ok(recovered)
+}
+
 // =============================================================================
 // BUILD JOB QUERIES (Work Queue Operations)
 // =============================================================================
@@ -1738,5 +1774,158 @@ mod tests {
             .expect("status lookup should succeed")
             .expect("job should still exist");
         assert_eq!(final_status, "success");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_requeue_orphaned_building_jobs_keeps_active_builder_jobs() {
+        let pool = test_pool().await;
+        let now = Utc::now();
+
+        let active_builder = create_active_test_builder(&pool, "requeue-active-builder").await;
+        let stale_builder = create_active_test_builder(&pool, "requeue-stale-builder").await;
+
+        sqlx::query("UPDATE builders SET status = 'offline' WHERE id = $1")
+            .bind(stale_builder.id)
+            .execute(&pool)
+            .await
+            .expect("Failed to mark stale builder offline");
+
+        let active_job = create_queued_job(
+            &pool,
+            "https://example.com/requeue-active.git",
+            "requeue-active",
+            "requeueactive000000000000000000000001",
+            now,
+            "drv-requeue-active",
+            1.0,
+            now,
+        )
+        .await;
+        set_build_job_status(&pool, active_job, "building").await;
+        sqlx::query("UPDATE build_jobs SET builder_id = $2 WHERE id = $1")
+            .bind(active_job)
+            .bind(active_builder.id)
+            .execute(&pool)
+            .await
+            .expect("Failed to assign active job to active builder");
+
+        let orphan_job = create_queued_job(
+            &pool,
+            "https://example.com/requeue-orphan.git",
+            "requeue-orphan",
+            "requeueorphan000000000000000000000001",
+            now,
+            "drv-requeue-orphan",
+            1.0,
+            now,
+        )
+        .await;
+        set_build_job_status(&pool, orphan_job, "building").await;
+        sqlx::query("UPDATE build_jobs SET builder_id = NULL WHERE id = $1")
+            .bind(orphan_job)
+            .execute(&pool)
+            .await
+            .expect("Failed to null builder assignment for orphan job");
+
+        let stale_job = create_queued_job(
+            &pool,
+            "https://example.com/requeue-stale.git",
+            "requeue-stale",
+            "requeuestale000000000000000000000001",
+            now,
+            "drv-requeue-stale",
+            1.0,
+            now,
+        )
+        .await;
+        set_build_job_status(&pool, stale_job, "building").await;
+        sqlx::query("UPDATE build_jobs SET builder_id = $2 WHERE id = $1")
+            .bind(stale_job)
+            .bind(stale_builder.id)
+            .execute(&pool)
+            .await
+            .expect("Failed to assign stale job to stale builder");
+
+        let recovered = requeue_orphaned_building_jobs(&pool)
+            .await
+            .expect("Failed to recover orphaned jobs");
+
+        let recovered_ids: std::collections::HashSet<Uuid> =
+            recovered.iter().map(|job| job.id).collect();
+        assert!(recovered_ids.contains(&orphan_job));
+        assert!(recovered_ids.contains(&stale_job));
+        assert!(!recovered_ids.contains(&active_job));
+
+        let active_status = get_build_job_status(&pool, &active_job)
+            .await
+            .expect("active job status lookup should succeed")
+            .expect("active job should exist");
+        assert_eq!(active_status, "building");
+
+        let orphan_status = get_build_job_status(&pool, &orphan_job)
+            .await
+            .expect("orphan job status lookup should succeed")
+            .expect("orphan job should exist");
+        assert_eq!(orphan_status, "queued");
+
+        let stale_status = get_build_job_status(&pool, &stale_job)
+            .await
+            .expect("stale job status lookup should succeed")
+            .expect("stale job should exist");
+        assert_eq!(stale_status, "queued");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_mark_stale_builders_offline_then_requeue_building_jobs() {
+        let pool = test_pool().await;
+        let now = Utc::now();
+
+        let builder = create_active_test_builder(&pool, "stale-offline-requeue-builder").await;
+
+        sqlx::query(
+            "UPDATE builders SET last_heartbeat_at = now() - interval '10 minutes' WHERE id = $1",
+        )
+        .bind(builder.id)
+        .execute(&pool)
+        .await
+        .expect("Failed to backdate builder heartbeat");
+
+        let job_id = create_queued_job(
+            &pool,
+            "https://example.com/requeue-runtime.git",
+            "requeue-runtime",
+            "requeueruntime0000000000000000000001",
+            now,
+            "drv-requeue-runtime",
+            1.0,
+            now,
+        )
+        .await;
+        set_build_job_status(&pool, job_id, "building").await;
+        sqlx::query("UPDATE build_jobs SET builder_id = $2 WHERE id = $1")
+            .bind(job_id)
+            .bind(builder.id)
+            .execute(&pool)
+            .await
+            .expect("Failed to assign runtime test job to builder");
+
+        let marked = mark_stale_builders_offline(&pool, 60)
+            .await
+            .expect("Failed to mark stale builders offline");
+        assert_eq!(marked, 1, "expected one stale builder to be marked offline");
+
+        let recovered = requeue_orphaned_building_jobs(&pool)
+            .await
+            .expect("Failed to requeue stale-builder jobs");
+        assert_eq!(recovered.len(), 1, "expected one recovered job");
+        assert_eq!(recovered[0].id, job_id);
+
+        let status = get_build_job_status(&pool, &job_id)
+            .await
+            .expect("status lookup should succeed")
+            .expect("job should exist");
+        assert_eq!(status, "queued");
     }
 }
