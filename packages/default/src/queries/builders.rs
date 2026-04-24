@@ -768,8 +768,15 @@ pub async fn assign_job_to_builder(
     Ok(job)
 }
 
-/// Mark a job as successfully completed
-pub async fn mark_job_complete(pool: &PgPool, job_id: &Uuid) -> Result<BuildJob> {
+/// Mark a job as successfully completed for a specific builder lease.
+///
+/// This transition is guarded by `(id, builder_id, status='building')` so a stale
+/// builder cannot clobber a job that has already been re-queued or reclaimed.
+pub async fn mark_job_complete(
+    pool: &PgPool,
+    job_id: &Uuid,
+    builder_id: &Uuid,
+) -> Result<BuildJob> {
     let job = sqlx::query_as::<_, BuildJob>(
         r#"
         UPDATE build_jobs
@@ -777,13 +784,19 @@ pub async fn mark_job_complete(pool: &PgPool, job_id: &Uuid) -> Result<BuildJob>
             completed_at = now(),
             updated_at = now()
         WHERE id = $1
+          AND builder_id = $2
+          AND status = 'building'
         RETURNING *
         "#,
     )
     .bind(job_id)
-    .fetch_one(pool)
+    .bind(builder_id)
+    .fetch_optional(pool)
     .await
-    .context("Failed to mark job as complete")?;
+    .context("Failed to mark job as complete")?
+    .ok_or_else(|| {
+        anyhow::anyhow!("Build job not found or no longer owned by this builder in building status")
+    })?;
 
     Ok(job)
 }
@@ -952,12 +965,27 @@ pub async fn prioritize_build_job(pool: &PgPool, job_id: &Uuid) -> Result<()> {
 pub async fn mark_job_failed_with_retry(
     pool: &PgPool,
     job_id: &Uuid,
+    builder_id: &Uuid,
     error_message: Option<&str>,
 ) -> Result<BuildJob> {
     // First, get the current job state
-    let job = get_build_job_by_id(pool, job_id)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("Job not found"))?;
+    let job = sqlx::query_as::<_, BuildJob>(
+        r#"
+        SELECT *
+        FROM build_jobs
+        WHERE id = $1
+          AND builder_id = $2
+          AND status = 'building'
+        "#,
+    )
+    .bind(job_id)
+    .bind(builder_id)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to load owned building job for fail transition")?
+    .ok_or_else(|| {
+        anyhow::anyhow!("Build job not found or no longer owned by this builder in building status")
+    })?;
 
     if job.retry_count < job.max_retries {
         // Re-queue the job with incremented retry count
@@ -975,14 +1003,22 @@ pub async fn mark_job_failed_with_retry(
                 created_at = now(),
                 updated_at = now()
             WHERE id = $1
+              AND builder_id = $3
+              AND status = 'building'
             RETURNING *
             "#,
         )
         .bind(job_id)
         .bind(new_priority)
-        .fetch_one(pool)
+        .bind(builder_id)
+        .fetch_optional(pool)
         .await
-        .context("Failed to re-queue job for retry")?;
+        .context("Failed to re-queue job for retry")?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Build job ownership/status changed before retry transition could be applied"
+            )
+        })?;
 
         Ok(updated_job)
     } else {
@@ -994,13 +1030,21 @@ pub async fn mark_job_failed_with_retry(
                 completed_at = now(),
                 updated_at = now()
             WHERE id = $1
+              AND builder_id = $2
+              AND status = 'building'
             RETURNING *
             "#,
         )
         .bind(job_id)
-        .fetch_one(pool)
+        .bind(builder_id)
+        .fetch_optional(pool)
         .await
-        .context("Failed to mark job as permanently failed")?;
+        .context("Failed to mark job as permanently failed")?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Build job ownership/status changed before fail transition could be applied"
+            )
+        })?;
 
         Ok(failed_job)
     }
@@ -1122,7 +1166,11 @@ pub async fn force_cancel_build_job(pool: &PgPool, job_id: &Uuid) -> Result<Buil
 ///
 /// Idempotent: if the job is already `cancelled` the update matches 0 rows and
 /// we return the existing row unchanged rather than an error.
-pub async fn finalize_cancelled_job(pool: &PgPool, job_id: &Uuid) -> Result<BuildJob> {
+pub async fn finalize_cancelled_job(
+    pool: &PgPool,
+    job_id: &Uuid,
+    builder_id: &Uuid,
+) -> Result<BuildJob> {
     let job = sqlx::query_as::<_, BuildJob>(
         r#"
         UPDATE build_jobs
@@ -1130,15 +1178,21 @@ pub async fn finalize_cancelled_job(pool: &PgPool, job_id: &Uuid) -> Result<Buil
             completed_at = now(),
             updated_at   = now()
         WHERE id = $1
+          AND builder_id = $2
           AND status IN ('cancelling', 'cancelled')
         RETURNING *
         "#,
     )
     .bind(job_id)
+    .bind(builder_id)
     .fetch_optional(pool)
     .await
     .context("Failed to finalize cancelled job")?
-    .ok_or_else(|| anyhow::anyhow!("Build job not found or not in a cancellable state"))?;
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "Build job not found or no longer owned by this builder in cancellable state"
+        )
+    })?;
 
     Ok(job)
 }
@@ -1927,5 +1981,121 @@ mod tests {
             .expect("status lookup should succeed")
             .expect("job should exist");
         assert_eq!(status, "queued");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_late_stale_builder_completion_does_not_clobber_requeued_job() {
+        let pool = test_pool().await;
+        let now = Utc::now();
+
+        let builder_a = create_active_test_builder(&pool, "late-builder-a").await;
+        let builder_b = create_active_test_builder(&pool, "late-builder-b").await;
+
+        let job_id = create_queued_job(
+            &pool,
+            "https://example.com/late-complete.git",
+            "late-complete",
+            "latecomplete000000000000000000000001",
+            now,
+            "drv-late-complete",
+            1.0,
+            now,
+        )
+        .await;
+
+        assign_job_to_builder(&pool, &job_id, &builder_a.id)
+            .await
+            .expect("builder A should claim job");
+
+        sqlx::query("UPDATE builders SET status = 'offline' WHERE id = $1")
+            .bind(builder_a.id)
+            .execute(&pool)
+            .await
+            .expect("Failed to mark builder A offline");
+
+        let recovered = requeue_orphaned_building_jobs(&pool)
+            .await
+            .expect("recovery should succeed");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].id, job_id);
+
+        assign_job_to_builder(&pool, &job_id, &builder_b.id)
+            .await
+            .expect("builder B should claim requeued job");
+
+        let stale_complete = mark_job_complete(&pool, &job_id, &builder_a.id).await;
+        assert!(
+            stale_complete.is_err(),
+            "stale builder A completion must be rejected"
+        );
+
+        let still_building = get_build_job_status(&pool, &job_id)
+            .await
+            .expect("status lookup should succeed")
+            .expect("job should exist");
+        assert_eq!(still_building, "building");
+
+        let row = get_build_job_by_id(&pool, &job_id)
+            .await
+            .expect("job fetch should succeed")
+            .expect("job should exist");
+        assert_eq!(row.builder_id, Some(builder_b.id));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_late_stale_builder_failure_does_not_clobber_requeued_job() {
+        let pool = test_pool().await;
+        let now = Utc::now();
+
+        let builder_a = create_active_test_builder(&pool, "late-fail-builder-a").await;
+        let builder_b = create_active_test_builder(&pool, "late-fail-builder-b").await;
+
+        let job_id = create_queued_job(
+            &pool,
+            "https://example.com/late-fail.git",
+            "late-fail",
+            "latefail0000000000000000000000000001",
+            now,
+            "drv-late-fail",
+            1.0,
+            now,
+        )
+        .await;
+
+        assign_job_to_builder(&pool, &job_id, &builder_a.id)
+            .await
+            .expect("builder A should claim job");
+
+        sqlx::query("UPDATE builders SET status = 'offline' WHERE id = $1")
+            .bind(builder_a.id)
+            .execute(&pool)
+            .await
+            .expect("Failed to mark builder A offline");
+
+        requeue_orphaned_building_jobs(&pool)
+            .await
+            .expect("recovery should succeed");
+
+        assign_job_to_builder(&pool, &job_id, &builder_b.id)
+            .await
+            .expect("builder B should claim requeued job");
+
+        let stale_fail = mark_job_failed_with_retry(
+            &pool,
+            &job_id,
+            &builder_a.id,
+            Some("late failure from stale builder"),
+        )
+        .await;
+        assert!(stale_fail.is_err(), "stale builder A fail must be rejected");
+
+        let row = get_build_job_by_id(&pool, &job_id)
+            .await
+            .expect("job fetch should succeed")
+            .expect("job should exist");
+        assert_eq!(row.status, "building");
+        assert_eq!(row.builder_id, Some(builder_b.id));
     }
 }

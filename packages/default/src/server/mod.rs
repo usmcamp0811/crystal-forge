@@ -348,7 +348,6 @@ pub fn spawn_background_tasks(
     tokio::spawn(run_commit_evaluation_loop(
         commit_pool,
         flake_config.commit_evaluation_interval,
-        cfg.builder.heartbeat_interval,
         cf_state,
         queue_notifier.clone(),
     ));
@@ -491,7 +490,6 @@ async fn run_flake_polling_loop(
 pub async fn run_commit_evaluation_loop(
     pool: PgPool,
     interval: Duration,
-    builder_heartbeat_interval: Duration,
     cf_state: Arc<crate::handlers::agent_request::CFState>,
     queue_notifier: Arc<QueueNotifier>,
 ) {
@@ -507,13 +505,6 @@ pub async fn run_commit_evaluation_loop(
 
     if let Err(e) = reset_stuck_builds(&pool).await {
         error!("❌ Failed to reset stuck builds: {}", e);
-    }
-
-    let stale_timeout_secs = builder_stale_timeout_secs(builder_heartbeat_interval);
-    if let Err(e) =
-        recover_orphaned_build_jobs_cycle(&pool, stale_timeout_secs, &queue_notifier).await
-    {
-        error!("❌ Failed startup orphaned-build recovery: {}", e);
     }
 
     if let Err(e) = cleanup_partial_derivations(&pool).await {
@@ -585,6 +576,12 @@ async fn run_builder_recovery_loop(
         "🔁 Starting builder recovery loop (tick={}s, stale_timeout={}s)",
         tick_secs, stale_timeout_secs
     );
+
+    if let Err(err) =
+        recover_orphaned_build_jobs_cycle(&pool, stale_timeout_secs, &queue_notifier).await
+    {
+        error!("❌ Initial builder recovery cycle failed: {:#}", err);
+    }
 
     let mut ticker = interval(Duration::from_secs(tick_secs));
     loop {
