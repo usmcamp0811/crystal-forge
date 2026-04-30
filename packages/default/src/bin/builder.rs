@@ -703,6 +703,7 @@ async fn fail_job_with_db_fallback(
         if let Err(e2) = crystal_forge::queries::builders::mark_job_failed_with_retry(
             pool,
             &job_id,
+            &client.builder_id(),
             Some(error_message),
         )
         .await
@@ -727,7 +728,10 @@ async fn complete_job_with_db_fallback(
             job_id, e
         );
 
-        if let Err(e2) = crystal_forge::queries::builders::mark_job_complete(pool, &job_id).await {
+        if let Err(e2) =
+            crystal_forge::queries::builders::mark_job_complete(pool, &job_id, &client.builder_id())
+                .await
+        {
             error!(
                 "❌ DB fallback failed while marking job {} complete: {}",
                 job_id, e2
@@ -747,8 +751,12 @@ async fn finalize_cancelled_with_db_fallback(
             job_id, e
         );
 
-        if let Err(e2) =
-            crystal_forge::queries::builders::finalize_cancelled_job(pool, &job_id).await
+        if let Err(e2) = crystal_forge::queries::builders::finalize_cancelled_job(
+            pool,
+            &job_id,
+            &client.builder_id(),
+        )
+        .await
         {
             error!(
                 "❌ DB fallback failed while finalizing cancelled job {}: {}",
