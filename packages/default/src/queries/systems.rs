@@ -1526,6 +1526,14 @@ mod tests {
             migration.contains("lss.generation_matches_current_store_path"),
             "migration must project generation/path match flag from latest_system_state row"
         );
+        assert!(
+            migration.contains("ORDER BY s.id, ss.timestamp DESC NULLS LAST, ss.id DESC"),
+            "migration must deterministically select latest system state row"
+        );
+        assert!(
+            migration.contains("ld.expected_store_path,\n    lss.generation,\n    lss.generation_matches_current_store_path"),
+            "migration must append generation columns after existing view columns"
+        );
     }
 
     #[tokio::test]
