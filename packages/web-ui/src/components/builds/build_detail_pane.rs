@@ -7,7 +7,7 @@ use crate::hooks::websocket::{ConnectionState, use_websocket_build_stream};
 use crate::theme;
 
 use super::helpers::{
-    BuildAction, BuildItem, PendingAction, build_status_badge_class, event_level_class,
+    BuildAction, BuildItem, BuildStatus, PendingAction, build_status_badge_class, event_level_class,
     mock_artifacts, mock_events,
 };
 
@@ -64,6 +64,7 @@ pub fn BuildDetailPane(
 
     let events = mock_events(build.id);
     let artifacts = mock_artifacts(build.id);
+    let duration_label = build.runtime.clone().unwrap_or_else(|| "—".to_string());
 
     // Use WebSocket logs if available.
     // For completed builds with no active WS channel, fall back to stored logs from the API.
@@ -91,14 +92,42 @@ pub fn BuildDetailPane(
                         div {
                             class: "flex flex-col md:flex-row md:items-center md:justify-between gap-3",
                             div {
-                                p { class: "text-sm text-white font-semibold", "{build.hostname}" }
-                                p { class: "text-xs text-gray-400", "{build.flake} · {build.branch} · {short_commit(&build.commit)}" }
-                                p { class: "text-xs text-gray-500 mt-1", "Queued by {build.started_by} · worker {build.worker_id}" }
+                                p { class: "text-sm text-white font-semibold", "{build.flake}" }
+                                p { class: "text-xs text-gray-400 font-mono", "{build.summary}" }
+                                p { class: "text-xs text-gray-500 mt-1", "{build.hostname} · {short_commit(&build.commit)}" }
                             }
                                 span {
                                     class: "inline-flex px-2 py-1 text-[10px] uppercase rounded border {build_status_badge_class(build.status)}",
                                     "{build.status_label()}"
                                 }
+                        }
+
+                        div {
+                            class: "grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-2 mt-4 text-xs",
+                            div { class: "text-gray-400", "Flake" }
+                            div { class: "text-gray-200", "{build.flake}" }
+                            div { class: "text-gray-400", "Commit" }
+                            div { class: "text-gray-200 font-mono", "{build.commit}" }
+                            div { class: "text-gray-400", "Worker" }
+                            div { class: "text-gray-200 font-mono", "{build.worker_id}" }
+                            div { class: "text-gray-400", "Queued" }
+                            div { class: "text-gray-200", "{build.queued_for}" }
+                            div { class: "text-gray-400", "Duration" }
+                            div { class: "text-gray-200 font-mono", "{duration_label}" }
+                            div { class: "text-gray-400", "Started by" }
+                            div { class: "text-gray-200", "{build.started_by}" }
+                        }
+
+                        if matches!(build.status, BuildStatus::Building | BuildStatus::Stopping) {
+                            div {
+                                class: "mt-4",
+                                p { class: "text-[11px] text-gray-400 mb-1", "Progress" }
+                                div {
+                                    class: "h-1.5 bg-slate-800 rounded-full overflow-hidden",
+                                    div { class: "h-full bg-cyan-400", style: "width: 56%" }
+                                }
+                                p { class: "text-[11px] text-gray-500 mt-1", "56% complete" }
+                            }
                         }
                     }
 
