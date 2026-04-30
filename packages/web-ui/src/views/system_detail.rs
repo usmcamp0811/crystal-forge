@@ -2474,14 +2474,21 @@ fn HardeningTab(
     } else {
         0.0
     };
-    let high_risk_count = results
+    let vuln_count = results
         .iter()
-        .filter(|service| {
-            matches!(
-                service.risk_level.as_str(),
-                "vulnerable" | "poorly_hardened"
-            )
-        })
+        .filter(|service| matches!(service.risk_level.as_str(), "vulnerable"))
+        .count();
+    let high_count = results
+        .iter()
+        .filter(|service| matches!(service.risk_level.as_str(), "poorly_hardened"))
+        .count();
+    let med_count = results
+        .iter()
+        .filter(|service| matches!(service.risk_level.as_str(), "moderately_hardened"))
+        .count();
+    let ok_count = results
+        .iter()
+        .filter(|service| matches!(service.risk_level.as_str(), "well_hardened"))
         .count();
     let cumulative_exposure = results
         .iter()
@@ -2591,24 +2598,44 @@ fn HardeningTab(
         ),
     ];
 
+    let avg_tone_class = if avg_score < 30.0 {
+        theme::health::CRITICAL_TEXT
+    } else {
+        theme::health::HEALTHY_TEXT
+    };
+
     rsx! {
         // Main content
         div { class: "space-y-4",
-            div { class: "flex gap-2 overflow-x-auto pb-1",
-                div { class: "min-w-[168px] flex-1",
-                    CompactMetricCard { label: "Scanned services", value: format!("{}", total_services), tone: "neutral" }
+            div { class: "hd-stat-row",
+                div { class: "hd-stat",
+                    div { class: "hd-stat-val {avg_tone_class}", "{avg_score.round()}%" }
+                    div { class: "hd-stat-label", "Avg score" }
                 }
-                div { class: "min-w-[168px] flex-1",
-                    CompactMetricCard { label: "Average score", value: format!("{avg_score:.1}"), tone: "neutral" }
+                div { class: "hd-stat",
+                    div { class: "hd-stat-val {theme::health::CRITICAL_TEXT}", "{vuln_count}" }
+                    div { class: "hd-stat-label", "VULN" }
                 }
-                div { class: "min-w-[168px] flex-1",
-                    CompactMetricCard { label: "High risk services", value: format!("{}", high_risk_count), tone: "danger" }
+                div { class: "hd-stat",
+                    div { class: "hd-stat-val {theme::health::WARNING_TEXT}", "{high_count}" }
+                    div { class: "hd-stat-label", "HIGH" }
                 }
-                div { class: "min-w-[168px] flex-1",
-                    CompactMetricCard { label: "Cumulative exposure", value: format!("{}", cumulative_exposure), tone: "warning" }
+                div { class: "hd-stat",
+                    div { class: "hd-stat-val text-amber-400", "{med_count}" }
+                    div { class: "hd-stat-label", "MED" }
                 }
-                div { class: "min-w-[168px] flex-1",
-                    CompactMetricCard { label: "Showing", value: format!("{}", filtered_count), tone: "neutral" }
+                div { class: "hd-stat",
+                    div { class: "hd-stat-val {theme::health::HEALTHY_TEXT}", "{ok_count}" }
+                    div { class: "hd-stat-label", "OK" }
+                }
+                div { class: "hd-stat",
+                    div { class: "hd-stat-val {theme::text::SECONDARY}", "{total_services}" }
+                    div { class: "hd-stat-label", "Total" }
+                }
+                div { class: "sd-callout sd-callout-info", style: "flex: 1; min-width: 260px; margin-left: 8px; padding: 8px 12px;",
+                    p { class: "text-[12px] {theme::text::SECONDARY}",
+                        "Mirrors systemd-analyze security. Higher score means more directives are enforced. Configure via systemd.services.<name>.serviceConfig."
+                    }
                 }
             }
 
@@ -2634,19 +2661,26 @@ fn HardeningTab(
                     }
                 }
 
-                // Severity filter dropdown
-                select {
-                    class: "{theme::interactive::INPUT} {theme::interactive::FOCUS_RING} h-10 rounded-lg px-3 min-w-[170px]",
-                    style: "min-height: 2.5rem;",
-                    value: "{severity_filter}",
-                    onchange: move |evt| severity_filter.set(evt.value()),
-                    option { value: "all", "All severities" }
-                    option { value: "high_risk", "High risk" }
-                    option { value: "vulnerable", "Vulnerable" }
-                    option { value: "poorly_hardened", "Poorly hardened" }
-                    option { value: "moderately_hardened", "Moderate" }
-                    option { value: "well_hardened", "Well hardened" }
+                div { class: "seg",
+                    for (value, label) in [
+                        ("all", "all"),
+                        ("vulnerable", "VULN"),
+                        ("poorly_hardened", "HIGH"),
+                        ("moderately_hardened", "MED"),
+                        ("well_hardened", "OK"),
+                    ] {
+                        button {
+                            class: if *severity_filter.read() == value { "active" } else { "" },
+                            onclick: {
+                                let value = value.to_string();
+                                move |_| severity_filter.set(value.clone())
+                            },
+                            "{label}"
+                        }
+                    }
                 }
+
+                span { class: "filter-count text-xs {theme::text::MUTED}", "{filtered_count} services" }
 
                 // Reset button (only show when filters active)
                 if has_active_filters {
@@ -2764,7 +2798,12 @@ fn HardeningTab(
                                                 }
                                             }
                                             td { class: "px-2 py-1.5 font-semibold {theme::text::PRIMARY}", "{service.hardening_score}" }
-                                            td { class: "px-2 py-1.5 font-mono text-[11px] {theme::text::PRIMARY} whitespace-nowrap", "{service.service_name}" }
+                                            td { class: "px-2 py-1.5 font-mono text-[11px] {theme::text::PRIMARY} whitespace-nowrap",
+                                                "{service.service_name}"
+                                                if !justifications_for(&service.service_name).is_empty() {
+                                                    div { class: "text-[10px] mt-0.5 {theme::text::MUTED}", "⚠ waiver" }
+                                                }
+                                            }
                                             td { class: "px-2 py-1.5 text-[11px] {theme::text::SECONDARY}",
                                                 "{identity_label}"
                                             }
@@ -2799,7 +2838,7 @@ fn HardeningTab(
                                                         let service = service.clone();
                                                         move |_| selected_service.set(Some(service.clone()))
                                                     },
-                                                    "Open"
+                                                    "View details"
                                                 }
                                             }
                                         }
@@ -2841,7 +2880,7 @@ fn HardeningTab(
                 },
 
                 div {
-                    class: "relative w-full {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl shadow-2xl cursor-default overflow-hidden",
+                    class: "relative w-full {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl shadow-2xl cursor-default overflow-hidden cf-hardening-modal",
                     style: "width: 100%; max-width: 52rem; max-height: 88vh; display: flex; flex-direction: column;",
                     onclick: move |evt| evt.stop_propagation(),
                     role: "dialog",
@@ -2849,9 +2888,9 @@ fn HardeningTab(
                     aria_labelledby: "hardening-modal-title",
 
                     // Header
-                    div { class: "px-5 py-4 border-b {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG}",
+                    div { class: "px-5 py-4 border-b {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG} cf-hardening-modal-header",
                         div { class: "flex items-start justify-between gap-3",
-                            div { class: "space-y-1.5 min-w-0 flex-1",
+                            div { class: "space-y-2 min-w-0 flex-1",
                                 div { class: "flex items-center gap-2 flex-wrap",
                                     h3 { id: "hardening-modal-title", class: "text-lg font-semibold leading-tight {theme::text::PRIMARY} break-words", "{service.service_name}" }
                                     span { class: "text-[10px] font-medium uppercase tracking-[0.16em] {theme::text::MUTED}", "Service hardening" }
@@ -2861,7 +2900,7 @@ fn HardeningTab(
                                         "{short_risk_label(&service.risk_level)}"
                                     }
                                 }
-                                p { class: "text-sm {theme::text::SECONDARY}",
+                                p { class: "text-sm leading-5 {theme::text::SECONDARY}",
                                     "Score "
                                     span { class: "font-semibold {theme::text::PRIMARY}", "{service.hardening_score}/100" }
                                     " · Missing "
@@ -2872,6 +2911,9 @@ fn HardeningTab(
                                     span { class: "font-semibold {theme::text::PRIMARY}",
                                         "{justifications.iter().filter(|j| j.service_name == service.service_name).count()}"
                                     }
+                                }
+                                p { class: "text-[11px] leading-5 {theme::text::MUTED}",
+                                    "Review control details below, then record an explicit rationale when accepting residual risk."
                                 }
                             }
                             button {
@@ -2889,12 +2931,12 @@ fn HardeningTab(
                     }
 
                     // Body
-                    div { class: "px-5 py-4 overflow-y-auto flex flex-col gap-3",
+                    div { class: "px-5 py-4 overflow-y-auto flex flex-col gap-3.5",
                         if allow_mutations {
-                            section { class: "space-y-2.5 rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-3.5 py-3.5",
+                            section { class: "space-y-2.5 rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-3.5 py-3.5 cf-hardening-justification-card",
                                 div { class: "space-y-1",
                                     p { class: "text-sm font-semibold {theme::text::PRIMARY}", "Add justification" }
-                                    p { class: "text-[10px] leading-4 {theme::text::SECONDARY}",
+                                    p { class: "text-[11px] leading-5 {theme::text::SECONDARY}",
                                         "Document why this service posture is acceptable (compensating controls, constrained runtime, or accepted risk)."
                                     }
                                 }
@@ -2970,7 +3012,7 @@ fn HardeningTab(
                             div { class: "flex items-end justify-between gap-2 flex-wrap",
                                 div { class: "space-y-1",
                                     p { class: "text-sm font-medium {theme::text::PRIMARY}", "Control detail" }
-                                    p { class: "text-[10px] leading-4 {theme::text::SECONDARY}",
+                                    p { class: "text-[11px] leading-5 {theme::text::SECONDARY}",
                                         "Showing the most relevant controls first so you can quickly understand why this service scored as it did."
                                     }
                                 }
@@ -2983,7 +3025,7 @@ fn HardeningTab(
                                 }
                             } else {
                                 div { class: "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden",
-                                    div { class: "h-[260px] overflow-y-scroll pr-1 cf-modal-table-scroll",
+                                    div { class: "h-[260px] overflow-y-scroll pr-1 cf-modal-table-scroll cf-hardening-directives-scroll",
                                         style: "scrollbar-gutter: stable both-edges;",
                                         table { class: "w-full text-sm table-fixed",
                                             thead {
@@ -3011,6 +3053,9 @@ fn HardeningTab(
                                                 }
                                             }
                                         }
+                                    }
+                                    p { class: "px-3 py-2 text-[11px] border-t {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG} {theme::text::MUTED}",
+                                        "Tip: scroll to review all directives and scores."
                                     }
                                 }
                             }

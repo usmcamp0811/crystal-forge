@@ -1261,6 +1261,71 @@ html, body {
   background: rgba(148, 163, 184, 0.95);
 }
 
+.cf-hardening-modal {
+  box-shadow: 0 28px 58px rgba(2, 6, 23, 0.48);
+}
+
+.cf-hardening-modal-header {
+  background-image: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--cf-subtle-bg) 94%, transparent),
+    color-mix(in srgb, var(--cf-subtle-bg) 82%, transparent)
+  );
+}
+
+.cf-hardening-justification-card {
+  border-color: color-mix(in srgb, var(--cf-brand-purple) 36%, var(--cf-card-border));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--cf-brand-purple) 18%, transparent);
+}
+
+.cf-hardening-directives-scroll {
+  position: relative;
+}
+
+.cf-hardening-directives-scroll::after {
+  content: "";
+  position: sticky;
+  left: 100%;
+  float: right;
+  width: 14px;
+  height: 100%;
+  margin-left: -14px;
+  pointer-events: none;
+  background: linear-gradient(270deg, color-mix(in srgb, var(--cf-card-bg) 86%, transparent), transparent);
+}
+
+.hd-stat-row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.hd-stat {
+  background: var(--cf-card-bg);
+  border: 1px solid var(--cf-card-border);
+  border-radius: 10px;
+  padding: 10px 16px;
+  min-width: 72px;
+  text-align: center;
+}
+
+.hd-stat-val {
+  font-size: 20px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+
+.hd-stat-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--cf-text-muted);
+  margin-top: 2px;
+}
+
 .sd-tab {
   background: transparent;
   border: 0;
