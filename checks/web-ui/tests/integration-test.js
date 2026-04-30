@@ -2998,6 +2998,27 @@ const steps = [
     },
   },
   {
+    name: "15a-builds-header-and-metrics",
+    description: "Builds header actions and stat strip labels",
+    action: async (page) => {
+      await routeBuildsData(page);
+      await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2000);
+
+      await assertVisible(page.locator("button:has-text('Refresh')"), "Expected Refresh action in Builds header");
+      await assertVisible(page.locator("button:has-text('Queue build')"), "Expected Queue build action in Builds header");
+
+      const pageText = await page.locator("body").textContent();
+      for (const metric of ["Building", "Queued", "Failed 24h", "Workers", "Slot usage"]) {
+        if (!pageText.includes(metric)) {
+          throw new Error(`Expected '${metric}' metric label in Builds stat strip`);
+        }
+      }
+
+      await unrouteBuildsData(page);
+    },
+  },
+  {
     name: "11b-builds-queue-card-focus",
     description: "Build queue card layout focus",
     action: async (page) => {

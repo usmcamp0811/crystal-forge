@@ -7,7 +7,11 @@ use super::helpers::WorkerItem;
 
 /// Metrics row showing build queue and worker statistics.
 #[component]
-pub fn MetricsRow(workers: Vec<WorkerItem>, builds: Vec<super::helpers::BuildItem>) -> Element {
+pub fn MetricsRow(
+    workers: Vec<WorkerItem>,
+    builds: Vec<super::helpers::BuildItem>,
+    history_builds: Vec<super::helpers::BuildItem>,
+) -> Element {
     let building = builds
         .iter()
         .filter(|b| matches!(b.status, BuildStatus::Building | BuildStatus::Stopping))
@@ -16,7 +20,7 @@ pub fn MetricsRow(workers: Vec<WorkerItem>, builds: Vec<super::helpers::BuildIte
         .iter()
         .filter(|b| matches!(b.status, BuildStatus::Queued))
         .count();
-    let failed = builds
+    let failed_24h = history_builds
         .iter()
         .filter(|b| matches!(b.status, BuildStatus::Failed))
         .count();
@@ -24,17 +28,29 @@ pub fn MetricsRow(workers: Vec<WorkerItem>, builds: Vec<super::helpers::BuildIte
         .iter()
         .filter(|w| w.status == super::helpers::WorkerStatus::Running)
         .count();
+    let slot_total = workers.iter().map(|w| w.total_slots).sum::<usize>();
+    let slot_used = workers.iter().map(|w| w.active_slots).sum::<usize>();
+    let slot_pct = if slot_total == 0 {
+        0
+    } else {
+        ((slot_used as f64 / slot_total as f64) * 100.0).round() as i32
+    };
 
     rsx! {
         div {
-            class: "grid grid-cols-2 md:grid-cols-4 gap-3",
+            class: "grid grid-cols-2 xl:grid-cols-5 gap-3",
             MetricBadge { label: "Building", value: building.to_string(), tone_class: "cf-metric-building" }
             MetricBadge { label: "Queued", value: queued.to_string(), tone_class: "cf-metric-queued" }
-            MetricBadge { label: "Failed", value: failed.to_string(), tone_class: "cf-metric-failed" }
+            MetricBadge { label: "Failed 24h", value: failed_24h.to_string(), tone_class: "cf-metric-failed" }
             MetricBadge {
                 label: "Workers",
                 value: format!("{active_workers}/{}", workers.len()),
                 tone_class: "cf-metric-workers",
+            }
+            MetricBadge {
+                label: "Slot usage",
+                value: format!("{slot_pct}%"),
+                tone_class: "cf-metric-slots",
             }
         }
     }

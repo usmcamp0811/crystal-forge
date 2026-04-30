@@ -24,13 +24,6 @@ enum BuildsTab {
     Completed,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
-enum QueueViewMode {
-    #[default]
-    Cards,
-    Table,
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CompletedStatusFilter {
     All,
@@ -134,7 +127,7 @@ fn map_queue_item(item: &crate::api::models::BuildQueueItem, idx: usize) -> Buil
 #[component]
 pub fn BuildsView() -> Element {
     let mut workers = use_signal(Vec::<WorkerItem>::new);
-    let refresh_trigger = use_signal(|| 0_u64);
+    let mut refresh_trigger = use_signal(|| 0_u64);
 
     // --- Active queue state ---
     let mut queue_page = use_signal(|| 1_i64);
@@ -308,7 +301,6 @@ pub fn BuildsView() -> Element {
 
     let mut selected_build = use_signal(|| Some(1_i32));
     let mut active_view = use_signal(|| BuildsTab::ActiveQueue);
-    let mut queue_view_mode = use_signal(QueueViewMode::default);
     let mut active_tab = use_signal(|| DetailTab::Logs);
     let mut completed_status_filter = use_signal(|| CompletedStatusFilter::All);
     let mut completed_sort_order = use_signal(|| CompletedSortOrder::NewestFirst);
@@ -366,15 +358,21 @@ pub fn BuildsView() -> Element {
                     h1 { class: "{theme::typography::PAGE_TITLE}", "Builds" }
                     p {
                         class: "text-sm {theme::text::SECONDARY}",
-                        "Control active build workers, inspect queue state, and monitor live build logs."
+                        "{queue_data.iter().filter(|b| matches!(b.status, BuildStatus::Building | BuildStatus::Stopping)).count()} building · {queue_data.iter().filter(|b| b.status == BuildStatus::Queued).count()} queued · {worker_data.iter().filter(|w| w.status == WorkerStatus::Running).count()}/{worker_data.len()} workers active"
                     }
                 }
                 div {
                     class: "flex flex-wrap items-center gap-2",
-                    span {
-                        class: "inline-flex items-center px-2 py-1 text-xs rounded border text-emerald-100 cf-worker-status-running",
-                        span { class: "w-2 h-2 rounded-full bg-emerald-300 mr-2 animate-pulse", }
-                        "Live"
+                    button {
+                        class: "inline-flex items-center gap-2 rounded-lg px-3 py-2 text-xs border transition-colors {theme::interactive::GHOST_BTN}",
+                        onclick: move |_| refresh_trigger.set(refresh_trigger() + 1),
+                        "Refresh"
+                    }
+                    QueueActionButton {
+                        label: "Queue build",
+                        onclick: move |_| {
+                            last_action_note.set(Some("Queue build flow is mocked in this UI pass; use Flakes/Evaluations to trigger real builds.".to_string()));
+                        },
                     }
                     QueueActionButton {
                         label: "Start All",
@@ -384,16 +382,13 @@ pub fn BuildsView() -> Element {
                         label: "Pause All",
                         onclick: move |_| pending_action.set(Some(PendingAction::Queue(QueueAction::PauseAll))),
                     }
-                    QueueActionButton {
-                        label: "Drain All",
-                        onclick: move |_| pending_action.set(Some(PendingAction::Queue(QueueAction::DrainAll))),
-                    }
                 }
             }
 
             MetricsRow {
                 workers: worker_data.clone(),
                 builds: queue_data.clone(),
+                history_builds: build_history.read().clone(),
             }
 
             WorkerStrip {
