@@ -1,11 +1,11 @@
 ---
 id: TASK-278.1
 title: Expose system generation in detail API for UI metric parity
-status: Review
+status: Done
 assignee:
   - '@ai-agent'
 created_date: '2026-04-20 00:34'
-updated_date: '2026-04-30 20:25'
+updated_date: '2026-04-30 21:23'
 labels:
   - ui
   - systems
@@ -40,11 +40,5 @@ Desired outcome: Add generation data to the relevant API/DTO path so the System 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Follow-up fix for reviewer merge blocker pushed in commit `0bc2f7e9`: removed independent latest-by-hostname lateral query in `get_system_detail_by_id` and now source generation fields from `view_system_detail` itself.
-
-Added migration `0120_project_generation_from_view_system_detail_state_row.sql` to project `generation` and `generation_matches_current_store_path` from the same `latest_system_state` row as `current_store_path` in `view_system_detail`.
-
-Added regression coverage in `packages/default/src/queries/systems.rs` verifying query shape and migration projection (`generation_projection_migration_updates_view_system_detail`).
-
-Verified ingestion-path concern by code inspection: `deserialize_system_state_versioned` tries `SystemState` (current schema) first and only falls back to `SystemStateV1` compatibility path (which intentionally leaves generation fields null), so current agents can populate generation while legacy v1 payloads remain backward-compatible.
+User confirmed MR !245 is merged.
 <!-- SECTION:NOTES:END -->
