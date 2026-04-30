@@ -395,6 +395,11 @@ pub fn BuildsView() -> Element {
                 history_builds: build_history.read().clone(),
             }
 
+            div {
+                class: "text-[11px] uppercase tracking-[0.12em] {theme::text::MUTED}",
+                "Build Workers"
+            }
+
             WorkerStrip {
                 workers: worker_data.clone(),
                 on_action: move |(worker_id, action)| {
@@ -411,7 +416,7 @@ pub fn BuildsView() -> Element {
                         "px-4 py-2 border-b-2 border-transparent text-slate-400 hover:text-white transition-colors"
                     },
                     onclick: move |_| active_view.set(BuildsTab::ActiveQueue),
-                    "Active Queue"
+                    "Active ({queue_data.len()})"
                 }
                 button {
                     class: if active_view() == BuildsTab::Completed {
@@ -420,7 +425,7 @@ pub fn BuildsView() -> Element {
                         "px-4 py-2 border-b-2 border-transparent text-slate-400 hover:text-white transition-colors"
                     },
                     onclick: move |_| active_view.set(BuildsTab::Completed),
-                    "Completed Builds"
+                    "Completed ({build_history.read().len()})"
                 }
             }
 
