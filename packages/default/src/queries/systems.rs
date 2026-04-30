@@ -1491,6 +1491,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn system_detail_query_does_not_derive_generation_from_store_path_regex() {
+        let source = include_str!("systems.rs");
+        let legacy_regex_expr = [
+            "substring(vsd.current_store_path from ",
+            "'/nix/var/nix/profiles/system-([0-9]+)-link'",
+        ]
+        .concat();
+
+        assert!(
+            source.contains("lss.generation"),
+            "system detail query should project persisted generation"
+        );
+        assert!(
+            !source.contains(&legacy_regex_expr),
+            "system detail query must not derive generation from current_store_path regex"
+        );
+    }
+
     #[tokio::test]
     #[ignore = "requires live database connection"]
     async fn system_detail_returns_latest_persisted_generation() {
