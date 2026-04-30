@@ -1,10 +1,11 @@
 ---
 id: TASK-276
 title: Add systemd hardening scanner and dashboard view
-status: Review
-assignee: []
+status: Done
+assignee:
+  - openai-gpt-5.4
 created_date: '2026-04-19 02:43'
-updated_date: '2026-04-19 16:53'
+updated_date: '2026-04-23 13:25'
 labels:
   - feature
   - security
@@ -18,7 +19,7 @@ references:
     https://www.reddit.com/r/homelab/comments/1spgay2/is_anyone_else_a_stickler_for_systemd_hardening/
   - 'https://www.freedesktop.org/software/systemd/man/systemd.exec.html#Security'
 priority: high
-ordinal: 0
+ordinal: 3690
 ---
 
 ## Description
@@ -41,18 +42,28 @@ Create a feature to scan NixOS system configurations for systemd service hardeni
 - [ ] #10 Results integrate with existing system detail views (view_system_detail extended)
 - [ ] #11 Color-coded risk indicators (green/yellow/orange/red) based on hardening score ranges
 - [ ] #12 Scoring algorithm validated against Crystal Forge's own NixOS configurations
+- [ ] #13 Hardening scan is integrated into the automatic evaluation pipeline (runs during dry-run eval)
+- [ ] #14 Hardening data is available by default when a system is evaluated (no manual scan button needed)
+- [ ] #15 Evaluation pipeline combines hardening scan logic with existing nix-eval-jobs to minimize overhead
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1) Add follow-up migration to scope hardening fleet summary view to active systems (latest completed scan per active system), mirroring the top-services scoping model.
+2) Add DB-backed regression test proving inactive systems and superseded derivations do not affect fleet summary aggregates.
+3) Apply requested small visual refinement to system hardening modal header styling.
+4) Run targeted backend/web verification and refresh sqlx metadata if required by query/schema changes.
+5) Rework the service hardening modal hierarchy so service identity and posture lead, directive detail is more curated for a modal, and the justification entry becomes the primary action area.
+6) Run targeted web-ui verification for the modal-only refinement.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Follow-up commit e3b207e5 aligns system hardening tab styling with theme/style-guide tokens and improves dense table formatting/alignment.
+Cleanup complete after merge: TASK-276 task worktree removed (`git worktree remove ../TASK-276-systemd-hardening-scanner`) and worktree list pruned.
 
-Added style-guide showcase section 'Hardening Audit Widgets' in `packages/web-ui/src/views/style_guide.rs` for new summary-strip + dense audit-table pattern.
-
-Refreshed system hardening screenshot upload: ![28-system-hardening-tab](/uploads/0199fccd9e997a675ad42b0a6852f9f1/28-system-hardening-tab.png) and posted details in MR note https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/242#note_3264584528.
-
-Verification rerun after styling pass: `nix develop -c cargo check` (packages/web-ui), `nix build .#checks.x86_64-linux.web-ui --print-out-paths`, `nix flake check`.
+Follow-up backlog item created: TASK-276.1 for additional modal refinement polish.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

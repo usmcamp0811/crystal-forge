@@ -40,6 +40,10 @@ pub struct BuilderApiClient {
 }
 
 impl BuilderApiClient {
+    pub fn builder_id(&self) -> Uuid {
+        self.builder_id
+    }
+
     /// Create a new API client from configuration
     pub async fn new(config: &BuilderConfig) -> Result<Self> {
         let builder_id = config.require_builder_id()?;

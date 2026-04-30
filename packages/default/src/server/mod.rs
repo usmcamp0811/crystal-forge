@@ -22,7 +22,9 @@ use tracing::{debug, error, info, warn};
 
 // ⬇️ bring in the commit-eval helpers you said you added in queries/commits.rs
 use crate::queries::build_jobs::create_build_jobs_for_commit;
-use crate::queries::builders::cleanup_expired_build_logs;
+use crate::queries::builders::{
+    cleanup_expired_build_logs, mark_stale_builders_offline, requeue_orphaned_building_jobs,
+};
 use crate::queries::commits::{
     get_commits_pending_evaluation, mark_commit_evaluation_complete, mark_commit_evaluation_failed,
     mark_commit_evaluation_started, reset_stuck_commit_evaluations,
@@ -350,6 +352,11 @@ pub fn spawn_background_tasks(
         cf_state,
         queue_notifier.clone(),
     ));
+    tokio::spawn(run_builder_recovery_loop(
+        target_pool,
+        cfg.builder.heartbeat_interval,
+        queue_notifier,
+    ));
     tokio::spawn(run_commit_artifact_hydration_loop(artifact_pool));
     tokio::spawn(run_build_log_retention_loop(
         build_log_pool,
@@ -526,6 +533,65 @@ pub async fn run_commit_evaluation_loop(
                 debug!("🔔 Eval loop: notified of new work");
             }
         }
+    }
+}
+
+fn builder_stale_timeout_secs(heartbeat_interval: Duration) -> i64 {
+    let heartbeat_secs = heartbeat_interval.as_secs().max(15);
+    ((heartbeat_secs * 3).max(60)) as i64
+}
+
+async fn recover_orphaned_build_jobs_cycle(
+    pool: &PgPool,
+    stale_timeout_secs: i64,
+    queue_notifier: &Arc<QueueNotifier>,
+) -> Result<()> {
+    let stale = mark_stale_builders_offline(pool, stale_timeout_secs).await?;
+    if stale > 0 {
+        warn!(
+            "🧹 Marked {} stale builders offline (timeout={}s)",
+            stale, stale_timeout_secs
+        );
+    }
+
+    let recovered = requeue_orphaned_building_jobs(pool).await?;
+    if !recovered.is_empty() {
+        warn!(
+            "🔄 Re-queued {} orphaned build jobs stuck in building",
+            recovered.len()
+        );
+        queue_notifier.notify_build_queue();
+    }
+
+    Ok(())
+}
+
+async fn run_builder_recovery_loop(
+    pool: PgPool,
+    heartbeat_interval: Duration,
+    queue_notifier: Arc<QueueNotifier>,
+) {
+    let tick_secs = heartbeat_interval.as_secs().max(15);
+    let stale_timeout_secs = builder_stale_timeout_secs(heartbeat_interval);
+    info!(
+        "🔁 Starting builder recovery loop (tick={}s, stale_timeout={}s)",
+        tick_secs, stale_timeout_secs
+    );
+
+    if let Err(err) =
+        recover_orphaned_build_jobs_cycle(&pool, stale_timeout_secs, &queue_notifier).await
+    {
+        error!("❌ Initial builder recovery cycle failed: {:#}", err);
+    }
+
+    let mut ticker = interval(Duration::from_secs(tick_secs));
+    loop {
+        if let Err(err) =
+            recover_orphaned_build_jobs_cycle(&pool, stale_timeout_secs, &queue_notifier).await
+        {
+            error!("❌ Builder recovery cycle failed: {:#}", err);
+        }
+        ticker.tick().await;
     }
 }
 
@@ -855,8 +921,8 @@ fn select_next_pending_commit_id_for_cycle(
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_custom_policy_expression, parse_deployment_policy_record,
-        select_next_pending_commit_id_for_cycle,
+        builder_stale_timeout_secs, normalize_custom_policy_expression,
+        parse_deployment_policy_record, select_next_pending_commit_id_for_cycle,
     };
     use crate::models::deployment_policies::{DeploymentPolicy, DeploymentPolicyRecord};
     use chrono::Utc;
@@ -948,6 +1014,22 @@ mod tests {
             }
             _ => panic!("expected CustomCheck variant"),
         }
+    }
+
+    #[test]
+    fn test_builder_stale_timeout_secs_floor_and_multiplier() {
+        assert_eq!(
+            builder_stale_timeout_secs(std::time::Duration::from_secs(5)),
+            60
+        );
+        assert_eq!(
+            builder_stale_timeout_secs(std::time::Duration::from_secs(20)),
+            60
+        );
+        assert_eq!(
+            builder_stale_timeout_secs(std::time::Duration::from_secs(30)),
+            90
+        );
     }
 }
 
