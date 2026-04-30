@@ -389,6 +389,7 @@ pub(super) fn build_system_detail(
         kernel: Some(kernel.to_string()),
         agent_version: Some(agent_version.to_string()),
         current_store_path: store_path,
+        generation: None,
         hardware: SystemHardwareInfo {
             cpu_brand: Some(cpu_brand.to_string()),
             cpu_cores: Some(cpu_cores),

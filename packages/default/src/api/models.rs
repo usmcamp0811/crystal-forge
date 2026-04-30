@@ -493,6 +493,8 @@ pub struct SystemDetail {
     pub kernel: Option<String>,
     pub agent_version: Option<String>,
     pub current_store_path: Option<String>,
+    #[serde(default)]
+    pub generation: Option<i32>,
 
     /// Hardware information.
     pub hardware: SystemHardwareInfo,

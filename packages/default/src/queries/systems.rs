@@ -462,6 +462,7 @@ pub struct SystemDetailRow {
     pub kernel: Option<String>,
     pub agent_version: Option<String>,
     pub current_store_path: Option<String>,
+    pub generation: Option<i32>,
     // Hardware
     pub cpu_brand: Option<String>,
     pub cpu_cores: Option<i32>,
@@ -503,7 +504,11 @@ pub async fn get_system_detail_by_id(
     system_id: Uuid,
 ) -> Result<Option<SystemDetailRow>> {
     let row = sqlx::query_as::<_, SystemDetailRow>(
-        "SELECT vsd.*, s.system_configuration_name
+        "SELECT vsd.*, s.system_configuration_name,
+            NULLIF(
+                substring(vsd.current_store_path from '/nix/var/nix/profiles/system-([0-9]+)-link'),
+                ''
+            )::integer AS generation
          FROM view_system_detail vsd
          JOIN systems s ON s.id = vsd.id
          WHERE vsd.id = $1",
