@@ -630,6 +630,7 @@ async function routeSystemsWarningData(page) {
     kernel: null,
     agent_version: null,
     current_store_path: null,
+    generation: 74,
     last_seen: null,
     cve_counts: { critical: 0, high: 0, medium: 1, low: 2 },
     flake: {
@@ -4034,6 +4035,29 @@ const steps = [
     },
   },
   {
+    name: "12i-system-detail-generation-metric",
+    description: "System detail shows API-provided generation in overview metrics",
+    action: async (page) => {
+      await routeSystemsWarningData(page);
+
+      await page.goto(`${baseUrl}/systems/00000000-0000-0000-0000-0000000000a1`, {
+        timeout: LOAD_TIMEOUT,
+      });
+      await page.waitForTimeout(1400);
+
+      await assertVisible(
+        page.locator(".sd-metric-label", { hasText: "Generation" }).first(),
+        "Expected generation metric label to be visible on system detail",
+      );
+      await assertVisible(
+        page.getByText("#74").first(),
+        "Expected API-provided generation value to render in system detail",
+      );
+
+      await unrouteSystemsWarningData(page);
+    },
+  },
+  {
     name: "27-hardening-fleet",
     description: "Systemd hardening fleet dashboard route and summary cards",
     action: async (page) => {
@@ -4294,6 +4318,7 @@ const CI_FAST_STEP_NAMES = new Set([
   "12f-systems-deploy-modal",
   "12g-system-detail-history-logs-edit",
   "12h-system-detail-cves-grouped-justification",
+  "12i-system-detail-generation-metric",
   "12d-systems-api-error-no-mock-fallback",
   "12g-systems-warning-clears-after-link",
   "13d-flakes-stress-dataset",

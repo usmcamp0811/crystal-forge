@@ -1173,6 +1173,8 @@ fn detail_row_to_api_model(row: SystemDetailRow) -> SystemDetail {
         kernel: row.kernel,
         agent_version: row.agent_version,
         current_store_path: row.current_store_path,
+        generation: row.generation,
+        generation_matches_current_store_path: row.generation_matches_current_store_path,
         hardware: SystemHardwareInfo {
             cpu_brand: row.cpu_brand,
             cpu_cores: row.cpu_cores,
