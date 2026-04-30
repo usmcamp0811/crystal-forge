@@ -505,16 +505,9 @@ pub async fn get_system_detail_by_id(
     system_id: Uuid,
 ) -> Result<Option<SystemDetailRow>> {
     let row = sqlx::query_as::<_, SystemDetailRow>(
-        "SELECT vsd.*, s.system_configuration_name, lss.generation, lss.generation_matches_current_store_path
+        "SELECT vsd.*, s.system_configuration_name
          FROM view_system_detail vsd
          JOIN systems s ON s.id = vsd.id
-         LEFT JOIN LATERAL (
-            SELECT ss.generation, ss.generation_matches_current_store_path
-            FROM system_states ss
-            WHERE ss.hostname = s.hostname
-            ORDER BY ss.timestamp DESC
-            LIMIT 1
-         ) lss ON TRUE
          WHERE vsd.id = $1",
     )
     .bind(system_id)
@@ -1502,12 +1495,36 @@ mod tests {
         .concat();
 
         assert!(
-            source.contains("lss.generation"),
-            "system detail query should project persisted generation"
+            source.contains("SELECT vsd.*, s.system_configuration_name"),
+            "system detail query should source generation from view_system_detail"
         );
         assert!(
             !source.contains(&legacy_regex_expr),
             "system detail query must not derive generation from current_store_path regex"
+        );
+        assert!(
+            !source.contains("LEFT JOIN LATERAL (\n            SELECT ss.generation"),
+            "system detail query must not independently select latest generation by hostname"
+        );
+    }
+
+    #[test]
+    fn generation_projection_migration_updates_view_system_detail() {
+        let migration = include_str!(
+            "../../migrations/0120_project_generation_from_view_system_detail_state_row.sql"
+        );
+
+        assert!(
+            migration.contains("CREATE OR REPLACE VIEW public.view_system_detail AS"),
+            "migration must rebuild view_system_detail"
+        );
+        assert!(
+            migration.contains("lss.generation"),
+            "migration must project generation from latest_system_state row"
+        );
+        assert!(
+            migration.contains("lss.generation_matches_current_store_path"),
+            "migration must project generation/path match flag from latest_system_state row"
         );
     }
 
