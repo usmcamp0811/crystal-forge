@@ -378,14 +378,6 @@ pub fn BuildsView() -> Element {
                             last_action_note.set(Some("Queue build flow is mocked in this UI pass; use Flakes/Evaluations to trigger real builds.".to_string()));
                         },
                     }
-                    QueueActionButton {
-                        label: "Start All",
-                        onclick: move |_| pending_action.set(Some(PendingAction::Queue(QueueAction::StartAll))),
-                    }
-                    QueueActionButton {
-                        label: "Pause All",
-                        onclick: move |_| pending_action.set(Some(PendingAction::Queue(QueueAction::PauseAll))),
-                    }
                 }
             }
 
