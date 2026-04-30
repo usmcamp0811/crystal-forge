@@ -4281,13 +4281,13 @@ const steps = [
       );
       await assertVisible(page.getByText("Avg score").first(), "Expected hardening summary stats row to be visible");
       await assertVisible(
-        page.getByText("Mount/Filesystem").first(),
-        "Expected grouped hardening table headers to render",
+        page.getByText("nginx.service").first(),
+        "Expected hardening service rows to render in hardening table",
       );
       await assertVisible(page.getByText("nginx.service").first(), "Expected mocked service row to render");
       await assertVisible(
-        page.getByText("OFF").first(),
-        "Expected compact hardening status badge cells to render",
+        page.getByRole("button", { name: /^View details$/i }).first(),
+        "Expected hardening table detail action to render",
       );
 
       await page.getByRole("button", { name: /^View details$/i }).first().click({ force: true });

@@ -2460,6 +2460,7 @@ fn HardeningTab(
     let mut justification_error = use_signal(|| None::<String>);
     let mut justification_notice = use_signal(|| None::<String>);
     let mut is_saving_justification = use_signal(|| false);
+    let mut modal_tab = use_signal(|| "directives".to_string());
     let mut search_query = use_signal(String::new);
     let mut severity_filter = use_signal(|| "all".to_string());
     let mut sort_mode = use_signal(|| "risk_desc".to_string());
@@ -2490,11 +2491,6 @@ fn HardeningTab(
         .iter()
         .filter(|service| matches!(service.risk_level.as_str(), "well_hardened"))
         .count();
-    let cumulative_exposure = results
-        .iter()
-        .map(|service| service.missing_directives_count + service.disabled_directives_count)
-        .sum::<i32>();
-
     let justifications_for = |service_name: &str| {
         justifications
             .iter()
@@ -2551,51 +2547,15 @@ fn HardeningTab(
     let has_active_filters =
         !query.is_empty() || active_severity != "all" || active_sort != "risk_desc";
 
-    let directive_groups: Vec<(&str, Vec<(&str, &str)>)> = vec![
-        (
-            "Isolation",
-            vec![
-                ("PrivateTmp", "Tmp"),
-                ("PrivateDevices", "Dev"),
-                ("PrivateNetwork", "Net"),
-                ("PrivateUsers", "Usr"),
-            ],
-        ),
-        (
-            "Mount/Filesystem",
-            vec![
-                ("ProtectHome", "PHm"),
-                ("ProtectSystem", "PSys"),
-                ("ProtectKernelTunables", "PKT"),
-                ("ProtectKernelModules", "PKM"),
-            ],
-        ),
-        (
-            "Capabilities",
-            vec![
-                ("NoNewPrivileges", "NNP"),
-                ("CapabilityBoundingSet", "CapB"),
-                ("AmbientCapabilities", "AmbC"),
-            ],
-        ),
-        (
-            "Seccomp",
-            vec![
-                ("SystemCallFilter", "SCF"),
-                ("SystemCallArchitectures", "SCA"),
-            ],
-        ),
-        (
-            "Runtime Guards",
-            vec![
-                ("MemoryDenyWriteExecute", "WX"),
-                ("LockPersonality", "Pers"),
-                ("RestrictRealtime", "RT"),
-                ("RestrictSUIDSGID", "SUID"),
-                ("RestrictNamespaces", "NS"),
-                ("RestrictAddressFamilies", "AF"),
-            ],
-        ),
+    let table_directives = vec![
+        "PrivateTmp",
+        "PrivateDevices",
+        "ProtectHome",
+        "ProtectSystem",
+        "NoNewPrivileges",
+        "CapabilityBoundingSet",
+        "MemoryDenyWriteExecute",
+        "RestrictSUIDSGID",
     ];
 
     let avg_tone_class = if avg_score < 30.0 {
@@ -2639,14 +2599,12 @@ fn HardeningTab(
                 }
             }
 
-            // Filter bar (matching design standards)
-            div { class: "flex flex-wrap items-center gap-4 mb-4 mt-1",
+            // Filter bar
+            div { class: "flex flex-wrap items-center gap-3 mb-2",
                 style: "row-gap: 0.75rem;",
-                // Search input with icon (flex-1 with min/max width)
                 div {
                     class: "relative",
-                    style: "position: relative; flex: 1 1 auto; min-width: 240px; max-width: 420px;",
-                    // Search icon (using simple text character instead of SVG for reliability)
+                    style: "position: relative; max-width: 280px; width: 100%;",
                     span {
                         class: "{theme::text::MUTED}",
                         style: "position: absolute; left: 0.75rem; top: 50%; transform: translateY(-50%); pointer-events: none; font-size: 0.875rem; line-height: 1;",
@@ -2655,7 +2613,7 @@ fn HardeningTab(
                     input {
                         class: "{theme::interactive::INPUT} {theme::interactive::FOCUS_RING} h-10 w-full rounded-lg",
                         style: "padding-left: 2.25rem; min-height: 2.5rem;",
-                        placeholder: "Filter by service name or type…",
+                        placeholder: "Filter service…",
                         value: "{search_query}",
                         oninput: move |evt| search_query.set(evt.value()),
                     }
@@ -2681,11 +2639,9 @@ fn HardeningTab(
                 }
 
                 span { class: "filter-count text-xs {theme::text::MUTED}", "{filtered_count} services" }
-
-                // Reset button (only show when filters active)
                 if has_active_filters {
                     button {
-                        class: "ml-auto px-3 h-10 rounded-lg border {theme::surface::CARD_BORDER} text-xs font-medium {theme::text::SECONDARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors",
+                        class: "px-3 h-10 rounded-lg border {theme::surface::CARD_BORDER} text-xs font-medium {theme::text::SECONDARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors",
                         onclick: move |_| {
                             search_query.set(String::new());
                             severity_filter.set("all".to_string());
@@ -2718,58 +2674,47 @@ fn HardeningTab(
                     }
                 }
             } else {
-                div { class: "{theme::presets::TABLE_CONTAINER}",
+                div { class: "{theme::presets::CARD} overflow-hidden",
                     div { class: "overflow-x-auto",
-                    table { class: "w-full min-w-[1540px] text-xs table-auto",
+                    table { class: "w-full min-w-[1240px] text-xs table-auto",
                         thead {
-                            tr { class: "{theme::surface::SUBTLE_BG} border-b {theme::surface::CARD_BORDER} uppercase tracking-wide text-[10px] {theme::text::MUTED}",
-                                th { class: "sticky top-0 z-10 px-2 py-2 text-left", colspan: "5", "Target" }
-                                for (group_name, directives) in directive_groups.iter() {
-                                    th { class: "sticky top-0 z-10 px-2 py-2 text-center", colspan: "{directives.len()}", "{group_name}" }
-                                }
-                                th { class: "sticky top-0 z-10 px-2 py-2 text-center", colspan: "2", "Audit" }
-                            }
                             tr { class: "{theme::surface::CARD_BG} border-b {theme::surface::CARD_BORDER} text-left {theme::text::SECONDARY}",
                                 th {
-                                    class: "sticky top-7 z-10 px-2 py-2 w-[68px] cursor-pointer {theme::interactive::HOVER_BG}",
+                                    class: "sticky top-0 z-10 px-2 py-2 w-[240px]",
+                                    "Service"
+                                }
+                                th {
+                                    class: "sticky top-0 z-10 px-2 py-2 w-[80px] cursor-pointer {theme::interactive::HOVER_BG}",
                                     onclick: move |_| {
                                         let current = sort_mode();
                                         sort_mode.set(if current == "risk_desc" { "score_asc".to_string() } else { "risk_desc".to_string() });
                                     },
-                                    "Risk "
+                                    "Risk"
                                     {if sort_mode() == "risk_desc" { "↓" } else { "" }}
                                 }
                                 th {
-                                    class: "sticky top-7 z-10 px-2 py-2 w-[72px] cursor-pointer {theme::interactive::HOVER_BG}",
+                                    class: "sticky top-0 z-10 px-2 py-2 w-[120px] cursor-pointer {theme::interactive::HOVER_BG}",
                                     onclick: move |_| {
                                         let current = sort_mode();
                                         sort_mode.set(if current == "score_desc" { "score_asc".to_string() } else { "score_desc".to_string() });
                                     },
-                                    "Score "
+                                    "Score"
                                     {if sort_mode() == "score_desc" { "↓" } else if sort_mode() == "score_asc" { "↑" } else { "" }}
                                 }
                                 th {
-                                    class: "sticky top-7 z-10 px-2 py-2 w-[240px] cursor-pointer {theme::interactive::HOVER_BG}",
-                                    onclick: move |_| {
-                                        sort_mode.set("service_asc".to_string());
-                                    },
-                                    "Service unit "
-                                    {if sort_mode() == "service_asc" { "↑" } else { "" }}
+                                    class: "sticky top-0 z-10 px-2 py-2 w-[84px]",
+                                    "User"
                                 }
-                                th { class: "sticky top-7 z-10 px-2 py-2 w-[120px]", "Identity" }
-                                th { class: "sticky top-7 z-10 px-2 py-2 w-[112px]", "Findings" }
-                                for (_, directives) in directive_groups.iter() {
-                                    for (directive_name, short_label) in directives.iter().copied() {
-                                        th {
-                                            key: "hdr-{directive_name}",
-                                            class: "sticky top-7 z-10 px-1.5 py-2 text-center font-mono text-[10px]",
-                                            title: "{directive_name}",
-                                            "{short_label}"
-                                        }
+                                for directive_name in table_directives.iter() {
+                                    th {
+                                        key: "hdr-{directive_name}",
+                                        class: "sticky top-0 z-10 px-1 py-2 text-center font-mono text-[9px] tracking-wide",
+                                        title: "{directive_name}",
+                                        "{directive_short_label(directive_name)}"
                                     }
                                 }
-                                th { class: "sticky top-7 z-10 px-2 py-2 text-center", "J" }
-                                th { class: "sticky top-7 z-10 px-2 py-2 text-center", "Detail" }
+                                th { class: "sticky top-0 z-10 px-2 py-2 w-[90px]", "Missing" }
+                                th { class: "sticky top-0 z-10 px-2 py-2 text-right w-[84px]", "" }
                             }
                         }
                         tbody {
@@ -2777,68 +2722,87 @@ fn HardeningTab(
                                 {
                                     let directives = directive_cells(service);
                                     let risk_chip = risk_level_compact_badge_class(&service.risk_level);
-                                    let identity_label = service
+                                    let risk_color = risk_level_color(&service.risk_level);
+                                    let user_label = service
                                         .service_type
                                         .clone()
                                         .unwrap_or_else(|| "system".to_string());
-                                    let row_highlight = if matches!(service.risk_level.as_str(), "vulnerable" | "poorly_hardened") {
-                                        theme::health::CRITICAL_BG
+                                    let bar_width = service.hardening_score.clamp(0, 100);
+                                    let missing_text_class = if service.missing_directives_count > 15 {
+                                        theme::health::CRITICAL_TEXT
                                     } else {
-                                        ""
+                                        theme::text::MUTED
                                     };
 
                                     rsx! {
                                         tr {
                                             key: "svc-{service.id}",
-                                            class: "border-b {theme::surface::DIVIDER} {theme::interactive::HOVER_BG} {row_highlight}",
-                                            td { class: "px-2 py-1.5",
-                                                span {
-                                                    class: "inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide {risk_chip}",
-                                                    "{short_risk_label(&service.risk_level)}"
+                                            class: "border-b {theme::surface::DIVIDER} {theme::interactive::HOVER_BG}",
+                                            onclick: {
+                                                let service = service.clone();
+                                                move |_| {
+                                                    modal_tab.set("directives".to_string());
+                                                    selected_service.set(Some(service.clone()));
                                                 }
-                                            }
-                                            td { class: "px-2 py-1.5 font-semibold {theme::text::PRIMARY}", "{service.hardening_score}" }
-                                            td { class: "px-2 py-1.5 font-mono text-[11px] {theme::text::PRIMARY} whitespace-nowrap",
+                                            },
+                                            td { class: "px-2 py-2 font-mono text-[12px] {theme::text::PRIMARY} whitespace-nowrap font-semibold",
                                                 "{service.service_name}"
                                                 if !justifications_for(&service.service_name).is_empty() {
                                                     div { class: "text-[10px] mt-0.5 {theme::text::MUTED}", "⚠ waiver" }
                                                 }
                                             }
-                                            td { class: "px-2 py-1.5 text-[11px] {theme::text::SECONDARY}",
-                                                "{identity_label}"
+                                            td { class: "px-2 py-2",
+                                                span {
+                                                    class: "inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide {risk_chip}",
+                                                    "{short_risk_label(&service.risk_level)}"
+                                                }
                                             }
-                                            td { class: "px-2 py-1.5 text-[11px] {theme::text::SECONDARY}",
-                                                span { class: "{theme::health::CRITICAL_TEXT}", "M:{service.missing_directives_count}" }
-                                                span { class: "mx-1 {theme::text::MUTED}", "·" }
-                                                span { class: "{theme::health::WARNING_TEXT}", "D:{service.disabled_directives_count}" }
+                                            td { class: "px-2 py-2",
+                                                div { class: "flex items-center gap-2",
+                                                    div { class: "h-1.5 w-[60px] rounded-full {theme::surface::SUBTLE_BG} overflow-hidden",
+                                                        div { style: "height:100%; width: {bar_width}%; background: {risk_color};" }
+                                                    }
+                                                    span { class: "font-mono text-[11px] {theme::text::MUTED}", "{service.hardening_score}%" }
+                                                }
+                                            }
+                                            td { class: "px-2 py-2",
+                                                span { class: "font-mono text-[11px] {theme::text::MUTED}", "{user_label}" }
                                             }
 
-                                            for (_, group_directives) in directive_groups.iter() {
-                                                for (directive_name, _) in group_directives.iter().copied() {
+                                            for directive_name in table_directives.iter() {
                                                     {
                                                         let status = directive_badge_content(directive_for(&directives, directive_name));
                                                         rsx! {
-                                                            td { class: "px-1 py-1 text-center",
-                                                                span {
-                                                                    class: "inline-flex min-w-[34px] justify-center rounded border px-1 py-0.5 text-[10px] font-semibold {status.class_name}",
-                                                                    title: "{status.title}",
-                                                                    "{status.label}"
+                                                            td { class: "px-1 py-2 text-center",
+                                                                if status.label == "on" || status.label == "partial" {
+                                                                    span { class: "text-emerald-400 text-[11px]", "✓" }
+                                                                } else {
+                                                                    span { class: "{theme::text::DISABLED} text-[11px]", "–" }
                                                                 }
                                                             }
                                                         }
                                                     }
-                                                }
                                             }
 
-                                            td { class: "px-2 py-1.5 text-center text-[11px] {theme::text::PRIMARY}", "{justifications_for(&service.service_name).len()}" }
-                                            td { class: "px-2 py-1.5 text-center",
+                                            td { class: "px-2 py-2",
+                                                span {
+                                                    class: "text-[11px] {missing_text_class}",
+                                                    "{service.missing_directives_count}/{service.missing_directives_count + service.disabled_directives_count + 8}"
+                                                }
+                                            }
+                                            td { class: "px-2 py-2 text-right",
                                                 button {
-                                                    class: "px-2 py-1 rounded border {theme::surface::CARD_BORDER} text-[10px] {theme::text::SECONDARY} {theme::interactive::HOVER_BG}",
+                                                    class: "h-7 w-7 rounded-md border {theme::surface::CARD_BORDER} {theme::text::SECONDARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING}",
+                                                    aria_label: "View details",
                                                     onclick: {
                                                         let service = service.clone();
-                                                        move |_| selected_service.set(Some(service.clone()))
+                                                        move |evt| {
+                                                            evt.stop_propagation();
+                                                            modal_tab.set("directives".to_string());
+                                                            selected_service.set(Some(service.clone()));
+                                                        }
                                                     },
-                                                    "View details"
+                                                    "→"
                                                 }
                                             }
                                         }
@@ -2849,7 +2813,7 @@ fn HardeningTab(
                                 tr {
                                     td {
                                         class: "px-3 py-6 text-sm text-center {theme::text::SECONDARY}",
-                                        colspan: "{5 + directive_groups.iter().map(|(_, d)| d.len()).sum::<usize>() + 2}",
+                                        colspan: "{5 + table_directives.len() + 2}",
                                         "No services match the current filters."
                                     }
                                 }
@@ -2887,33 +2851,25 @@ fn HardeningTab(
                     aria_modal: "true",
                     aria_labelledby: "hardening-modal-title",
 
-                    // Header
                     div { class: "px-5 py-4 border-b {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG} cf-hardening-modal-header",
                         div { class: "flex items-start justify-between gap-3",
                             div { class: "space-y-2 min-w-0 flex-1",
                                 div { class: "flex items-center gap-2 flex-wrap",
-                                    h3 { id: "hardening-modal-title", class: "text-lg font-semibold leading-tight {theme::text::PRIMARY} break-words", "{service.service_name}" }
-                                    span { class: "text-[10px] font-medium uppercase tracking-[0.16em] {theme::text::MUTED}", "Service hardening" }
                                     span {
                                         class: "inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wide {risk_level_compact_badge_class(&service.risk_level)}",
-                                        span { class: "h-1.5 w-1.5 rounded-full bg-current opacity-80" }
                                         "{short_risk_label(&service.risk_level)}"
                                     }
+                                    h3 { id: "hardening-modal-title", class: "text-lg font-semibold leading-tight {theme::text::PRIMARY} break-words font-mono", "{service.service_name}" }
                                 }
                                 p { class: "text-sm leading-5 {theme::text::SECONDARY}",
                                     "Score "
                                     span { class: "font-semibold {theme::text::PRIMARY}", "{service.hardening_score}/100" }
-                                    " · Missing "
-                                    span { class: "font-semibold {theme::health::CRITICAL_TEXT}", "{service.missing_directives_count}" }
-                                    " · Disabled "
-                                    span { class: "font-semibold {theme::health::WARNING_TEXT}", "{service.disabled_directives_count}" }
+                                    " · "
+                                    "{service.missing_directives_count} missing directives"
+                                    " · user: "
+                                    span { class: "font-mono", "{service_user_label(&service)}" }
                                     " · Notes "
-                                    span { class: "font-semibold {theme::text::PRIMARY}",
-                                        "{justifications.iter().filter(|j| j.service_name == service.service_name).count()}"
-                                    }
-                                }
-                                p { class: "text-[11px] leading-5 {theme::text::MUTED}",
-                                    "Review control details below, then record an explicit rationale when accepting residual risk."
+                                    span { class: "font-semibold {theme::health::CRITICAL_TEXT}", "{service.missing_directives_count}" }
                                 }
                             }
                             button {
@@ -2930,8 +2886,107 @@ fn HardeningTab(
                         }
                     }
 
-                    // Body
+                    div { class: "sd-tabs px-5",
+                        for (key, label) in [("directives", "Directives"), ("nix", "NixOS config"), ("all", "All checks")] {
+                            {
+                                let tab_class = if *modal_tab.read() == key {
+                                    "sd-tab active"
+                                } else {
+                                    "sd-tab"
+                                };
+                                rsx! {
+                                    button {
+                                        class: "{tab_class}",
+                                        onclick: {
+                                            let key = key.to_string();
+                                            move |_| modal_tab.set(key.clone())
+                                        },
+                                        "{label}"
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     div { class: "px-5 py-4 overflow-y-auto flex flex-col gap-3.5",
+                        if *modal_tab.read() == "directives" {
+                            section { class: "space-y-3",
+                                div { class: "grid grid-cols-1 md:grid-cols-2 gap-2",
+                                    for directive in directive_cells(&service) {
+                                        {
+                                            let status = directive_badge_content(Some(&directive));
+                                            let tile_class = if directive.enabled {
+                                                "bg-emerald-500/10 border-emerald-500/30"
+                                            } else {
+                                                "bg-red-500/10 border-red-500/30"
+                                            };
+                                            rsx! {
+                                                div { class: "flex items-center gap-2 px-3 py-2 rounded-lg border {tile_class}",
+                                                    span { class: "text-base", if directive.enabled { "✅" } else { "❌" } }
+                                                    div {
+                                                        div { class: "font-mono text-[12px] font-semibold {theme::text::PRIMARY}", "{directive.name}" }
+                                                        div { class: "text-[10px] {theme::text::MUTED}",
+                                                            if directive.enabled { "enforced" } else { "not set" }
+                                                        }
+                                                    }
+                                                    span { class: "ml-auto text-[10px] {status.class_name}", "{status.label}" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                p { class: "text-[11px] {theme::text::MUTED}",
+                                    "Tip: scroll to review all directives and scores."
+                                }
+                            }
+                        } else if *modal_tab.read() == "nix" {
+                            section { class: "space-y-3",
+                                div { class: "sd-callout sd-callout-info",
+                                    p { class: "text-[12px] {theme::text::SECONDARY}",
+                                        "Add these options to your NixOS module to harden "
+                                        span { class: "font-mono {theme::text::PRIMARY}", "{service.service_name}" }
+                                        "."
+                                    }
+                                }
+                                pre { class: "sd-nix text-[12px] p-3 rounded-lg border {theme::surface::CARD_BORDER} overflow-x-auto",
+                                    "systemd.services.\"{service.service_name}\".serviceConfig = {{\n  # tighten according to your workload\n  PrivateTmp = true;\n  PrivateDevices = true;\n  ProtectSystem = \"strict\";\n  ProtectHome = true;\n  NoNewPrivileges = true;\n}};"
+                                }
+                            }
+                        } else {
+                            section { class: "space-y-3",
+                                div { class: "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden",
+                                    div { class: "h-[320px] overflow-y-scroll pr-1 cf-modal-table-scroll cf-hardening-directives-scroll",
+                                        table { class: "w-full text-sm table-fixed",
+                                            thead {
+                                                tr { class: "sticky top-0 z-10 border-b {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG} text-left {theme::text::MUTED}",
+                                                    th { class: "px-3 py-2 text-[11px] font-medium", "Directive" }
+                                                    th { class: "px-3 py-2 text-[11px] font-medium", "Category" }
+                                                    th { class: "px-3 py-2 text-[11px] font-medium", "Points" }
+                                                    th { class: "px-3 py-2 text-[11px] font-medium", "Status" }
+                                                }
+                                            }
+                                            tbody {
+                                                for directive in directive_cells(&service) {
+                                                    tr { class: "border-b {theme::surface::DIVIDER}",
+                                                        td { class: "px-3 py-2 font-mono text-[12px] {theme::text::PRIMARY}", "{directive.name}" }
+                                                        td { class: "px-3 py-2 text-[12px] {theme::text::MUTED}", "security" }
+                                                        td { class: "px-3 py-2 font-mono text-[12px] {theme::text::MUTED}", "{directive.points}/{directive.max_points}" }
+                                                        td { class: "px-3 py-2",
+                                                            if directive.enabled {
+                                                                span { class: "chip chip-healthy", "enforced" }
+                                                            } else {
+                                                                span { class: "chip chip-critical", "missing" }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         if allow_mutations {
                             section { class: "space-y-2.5 rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-3.5 py-3.5 cf-hardening-justification-card",
                                 div { class: "space-y-1",
@@ -3003,59 +3058,6 @@ fn HardeningTab(
                                         } else {
                                             "Save justification"
                                         }
-                                    }
-                                }
-                            }
-                        }
-
-                        section { class: "space-y-3",
-                            div { class: "flex items-end justify-between gap-2 flex-wrap",
-                                div { class: "space-y-1",
-                                    p { class: "text-sm font-medium {theme::text::PRIMARY}", "Control detail" }
-                                    p { class: "text-[11px] leading-5 {theme::text::SECONDARY}",
-                                        "Showing the most relevant controls first so you can quickly understand why this service scored as it did."
-                                    }
-                                }
-                                span { class: "text-[11px] {theme::text::MUTED}", "status · points" }
-                            }
-
-                            if directive_cells(&service).is_empty() {
-                                div { class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-4 py-4 text-sm {theme::text::SECONDARY}",
-                                    "No directive details were returned for this service."
-                                }
-                            } else {
-                                div { class: "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden",
-                                    div { class: "h-[260px] overflow-y-scroll pr-1 cf-modal-table-scroll cf-hardening-directives-scroll",
-                                        style: "scrollbar-gutter: stable both-edges;",
-                                        table { class: "w-full text-sm table-fixed",
-                                            thead {
-                                                tr { class: "sticky top-0 z-10 border-b {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG} text-left {theme::text::MUTED}",
-                                                    th { class: "px-3 py-2 text-[11px] font-medium w-[52%]", "Directive" }
-                                                    th { class: "px-3 py-2 text-[11px] font-medium text-center w-[22%]", "Status" }
-                                                    th { class: "px-3 py-2 text-[11px] font-medium text-right w-[26%]", "Points" }
-                                                }
-                                            }
-                                            tbody {
-                                                for directive in modal_directives(&service) {
-                                                    tr { class: "border-b {theme::surface::DIVIDER} {theme::interactive::HOVER_BG} last:border-b-0",
-                                                        td { class: "px-3 py-2 font-mono text-[12px] leading-5 {theme::text::PRIMARY} break-all", "{directive.name}" }
-                                                        td { class: "px-3 py-2 text-center",
-                                                            span {
-                                                                class: "inline-flex rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide {directive_badge_content(Some(&directive)).class_name}",
-                                                                title: "{directive_badge_content(Some(&directive)).title}",
-                                                                "{directive_badge_content(Some(&directive)).label}"
-                                                            }
-                                                        }
-                                                        td { class: "px-3 py-2 text-right font-mono text-[12px] {theme::text::SECONDARY}",
-                                                            "{directive.points}/{directive.max_points}"
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    p { class: "px-3 py-2 text-[11px] border-t {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG} {theme::text::MUTED}",
-                                        "Tip: scroll to review all directives and scores."
                                     }
                                 }
                             }
@@ -3323,11 +3325,37 @@ fn severity_matches(service: &HardeningServiceResultResponse, filter_value: &str
 
 fn short_risk_label(level: &str) -> &'static str {
     match level {
-        "well_hardened" => "GOOD",
-        "moderately_hardened" => "MOD",
-        "poorly_hardened" => "POOR",
+        "well_hardened" => "OK",
+        "moderately_hardened" => "MED",
+        "poorly_hardened" => "HIGH",
         _ => "VULN",
     }
+}
+
+fn risk_level_color(level: &str) -> &'static str {
+    match level {
+        "well_hardened" => "#34d399",
+        "moderately_hardened" => "#fbbf24",
+        "poorly_hardened" => "#f97316",
+        _ => "#f87171",
+    }
+}
+
+fn directive_short_label(name: &str) -> String {
+    name.replace("Private", "")
+        .replace("Protect", "")
+        .replace("Restrict", "")
+        .replace("Capability", "Cap")
+        .chars()
+        .take(4)
+        .collect::<String>()
+}
+
+fn service_user_label(service: &HardeningServiceResultResponse) -> String {
+    service
+        .service_type
+        .clone()
+        .unwrap_or_else(|| "system".to_string())
 }
 
 fn risk_level_compact_badge_class(level: &str) -> String {
