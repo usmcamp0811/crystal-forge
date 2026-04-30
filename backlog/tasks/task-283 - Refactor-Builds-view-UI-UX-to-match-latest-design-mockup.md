@@ -4,6 +4,7 @@ title: Refactor Builds view UI/UX to match latest design mockup
 status: Backlog
 assignee: []
 created_date: '2026-04-30 21:32'
+updated_date: '2026-04-30 21:36'
 labels:
   - ui
   - ux
