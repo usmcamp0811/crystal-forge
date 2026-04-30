@@ -463,6 +463,7 @@ pub struct SystemDetailRow {
     pub agent_version: Option<String>,
     pub current_store_path: Option<String>,
     pub generation: Option<i32>,
+    pub generation_matches_current_store_path: Option<bool>,
     // Hardware
     pub cpu_brand: Option<String>,
     pub cpu_cores: Option<i32>,
@@ -504,11 +505,11 @@ pub async fn get_system_detail_by_id(
     system_id: Uuid,
 ) -> Result<Option<SystemDetailRow>> {
     let row = sqlx::query_as::<_, SystemDetailRow>(
-        "SELECT vsd.*, s.system_configuration_name, lss.generation
+        "SELECT vsd.*, s.system_configuration_name, lss.generation, lss.generation_matches_current_store_path
          FROM view_system_detail vsd
          JOIN systems s ON s.id = vsd.id
          LEFT JOIN LATERAL (
-            SELECT ss.generation
+            SELECT ss.generation, ss.generation_matches_current_store_path
             FROM system_states ss
             WHERE ss.hostname = s.hostname
             ORDER BY ss.timestamp DESC

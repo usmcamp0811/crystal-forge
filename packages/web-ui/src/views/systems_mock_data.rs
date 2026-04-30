@@ -390,6 +390,7 @@ pub(super) fn build_system_detail(
         agent_version: Some(agent_version.to_string()),
         current_store_path: store_path,
         generation: None,
+        generation_matches_current_store_path: None,
         hardware: SystemHardwareInfo {
             cpu_brand: Some(cpu_brand.to_string()),
             cpu_cores: Some(cpu_cores),

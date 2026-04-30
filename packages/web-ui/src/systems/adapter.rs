@@ -496,6 +496,7 @@ pub fn fallback_system_detail() -> SystemDetail {
         agent_version: None,
         current_store_path: None,
         generation: None,
+        generation_matches_current_store_path: None,
         hardware: SystemHardwareInfo {
             cpu_brand: None,
             cpu_cores: None,

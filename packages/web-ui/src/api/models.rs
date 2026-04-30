@@ -375,6 +375,8 @@ pub struct SystemDetail {
     pub current_store_path: Option<String>,
     #[serde(default)]
     pub generation: Option<i32>,
+    #[serde(default)]
+    pub generation_matches_current_store_path: Option<bool>,
     pub hardware: SystemHardwareInfo,
     pub network: SystemNetworkInfo,
     pub security: SystemSecurityInfo,
