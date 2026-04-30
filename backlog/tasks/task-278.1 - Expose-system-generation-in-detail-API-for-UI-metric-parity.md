@@ -5,7 +5,7 @@ status: Review
 assignee:
   - '@ai-agent'
 created_date: '2026-04-20 00:34'
-updated_date: '2026-04-30 03:29'
+updated_date: '2026-04-30 19:58'
 labels:
   - ui
   - systems
@@ -32,15 +32,17 @@ Desired outcome: Add generation data to the relevant API/DTO path so the System 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [x] #1 System detail API/DTO exposes a generation field for the current deployed system state.
-- [x] #2 Web UI System Detail metric strip renders a non-placeholder generation value when data is available.
-- [x] #3 No regression in existing system detail fetch/parsing behavior when generation is absent (backward compatibility handled).
+- [ ] #1 System detail API/DTO exposes a generation field for the current deployed system state.
+- [ ] #2 Web UI System Detail metric strip renders a non-placeholder generation value when data is available.
+- [ ] #3 No regression in existing system detail fetch/parsing behavior when generation is absent (backward compatibility handled).
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/245
+Follow-up fix pushed in MR iteration: commit `2bb0e42f` renumbers task migrations from `0113/0114` to `0118/0119` to avoid collision with existing dev migrations (`0113_add_eval_cancellation_support`, `0114_create_hardening_tables`).
 
-Verification: `nix develop -c env SQLX_OFFLINE=true cargo check` (packages/default), `nix develop -c cargo check` (packages/web-ui), `nix build .#checks.x86_64-linux.web-ui` (includes `12i-system-detail-generation-metric.png`).
+Updated test migration include reference in `packages/default/src/queries/systems.rs` to `0118_add_generation_to_system_states.sql`.
+
+Local verification executed after rename: `nix develop -c env SQLX_OFFLINE=true cargo check` (packages/default), `nix develop -c env SQLX_OFFLINE=true cargo test queries::systems::tests::generation_migration_adds_generation_column_to_system_states` (packages/default), `nix develop -c env SQLX_OFFLINE=true cargo test queries::systems::tests::system_detail_query_does_not_derive_generation_from_store_path_regex` (packages/default), `nix develop -c cargo check` (packages/web-ui).
 <!-- SECTION:NOTES:END -->
