@@ -1480,7 +1480,7 @@ mod tests {
 
     #[test]
     fn generation_migration_adds_generation_column_to_system_states() {
-        let migration = include_str!("../../migrations/0113_add_generation_to_system_states.sql");
+        let migration = include_str!("../../migrations/0118_add_generation_to_system_states.sql");
 
         assert!(
             migration.contains("ALTER TABLE public.system_states"),
