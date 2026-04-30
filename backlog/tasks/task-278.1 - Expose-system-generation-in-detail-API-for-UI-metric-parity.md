@@ -1,11 +1,11 @@
 ---
 id: TASK-278.1
 title: Expose system generation in detail API for UI metric parity
-status: In Progress
+status: Review
 assignee:
   - '@ai-agent'
 created_date: '2026-04-20 00:34'
-updated_date: '2026-04-30 02:25'
+updated_date: '2026-04-30 03:29'
 labels:
   - ui
   - systems
@@ -32,13 +32,15 @@ Desired outcome: Add generation data to the relevant API/DTO path so the System 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 System detail API/DTO exposes a generation field for the current deployed system state.
-- [ ] #2 Web UI System Detail metric strip renders a non-placeholder generation value when data is available.
-- [ ] #3 No regression in existing system detail fetch/parsing behavior when generation is absent (backward compatibility handled).
+- [x] #1 System detail API/DTO exposes a generation field for the current deployed system state.
+- [x] #2 Web UI System Detail metric strip renders a non-placeholder generation value when data is available.
+- [x] #3 No regression in existing system detail fetch/parsing behavior when generation is absent (backward compatibility handled).
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-LOCK: gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-278.1-expose-system-generation-api
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/245
+
+Verification: `nix develop -c env SQLX_OFFLINE=true cargo check` (packages/default), `nix develop -c cargo check` (packages/web-ui), `nix build .#checks.x86_64-linux.web-ui` (includes `12i-system-detail-generation-metric.png`).
 <!-- SECTION:NOTES:END -->
