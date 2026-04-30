@@ -462,6 +462,8 @@ pub struct SystemDetailRow {
     pub kernel: Option<String>,
     pub agent_version: Option<String>,
     pub current_store_path: Option<String>,
+    pub generation: Option<i32>,
+    pub generation_matches_current_store_path: Option<bool>,
     // Hardware
     pub cpu_brand: Option<String>,
     pub cpu_cores: Option<i32>,
@@ -1467,5 +1469,117 @@ mod tests {
             (2, 1, 0, 0),
             "expected 2 distinct CRITICAL and 1 distinct HIGH (got {list_counts:?})"
         );
+    }
+
+    #[test]
+    fn generation_migration_adds_generation_column_to_system_states() {
+        let migration = include_str!("../../migrations/0118_add_generation_to_system_states.sql");
+
+        assert!(
+            migration.contains("ALTER TABLE public.system_states"),
+            "migration must alter system_states"
+        );
+        assert!(
+            migration.contains("ADD COLUMN IF NOT EXISTS generation integer"),
+            "migration must add nullable generation integer column"
+        );
+    }
+
+    #[test]
+    fn system_detail_query_does_not_derive_generation_from_store_path_regex() {
+        let source = include_str!("systems.rs");
+        let legacy_regex_expr = [
+            "substring(vsd.current_store_path from ",
+            "'/nix/var/nix/profiles/system-([0-9]+)-link'",
+        ]
+        .concat();
+
+        assert!(
+            source.contains("SELECT vsd.*, s.system_configuration_name"),
+            "system detail query should source generation from view_system_detail"
+        );
+        assert!(
+            !source.contains(&legacy_regex_expr),
+            "system detail query must not derive generation from current_store_path regex"
+        );
+        assert!(
+            !source.contains("LEFT JOIN LATERAL (\n            SELECT ss.generation"),
+            "system detail query must not independently select latest generation by hostname"
+        );
+    }
+
+    #[test]
+    fn generation_projection_migration_updates_view_system_detail() {
+        let migration = include_str!(
+            "../../migrations/0120_project_generation_from_view_system_detail_state_row.sql"
+        );
+
+        assert!(
+            migration.contains("CREATE OR REPLACE VIEW public.view_system_detail AS"),
+            "migration must rebuild view_system_detail"
+        );
+        assert!(
+            migration.contains("lss.generation"),
+            "migration must project generation from latest_system_state row"
+        );
+        assert!(
+            migration.contains("lss.generation_matches_current_store_path"),
+            "migration must project generation/path match flag from latest_system_state row"
+        );
+        assert!(
+            migration.contains("ORDER BY s.id, ss.timestamp DESC NULLS LAST, ss.id DESC"),
+            "migration must deterministically select latest system state row"
+        );
+        assert!(
+            migration.contains("ld.expected_store_path,\n    lss.generation,\n    lss.generation_matches_current_store_path"),
+            "migration must append generation columns after existing view columns"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn system_detail_returns_latest_persisted_generation() {
+        let pool = test_pool_from_env().await;
+        let hostname = format!("task278-gen-{}", Uuid::new_v4());
+        let system = make_test_system(&pool, &hostname).await;
+
+        sqlx::query(
+            "INSERT INTO system_states (hostname, change_reason, store_path, generation, timestamp)
+             VALUES ($1, 'startup', $2, $3, NOW() - INTERVAL '5 minutes')",
+        )
+        .bind(&hostname)
+        .bind("/nix/store/task278-old")
+        .bind(73_i32)
+        .execute(&pool)
+        .await
+        .expect("failed to insert older state row");
+
+        sqlx::query(
+            "INSERT INTO system_states (hostname, change_reason, store_path, generation, timestamp)
+             VALUES ($1, 'state_delta', $2, $3, NOW())",
+        )
+        .bind(&hostname)
+        .bind("/nix/store/task278-new")
+        .bind(74_i32)
+        .execute(&pool)
+        .await
+        .expect("failed to insert latest state row");
+
+        let detail = get_system_detail_by_id(&pool, system.id)
+            .await
+            .expect("detail query should succeed")
+            .expect("system detail row should exist");
+
+        assert_eq!(
+            detail.generation,
+            Some(74),
+            "detail query should expose latest persisted generation"
+        );
+
+        sqlx::query("DELETE FROM systems WHERE id = $1")
+            .bind(system.id)
+            .execute(&pool)
+            .await
+            .ok();
     }
 }

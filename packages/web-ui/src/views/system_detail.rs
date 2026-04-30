@@ -803,6 +803,18 @@ pub fn SystemDetailView(id: String) -> Element {
                 let kernel_str = system.kernel.clone().unwrap_or_else(|| "unknown".to_string());
                 let policy_str = system.deployment_policy.clone();
                 let env_str = environment.clone();
+                let generation_text = system
+                    .generation
+                    .map(|generation| format!("#{generation}"))
+                    .unwrap_or_else(|| "#—".to_string());
+                let generation_subtext = if matches!(
+                    system.generation_matches_current_store_path,
+                    Some(false)
+                ) {
+                    "profile/current mismatch detected".to_string()
+                } else {
+                    format!("activated · {last_seen_text}")
+                };
                 let cve_total = system.cve_counts.total();
                 let cve_critical = system.cve_counts.critical;
                 let cve_high = system.cve_counts.high;
@@ -827,8 +839,8 @@ pub fn SystemDetailView(id: String) -> Element {
                         div {
                             class: "sd-metric",
                             div { class: "sd-metric-label", "Generation" }
-                            div { class: "sd-metric-val-num", "#—" }
-                            div { class: "sd-metric-sub", "activated · {last_seen_text}" }
+                            div { class: "sd-metric-val-num", "{generation_text}" }
+                            div { class: "sd-metric-sub", "{generation_subtext}" }
                         }
                         // Uptime
                         div {
@@ -1254,7 +1266,15 @@ fn OverviewTab(
         .unwrap_or_else(|| "-".to_string());
     let ipv6_text = "—".to_string();
     let branch_text = "main".to_string();
-    let generation_text = "#—".to_string();
+    let generation_text = system
+        .generation
+        .map(|generation| format!("#{generation}"))
+        .unwrap_or_else(|| "#—".to_string());
+    let generation_mismatch_note = if matches!(system.generation_matches_current_store_path, Some(false)) {
+        " (profile/current mismatch)"
+    } else {
+        ""
+    };
     let commit_message_text = current_commit
         .as_ref()
         .map(|commit| commit.message.clone())
@@ -1320,7 +1340,7 @@ fn OverviewTab(
                     dt { "Branch" } dd { class: "mono", "{branch_text}" }
                     dt { "Commit" } dd { class: "mono", "{flake_commit}" }
                     dt { "Message" } dd { style: "white-space: normal; font-family: var(--font-sans);", "{commit_message_text}" }
-                    dt { "Generation" } dd { class: "mono", "{generation_text}" }
+                    dt { "Generation" } dd { class: "mono", "{generation_text}{generation_mismatch_note}" }
                     dt { "NixOS" } dd { class: "mono", "{nixos_version}" }
                     dt { "Kernel" } dd { class: "mono", "{kernel}" }
                 }
