@@ -1,10 +1,11 @@
 ---
 id: TASK-283
 title: Refactor Builds view UI/UX to match latest design mockup
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@ai-agent'
 created_date: '2026-04-30 21:32'
-updated_date: '2026-04-30 21:39'
+updated_date: '2026-04-30 21:40'
 labels:
   - ui
   - ux
@@ -77,3 +78,9 @@ Medium: high visible surface area and potential interaction regressions if styli
 - [ ] #5 `nix develop -c cargo check` (web-ui) succeeds after implementation.
 - [ ] #6 `nix build .#checks.x86_64-linux.web-ui` succeeds and includes updated Builds-view screenshot/assertion coverage proving intended UI behavior.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: ai-agent on reckless in /home/mcamp/code/crystal-forge/TASK-283-refactor-builds-view-ui-ux
+<!-- SECTION:NOTES:END -->
