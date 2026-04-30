@@ -1,10 +1,11 @@
 ---
 id: TASK-278.1
 title: Expose system generation in detail API for UI metric parity
-status: Backlog
+status: To Do
 assignee:
   - '@ai-agent'
 created_date: '2026-04-20 00:34'
+updated_date: '2026-04-30 02:25'
 labels:
   - ui
   - systems
