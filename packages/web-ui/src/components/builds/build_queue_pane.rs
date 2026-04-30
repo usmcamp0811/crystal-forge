@@ -284,12 +284,12 @@ fn BuildQueueTable(
                 thead {
                     class: "sticky top-0 {theme::surface::CARD_BG} border-b {theme::surface::CARD_BORDER}",
                     tr {
+                        th { class: "text-left px-2 py-2 {theme::text::MUTED} font-medium", "Package / derivation" }
                         th { class: "text-left px-2 py-2 {theme::text::MUTED} font-medium", "Status" }
-                        th { class: "text-left px-2 py-2 {theme::text::MUTED} font-medium", "System" }
-                        th { class: "text-left px-2 py-2 {theme::text::MUTED} font-medium", "Flake" }
-                        th { class: "text-left px-2 py-2 {theme::text::MUTED} font-medium", "Commit" }
                         th { class: "text-left px-2 py-2 {theme::text::MUTED} font-medium", "Worker" }
-                        th { class: "text-left px-2 py-2 {theme::text::MUTED} font-medium", "Time" }
+                        th { class: "text-left px-2 py-2 {theme::text::MUTED} font-medium", "Progress" }
+                        th { class: "text-left px-2 py-2 {theme::text::MUTED} font-medium", "Queued" }
+                        th { class: "text-left px-2 py-2 {theme::text::MUTED} font-medium", "Duration" }
                         th { class: "text-right px-2 py-2 {theme::text::MUTED} font-medium", "Actions" }
                     }
                 }
@@ -308,7 +308,17 @@ fn BuildQueueTable(
                                     class: "{row_class} border-b {theme::surface::CARD_BORDER}",
                                     "data-testid": "build-queue-row",
                                     onclick: move |_| selected_id.set(Some(build.id)),
-                                    // Status
+                                    td {
+                                        class: "px-2 py-2",
+                                        div {
+                                            p { class: "text-[13px] font-semibold {theme::text::PRIMARY}", "{build.flake}" }
+                                            p { class: "text-[10px] font-mono {theme::text::MUTED} truncate max-w-[18rem]", "{build.summary}" }
+                                            p { class: "text-[10px] {theme::text::MUTED}",
+                                                "{extract_system_name(&build.hostname)} · "
+                                                span { class: "font-mono", "{short_commit(&build.commit)}" }
+                                            }
+                                        }
+                                    }
                                     td {
                                         class: "px-2 py-2",
                                         span {
@@ -316,44 +326,33 @@ fn BuildQueueTable(
                                             "{build.status_label()}"
                                         }
                                     }
-                                    // System
                                     td {
-                                        class: "px-2 py-2 {theme::text::PRIMARY} font-medium truncate max-w-[120px]",
-                                        title: "{extract_system_name(&build.hostname)}",
-                                        "{extract_system_name(&build.hostname)}"
-                                    }
-                                    // Flake
-                                    td {
-                                        class: "px-2 py-2",
-                                        span {
-                                            class: "inline-flex px-2 py-0.5 text-[10px] rounded border cf-chip-blue",
-                                            "{build.flake}"
-                                        }
-                                    }
-                                    // Commit
-                                    td {
-                                        class: "px-2 py-2 font-mono {theme::text::SECONDARY}",
-                                        title: "{build.commit}",
-                                        "{short_commit(&build.commit)}"
-                                    }
-                                    // Worker
-                                    td {
-                                        class: "px-2 py-2 {theme::text::MUTED}",
+                                        class: "px-2 py-2 font-mono text-xs {theme::text::SECONDARY}",
                                         "{build.worker_id}"
                                     }
-                                    // Time (runtime or queued_for)
                                     td {
-                                        class: "px-2 py-2 {theme::text::MUTED} whitespace-nowrap",
-                                        if let Some(ref runtime) = build.runtime {
-                                            span {
-                                                class: "text-teal-400",
-                                                "{runtime}"
+                                        class: "px-2 py-2 w-[110px]",
+                                        if matches!(build.status, BuildStatus::Building | BuildStatus::Stopping) {
+                                            div {
+                                                class: "h-1.5 bg-slate-800 rounded-full overflow-hidden",
+                                                div { class: "h-full bg-cyan-400", style: "width: 56%" }
                                             }
                                         } else {
-                                            "{build.queued_for}"
+                                            span { class: "text-xs {theme::text::MUTED}", "—" }
                                         }
                                     }
-                                    // Actions
+                                    td {
+                                        class: "px-2 py-2 text-xs {theme::text::MUTED} whitespace-nowrap",
+                                        "{build.queued_for}"
+                                    }
+                                    td {
+                                        class: "px-2 py-2 font-mono text-xs {theme::text::SECONDARY} whitespace-nowrap",
+                                        if let Some(ref runtime) = build.runtime {
+                                            "{runtime}"
+                                        } else {
+                                            "—"
+                                        }
+                                    }
                                     td {
                                         class: "px-2 py-2 text-right",
                                         div {

@@ -120,6 +120,10 @@ pub enum BuildAction {
 pub struct WorkerItem {
     pub id: String,
     pub name: String,
+    pub host: Option<String>,
+    pub arch: Option<String>,
+    pub cpu_cores: Option<i32>,
+    pub memory_gb: Option<i32>,
     pub active_slots: usize,
     pub total_slots: usize,
     pub queue_depth: usize,
@@ -350,6 +354,10 @@ pub fn mock_workers() -> Vec<WorkerItem> {
         WorkerItem {
             id: "worker-a".to_string(),
             name: "worker-a".to_string(),
+            host: Some("worker-a.lab".to_string()),
+            arch: Some("x86_64-linux".to_string()),
+            cpu_cores: Some(16),
+            memory_gb: Some(64),
             active_slots: 2,
             total_slots: 4,
             queue_depth: 6,
@@ -358,6 +366,10 @@ pub fn mock_workers() -> Vec<WorkerItem> {
         WorkerItem {
             id: "worker-b".to_string(),
             name: "worker-b".to_string(),
+            host: Some("worker-b.lab".to_string()),
+            arch: Some("x86_64-linux".to_string()),
+            cpu_cores: Some(16),
+            memory_gb: Some(64),
             active_slots: 3,
             total_slots: 4,
             queue_depth: 4,

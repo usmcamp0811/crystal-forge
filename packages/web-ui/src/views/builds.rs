@@ -211,6 +211,10 @@ pub fn BuildsView() -> Element {
                 .map(|builder| WorkerItem {
                     id: builder.id.to_string(),
                     name: builder.name.clone(),
+                    host: None,
+                    arch: None,
+                    cpu_cores: builder.max_cpu_cores,
+                    memory_gb: builder.max_memory_mb.map(|mb| mb / 1024),
                     active_slots: builder.active_jobs.max(0) as usize,
                     total_slots: builder.max_concurrent_jobs.max(1) as usize,
                     queue_depth: builder.queued_jobs.max(0) as usize,
