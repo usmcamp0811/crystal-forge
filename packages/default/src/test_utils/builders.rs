@@ -365,6 +365,7 @@ impl SystemStateBuilder {
             change_reason: self.change_reason.clone(),
             timestamp: Some(Utc::now()),
             store_path: self.store_path.clone(),
+            generation: None,
             os: self.os.clone(),
             kernel: self.kernel.clone(),
             memory_gb: self.memory_gb,

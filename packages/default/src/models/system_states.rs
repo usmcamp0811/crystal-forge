@@ -93,6 +93,7 @@ pub struct SystemState {
 
     // ───── System Info ─────
     pub store_path: Option<String>,
+    pub generation: Option<i32>,
     pub os: Option<String>,
     pub kernel: Option<String>,
     pub memory_gb: Option<f64>,
@@ -150,6 +151,7 @@ impl SystemState {
 
             // ───── System Info ─────
             store_path: v1.store_path,
+            generation: None,
             os: v1.os,
             kernel: v1.kernel,
             memory_gb: v1.memory_gb,
@@ -221,6 +223,7 @@ impl SystemState {
             timestamp: timestamp_override.or_else(|| Some(Utc::now())),
             hostname: hostname.to_string(),
             store_path: Some(store_path.to_string()),
+            generation: None,
             change_reason: change_reason.to_string(),
 
             // Use overrides or sensible test defaults
@@ -339,11 +342,14 @@ impl SystemState {
                 .map(|l| l.trim_start_matches("VERSION=").replace('"', ""))
         });
 
+        let generation = current_system_generation();
+
         Ok(SystemState {
             id: None,
             timestamp: Some(Utc::now()),
             hostname: hostname.to_string(),
             store_path: Some(store_path.to_string()),
+            generation,
             change_reason: change_reason.to_string(),
             os,
             kernel,
@@ -371,6 +377,35 @@ impl SystemState {
             agent_compatible: Some(true), // Default to compatible
             partial_data: Some(false),    // Default to complete data
         })
+    }
+}
+
+fn current_system_generation() -> Option<i32> {
+    let target = fs::read_link("/nix/var/nix/profiles/system").ok()?;
+    let name = target.file_name()?.to_string_lossy();
+    parse_generation_from_profile_link_name(name.as_ref())
+}
+
+fn parse_generation_from_profile_link_name(name: &str) -> Option<i32> {
+    let generation_str = name.strip_prefix("system-")?.strip_suffix("-link")?;
+    generation_str.parse::<i32>().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_generation_from_profile_link_name;
+
+    #[test]
+    fn parses_generation_from_profile_link_name() {
+        assert_eq!(parse_generation_from_profile_link_name("system-74-link"), Some(74));
+        assert_eq!(parse_generation_from_profile_link_name("system-1-link"), Some(1));
+    }
+
+    #[test]
+    fn rejects_invalid_profile_link_name() {
+        assert_eq!(parse_generation_from_profile_link_name("system-link"), None);
+        assert_eq!(parse_generation_from_profile_link_name("system-abc-link"), None);
+        assert_eq!(parse_generation_from_profile_link_name("/nix/store/foo"), None);
     }
 }
 

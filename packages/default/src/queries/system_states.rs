@@ -16,6 +16,7 @@ pub async fn insert_system_state(
             hostname, 
             change_reason,
             store_path,
+            generation,
             os, 
             kernel,
             memory_gb, 
@@ -41,11 +42,12 @@ pub async fn insert_system_state(
             nixos_version,
             agent_compatible,
             partial_data
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)"#,
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)"#,
     )
     .bind(&state.hostname)
     .bind(change_reason)
     .bind(&state.store_path)
+    .bind(state.generation)
     .bind(&state.os)
     .bind(&state.kernel)
     .bind(state.memory_gb)
@@ -69,8 +71,8 @@ pub async fn insert_system_state(
     .bind(&state.agent_version)
     .bind(&state.agent_build_hash)
     .bind(&state.nixos_version)
-    .bind(version_compatible)  // $27
-    .bind(!version_compatible) // $28 - partial_data flag
+    .bind(version_compatible)  // $28
+    .bind(!version_compatible) // $29 - partial_data flag
     .execute(pool)
     .await
     .map_err(|e| anyhow::anyhow!("SQL error: {e:?}"))?;
@@ -131,6 +133,7 @@ mod tests {
             hostname: "test-host".to_string(),
             change_reason: "test-context".to_string(),
             store_path: Some("/nix/store/test".to_string()),
+            generation: Some(74),
             os: Some("NixOS".to_string()),
             kernel: Some("6.1.0".to_string()),
             memory_gb: Some(16.0),
