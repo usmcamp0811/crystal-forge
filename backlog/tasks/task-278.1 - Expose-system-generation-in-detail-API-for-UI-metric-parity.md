@@ -1,7 +1,7 @@
 ---
 id: TASK-278.1
 title: Expose system generation in detail API for UI metric parity
-status: To Do
+status: In Progress
 assignee:
   - '@ai-agent'
 created_date: '2026-04-20 00:34'
@@ -36,3 +36,9 @@ Desired outcome: Add generation data to the relevant API/DTO path so the System 
 - [ ] #2 Web UI System Detail metric strip renders a non-placeholder generation value when data is available.
 - [ ] #3 No regression in existing system detail fetch/parsing behavior when generation is absent (backward compatibility handled).
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-278.1-expose-system-generation-api
+<!-- SECTION:NOTES:END -->
