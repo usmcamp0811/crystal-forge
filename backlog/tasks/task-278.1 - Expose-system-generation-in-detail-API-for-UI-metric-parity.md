@@ -5,7 +5,7 @@ status: Review
 assignee:
   - '@ai-agent'
 created_date: '2026-04-20 00:34'
-updated_date: '2026-04-30 19:58'
+updated_date: '2026-04-30 20:25'
 labels:
   - ui
   - systems
@@ -40,9 +40,11 @@ Desired outcome: Add generation data to the relevant API/DTO path so the System 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Follow-up fix pushed in MR iteration: commit `2bb0e42f` renumbers task migrations from `0113/0114` to `0118/0119` to avoid collision with existing dev migrations (`0113_add_eval_cancellation_support`, `0114_create_hardening_tables`).
+Follow-up fix for reviewer merge blocker pushed in commit `0bc2f7e9`: removed independent latest-by-hostname lateral query in `get_system_detail_by_id` and now source generation fields from `view_system_detail` itself.
 
-Updated test migration include reference in `packages/default/src/queries/systems.rs` to `0118_add_generation_to_system_states.sql`.
+Added migration `0120_project_generation_from_view_system_detail_state_row.sql` to project `generation` and `generation_matches_current_store_path` from the same `latest_system_state` row as `current_store_path` in `view_system_detail`.
 
-Local verification executed after rename: `nix develop -c env SQLX_OFFLINE=true cargo check` (packages/default), `nix develop -c env SQLX_OFFLINE=true cargo test queries::systems::tests::generation_migration_adds_generation_column_to_system_states` (packages/default), `nix develop -c env SQLX_OFFLINE=true cargo test queries::systems::tests::system_detail_query_does_not_derive_generation_from_store_path_regex` (packages/default), `nix develop -c cargo check` (packages/web-ui).
+Added regression coverage in `packages/default/src/queries/systems.rs` verifying query shape and migration projection (`generation_projection_migration_updates_view_system_detail`).
+
+Verified ingestion-path concern by code inspection: `deserialize_system_state_versioned` tries `SystemState` (current schema) first and only falls back to `SystemStateV1` compatibility path (which intentionally leaves generation fields null), so current agents can populate generation while legacy v1 payloads remain backward-compatible.
 <!-- SECTION:NOTES:END -->
