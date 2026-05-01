@@ -454,33 +454,23 @@ pub fn BuildsView() -> Element {
 
             if selected.is_some() {
                 div {
-                    class: "fixed inset-0 z-[60]",
-                    div {
-                        class: "absolute inset-0 bg-black/50",
-                        onclick: move |_| {
+                    class: "pt-1",
+                    BuildDetailPane {
+                        selected: selected.clone(),
+                        on_close: move |_| {
                             selected_build.set(None);
                             log_open.set(false);
                         },
-                    }
-                    div {
-                        class: "absolute right-0 top-0 h-full w-full max-w-[440px] overflow-y-auto p-4",
-                        BuildDetailPane {
-                            selected: selected.clone(),
-                            on_close: move |_| {
-                                selected_build.set(None);
-                                log_open.set(false);
-                            },
-                            on_log: move |_| {
-                                active_tab.set(DetailTab::Logs);
-                                log_open.set(true);
-                            },
-                            tab: active_tab,
-                            on_tab_change: move |tab| active_tab.set(tab),
-                            follow_logs: follow_logs,
-                            pause_logs: pause_logs,
-                            wrap_logs: wrap_logs,
-                            log_query: log_query,
-                        }
+                        on_log: move |_| {
+                            active_tab.set(DetailTab::Logs);
+                            log_open.set(true);
+                        },
+                        tab: active_tab,
+                        on_tab_change: move |tab| active_tab.set(tab),
+                        follow_logs: follow_logs,
+                        pause_logs: pause_logs,
+                        wrap_logs: wrap_logs,
+                        log_query: log_query,
                     }
                 }
             }
