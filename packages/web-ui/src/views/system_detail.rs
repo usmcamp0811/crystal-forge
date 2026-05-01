@@ -2544,9 +2544,6 @@ fn HardeningTab(
     }
 
     let filtered_count = filtered_results.len();
-    let has_active_filters =
-        !query.is_empty() || active_severity != "all" || active_sort != "risk_desc";
-
     let table_directives = vec![
         "PrivateTmp",
         "PrivateDevices",
@@ -2604,7 +2601,7 @@ fn HardeningTab(
             }
 
             // Filter bar
-            div { class: "filterbar",
+            div { class: "filterbar", style: "margin-bottom: 10px;",
                 div {
                     class: "filter-search",
                     style: "max-width: 280px;",
@@ -2867,13 +2864,16 @@ fn HardeningTab(
                                 }
                                 p { class: "text-sm leading-5 {theme::text::SECONDARY}",
                                     "Score "
-                                    span { class: "font-semibold {theme::text::PRIMARY}", "{service.hardening_score}/100" }
+                                    span { class: "font-semibold", style: "color: {risk_level_color(&service.risk_level)};", "{service.hardening_score}%" }
                                     " · "
                                     "{service.missing_directives_count} missing directives"
                                     " · user: "
                                     span { class: "font-mono", "{service_user_label(&service)}" }
                                     " · Notes "
-                                    span { class: "font-semibold {theme::health::CRITICAL_TEXT}", "{service.missing_directives_count}" }
+                                    span {
+                                        class: "font-semibold {theme::text::PRIMARY}",
+                                        "{justifications.iter().filter(|item| item.service_name == service.service_name).count()}"
+                                    }
                                 }
                             }
                             button {
