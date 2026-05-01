@@ -302,7 +302,7 @@ pub fn BuildsView() -> Element {
         }
     });
 
-    let mut selected_build = use_signal(|| Some(1_i32));
+    let mut selected_build = use_signal(|| None::<i32>);
     let mut active_view = use_signal(|| BuildsTab::ActiveQueue);
     let mut active_tab = use_signal(|| DetailTab::Logs);
     let mut completed_status_filter = use_signal(|| CompletedStatusFilter::All);
@@ -435,295 +435,32 @@ pub fn BuildsView() -> Element {
                 }
             }
 
-            if active_view() == BuildsTab::ActiveQueue {
-                // ── Filter / Search bar ──────────────────────────────────────
-                Card {
-                    title: None,
-                    children: rsx! {
-                        div {
-                            class: "flex flex-wrap items-end gap-3",
-
-                            div {
-                                class: "flex flex-col gap-1",
-                                label { class: "text-xs {theme::text::SECONDARY}", "Status" }
-                                select {
-                                    class: "px-2 py-1 rounded border border-slate-600 bg-slate-900 text-xs text-slate-200",
-                                    value: "{filter_status.read()}",
-                                    onchange: move |e| {
-                                        filter_status.set(e.value());
-                                        queue_page.set(1);
-                                    },
-                                    option { value: "queued,building,cancelling", "Active (queued + building + stopping)" }
-                                    option { value: "queued", "Queued only" }
-                                    option { value: "building", "Building only" }
-                                    option { value: "cancelling", "Stopping only" }
-                                    option { value: "success", "Completed" }
-                                    option { value: "failed", "Failed" }
-                                    option { value: "cancelled", "Cancelled" }
-                                    option { value: "", "All statuses" }
-                                }
-                            }
-
-                            div {
-                                class: "flex flex-col gap-1 flex-1 min-w-[10rem]",
-                                label { class: "text-xs {theme::text::SECONDARY}", "Commit hash" }
-                                input {
-                                    class: "px-2 py-1 rounded border border-slate-600 bg-slate-900 text-xs text-slate-200 {theme::interactive::FOCUS_RING}",
-                                    r#type: "search",
-                                    placeholder: "e.g. a1b2c3…",
-                                    value: "{filter_commit.read()}",
-                                    oninput: move |e| {
-                                        filter_commit.set(e.value());
-                                        queue_page.set(1);
-                                    },
-                                }
-                            }
-
-                            div {
-                                class: "flex flex-col gap-1 flex-1 min-w-[10rem]",
-                                label { class: "text-xs {theme::text::SECONDARY}", "Flake / repo" }
-                                input {
-                                    class: "px-2 py-1 rounded border border-slate-600 bg-slate-900 text-xs text-slate-200 {theme::interactive::FOCUS_RING}",
-                                    r#type: "search",
-                                    placeholder: "flake name…",
-                                    value: "{filter_flake.read()}",
-                                    oninput: move |e| {
-                                        filter_flake.set(e.value());
-                                        queue_page.set(1);
-                                    },
-                                }
-                            }
-
-                            div {
-                                class: "flex flex-col gap-1 flex-1 min-w-[10rem]",
-                                label { class: "text-xs {theme::text::SECONDARY}", "System / config" }
-                                input {
-                                    class: "px-2 py-1 rounded border border-slate-600 bg-slate-900 text-xs text-slate-200 {theme::interactive::FOCUS_RING}",
-                                    r#type: "search",
-                                    placeholder: "hostname or config name…",
-                                    value: "{filter_config.read()}",
-                                    oninput: move |e| {
-                                        filter_config.set(e.value());
-                                        queue_page.set(1);
-                                    },
-                                }
-                            }
-
-                            div {
-                                class: "flex flex-col gap-1",
-                                label { class: "text-xs {theme::text::SECONDARY}", "Time range" }
-                                select {
-                                    class: "px-2 py-1 rounded border border-slate-600 bg-slate-900 text-xs text-slate-200",
-                                    value: "{filter_time_range.read()}",
-                                    onchange: move |e| {
-                                        filter_time_range.set(e.value());
-                                        queue_page.set(1);
-                                    },
-                                    option { value: "", "All time" }
-                                    option { value: "today", "Today" }
-                                    option { value: "last7d", "Last 7 days" }
-                                }
-                            }
-
-                            button {
-                                class: "px-3 py-1 rounded border border-slate-600 text-xs text-slate-300 hover:bg-slate-700 transition-colors",
-                                onclick: move |_| {
-                                    // Reset status back to active-only (the intended default for this tab).
-                                    filter_status.set("queued,building,cancelling".to_string());
-                                    filter_commit.set(String::new());
-                                    filter_flake.set(String::new());
-                                    filter_config.set(String::new());
-                                    filter_time_range.set(String::new());
-                                    queue_page.set(1);
-                                },
-                                "Clear filters"
-                            }
-                        }
-
-                        // ── Result summary ────────────────────────────────────
-                        p {
-                            class: "text-xs {theme::text::SECONDARY} mt-2",
-                            {
-                                let total = queue_total();
-                                let page = queue_page();
-                                let from = ((page - 1) * PAGE_SIZE + 1).min(total.max(1));
-                                let to = (page * PAGE_SIZE).min(total);
-                                if total == 0 {
-                                    "No matching jobs.".to_string()
-                                } else {
-                                    format!("Showing {from}–{to} of {total} job(s)")
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // ── Queue + detail split ─────────────────────────────────────
-                div {
-                    class: "cf-builds-split",
-                    div {
-                        BuildQueuePane {
-                            builds: queue_data.clone(),
-                            selected_id: selected_build,
-                            on_build_action: move |(build_id, action)| {
-                                pending_action.set(Some(PendingAction::Build { build_id, action }))
-                            },
-                        }
-                    }
-
-                    div {
-                        BuildDetailPane {
-                            selected: selected,
-                            tab: active_tab,
-                            on_tab_change: move |tab| active_tab.set(tab),
-                            follow_logs: follow_logs,
-                            pause_logs: pause_logs,
-                            wrap_logs: wrap_logs,
-                            log_query: log_query,
-                        }
-                    }
-                }
-
-                // ── Pagination controls ──────────────────────────────────────
-                if total_pages > 1 {
-                    div {
-                        class: "flex items-center justify-center gap-2 pt-2",
-                        button {
-                            class: "px-3 py-1 rounded border border-slate-600 text-xs text-slate-300 disabled:opacity-40 hover:bg-slate-700 transition-colors",
-                            disabled: queue_page() <= 1,
-                            onclick: move |_| {
-                                let p = queue_page();
-                                if p > 1 { queue_page.set(p - 1); }
-                            },
-                            "← Prev"
-                        }
-                        span {
-                            class: "text-xs {theme::text::SECONDARY}",
-                            "Page {queue_page()} of {total_pages}"
-                        }
-                        button {
-                            class: "px-3 py-1 rounded border border-slate-600 text-xs text-slate-300 disabled:opacity-40 hover:bg-slate-700 transition-colors",
-                            disabled: queue_page() >= total_pages,
-                            onclick: move |_| {
-                                let p = queue_page();
-                                if p < total_pages { queue_page.set(p + 1); }
-                            },
-                            "Next →"
-                        }
-                    }
-                }
-            } else {
-                Card {
-                    title: Some("Completed Builds".to_string()),
-                    children: rsx! {
-                        div {
-                            class: "flex flex-wrap items-center gap-3 pb-3",
-                            label { class: "text-xs {theme::text::SECONDARY}", "Status" }
-                            select {
-                                class: "px-2 py-1 rounded border border-slate-600 bg-slate-900 text-xs text-slate-200",
-                                value: match completed_status_filter() {
-                                    CompletedStatusFilter::All => "all",
-                                    CompletedStatusFilter::Complete => "complete",
-                                    CompletedStatusFilter::Failed => "failed",
-                                    CompletedStatusFilter::Cancelled => "cancelled",
-                                },
-                                onchange: move |event| {
-                                    let value = event.value();
-                                    let next = match value.as_str() {
-                                        "complete" => CompletedStatusFilter::Complete,
-                                        "failed" => CompletedStatusFilter::Failed,
-                                        "cancelled" => CompletedStatusFilter::Cancelled,
-                                        _ => CompletedStatusFilter::All,
-                                    };
-                                    completed_status_filter.set(next);
-                                },
-                                option { value: "all", "All" }
-                                option { value: "complete", "Complete" }
-                                option { value: "failed", "Failed" }
-                                option { value: "cancelled", "Cancelled" }
-                            }
-
-                            label { class: "text-xs {theme::text::SECONDARY}", "Sort" }
-                            select {
-                                class: "px-2 py-1 rounded border border-slate-600 bg-slate-900 text-xs text-slate-200",
-                                value: match completed_sort_order() {
-                                    CompletedSortOrder::NewestFirst => "newest",
-                                    CompletedSortOrder::OldestFirst => "oldest",
-                                },
-                                onchange: move |event| {
-                                    let next = if event.value() == "oldest" {
-                                        CompletedSortOrder::OldestFirst
-                                    } else {
-                                        CompletedSortOrder::NewestFirst
-                                    };
-                                    completed_sort_order.set(next);
-                                },
-                                option { value: "newest", "Newest completion first" }
-                                option { value: "oldest", "Oldest completion first" }
-                            }
-                        }
-
-                        if completed_rows.is_empty() {
-                            p { class: "text-sm {theme::text::SECONDARY}", "No completed builds yet." }
+            Card {
+                title: None,
+                children: rsx! {
+                    BuildQueuePane {
+                        builds: if active_view() == BuildsTab::ActiveQueue {
+                            queue_data.clone()
                         } else {
-                            div {
-                                class: "overflow-x-auto",
-                                table {
-                                    class: "w-full text-xs",
-                                    thead {
-                                        tr { class: "text-left border-b border-slate-700 text-slate-300",
-                                            th { class: "py-2 pr-3", "System" }
-                                            th { class: "py-2 pr-3", "Environment" }
-                                            th { class: "py-2 pr-3", "Status" }
-                                            th { class: "py-2 pr-3", "Completion Time" }
-                                            th { class: "py-2 pr-3", "Duration" }
-                                            th { class: "py-2 pr-3", "Commit" }
-                                            th { class: "py-2 pr-3 text-right", "Actions" }
-                                        }
-                                    }
-                                    tbody {
-                                        for item in completed_rows.iter() {
-                                            {
-                                                let status_class = match item.status {
-                                                    BuildStatus::Complete => "px-2 py-1 text-[10px] rounded border cf-build-status-complete",
-                                                    BuildStatus::Failed => "px-2 py-1 text-[10px] rounded border cf-build-status-failed",
-                                                    _ => "px-2 py-1 text-[10px] rounded border cf-chip-slate",
-                                                };
-                                                let build_id = item.id;
-                                                let item_status = item.status;
-                                                rsx! {
-                                                    tr { key: "completed-{item.id}", class: "border-b border-slate-800/70",
-                                                        td { class: "py-2 pr-3 font-mono text-slate-200", "{extract_system_name(&item.hostname)}" }
-                                                        td { class: "py-2 pr-3 text-slate-300", "{format_environment(item)}" }
-                                                        td { class: "py-2 pr-3",
-                                                            span { class: "{status_class}", "{item.status_label()}" }
-                                                        }
-                                                        td { class: "py-2 pr-3 text-slate-300", "{format_completed_at(item)}" }
-                                                        td { class: "py-2 pr-3 text-slate-300", "{format_duration(item)}" }
-                                                        td { class: "py-2 pr-3 text-slate-400 font-mono", "{item.commit.chars().take(8).collect::<String>()}" }
-                                                        td { class: "py-2 pr-3 text-right",
-                                                            if matches!(item_status, BuildStatus::Failed | BuildStatus::Cancelled) {
-                                                                button {
-                                                                    class: "text-[10px] px-2 py-1 rounded transition-colors cf-action-link",
-                                                                    onclick: move |_| {
-                                                                        pending_action.set(Some(PendingAction::Build {
-                                                                            build_id,
-                                                                            action: BuildAction::Restart,
-                                                                        }));
-                                                                    },
-                                                                    "Restart"
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                            completed_rows.clone()
+                        },
+                        selected_id: selected_build,
+                        on_build_action: move |(build_id, action)| {
+                            pending_action.set(Some(PendingAction::Build { build_id, action }))
+                        },
                     }
+                }
+            }
+
+            if selected.is_some() {
+                BuildDetailPane {
+                    selected: selected,
+                    tab: active_tab,
+                    on_tab_change: move |tab| active_tab.set(tab),
+                    follow_logs: follow_logs,
+                    pause_logs: pause_logs,
+                    wrap_logs: wrap_logs,
+                    log_query: log_query,
                 }
             }
 
