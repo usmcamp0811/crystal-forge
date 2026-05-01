@@ -2,7 +2,6 @@
 
 use dioxus::prelude::*;
 
-use crate::components::layout::Card;
 use crate::theme;
 
 use super::helpers::{
@@ -17,47 +16,13 @@ pub fn BuildQueuePane(
     selected_id: Signal<Option<i32>>,
     on_build_action: EventHandler<(i32, BuildAction)>,
 ) -> Element {
-    let mut search = use_signal(String::new);
-
-    let filtered: Vec<BuildItem> = builds
-        .into_iter()
-        .filter(|b| {
-            let q = search.read().trim().to_lowercase();
-            if q.is_empty() {
-                true
-            } else {
-                b.hostname.to_lowercase().contains(&q)
-                    || b.flake.to_lowercase().contains(&q)
-                    || b.commit.to_lowercase().contains(&q)
-            }
-        })
-        .collect();
+    let filtered = builds;
 
     rsx! {
-        Card {
-            title: None,
-            children: rsx! {
-                div {
-                    class: "space-y-3",
-                    // Search row
-                    div {
-                        class: "flex items-center gap-2",
-                        input {
-                            class: "flex-1 rounded-lg px-3 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
-                            r#type: "search",
-                            placeholder: "Search by package, host, flake, or commit...",
-                            value: "{search.read()}",
-                            oninput: move |evt| search.set(evt.value()),
-                        }
-                    }
-
-                    BuildQueueTable {
-                        builds: filtered,
-                        selected_id: selected_id,
-                        on_build_action: on_build_action,
-                    }
-                }
-            }
+        BuildQueueTable {
+            builds: filtered,
+            selected_id: selected_id,
+            on_build_action: on_build_action,
         }
     }
 }
@@ -240,11 +205,11 @@ fn BuildQueueTable(
                                     td {
                                         class: "px-2 py-2",
                                         div {
-                                            p { class: "text-[13px] font-semibold {theme::text::PRIMARY}", "{build.flake}" }
-                                            p { class: "text-[10px] font-mono {theme::text::MUTED} truncate max-w-[18rem]", "{truncate_with_ellipsis(&build.summary, 40)}" }
+                                            p { class: "text-[13px] font-semibold {theme::text::PRIMARY}", "{extract_system_name(&build.hostname)}" }
+                                            p { class: "text-[10px] font-mono {theme::text::MUTED} truncate max-w-[18rem]", "{truncate_with_ellipsis(&build.summary, 52)}" }
                                             p { class: "text-[10px] {theme::text::MUTED}",
-                                                "{extract_system_name(&build.hostname)} · "
-                                                span { class: "font-mono", "{short_commit(&build.commit)}" }
+                                                "{build.flake} · "
+                                                span { class: "font-mono", "{build.commit}" }
                                             }
                                         }
                                     }
@@ -288,22 +253,12 @@ fn BuildQueueTable(
                                             class: "inline-flex items-center gap-1",
                                             button {
                                                 class: "btn-icon focus-ring",
-                                                title: "Inspect",
+                                                title: "Logs",
                                                 onclick: move |evt| {
                                                     evt.stop_propagation();
+                                                    selected_id.set(Some(build.id));
                                                 },
-                                                "⌁"
-                                            }
-                                            if build.status == BuildStatus::Queued {
-                                                button {
-                                                    class: "btn-icon focus-ring",
-                                                    title: "Run next",
-                                                    onclick: move |evt| {
-                                                        evt.stop_propagation();
-                                                        on_build_action.call((build.id, BuildAction::RunNext));
-                                                    },
-                                                    "↥"
-                                                }
+                                                "⌘"
                                             }
                                             if let Some(cancel_action) = cancel_action_for_status(build.status) {
                                                 button {
