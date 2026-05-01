@@ -120,7 +120,7 @@ async fn authenticate_builder_request_with_lookup_options<L: BuilderLookup>(
     method: &str,
     path: &str,
     lookup: &L,
-    allow_inactive: bool,
+    allow_non_active: bool,
 ) -> Result<VerifiedBuilderRequest, StatusCode> {
     // Extract builder ID from header
     let builder_id_str = headers
@@ -182,8 +182,8 @@ async fn authenticate_builder_request_with_lookup_options<L: BuilderLookup>(
 
     let allowed = match builder.status {
         crate::models::builders::BuilderStatus::Active => true,
-        crate::models::builders::BuilderStatus::Inactive => allow_inactive,
-        crate::models::builders::BuilderStatus::Offline => false,
+        crate::models::builders::BuilderStatus::Inactive => allow_non_active,
+        crate::models::builders::BuilderStatus::Offline => allow_non_active,
     };
 
     if !allowed {
@@ -236,7 +236,7 @@ pub async fn authenticate_builder_request(
     authenticate_builder_request_with_lookup(headers, body, method, path, pool).await
 }
 
-/// Production entry point that allows inactive builders to authenticate.
+/// Production entry point that allows non-active builders to authenticate.
 /// Intended only for bootstrap paths (e.g. first heartbeat).
 pub async fn authenticate_builder_request_allow_inactive(
     headers: &HeaderMap,
@@ -252,12 +252,29 @@ pub async fn authenticate_builder_request_allow_inactive(
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
+    use chrono::Utc;
     use ed25519_dalek::Signer;
+    use std::sync::Arc;
 
     use crate::models::builders::{Builder, BuilderStatus, CreateBuilderRequest};
     use crate::models::public_key::PublicKey;
     use crate::queries::builders::create_builder;
     use crate::test_utils::db::test_pool;
+
+    #[derive(Clone)]
+    struct StaticLookup {
+        builder: Arc<Builder>,
+    }
+
+    impl BuilderLookup for StaticLookup {
+        fn lookup(
+            &self,
+            _builder_id: Uuid,
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<Option<Builder>>> + Send>> {
+            let builder = (*self.builder).clone();
+            Box::pin(async move { Ok(Some(builder)) })
+        }
+    }
 
     #[tokio::test]
     #[ignore = "requires running test database"]
@@ -432,6 +449,59 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_authenticate_builder_request_allow_inactive_accepts_offline_builder() {
+        let pool = test_pool().await;
+
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+        let verifying_key = signing_key.verifying_key();
+        let public_key_base64 = general_purpose::STANDARD.encode(verifying_key.to_bytes());
+
+        let request = CreateBuilderRequest {
+            name: "offline-builder".to_string(),
+            public_key: Some(public_key_base64),
+            max_cpu_cores: None,
+            max_memory_mb: None,
+            max_concurrent_jobs: None,
+            environment_ids: vec![],
+        };
+
+        let (builder, _private_key) = create_builder(&pool, &request)
+            .await
+            .expect("Failed to create builder");
+
+        sqlx::query("UPDATE builders SET status = 'offline' WHERE id = $1")
+            .bind(builder.id)
+            .execute(&pool)
+            .await
+            .expect("Failed to set builder offline");
+
+        let body = Bytes::from("test request body");
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        let method = "POST";
+        let path = "/api/v1/builders/test/heartbeat";
+        let signature_payload = canonical_signature_payload(method, path, &timestamp, &body);
+        let signature = signing_key.sign(&signature_payload);
+        let signature_base64 = general_purpose::STANDARD.encode(signature.to_bytes());
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Builder-ID",
+            HeaderValue::from_str(&builder.id.to_string()).unwrap(),
+        );
+        headers.insert(
+            "X-Signature",
+            HeaderValue::from_str(&signature_base64).unwrap(),
+        );
+        headers.insert("X-Timestamp", HeaderValue::from_str(&timestamp).unwrap());
+
+        let result =
+            authenticate_builder_request_allow_inactive(&headers, body, method, path, &pool).await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
     async fn test_authenticate_builder_request_missing_headers() {
         let pool = test_pool().await;
         let body = Bytes::from("test");
@@ -452,5 +522,62 @@ mod tests {
         );
         let result = authenticate_builder_request(&headers, body, method, path, &pool).await;
         assert_eq!(result.unwrap_err(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_allow_inactive_path_accepts_offline_builder_with_valid_signature() {
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+        let verifying_key = signing_key.verifying_key();
+
+        let builder = Builder {
+            id: Uuid::new_v4(),
+            name: "offline-builder".to_string(),
+            public_key: PublicKey::from_verifying_key(verifying_key),
+            status: BuilderStatus::Offline,
+            max_cpu_cores: None,
+            max_memory_mb: None,
+            max_concurrent_jobs: 1,
+            last_heartbeat_at: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let lookup = StaticLookup {
+            builder: Arc::new(builder.clone()),
+        };
+
+        let body = Bytes::from("{}");
+        let timestamp = Utc::now().to_rfc3339();
+        let method = "POST";
+        let path = "/api/v1/builders/test/heartbeat";
+        let signature_payload = canonical_signature_payload(method, path, &timestamp, &body);
+        let signature = signing_key.sign(&signature_payload);
+        let signature_base64 = general_purpose::STANDARD.encode(signature.to_bytes());
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Builder-ID",
+            HeaderValue::from_str(&builder.id.to_string()).expect("valid builder id header"),
+        );
+        headers.insert(
+            "X-Signature",
+            HeaderValue::from_str(&signature_base64).expect("valid signature header"),
+        );
+        headers.insert(
+            "X-Timestamp",
+            HeaderValue::from_str(&timestamp).expect("valid timestamp header"),
+        );
+
+        let result = authenticate_builder_request_with_lookup_options(
+            &headers,
+            body,
+            method,
+            path,
+            &lookup,
+            true,
+        )
+        .await;
+
+        assert!(result.is_ok());
     }
 }
