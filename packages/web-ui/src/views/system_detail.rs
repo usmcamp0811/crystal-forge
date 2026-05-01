@@ -2776,7 +2776,7 @@ fn HardeningTab(
                                             td { class: "px-2 py-2",
                                                 span {
                                                     class: "text-[11px] {missing_text_class}",
-                                                    "{service.missing_directives_count}/{service.missing_directives_count + service.disabled_directives_count + 8}"
+                                                    "{service.missing_directives_count}/{directive_cells(service).len()}"
                                                 }
                                             }
                                             td { class: "px-2 py-2 text-right",
@@ -2829,9 +2829,8 @@ fn HardeningTab(
         // Modal - rendered as sibling to main content for proper overlay
         if let Some(service) = selected_service() {
             div {
-                class: "fixed inset-0 z-50 bg-black/65 backdrop-blur-[1px] p-4 cf-modal-overlay",
+                class: "modal-backdrop cf-modal-overlay",
                 tabindex: "0",
-                style: "display: grid; place-items: center;",
                 onkeydown: move |evt| {
                     if evt.key() == Key::Escape && confirm_discard_unsaved_justification(!reason.read().trim().is_empty()) {
                         evt.prevent_default();
@@ -2845,14 +2844,14 @@ fn HardeningTab(
                 },
 
                     div {
-                        class: "relative w-full {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl shadow-2xl cursor-default overflow-hidden cf-hardening-modal",
-                        style: "width: min(720px, 98vw); max-height: 88vh; display: flex; flex-direction: column;",
+                        class: "modal cf-hardening-modal",
+                        style: "width:min(720px,98vw);",
                     onclick: move |evt| evt.stop_propagation(),
                     role: "dialog",
                     aria_modal: "true",
                     aria_labelledby: "hardening-modal-title",
 
-                    div { class: "px-5 py-4 border-b {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG} cf-hardening-modal-header",
+                    div { class: "modal-head cf-hardening-modal-header",
                         div { class: "flex items-start justify-between gap-3",
                             div { class: "space-y-2 min-w-0 flex-1",
                                 div { class: "flex items-center gap-2 flex-wrap",
@@ -2901,7 +2900,7 @@ fn HardeningTab(
                         }
                     }
 
-                    div { class: "sd-tabs px-5",
+                    div { class: "sd-tabs", style: "padding:0 22px; margin-top:0;",
                         for (key, label) in [("overview", "Directives"), ("nix", "NixOS config"), ("all", "All checks")] {
                             {
                                 let tab_class = if *modal_tab.read() == key {
@@ -2923,7 +2922,7 @@ fn HardeningTab(
                         }
                     }
 
-                    div { class: "px-5 py-4 overflow-y-auto flex flex-col gap-3.5", style: "max-height: 60vh; overflow-y: auto;",
+                    div { class: "modal-body", style: "padding:16px 22px; max-height:60vh; overflow-y:auto;",
                         if *modal_tab.read() == "overview" {
                             section { class: "space-y-3",
                                 div { class: "grid gap-2", style: "grid-template-columns: 1fr 1fr;",
@@ -3109,7 +3108,7 @@ fn HardeningTab(
                     }
 
                     // Footer
-                    div { class: "modal-foot px-5 py-3.5 border-t {theme::surface::DIVIDER} flex justify-end gap-2",
+                    div { class: "modal-foot",
                         button {
                             class: "btn btn-ghost focus-ring xs",
                             svg {
