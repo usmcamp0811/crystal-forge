@@ -2594,7 +2594,11 @@ fn HardeningTab(
                 }
                 div { class: "sd-callout sd-callout-info", style: "flex: 1; min-width: 260px; margin-left: 8px; padding: 8px 12px;",
                     p { class: "text-[12px] {theme::text::SECONDARY}",
-                        "Mirrors systemd-analyze security. Higher score means more directives are enforced. Configure via systemd.services.<name>.serviceConfig."
+                        "Mirrors "
+                        code { class: "font-mono text-[11px]", "systemd-analyze security" }
+                        ". Higher score = more directives enforced. Set directives in NixOS via "
+                        code { class: "font-mono text-[11px]", "systemd.services.<name>.serviceConfig" }
+                        "."
                     }
                 }
             }
@@ -2639,17 +2643,6 @@ fn HardeningTab(
                 }
 
                 span { class: "filter-count text-xs {theme::text::MUTED}", "{filtered_count} services" }
-                if has_active_filters {
-                    button {
-                        class: "px-3 h-10 rounded-lg border {theme::surface::CARD_BORDER} text-xs font-medium {theme::text::SECONDARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors",
-                        onclick: move |_| {
-                            search_query.set(String::new());
-                            severity_filter.set("all".to_string());
-                            sort_mode.set("risk_desc".to_string());
-                        },
-                        "Reset"
-                    }
-                }
             }
 
             if results.is_empty() {
@@ -2802,7 +2795,18 @@ fn HardeningTab(
                                                             selected_service.set(Some(service.clone()));
                                                         }
                                                     },
-                                                    "→"
+                                                    svg {
+                                                        class: "w-3.5 h-3.5 inline-block",
+                                                        fill: "none",
+                                                        stroke: "currentColor",
+                                                        stroke_width: "2",
+                                                        view_box: "0 0 24 24",
+                                                        path {
+                                                            stroke_linecap: "round",
+                                                            stroke_linejoin: "round",
+                                                            d: "M5 12h14m-7-7l7 7-7 7"
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
@@ -2970,7 +2974,7 @@ fn HardeningTab(
                                                     tr { class: "border-b {theme::surface::DIVIDER}",
                                                         td { class: "px-3 py-2 font-mono text-[12px] {theme::text::PRIMARY}", "{directive.name}" }
                                                         td { class: "px-3 py-2 text-[12px] {theme::text::MUTED}", "security" }
-                                                        td { class: "px-3 py-2 font-mono text-[12px] {theme::text::MUTED}", "{directive.points}/{directive.max_points}" }
+                                                        td { class: "px-3 py-2 font-mono text-[12px] {theme::text::MUTED}", "—" }
                                                         td { class: "px-3 py-2",
                                                             if directive.enabled {
                                                                 span { class: "chip chip-healthy", "enforced" }
@@ -3094,9 +3098,25 @@ fn HardeningTab(
                     }
 
                     // Footer
-                    div { class: "px-5 py-3.5 border-t {theme::surface::DIVIDER} flex justify-end gap-2",
+                    div { class: "modal-foot px-5 py-3.5 border-t {theme::surface::DIVIDER} flex justify-end gap-2",
                         button {
-                            class: "h-9 px-3 rounded-lg border {theme::surface::CARD_BORDER} text-xs font-medium {theme::text::SECONDARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors",
+                            class: "btn btn-ghost focus-ring xs",
+                            svg {
+                                class: "w-3 h-3 inline-block",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                view_box: "0 0 24 24",
+                                path {
+                                    stroke_linecap: "round",
+                                    stroke_linejoin: "round",
+                                    d: "M12 3v12m0 0l4-4m-4 4l-4-4M5 21h14"
+                                }
+                            }
+                            "Export report"
+                        }
+                        button {
+                            class: "btn btn-primary focus-ring",
                             onclick: move |_| {
                                 if confirm_discard_unsaved_justification(!reason.read().trim().is_empty()) {
                                     selected_service.set(None);
