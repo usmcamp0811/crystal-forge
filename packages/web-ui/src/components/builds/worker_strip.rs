@@ -39,7 +39,7 @@ pub fn WorkerStrip(
                                 span {
                                     class: "inline-flex px-2 py-0.5 rounded text-[10px] uppercase font-medium",
                                     style: "color: {status_color(worker.status)}; background-color: {status_bg(worker.status)};",
-                                    "{worker.status_label()}"
+                                    "{status_text(worker.status)}"
                                 }
                             }
                             div {
@@ -86,5 +86,13 @@ fn status_bg(status: super::helpers::WorkerStatus) -> &'static str {
         super::helpers::WorkerStatus::Running => "rgba(52, 211, 153, 0.14)",
         super::helpers::WorkerStatus::Paused => "rgba(251, 191, 36, 0.14)",
         super::helpers::WorkerStatus::Draining => "rgba(96, 165, 250, 0.14)",
+    }
+}
+
+fn status_text(status: super::helpers::WorkerStatus) -> &'static str {
+    match status {
+        super::helpers::WorkerStatus::Running => "running",
+        super::helpers::WorkerStatus::Paused => "paused",
+        super::helpers::WorkerStatus::Draining => "draining",
     }
 }

@@ -410,10 +410,10 @@ pub fn BuildsView() -> Element {
             div {
                 class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} overflow-hidden",
                 div {
-                    class: "px-4 border-b {theme::surface::CARD_BORDER} inline-flex items-end gap-1",
+                    class: "px-4 border-b {theme::surface::CARD_BORDER} inline-flex items-end gap-0.5",
                     button {
                         class: if active_view() == BuildsTab::ActiveQueue {
-                            "px-3 py-2 text-sm border-b-2 border-blue-500 text-blue-300 font-medium"
+                            "px-3 py-2 text-sm border-b-2 border-white text-white font-medium"
                         } else {
                             "px-3 py-2 text-sm border-b-2 border-transparent {theme::text::SECONDARY} hover:text-white transition-colors"
                         },
@@ -426,7 +426,7 @@ pub fn BuildsView() -> Element {
                     }
                     button {
                         class: if active_view() == BuildsTab::Completed {
-                            "px-3 py-2 text-sm border-b-2 border-blue-500 text-blue-300 font-medium"
+                            "px-3 py-2 text-sm border-b-2 border-white text-white font-medium"
                         } else {
                             "px-3 py-2 text-sm border-b-2 border-transparent {theme::text::SECONDARY} hover:text-white transition-colors"
                         },
@@ -456,7 +456,7 @@ pub fn BuildsView() -> Element {
 
             if selected.is_some() && !log_open() {
                 div {
-                    class: "fixed right-4 top-[96px] z-40 w-full max-w-[440px] max-h-[calc(100vh-120px)] overflow-y-auto",
+                    class: "fixed right-4 top-[96px] z-40 w-full max-w-[420px] max-h-[calc(100vh-120px)] overflow-y-auto",
                     div {
                         class: "p-1",
                         BuildDetailPane {
