@@ -62,20 +62,20 @@ pub fn BuildDetailPane(
 
     rsx! {
         aside {
-            class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-4",
+            class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-4 shadow-2xl",
             div {
                 class: "flex items-start justify-between gap-3",
                 div {
                     h2 {
-                        class: "text-[15px] font-semibold text-white",
+                        class: "text-[15px] font-semibold text-white leading-5",
                         span {
-                            class: "inline-flex mr-2 px-2 py-0.5 text-[10px] uppercase rounded border {build_status_badge_class(build.status)}",
+                            class: "inline-flex mr-2 px-1.5 py-0.5 text-[10px] uppercase rounded border {build_status_badge_class(build.status)}",
                             "{build.status_label()}"
                         }
                         "{extract_system_name(&build.hostname)}"
                     }
-                    p { class: "text-[11px] font-mono {theme::text::MUTED}", "{build.summary}" }
-                    p { class: "text-[11px] {theme::text::MUTED}", "{build.flake} · {build.commit}" }
+                    p { class: "text-[11px] font-mono {theme::text::MUTED} truncate", "{build.summary}" }
+                    p { class: "text-[11px] {theme::text::MUTED} truncate", "{build.flake} · {build.commit}" }
                 }
                 button {
                     class: "btn-icon focus-ring",
@@ -85,9 +85,9 @@ pub fn BuildDetailPane(
             }
 
             dl {
-                class: "mt-4 grid grid-cols-[auto,1fr] gap-x-3 gap-y-2 text-xs",
+                class: "mt-4 grid grid-cols-[92px,1fr] gap-x-3 gap-y-1.5 text-xs",
                 dt { class: "{theme::text::MUTED}", "Flake" } dd { class: "{theme::text::SECONDARY}", "{build.flake}" }
-                dt { class: "{theme::text::MUTED}", "Commit" } dd { class: "font-mono {theme::text::SECONDARY}", "{build.commit}" }
+                dt { class: "{theme::text::MUTED}", "Commit" } dd { class: "font-mono {theme::text::SECONDARY} truncate", "{build.commit}" }
                 dt { class: "{theme::text::MUTED}", "Worker" } dd { class: "font-mono {theme::text::SECONDARY}", "{build.worker_id}" }
                 dt { class: "{theme::text::MUTED}", "Arch" } dd { class: "font-mono {theme::text::SECONDARY}", "x86_64-linux" }
                 dt { class: "{theme::text::MUTED}", "Queued" } dd { class: "{theme::text::SECONDARY}", "{build.queued_for}" }
@@ -109,7 +109,7 @@ pub fn BuildDetailPane(
             }
 
             div {
-                class: "mt-4 flex items-center gap-2",
+                class: "mt-4 flex items-center gap-2 pt-1",
                 button {
                     class: "inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs border transition-colors {theme::interactive::GHOST_BTN}",
                     onclick: move |_| on_log.call(()),

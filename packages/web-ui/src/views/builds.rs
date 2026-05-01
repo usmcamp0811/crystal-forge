@@ -362,7 +362,7 @@ pub fn BuildsView() -> Element {
             class: "space-y-6",
 
             header {
-                class: "flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between",
+                class: "flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between",
                 div {
                     h1 { class: "{theme::typography::PAGE_TITLE}", "Builds" }
                     p {
@@ -394,7 +394,7 @@ pub fn BuildsView() -> Element {
             }
 
             div {
-                class: "text-[12px] font-semibold uppercase tracking-[0.08em] {theme::text::MUTED}",
+                class: "text-[12px] font-semibold uppercase tracking-[0.08em] {theme::text::MUTED} mb-[-4px]",
                 "Build Workers"
             }
 
@@ -454,7 +454,7 @@ pub fn BuildsView() -> Element {
 
             if selected.is_some() {
                 div {
-                    class: "fixed right-4 top-[88px] z-40 w-full max-w-[440px] max-h-[calc(100vh-112px)] overflow-y-auto",
+                    class: "fixed right-4 top-[112px] z-40 w-full max-w-[440px] max-h-[calc(100vh-136px)] overflow-y-auto",
                     div {
                         class: "p-1",
                         BuildDetailPane {
