@@ -85,7 +85,7 @@ pub fn BuildDetailPane(
             }
 
             dl {
-                class: "mt-4 grid grid-cols-[92px,1fr] gap-x-3 gap-y-1.5 text-xs",
+                class: "mt-4 grid grid-cols-[92px,1fr] gap-x-3 gap-y-1 text-xs",
                 dt { class: "{theme::text::MUTED}", "Flake" } dd { class: "{theme::text::SECONDARY}", "{build.flake}" }
                 dt { class: "{theme::text::MUTED}", "Commit" } dd { class: "font-mono {theme::text::SECONDARY} truncate", "{build.commit}" }
                 dt { class: "{theme::text::MUTED}", "Worker" } dd { class: "font-mono {theme::text::SECONDARY}", "{build.worker_id}" }
@@ -98,7 +98,7 @@ pub fn BuildDetailPane(
 
             if progress > 0 && progress < 100 {
                 section {
-                    class: "mt-4",
+                    class: "mt-3",
                     h3 { class: "text-xs font-medium {theme::text::SECONDARY} mb-2", "Progress" }
                     div {
                         class: "h-1.5 bg-slate-800 rounded-full overflow-hidden",
@@ -109,7 +109,7 @@ pub fn BuildDetailPane(
             }
 
             div {
-                class: "mt-4 flex items-center gap-2 pt-1",
+                class: "mt-3 flex items-center gap-2 pt-1",
                 button {
                     class: "inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs border transition-colors {theme::interactive::GHOST_BTN}",
                     onclick: move |_| on_log.call(()),

@@ -39,7 +39,7 @@ pub fn MetricsRow(
 
     rsx! {
         div {
-            class: "grid gap-3 grid-cols-2 xl:grid-cols-5",
+            class: "grid gap-2.5 grid-cols-2 xl:grid-cols-5",
             MetricBadge { label: "Building", value: building.to_string(), tone_class: "cf-metric-building" }
             MetricBadge { label: "Queued", value: queued.to_string(), tone_class: "cf-metric-queued" }
             MetricBadge { label: "Failed 24h", value: failed_24h.to_string(), tone_class: "cf-metric-failed" }
@@ -71,7 +71,7 @@ fn MetricBadge(label: &'static str, value: String, tone_class: &'static str) -> 
 
     rsx! {
         div {
-            class: "relative rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-3 min-h-[58px]",
+            class: "relative rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2.5 min-h-[56px]",
             span {
                 class: "absolute left-2 top-3 h-5 w-0.5 rounded-full",
                 style: "background-color: {value_color};"

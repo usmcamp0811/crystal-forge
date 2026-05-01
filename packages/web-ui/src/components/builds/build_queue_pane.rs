@@ -205,9 +205,9 @@ fn BuildQueueTable(
                                     td {
                                         class: "px-3 py-2.5",
                                         div {
-                                            p { class: "text-[13px] font-semibold {theme::text::PRIMARY}", "{build.flake}" }
-                                            p { class: "text-[10px] font-mono {theme::text::MUTED} truncate max-w-[18rem]", "{truncate_with_ellipsis(&build.summary, 44)}" }
-                                            p { class: "text-[10px] {theme::text::MUTED}",
+                                            p { class: "text-[13px] font-semibold leading-4 {theme::text::PRIMARY}", "{build.flake}" }
+                                            p { class: "text-[10px] leading-4 font-mono {theme::text::MUTED} truncate max-w-[18rem]", "{truncate_with_ellipsis(&build.summary, 40)}" }
+                                            p { class: "text-[10px] leading-4 {theme::text::MUTED}",
                                                 "{build.flake} · "
                                                 span { class: "font-mono", "{short_commit(&build.commit)}" }
                                             }
@@ -225,7 +225,7 @@ fn BuildQueueTable(
                                         }
                                     }
                                     td {
-                                        class: "px-3 py-2.5 font-mono text-xs {theme::text::SECONDARY}",
+                                        class: "px-3 py-2.5 font-mono text-xs {theme::text::SECONDARY} whitespace-nowrap",
                                         "{build.worker_id}"
                                     }
                                     td {
