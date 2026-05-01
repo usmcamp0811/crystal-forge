@@ -62,19 +62,19 @@ pub fn BuildDetailPane(
 
     rsx! {
         aside {
-            class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-4 shadow-2xl",
+            class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-4 py-3.5 shadow-2xl",
             div {
                 class: "flex items-start justify-between gap-3",
                 div {
                     h2 {
-                        class: "text-[15px] font-semibold text-white leading-5",
+                        class: "text-[15px] font-semibold text-white leading-5 flex items-center",
                         span {
                             class: "inline-flex mr-2 px-1.5 py-0.5 text-[10px] uppercase rounded border {build_status_badge_class(build.status)}",
                             "{build.status_label()}"
                         }
                         "{extract_system_name(&build.hostname)}"
                     }
-                    p { class: "text-[11px] font-mono {theme::text::MUTED} truncate", "{build.summary}" }
+                    p { class: "text-[11px] font-mono {theme::text::MUTED} truncate mt-0.5", "{build.summary}" }
                     p { class: "text-[11px] {theme::text::MUTED} truncate", "{build.flake} · {build.commit}" }
                 }
                 button {

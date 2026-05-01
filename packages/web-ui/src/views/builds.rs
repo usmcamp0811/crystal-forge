@@ -375,7 +375,7 @@ pub fn BuildsView() -> Element {
                     button {
                         class: "inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm border transition-colors {theme::interactive::GHOST_BTN}",
                         onclick: move |_| refresh_trigger.set(refresh_trigger() + 1),
-                        span { class: "text-xs", "↻" }
+                        span { class: "text-xs", "⟳" }
                         "Refresh"
                     }
                     QueueActionButton {

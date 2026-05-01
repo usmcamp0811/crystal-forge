@@ -77,7 +77,7 @@ fn MetricBadge(label: &'static str, value: String, tone_class: &'static str) -> 
                 style: "background-color: {value_color};"
             }
             p { class: "pl-2 text-[10px] uppercase tracking-wide {theme::text::MUTED}", "{label}" }
-            p { class: "pl-2 text-base font-semibold", style: "color: {value_color};", "{value}" }
+            p { class: "pl-2 text-base font-semibold leading-5", style: "color: {value_color};", "{value}" }
         }
     }
 }
