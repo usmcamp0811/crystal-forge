@@ -206,7 +206,7 @@ fn BuildQueueTable(
                                         class: "px-3 py-2.5",
                                         div {
                                             p { class: "text-[13px] font-semibold {theme::text::PRIMARY}", "{build.flake}" }
-                                            p { class: "text-[10px] font-mono {theme::text::MUTED} truncate max-w-[18rem]", "{truncate_with_ellipsis(&build.summary, 52)}" }
+                                            p { class: "text-[10px] font-mono {theme::text::MUTED} truncate max-w-[18rem]", "{truncate_with_ellipsis(&build.summary, 44)}" }
                                             p { class: "text-[10px] {theme::text::MUTED}",
                                                 "{build.flake} · "
                                                 span { class: "font-mono", "{short_commit(&build.commit)}" }
@@ -216,7 +216,11 @@ fn BuildQueueTable(
                                     td {
                                         class: "px-3 py-2.5",
                                         span {
-                                            class: "inline-flex px-2 py-0.5 text-[10px] uppercase rounded border {build_status_badge_class(build.status)}",
+                                            class: "inline-flex items-center gap-1.5 px-2 py-0.5 text-[10px] uppercase rounded border {build_status_badge_class(build.status)}",
+                                            span {
+                                                class: "inline-block h-1.5 w-1.5 rounded-full",
+                                                style: "background-color: {status_dot_color(build.status)};"
+                                            }
                                             "{build.status_label()}"
                                         }
                                     }
@@ -299,5 +303,16 @@ fn cancel_action_for_status(status: BuildStatus) -> Option<BuildAction> {
         BuildStatus::Stopping => Some(BuildAction::ForceCancel),
         BuildStatus::Queued => Some(BuildAction::Stop),
         _ => None,
+    }
+}
+
+fn status_dot_color(status: BuildStatus) -> &'static str {
+    match status {
+        BuildStatus::Queued => "#a78bfa",
+        BuildStatus::Building => "#34d399",
+        BuildStatus::Stopping => "#fbbf24",
+        BuildStatus::Failed => "#f87171",
+        BuildStatus::Complete => "#34d399",
+        BuildStatus::Cancelled => "#94a3b8",
     }
 }

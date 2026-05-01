@@ -113,11 +113,13 @@ pub fn BuildDetailPane(
                 button {
                     class: "inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs border transition-colors {theme::interactive::GHOST_BTN}",
                     onclick: move |_| on_log.call(()),
+                    span { class: "text-[11px]", "⌘" }
                     "Logs"
                 }
                 button {
                     class: "inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs border transition-colors {theme::interactive::GHOST_BTN}",
                     onclick: move |_| on_close.call(()),
+                    span { class: "text-[11px]", "✕" }
                     "Cancel"
                 }
             }
