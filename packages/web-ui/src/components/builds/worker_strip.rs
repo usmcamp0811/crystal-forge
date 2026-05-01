@@ -27,13 +27,13 @@ pub fn WorkerStrip(
                     rsx! {
                         div {
                             key: "{worker.id}",
-                            class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-4 py-3 space-y-3",
+                            class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-4 py-[14px] space-y-[10px]",
                             div {
                                 class: "flex items-center justify-between gap-2",
                                 div {
                                     p { class: "text-[13px] text-white font-semibold", "{worker.name}" }
                                     if let Some(host) = worker.host.clone() {
-                                        p { class: "text-[11px] font-mono {theme::text::MUTED}", "{host}" }
+                                        p { class: "text-[11px] font-mono {theme::text::MUTED} whitespace-nowrap overflow-hidden text-ellipsis", "{host}" }
                                     }
                                 }
                                 span {

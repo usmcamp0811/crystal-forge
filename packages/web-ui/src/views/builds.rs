@@ -13,7 +13,6 @@ use crate::components::builds::{
     DetailTab, MetricsRow, PendingAction, QueueAction, QueueActionButton, WorkerAction, WorkerItem,
     WorkerStatus, WorkerStrip, extract_system_name, selected_build_data,
 };
-use crate::components::layout::Card;
 use crate::theme;
 
 const PAGE_SIZE: i64 = 50;
@@ -406,54 +405,49 @@ pub fn BuildsView() -> Element {
                 },
             }
 
-            Card {
-                title: None,
-                children: rsx! {
-                    div {
-                        class: "-mx-4 -mt-3 overflow-hidden",
-                        div {
-                            class: "px-4 border-b {theme::surface::CARD_BORDER} inline-flex items-end gap-1",
-                            button {
-                                class: if active_view() == BuildsTab::ActiveQueue {
-                                    "px-3 py-2 text-sm border-b-2 border-blue-500 text-blue-300 font-medium"
-                                } else {
-                                    "px-3 py-2 text-sm border-b-2 border-transparent {theme::text::SECONDARY} hover:text-white transition-colors"
-                                },
-                                onclick: move |_| {
-                                    active_view.set(BuildsTab::ActiveQueue);
-                                    selected_build.set(None);
-                                    log_open.set(false);
-                                },
-                                "Active ({queue_data.len()})"
-                            }
-                            button {
-                                class: if active_view() == BuildsTab::Completed {
-                                    "px-3 py-2 text-sm border-b-2 border-blue-500 text-blue-300 font-medium"
-                                } else {
-                                    "px-3 py-2 text-sm border-b-2 border-transparent {theme::text::SECONDARY} hover:text-white transition-colors"
-                                },
-                                onclick: move |_| {
-                                    active_view.set(BuildsTab::Completed);
-                                    selected_build.set(None);
-                                    log_open.set(false);
-                                },
-                                "Completed ({build_history.read().len()})"
-                            }
-                        }
-                        div {
-                            class: "px-4 pt-3",
-                            BuildQueuePane {
-                                builds: if active_view() == BuildsTab::ActiveQueue {
-                                    queue_data.clone()
-                                } else {
-                                    completed_rows.clone()
-                                },
-                                selected_id: selected_build,
-                                on_build_action: move |(build_id, action)| {
-                                    pending_action.set(Some(PendingAction::Build { build_id, action }))
-                                },
-                            }
-                        }
+            div {
+                class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} overflow-hidden",
+                div {
+                    class: "px-4 border-b {theme::surface::CARD_BORDER} inline-flex items-end gap-1",
+                    button {
+                        class: if active_view() == BuildsTab::ActiveQueue {
+                            "px-3 py-2 text-sm border-b-2 border-blue-500 text-blue-300 font-medium"
+                        } else {
+                            "px-3 py-2 text-sm border-b-2 border-transparent {theme::text::SECONDARY} hover:text-white transition-colors"
+                        },
+                        onclick: move |_| {
+                            active_view.set(BuildsTab::ActiveQueue);
+                            selected_build.set(None);
+                            log_open.set(false);
+                        },
+                        "Active ({queue_data.len()})"
+                    }
+                    button {
+                        class: if active_view() == BuildsTab::Completed {
+                            "px-3 py-2 text-sm border-b-2 border-blue-500 text-blue-300 font-medium"
+                        } else {
+                            "px-3 py-2 text-sm border-b-2 border-transparent {theme::text::SECONDARY} hover:text-white transition-colors"
+                        },
+                        onclick: move |_| {
+                            active_view.set(BuildsTab::Completed);
+                            selected_build.set(None);
+                            log_open.set(false);
+                        },
+                        "Completed ({build_history.read().len()})"
+                    }
+                }
+                div {
+                    class: "px-4 pt-3 pb-4",
+                    BuildQueuePane {
+                        builds: if active_view() == BuildsTab::ActiveQueue {
+                            queue_data.clone()
+                        } else {
+                            completed_rows.clone()
+                        },
+                        selected_id: selected_build,
+                        on_build_action: move |(build_id, action)| {
+                            pending_action.set(Some(PendingAction::Build { build_id, action }))
+                        },
                     }
                 }
             }

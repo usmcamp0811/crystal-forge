@@ -171,7 +171,7 @@ fn BuildQueueTable(
 ) -> Element {
     rsx! {
         div {
-            class: "h-[56vh] overflow-auto",
+            class: "min-h-[220px] max-h-[56vh] overflow-auto",
             "data-testid": "build-queue-table",
             table {
                 class: "w-full text-xs",
