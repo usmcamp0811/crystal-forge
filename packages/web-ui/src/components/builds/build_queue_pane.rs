@@ -286,46 +286,34 @@ fn BuildQueueTable(
                                         class: "px-2 py-2 text-right",
                                         div {
                                             class: "inline-flex items-center gap-1",
-                                            if matches!(build.status, BuildStatus::Building) {
-                                                button {
-                                                    class: "text-[10px] text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors",
-                                                    onclick: move |evt| {
-                                                        evt.stop_propagation();
-                                                        on_build_action.call((build.id, BuildAction::Stop));
-                                                    },
-                                                    "Stop"
-                                                }
-                                            }
-                                            // Force Cancel for stuck builds in Stopping state
-                                            if matches!(build.status, BuildStatus::Stopping) {
-                                                button {
-                                                    class: "text-[10px] text-orange-400 hover:text-orange-300 px-2 py-1 rounded hover:bg-orange-500/10 transition-colors",
-                                                    onclick: move |evt| {
-                                                        evt.stop_propagation();
-                                                        on_build_action.call((build.id, BuildAction::ForceCancel));
-                                                    },
-                                                    "Force Cancel"
-                                                }
-                                            }
-                                            // Restart only valid for terminal statuses
-                                            if matches!(build.status, BuildStatus::Failed | BuildStatus::Complete | BuildStatus::Cancelled) {
-                                                button {
-                                                    class: "text-[10px] px-2 py-1 rounded transition-colors cf-action-link",
-                                                    onclick: move |evt| {
-                                                        evt.stop_propagation();
-                                                        on_build_action.call((build.id, BuildAction::Restart));
-                                                    },
-                                                    "Restart"
-                                                }
+                                            button {
+                                                class: "btn-icon focus-ring",
+                                                title: "Inspect",
+                                                onclick: move |evt| {
+                                                    evt.stop_propagation();
+                                                },
+                                                "⌁"
                                             }
                                             if build.status == BuildStatus::Queued {
                                                 button {
-                                                    class: "text-[10px] text-cyan-300 hover:text-cyan-200 px-2 py-1 rounded hover:bg-cyan-500/10 transition-colors",
+                                                    class: "btn-icon focus-ring",
+                                                    title: "Run next",
                                                     onclick: move |evt| {
                                                         evt.stop_propagation();
                                                         on_build_action.call((build.id, BuildAction::RunNext));
                                                     },
-                                                    "Run Next"
+                                                    "↥"
+                                                }
+                                            }
+                                            if let Some(cancel_action) = cancel_action_for_status(build.status) {
+                                                button {
+                                                    class: "btn-icon focus-ring",
+                                                    title: "Cancel",
+                                                    onclick: move |evt| {
+                                                        evt.stop_propagation();
+                                                        on_build_action.call((build.id, cancel_action));
+                                                    },
+                                                    "✕"
                                                 }
                                             }
                                         }
@@ -347,5 +335,14 @@ fn truncate_with_ellipsis(value: &str, max_chars: usize) -> String {
         format!("{truncated}…")
     } else {
         truncated
+    }
+}
+
+fn cancel_action_for_status(status: BuildStatus) -> Option<BuildAction> {
+    match status {
+        BuildStatus::Building => Some(BuildAction::Stop),
+        BuildStatus::Stopping => Some(BuildAction::ForceCancel),
+        BuildStatus::Queued => Some(BuildAction::Stop),
+        _ => None,
     }
 }
