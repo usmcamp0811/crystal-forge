@@ -205,7 +205,7 @@ fn BuildQueueTable(
                                     td {
                                         class: "px-2 py-2",
                                         div {
-                                            p { class: "text-[13px] font-semibold {theme::text::PRIMARY}", "{extract_system_name(&build.hostname)}" }
+                                            p { class: "text-[13px] font-semibold {theme::text::PRIMARY}", "{build.flake}" }
                                             p { class: "text-[10px] font-mono {theme::text::MUTED} truncate max-w-[18rem]", "{truncate_with_ellipsis(&build.summary, 52)}" }
                                             p { class: "text-[10px] {theme::text::MUTED}",
                                                 "{build.flake} · "
@@ -258,7 +258,7 @@ fn BuildQueueTable(
                                                     evt.stop_propagation();
                                                     selected_id.set(Some(build.id));
                                                 },
-                                                "⌂"
+                                                "⌘"
                                             }
                                             if let Some(cancel_action) = cancel_action_for_status(build.status) {
                                                 button {
