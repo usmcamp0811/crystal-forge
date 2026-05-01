@@ -64,6 +64,11 @@ pub fn BuildDetailPane(
 
     let events = mock_events(build.id);
     let artifacts = mock_artifacts(build.id);
+    let log_line_count = build
+        .logs
+        .as_deref()
+        .map(|text| text.lines().count())
+        .unwrap_or(0);
     let duration_label = build.runtime.clone().unwrap_or_else(|| "—".to_string());
 
     // Use WebSocket logs if available.
@@ -104,6 +109,8 @@ pub fn BuildDetailPane(
 
                         div {
                             class: "grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-2 mt-4 text-xs",
+                            div { class: "text-gray-400", "Derivation" }
+                            div { class: "text-gray-200 font-mono", "{build.summary}" }
                             div { class: "text-gray-400", "Flake" }
                             div { class: "text-gray-200", "{build.flake}" }
                             div { class: "text-gray-400", "Commit" }
@@ -116,6 +123,8 @@ pub fn BuildDetailPane(
                             div { class: "text-gray-200 font-mono", "{duration_label}" }
                             div { class: "text-gray-400", "Started by" }
                             div { class: "text-gray-200", "{build.started_by}" }
+                            div { class: "text-gray-400", "Log lines" }
+                            div { class: "text-gray-200", "{log_line_count}" }
                         }
 
                         if matches!(build.status, BuildStatus::Building | BuildStatus::Stopping) {

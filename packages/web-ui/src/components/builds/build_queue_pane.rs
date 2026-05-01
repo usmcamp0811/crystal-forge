@@ -241,7 +241,7 @@ fn BuildQueueTable(
                                         class: "px-2 py-2",
                                         div {
                                             p { class: "text-[13px] font-semibold {theme::text::PRIMARY}", "{build.flake}" }
-                                            p { class: "text-[10px] font-mono {theme::text::MUTED} truncate max-w-[18rem]", "{build.summary}" }
+                                            p { class: "text-[10px] font-mono {theme::text::MUTED} truncate max-w-[18rem]", "{truncate_with_ellipsis(&build.summary, 40)}" }
                                             p { class: "text-[10px] {theme::text::MUTED}",
                                                 "{extract_system_name(&build.hostname)} · "
                                                 span { class: "font-mono", "{short_commit(&build.commit)}" }
@@ -337,5 +337,15 @@ fn BuildQueueTable(
                 }
             }
         }
+    }
+}
+
+fn truncate_with_ellipsis(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
     }
 }
