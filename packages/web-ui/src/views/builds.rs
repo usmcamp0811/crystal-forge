@@ -320,7 +320,6 @@ pub fn BuildsView() -> Element {
 
     let queue_data = builds.read().clone();
     let worker_data = workers.read().clone();
-    let selected = selected_build_data(selected_build.read().to_owned(), &queue_data);
 
     let mut completed_rows = build_history.read().clone();
     completed_rows.retain(|item| {
@@ -342,6 +341,13 @@ pub fn BuildsView() -> Element {
             CompletedSortOrder::OldestFirst => left_key.cmp(&right_key),
         }
     });
+
+    let visible_rows = if active_view() == BuildsTab::ActiveQueue {
+        queue_data.clone()
+    } else {
+        completed_rows.clone()
+    };
+    let selected = selected_build_data(selected_build.read().to_owned(), &visible_rows);
 
     let total_pages = {
         let t = queue_total();
@@ -413,7 +419,11 @@ pub fn BuildsView() -> Element {
                                 } else {
                                     "px-3 py-2 text-sm border-b-2 border-transparent {theme::text::SECONDARY} hover:text-white transition-colors"
                                 },
-                                onclick: move |_| active_view.set(BuildsTab::ActiveQueue),
+                                onclick: move |_| {
+                                    active_view.set(BuildsTab::ActiveQueue);
+                                    selected_build.set(None);
+                                    log_open.set(false);
+                                },
                                 "Active ({queue_data.len()})"
                             }
                             button {
@@ -422,7 +432,11 @@ pub fn BuildsView() -> Element {
                                 } else {
                                     "px-3 py-2 text-sm border-b-2 border-transparent {theme::text::SECONDARY} hover:text-white transition-colors"
                                 },
-                                onclick: move |_| active_view.set(BuildsTab::Completed),
+                                onclick: move |_| {
+                                    active_view.set(BuildsTab::Completed);
+                                    selected_build.set(None);
+                                    log_open.set(false);
+                                },
                                 "Completed ({build_history.read().len()})"
                             }
                         }
