@@ -59,11 +59,23 @@ pub fn MetricsRow(
 /// Individual metric badge component.
 #[component]
 fn MetricBadge(label: &'static str, value: String, tone_class: &'static str) -> Element {
+    let value_color = match label {
+        "Building" => "#60a5fa",
+        "Queued" => "#a78bfa",
+        "Failed 24h" => "#f87171",
+        "Workers" => "#34d399",
+        _ => "#22d3ee",
+    };
+
     rsx! {
         div {
-            class: "rounded-lg border px-3 py-2 {tone_class}",
-            p { class: "text-[10px] uppercase tracking-wide text-gray-400", "{label}" }
-            p { class: "text-sm text-white font-semibold", "{value}" }
+            class: "relative rounded-lg border px-3 py-2 {tone_class}",
+            span {
+                class: "absolute left-2 top-2 h-6 w-0.5 rounded-full",
+                style: "background-color: {value_color};"
+            }
+            p { class: "pl-2 text-[10px] uppercase tracking-wide text-gray-400", "{label}" }
+            p { class: "pl-2 text-sm font-semibold", style: "color: {value_color};", "{value}" }
         }
     }
 }

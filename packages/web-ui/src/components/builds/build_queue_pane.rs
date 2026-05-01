@@ -184,7 +184,7 @@ fn BuildQueueTable(
                         th { class: "text-left px-2 py-2 {theme::text::MUTED} font-medium", "Progress" }
                         th { class: "text-left px-2 py-2 {theme::text::MUTED} font-medium", "Queued" }
                         th { class: "text-left px-2 py-2 {theme::text::MUTED} font-medium", "Duration" }
-                        th { class: "text-right px-2 py-2 {theme::text::MUTED} font-medium", "Actions" }
+                        th { class: "text-right px-2 py-2 {theme::text::MUTED} font-medium", " " }
                     }
                 }
                 tbody {

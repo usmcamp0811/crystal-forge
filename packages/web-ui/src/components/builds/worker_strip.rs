@@ -4,7 +4,7 @@ use dioxus::prelude::*;
 
 use crate::theme;
 
-use super::helpers::{WorkerAction, WorkerItem, worker_status_class};
+use super::helpers::{WorkerAction, WorkerItem};
 
 /// Worker strip showing all build workers and their status.
 #[component]
@@ -26,69 +26,66 @@ pub fn WorkerStrip(
                     rsx! {
                         div {
                             key: "{worker.id}",
-                            class: "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden shadow-sm",
+                            class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-4 space-y-3",
                             div {
-                                class: "px-4 py-3 border-b border-gray-800 flex items-center justify-between cf-worker-header-gradient",
+                                class: "flex items-center justify-between gap-2",
                                 div {
-                                    p { class: "text-sm text-white font-semibold", "{worker.name}" }
+                                    p { class: "text-[13px] text-white font-semibold", "{worker.name}" }
                                     if let Some(host) = worker.host.clone() {
-                                        p { class: "text-[11px] font-mono {theme::text::SECONDARY}", "{host}" }
+                                        p { class: "text-[11px] font-mono {theme::text::MUTED}", "{host}" }
                                     }
                                 }
                                 span {
-                                    class: "inline-flex px-2 py-1 text-[10px] uppercase rounded border {worker_status_class(worker.status)}",
+                                    class: "inline-flex px-2 py-0.5 rounded text-[10px] uppercase",
+                                    style: "color: {status_color(worker.status)}; background-color: {status_bg(worker.status)};",
                                     "{worker.status_label()}"
                                 }
                             }
                             div {
-                                class: "px-4 py-3 bg-gray-900/80 space-y-3",
+                                class: "text-[11px] {theme::text::SECONDARY} flex items-center gap-3",
+                                if let Some(arch) = worker.arch.clone() {
+                                    span { class: "font-mono", "{arch}" }
+                                }
+                                if let (Some(cores), Some(mem)) = (worker.cpu_cores, worker.memory_gb) {
+                                    span { "{cores}c · {mem}GB" }
+                                }
+                            }
+                            div {
                                 div {
-                                    class: "flex items-center gap-3 text-[11px] {theme::text::SECONDARY}",
-                                    if let Some(arch) = worker.arch.clone() {
-                                        span { class: "font-mono", "{arch}" }
-                                    }
-                                    if let (Some(cores), Some(mem)) = (worker.cpu_cores, worker.memory_gb) {
-                                        span { "{cores}c · {mem}GB" }
-                                    }
+                                    class: "flex items-center justify-between text-[11px] {theme::text::MUTED} mb-1",
+                                    span { "Slots" }
+                                    span { "{worker.active_slots}/{worker.total_slots}" }
                                 }
                                 div {
-                                    class: "space-y-1",
+                                    class: "h-1 rounded-full bg-slate-800 overflow-hidden",
                                     div {
-                                        class: "flex items-center justify-between text-[11px] {theme::text::MUTED}",
-                                        span { "Slots" }
-                                        span { "{worker.active_slots}/{worker.total_slots}" }
-                                    }
-                                    div {
-                                        class: "h-1.5 rounded-full bg-slate-800 overflow-hidden",
-                                        div {
-                                            class: "h-full rounded-full bg-emerald-400 transition-all",
-                                            style: "width: {slot_pct}%",
-                                        }
+                                        class: "h-full rounded-full transition-all",
+                                        style: "width: {slot_pct}%; background-color: {status_color(worker.status)};",
                                     }
                                 }
+                            }
+                            div {
+                                class: "flex items-center justify-between",
+                                p { class: "text-[11px] {theme::text::MUTED}", "Queue depth: {worker.queue_depth}" }
                                 div {
-                                    class: "flex items-center justify-between",
-                                    p { class: "text-xs text-gray-400", "Queue depth: {worker.queue_depth}" }
-                                    div {
-                                        class: "inline-flex items-center gap-2",
-                                        WorkerTextAction {
-                                            label: "Start",
-                                            on_click: {
-                                                let worker_id = worker_id.clone();
-                                                move |_| on_action.call((worker_id.clone(), WorkerAction::Start))
-                                            },
-                                        }
-                                        WorkerTextAction {
-                                            label: "Pause",
-                                            on_click: {
-                                                let worker_id = worker_id.clone();
-                                                move |_| on_action.call((worker_id.clone(), WorkerAction::Pause))
-                                            },
-                                        }
-                                        WorkerTextAction {
-                                            label: "Drain",
-                                            on_click: move |_| on_action.call((worker_id.clone(), WorkerAction::Drain)),
-                                        }
+                                    class: "inline-flex items-center gap-2",
+                                    WorkerTextAction {
+                                        label: "Start",
+                                        on_click: {
+                                            let worker_id = worker_id.clone();
+                                            move |_| on_action.call((worker_id.clone(), WorkerAction::Start))
+                                        },
+                                    }
+                                    WorkerTextAction {
+                                        label: "Pause",
+                                        on_click: {
+                                            let worker_id = worker_id.clone();
+                                            move |_| on_action.call((worker_id.clone(), WorkerAction::Pause))
+                                        },
+                                    }
+                                    WorkerTextAction {
+                                        label: "Drain",
+                                        on_click: move |_| on_action.call((worker_id.clone(), WorkerAction::Drain)),
                                     }
                                 }
                             }
@@ -97,6 +94,22 @@ pub fn WorkerStrip(
                 }
             }
         }
+    }
+}
+
+fn status_color(status: super::helpers::WorkerStatus) -> &'static str {
+    match status {
+        super::helpers::WorkerStatus::Running => "#34d399",
+        super::helpers::WorkerStatus::Paused => "#fbbf24",
+        super::helpers::WorkerStatus::Draining => "#60a5fa",
+    }
+}
+
+fn status_bg(status: super::helpers::WorkerStatus) -> &'static str {
+    match status {
+        super::helpers::WorkerStatus::Running => "rgba(52, 211, 153, 0.14)",
+        super::helpers::WorkerStatus::Paused => "rgba(251, 191, 36, 0.14)",
+        super::helpers::WorkerStatus::Draining => "rgba(96, 165, 250, 0.14)",
     }
 }
 
