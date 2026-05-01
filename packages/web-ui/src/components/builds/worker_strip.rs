@@ -26,7 +26,7 @@ pub fn WorkerStrip(
                     rsx! {
                         div {
                             key: "{worker.id}",
-                            class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-4 space-y-3",
+                            class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-4 py-3 space-y-3",
                             div {
                                 class: "flex items-center justify-between gap-2",
                                 div {
@@ -36,7 +36,7 @@ pub fn WorkerStrip(
                                     }
                                 }
                                 span {
-                                    class: "inline-flex px-2 py-0.5 rounded text-[10px] uppercase",
+                                    class: "inline-flex px-2 py-0.5 rounded text-[10px] uppercase font-medium",
                                     style: "color: {status_color(worker.status)}; background-color: {status_bg(worker.status)};",
                                     "{worker.status_label()}"
                                 }

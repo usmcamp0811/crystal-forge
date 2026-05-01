@@ -1,6 +1,7 @@
 //! Metrics row component for the builds control center.
 
 use dioxus::prelude::*;
+use crate::theme;
 
 use super::helpers::BuildStatus;
 use super::helpers::WorkerItem;
@@ -38,7 +39,7 @@ pub fn MetricsRow(
 
     rsx! {
         div {
-            class: "grid grid-cols-2 xl:grid-cols-5 gap-3",
+            class: "grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-3",
             MetricBadge { label: "Building", value: building.to_string(), tone_class: "cf-metric-building" }
             MetricBadge { label: "Queued", value: queued.to_string(), tone_class: "cf-metric-queued" }
             MetricBadge { label: "Failed 24h", value: failed_24h.to_string(), tone_class: "cf-metric-failed" }
@@ -59,6 +60,7 @@ pub fn MetricsRow(
 /// Individual metric badge component.
 #[component]
 fn MetricBadge(label: &'static str, value: String, tone_class: &'static str) -> Element {
+    let _ = tone_class;
     let value_color = match label {
         "Building" => "#60a5fa",
         "Queued" => "#a78bfa",
@@ -69,13 +71,13 @@ fn MetricBadge(label: &'static str, value: String, tone_class: &'static str) -> 
 
     rsx! {
         div {
-            class: "relative rounded-lg border px-3 py-2 {tone_class}",
+            class: "relative rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-3",
             span {
-                class: "absolute left-2 top-2 h-6 w-0.5 rounded-full",
+                class: "absolute left-2 top-3 h-5 w-0.5 rounded-full",
                 style: "background-color: {value_color};"
             }
-            p { class: "pl-2 text-[10px] uppercase tracking-wide text-gray-400", "{label}" }
-            p { class: "pl-2 text-sm font-semibold", style: "color: {value_color};", "{value}" }
+            p { class: "pl-2 text-[10px] uppercase tracking-wide {theme::text::MUTED}", "{label}" }
+            p { class: "pl-2 text-base font-semibold", style: "color: {value_color};", "{value}" }
         }
     }
 }
