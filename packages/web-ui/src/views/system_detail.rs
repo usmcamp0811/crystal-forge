@@ -2604,19 +2604,17 @@ fn HardeningTab(
             }
 
             // Filter bar
-            div { class: "flex flex-wrap items-center gap-3 mb-2",
-                style: "row-gap: 0.75rem;",
+            div { class: "filterbar",
                 div {
-                    class: "relative",
-                    style: "position: relative; max-width: 280px; width: 100%;",
+                    class: "filter-search",
+                    style: "max-width: 280px;",
                     span {
                         class: "{theme::text::MUTED}",
                         style: "position: absolute; left: 0.75rem; top: 50%; transform: translateY(-50%); pointer-events: none; font-size: 0.875rem; line-height: 1;",
                         "🔍"
                     }
                     input {
-                        class: "{theme::interactive::INPUT} {theme::interactive::FOCUS_RING} h-10 w-full rounded-lg",
-                        style: "padding-left: 2.25rem; min-height: 2.5rem;",
+                        class: "input focus-ring",
                         placeholder: "Filter service…",
                         value: "{search_query}",
                         oninput: move |evt| search_query.set(evt.value()),
@@ -2673,7 +2671,8 @@ fn HardeningTab(
                         thead {
                             tr { class: "{theme::surface::CARD_BG} border-b {theme::surface::CARD_BORDER} text-left {theme::text::SECONDARY}",
                                 th {
-                                    class: "sticky top-0 z-10 px-2 py-2 w-[240px]",
+                                    class: "sticky top-0 z-10 px-2 py-2",
+                                    style: "width: 22%;",
                                     "Service"
                                 }
                                 th {
@@ -2785,8 +2784,9 @@ fn HardeningTab(
                                             }
                                             td { class: "px-2 py-2 text-right",
                                                 button {
-                                                    class: "h-7 w-7 rounded-md border {theme::surface::CARD_BORDER} {theme::text::SECONDARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING}",
+                                                    class: "btn-icon focus-ring",
                                                     aria_label: "View details",
+                                                    title: "View details",
                                                     onclick: {
                                                         let service = service.clone();
                                                         move |evt| {
@@ -2847,9 +2847,9 @@ fn HardeningTab(
                     }
                 },
 
-                div {
-                    class: "relative w-full {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl shadow-2xl cursor-default overflow-hidden cf-hardening-modal",
-                    style: "width: 100%; max-width: 52rem; max-height: 88vh; display: flex; flex-direction: column;",
+                    div {
+                        class: "relative w-full {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl shadow-2xl cursor-default overflow-hidden cf-hardening-modal",
+                        style: "width: min(720px, 98vw); max-height: 88vh; display: flex; flex-direction: column;",
                     onclick: move |evt| evt.stop_propagation(),
                     role: "dialog",
                     aria_modal: "true",
@@ -2877,7 +2877,7 @@ fn HardeningTab(
                                 }
                             }
                             button {
-                                class: "shrink-0 h-8 w-8 rounded-lg border {theme::surface::CARD_BORDER} {theme::text::SECONDARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors",
+                                class: "btn-icon focus-ring",
                                 autofocus: "true",
                                 onclick: move |_| {
                                     if confirm_discard_unsaved_justification(!reason.read().trim().is_empty()) {
@@ -2885,7 +2885,18 @@ fn HardeningTab(
                                     }
                                 },
                                 aria_label: "Close service hardening modal",
-                                "✕"
+                                svg {
+                                    class: "w-4 h-4 inline-block",
+                                    fill: "none",
+                                    stroke: "currentColor",
+                                    stroke_width: "2",
+                                    view_box: "0 0 24 24",
+                                    path {
+                                        stroke_linecap: "round",
+                                        stroke_linejoin: "round",
+                                        d: "M6 18L18 6M6 6l12 12"
+                                    }
+                                }
                             }
                         }
                     }
