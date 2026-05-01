@@ -44,7 +44,7 @@ pub fn BuildQueuePane(
 
     rsx! {
         Card {
-            title: Some("Queue".to_string()),
+            title: None,
             children: rsx! {
                 div {
                     class: "space-y-3",
