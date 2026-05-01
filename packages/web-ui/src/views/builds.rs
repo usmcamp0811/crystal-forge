@@ -393,16 +393,18 @@ pub fn BuildsView() -> Element {
                 history_builds: build_history.read().clone(),
             }
 
-            div {
-                class: "text-[12px] font-semibold uppercase tracking-[0.08em] {theme::text::MUTED} mb-[-4px]",
-                "Build Workers"
-            }
+            section {
+                div {
+                    class: "text-[12px] font-semibold uppercase tracking-[0.08em] {theme::text::MUTED} mb-[10px]",
+                    "Build Workers"
+                }
 
-            WorkerStrip {
-                workers: worker_data.clone(),
-                on_action: move |(worker_id, action)| {
-                    pending_action.set(Some(PendingAction::Worker { worker_id, action }))
-                },
+                WorkerStrip {
+                    workers: worker_data.clone(),
+                    on_action: move |(worker_id, action)| {
+                        pending_action.set(Some(PendingAction::Worker { worker_id, action }))
+                    },
+                }
             }
 
             div {
@@ -452,9 +454,9 @@ pub fn BuildsView() -> Element {
                 }
             }
 
-            if selected.is_some() {
+            if selected.is_some() && !log_open() {
                 div {
-                    class: "fixed right-4 top-[112px] z-40 w-full max-w-[440px] max-h-[calc(100vh-136px)] overflow-y-auto",
+                    class: "fixed right-4 top-[96px] z-40 w-full max-w-[440px] max-h-[calc(100vh-120px)] overflow-y-auto",
                     div {
                         class: "p-1",
                         BuildDetailPane {

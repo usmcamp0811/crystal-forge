@@ -27,7 +27,7 @@ pub fn WorkerStrip(
                     rsx! {
                         div {
                             key: "{worker.id}",
-                            class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-4 py-[14px] space-y-[10px]",
+                            class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-4 py-[14px] space-y-[10px] min-h-[152px]",
                             div {
                                 class: "flex items-center justify-between gap-2",
                                 div {
