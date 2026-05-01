@@ -211,8 +211,8 @@ pub fn BuildsView() -> Element {
                 .map(|builder| WorkerItem {
                     id: builder.id.to_string(),
                     name: builder.name.clone(),
-                    host: None,
-                    arch: None,
+                    host: Some(format!("{}.builder", builder.name)),
+                    arch: Some("x86_64-linux".to_string()),
                     cpu_cores: builder.max_cpu_cores,
                     memory_gb: builder.max_memory_mb.map(|mb| mb / 1024),
                     active_slots: builder.active_jobs.max(0) as usize,
@@ -284,7 +284,6 @@ pub fn BuildsView() -> Element {
                             ApiBuildStatus::Cancelled => BuildStatus::Cancelled,
                             ApiBuildStatus::Building => BuildStatus::Building,
                             ApiBuildStatus::Cancelling => BuildStatus::Stopping,
-                            ApiBuildStatus::Cancelled => BuildStatus::Cancelled,
                             ApiBuildStatus::Queued => BuildStatus::Queued,
                             ApiBuildStatus::Idle => BuildStatus::Queued,
                         },
