@@ -27,6 +27,8 @@ impl DetailTab {
 #[component]
 pub fn BuildDetailPane(
     selected: Option<BuildItem>,
+    on_close: EventHandler<()>,
+    on_log: EventHandler<()>,
     tab: Signal<DetailTab>,
     on_tab_change: EventHandler<DetailTab>,
     follow_logs: Signal<bool>,
@@ -72,6 +74,11 @@ pub fn BuildDetailPane(
                     }
                     p { class: "text-[11px] font-mono {theme::text::MUTED}", "{build.summary}" }
                 }
+                button {
+                    class: "btn-icon focus-ring",
+                    onclick: move |_| on_close.call(()),
+                    "✕"
+                }
             }
 
             dl {
@@ -95,6 +102,19 @@ pub fn BuildDetailPane(
                         div { class: "h-full bg-cyan-400", style: "width: {progress}%" }
                     }
                     p { class: "text-[11px] {theme::text::MUTED} mt-1", "{progress}% complete" }
+                }
+            }
+
+            div {
+                class: "mt-4 flex items-center gap-2",
+                button {
+                    class: "inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs border transition-colors {theme::interactive::GHOST_BTN}",
+                    onclick: move |_| on_log.call(()),
+                    "Logs"
+                }
+                button {
+                    class: "inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs border transition-colors {theme::interactive::GHOST_BTN}",
+                    "Cancel"
                 }
             }
         }

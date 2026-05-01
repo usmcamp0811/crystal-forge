@@ -367,7 +367,7 @@ pub fn BuildsView() -> Element {
                 div {
                     class: "flex flex-wrap items-center gap-2",
                     button {
-                        class: "inline-flex items-center gap-2 rounded-lg px-3 py-2 text-xs border transition-colors {theme::interactive::GHOST_BTN}",
+                        class: "inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm border transition-colors {theme::interactive::GHOST_BTN}",
                         onclick: move |_| refresh_trigger.set(refresh_trigger() + 1),
                         "Refresh"
                     }
@@ -387,7 +387,7 @@ pub fn BuildsView() -> Element {
             }
 
             div {
-                class: "text-[11px] uppercase tracking-[0.12em] {theme::text::MUTED}",
+                class: "text-[12px] font-semibold uppercase tracking-[0.08em] {theme::text::MUTED}",
                 "Build Workers"
             }
 
@@ -396,28 +396,6 @@ pub fn BuildsView() -> Element {
                 on_action: move |(worker_id, action)| {
                     pending_action.set(Some(PendingAction::Worker { worker_id, action }))
                 },
-            }
-
-            div {
-                class: "flex border-b border-slate-700",
-                button {
-                    class: if active_view() == BuildsTab::ActiveQueue {
-                        "px-4 py-2 border-b-2 border-blue-500 text-blue-400 font-medium"
-                    } else {
-                        "px-4 py-2 border-b-2 border-transparent text-slate-400 hover:text-white transition-colors"
-                    },
-                    onclick: move |_| active_view.set(BuildsTab::ActiveQueue),
-                    "Active ({queue_data.len()})"
-                }
-                button {
-                    class: if active_view() == BuildsTab::Completed {
-                        "px-4 py-2 border-b-2 border-blue-500 text-blue-400 font-medium"
-                    } else {
-                        "px-4 py-2 border-b-2 border-transparent text-slate-400 hover:text-white transition-colors"
-                    },
-                    onclick: move |_| active_view.set(BuildsTab::Completed),
-                    "Completed ({build_history.read().len()})"
-                }
             }
 
             if let Some(note) = last_action_note.read().clone() {
@@ -438,16 +416,43 @@ pub fn BuildsView() -> Element {
             Card {
                 title: None,
                 children: rsx! {
-                    BuildQueuePane {
-                        builds: if active_view() == BuildsTab::ActiveQueue {
-                            queue_data.clone()
-                        } else {
-                            completed_rows.clone()
-                        },
-                        selected_id: selected_build,
-                        on_build_action: move |(build_id, action)| {
-                            pending_action.set(Some(PendingAction::Build { build_id, action }))
-                        },
+                    div {
+                        class: "-mx-4 -mt-3",
+                        div {
+                            class: "px-4 border-b {theme::surface::CARD_BORDER} inline-flex items-end gap-1",
+                            button {
+                                class: if active_view() == BuildsTab::ActiveQueue {
+                                    "px-3 py-2 text-sm border-b-2 border-blue-500 text-blue-300 font-medium"
+                                } else {
+                                    "px-3 py-2 text-sm border-b-2 border-transparent {theme::text::SECONDARY} hover:text-white transition-colors"
+                                },
+                                onclick: move |_| active_view.set(BuildsTab::ActiveQueue),
+                                "Active ({queue_data.len()})"
+                            }
+                            button {
+                                class: if active_view() == BuildsTab::Completed {
+                                    "px-3 py-2 text-sm border-b-2 border-blue-500 text-blue-300 font-medium"
+                                } else {
+                                    "px-3 py-2 text-sm border-b-2 border-transparent {theme::text::SECONDARY} hover:text-white transition-colors"
+                                },
+                                onclick: move |_| active_view.set(BuildsTab::Completed),
+                                "Completed ({build_history.read().len()})"
+                            }
+                        }
+                        div {
+                            class: "px-4 pt-3",
+                            BuildQueuePane {
+                                builds: if active_view() == BuildsTab::ActiveQueue {
+                                    queue_data.clone()
+                                } else {
+                                    completed_rows.clone()
+                                },
+                                selected_id: selected_build,
+                                on_build_action: move |(build_id, action)| {
+                                    pending_action.set(Some(PendingAction::Build { build_id, action }))
+                                },
+                            }
+                        }
                     }
                 }
             }
@@ -463,6 +468,8 @@ pub fn BuildsView() -> Element {
                         class: "absolute right-0 top-0 h-full w-full max-w-xl overflow-y-auto p-4",
                         BuildDetailPane {
                             selected: selected,
+                            on_close: move |_| selected_build.set(None),
+                            on_log: move |_| active_tab.set(DetailTab::Logs),
                             tab: active_tab,
                             on_tab_change: move |tab| active_tab.set(tab),
                             follow_logs: follow_logs,
