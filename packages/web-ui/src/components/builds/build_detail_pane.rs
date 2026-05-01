@@ -129,8 +129,9 @@ pub fn BuildDetailPane(
 pub fn QueueActionButton(label: &'static str, onclick: EventHandler<MouseEvent>) -> Element {
     rsx! {
         button {
-            class: "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}",
+            class: "inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}",
             onclick: move |evt| onclick.call(evt),
+            span { class: "text-xs", "+" }
             "{label}"
         }
     }

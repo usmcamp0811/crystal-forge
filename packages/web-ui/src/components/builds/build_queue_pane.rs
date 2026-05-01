@@ -258,7 +258,7 @@ fn BuildQueueTable(
                                                     evt.stop_propagation();
                                                     selected_id.set(Some(build.id));
                                                 },
-                                                "⌘"
+                                                "⌂"
                                             }
                                             if let Some(cancel_action) = cancel_action_for_status(build.status) {
                                                 button {

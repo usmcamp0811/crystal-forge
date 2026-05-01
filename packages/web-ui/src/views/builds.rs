@@ -369,6 +369,7 @@ pub fn BuildsView() -> Element {
                     button {
                         class: "inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm border transition-colors {theme::interactive::GHOST_BTN}",
                         onclick: move |_| refresh_trigger.set(refresh_trigger() + 1),
+                        span { class: "text-xs", "↻" }
                         "Refresh"
                     }
                     QueueActionButton {
@@ -402,7 +403,7 @@ pub fn BuildsView() -> Element {
                 title: None,
                 children: rsx! {
                     div {
-                        class: "-mx-4 -mt-3",
+                        class: "-mx-4 -mt-3 overflow-hidden",
                         div {
                             class: "px-4 border-b {theme::surface::CARD_BORDER} inline-flex items-end gap-1",
                             button {
