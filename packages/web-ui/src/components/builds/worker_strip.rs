@@ -12,12 +12,13 @@ pub fn WorkerStrip(
     workers: Vec<WorkerItem>,
     on_action: EventHandler<(String, WorkerAction)>,
 ) -> Element {
+    let _ = &on_action;
     rsx! {
         div {
-            class: "grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3",
+            class: "grid gap-2",
+            style: "grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));",
             for worker in workers {
                 {
-                    let worker_id = worker.id.clone();
                     let slot_pct = if worker.total_slots == 0 {
                         0
                     } else {
@@ -57,35 +58,10 @@ pub fn WorkerStrip(
                                     span { "{worker.active_slots}/{worker.total_slots}" }
                                 }
                                 div {
-                                    class: "h-1.5 rounded-full bg-slate-800 overflow-hidden",
+                                    class: "h-1 rounded-full bg-slate-800 overflow-hidden",
                                     div {
                                         class: "h-full rounded-full transition-all",
                                         style: "width: {slot_pct}%; background-color: {status_color(worker.status)};",
-                                    }
-                                }
-                            }
-                            div {
-                                class: "flex items-center justify-between",
-                                p { class: "text-[11px] {theme::text::MUTED}", "Queue depth: {worker.queue_depth}" }
-                                div {
-                                    class: "inline-flex items-center gap-2",
-                                    WorkerTextAction {
-                                        label: "Start",
-                                        on_click: {
-                                            let worker_id = worker_id.clone();
-                                            move |_| on_action.call((worker_id.clone(), WorkerAction::Start))
-                                        },
-                                    }
-                                    WorkerTextAction {
-                                        label: "Pause",
-                                        on_click: {
-                                            let worker_id = worker_id.clone();
-                                            move |_| on_action.call((worker_id.clone(), WorkerAction::Pause))
-                                        },
-                                    }
-                                    WorkerTextAction {
-                                        label: "Drain",
-                                        on_click: move |_| on_action.call((worker_id.clone(), WorkerAction::Drain)),
                                     }
                                 }
                             }
@@ -110,17 +86,5 @@ fn status_bg(status: super::helpers::WorkerStatus) -> &'static str {
         super::helpers::WorkerStatus::Running => "rgba(52, 211, 153, 0.14)",
         super::helpers::WorkerStatus::Paused => "rgba(251, 191, 36, 0.14)",
         super::helpers::WorkerStatus::Draining => "rgba(96, 165, 250, 0.14)",
-    }
-}
-
-/// Worker text action button component.
-#[component]
-fn WorkerTextAction(label: &'static str, on_click: EventHandler<MouseEvent>) -> Element {
-    rsx! {
-        button {
-            class: "text-xs px-2 py-1 rounded transition-colors cf-action-link",
-            onclick: move |evt| on_click.call(evt),
-            "{label}"
-        }
     }
 }
