@@ -2710,7 +2710,6 @@ fn HardeningTab(
                             for service in filtered_results.iter() {
                                 {
                                     let directives = directive_cells(service);
-                                    let risk_chip = risk_level_compact_badge_class(&service.risk_level);
                                     let risk_color = risk_level_color(&service.risk_level);
                                     let user_label = service
                                         .service_type
@@ -2742,7 +2741,8 @@ fn HardeningTab(
                                             }
                                             td { class: "px-2 py-2",
                                                 span {
-                                                    class: "inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide {risk_chip}",
+                                                    class: "chip",
+                                                    style: "color:{risk_color}; background:color-mix(in srgb, {risk_color} 13%, transparent); border:1px solid color-mix(in srgb, {risk_color} 30%, transparent); font-size:10px; font-weight:700;",
                                                     "{short_risk_label(&service.risk_level)}"
                                                 }
                                             }
@@ -2854,25 +2854,21 @@ fn HardeningTab(
                     div { class: "modal-head cf-hardening-modal-header",
                         div { class: "flex items-start justify-between gap-3",
                             div { class: "space-y-2 min-w-0 flex-1",
-                                div { class: "flex items-center gap-2 flex-wrap",
+                                h3 { id: "hardening-modal-title", class: "text-base font-semibold leading-tight {theme::text::PRIMARY} break-words flex items-center gap-2", style: "margin:0;",
                                     span {
-                                        class: "inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wide {risk_level_compact_badge_class(&service.risk_level)}",
+                                        class: "chip",
+                                        style: "color:{risk_level_color(&service.risk_level)}; background:color-mix(in srgb, {risk_level_color(&service.risk_level)} 13%, transparent); font-size:10px;",
                                         "{short_risk_label(&service.risk_level)}"
                                     }
-                                    h3 { id: "hardening-modal-title", class: "text-lg font-semibold leading-tight {theme::text::PRIMARY} break-words font-mono", "{service.service_name}" }
+                                    span { class: "font-mono", "{service.service_name}" }
                                 }
-                                p { class: "text-sm leading-5 {theme::text::SECONDARY}",
-                                    "Score "
+                                p { class: "text-[12px] leading-5 {theme::text::MUTED}", style: "margin-top:4px;",
+                                    "Score: "
                                     span { class: "font-semibold", style: "color: {risk_level_color(&service.risk_level)};", "{service.hardening_score}%" }
                                     " · "
                                     "{service.missing_directives_count} missing directives"
                                     " · user: "
                                     span { class: "font-mono", "{service_user_label(&service)}" }
-                                    " · Notes "
-                                    span {
-                                        class: "font-semibold {theme::text::PRIMARY}",
-                                        "{justifications.iter().filter(|item| item.service_name == service.service_name).count()}"
-                                    }
                                 }
                             }
                             button {
