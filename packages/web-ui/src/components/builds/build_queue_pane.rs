@@ -10,14 +10,6 @@ use super::helpers::{
     queue_row_style, short_commit,
 };
 
-/// View mode for the build queue display.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum QueueViewMode {
-    #[default]
-    Cards,
-    Table,
-}
-
 /// Build queue pane showing all queued and active builds.
 #[component]
 pub fn BuildQueuePane(
@@ -26,7 +18,6 @@ pub fn BuildQueuePane(
     on_build_action: EventHandler<(i32, BuildAction)>,
 ) -> Element {
     let mut search = use_signal(String::new);
-    let mut view_mode = use_signal(QueueViewMode::default);
 
     let filtered: Vec<BuildItem> = builds
         .into_iter()
@@ -48,84 +39,22 @@ pub fn BuildQueuePane(
             children: rsx! {
                 div {
                     class: "space-y-3",
-                    // Search and view mode toggle row
+                    // Search row
                     div {
                         class: "flex items-center gap-2",
                         input {
                             class: "flex-1 rounded-lg px-3 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
                             r#type: "search",
-                            placeholder: "Search by host, flake, or commit...",
+                            placeholder: "Search by package, host, flake, or commit...",
                             value: "{search.read()}",
                             oninput: move |evt| search.set(evt.value()),
                         }
-                        // View mode toggle buttons
-                        {
-                            let cards_active = if *view_mode.read() == QueueViewMode::Cards {
-                                "bg-cyan-600/20 text-cyan-300"
-                            } else {
-                                theme::text::MUTED
-                            };
-                            let table_active = if *view_mode.read() == QueueViewMode::Table {
-                                "bg-cyan-600/20 text-cyan-300"
-                            } else {
-                                theme::text::MUTED
-                            };
-                            rsx! {
-                                div {
-                                    class: "inline-flex rounded-lg border {theme::surface::CARD_BORDER} overflow-hidden shrink-0",
-                                    "data-testid": "queue-view-toggle",
-                                    button {
-                                        class: "px-3 py-2 text-xs transition-colors {cards_active}",
-                                        title: "Card view",
-                                        "data-testid": "queue-view-cards",
-                                        onclick: move |_| view_mode.set(QueueViewMode::Cards),
-                                        // Cards icon (grid)
-                                        svg {
-                                            class: "w-4 h-4",
-                                            fill: "none",
-                                            stroke: "currentColor",
-                                            stroke_width: "2",
-                                            view_box: "0 0 24 24",
-                                            path {
-                                                d: "M4 5a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM14 5a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1V5zM4 15a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H5a1 1 0 01-1-1v-4zM14 15a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z"
-                                            }
-                                        }
-                                    }
-                                    button {
-                                        class: "px-3 py-2 text-xs transition-colors {table_active}",
-                                        title: "Table view",
-                                        "data-testid": "queue-view-table",
-                                        onclick: move |_| view_mode.set(QueueViewMode::Table),
-                                        // Table icon (list)
-                                        svg {
-                                            class: "w-4 h-4",
-                                            fill: "none",
-                                            stroke: "currentColor",
-                                            stroke_width: "2",
-                                            view_box: "0 0 24 24",
-                                            path {
-                                                d: "M4 6h16M4 10h16M4 14h16M4 18h16"
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
                     }
 
-                    // Render based on view mode
-                    if *view_mode.read() == QueueViewMode::Table {
-                        BuildQueueTable {
-                            builds: filtered,
-                            selected_id: selected_id,
-                            on_build_action: on_build_action,
-                        }
-                    } else {
-                        BuildQueueCards {
-                            builds: filtered,
-                            selected_id: selected_id,
-                            on_build_action: on_build_action,
-                        }
+                    BuildQueueTable {
+                        builds: filtered,
+                        selected_id: selected_id,
+                        on_build_action: on_build_action,
                     }
                 }
             }

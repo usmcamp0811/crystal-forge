@@ -3094,21 +3094,15 @@ const steps = [
   // ============================================================
   {
     name: "15d-builds-queue-table-view",
-    description: "Build queue in table view mode",
+    description: "Build queue default table view",
     action: async (page) => {
       await routeBuildsDataWithCancelStates(page);
       await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
 
-      // Find and click the table view toggle button
-      const tableToggle = page.locator("[data-testid='queue-view-table']");
-      await assertVisible(tableToggle, "Table view toggle should be visible");
-      await tableToggle.click();
-      await page.waitForTimeout(800);
-
-      // Verify table view is now displayed
+      // Verify table view is displayed by default
       const queueTable = page.locator("[data-testid='build-queue-table']");
-      await assertVisible(queueTable, "Build queue table should be visible after toggle");
+      await assertVisible(queueTable, "Build queue table should be visible by default");
 
       // Verify table has rows
       const tableRows = page.locator("[data-testid='build-queue-row']");
@@ -3152,11 +3146,6 @@ const steps = [
       await routeBuildsDataWithCancelStates(page);
       await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
-
-      // Switch to table view to see duration column more clearly
-      const tableToggle = page.locator("[data-testid='queue-view-table']");
-      await tableToggle.click();
-      await page.waitForTimeout(800);
 
       // The mock data has elapsed_secs: 3723 which should display as "1h 2m" (approximately)
       // Look for human-readable time format patterns like "Xh Ym" or "Xm Ys"
