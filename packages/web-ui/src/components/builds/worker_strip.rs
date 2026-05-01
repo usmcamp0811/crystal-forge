@@ -57,7 +57,7 @@ pub fn WorkerStrip(
                                     span { "{worker.active_slots}/{worker.total_slots}" }
                                 }
                                 div {
-                                    class: "h-1 rounded-full bg-slate-800 overflow-hidden",
+                                    class: "h-1.5 rounded-full bg-slate-800 overflow-hidden",
                                     div {
                                         class: "h-full rounded-full transition-all",
                                         style: "width: {slot_pct}%; background-color: {status_color(worker.status)};",
