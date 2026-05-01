@@ -303,6 +303,7 @@ pub fn BuildsView() -> Element {
     });
 
     let mut selected_build = use_signal(|| None::<i32>);
+    let mut log_open = use_signal(|| false);
     let mut active_view = use_signal(|| BuildsTab::ActiveQueue);
     let mut active_tab = use_signal(|| DetailTab::Logs);
     let mut completed_status_filter = use_signal(|| CompletedStatusFilter::All);
@@ -448,20 +449,59 @@ pub fn BuildsView() -> Element {
                     class: "fixed inset-0 z-[60]",
                     div {
                         class: "absolute inset-0 bg-black/50",
-                        onclick: move |_| selected_build.set(None),
+                        onclick: move |_| {
+                            selected_build.set(None);
+                            log_open.set(false);
+                        },
                     }
                     div {
                         class: "absolute right-0 top-0 h-full w-full max-w-[440px] overflow-y-auto p-4",
                         BuildDetailPane {
-                            selected: selected,
-                            on_close: move |_| selected_build.set(None),
-                            on_log: move |_| active_tab.set(DetailTab::Logs),
+                            selected: selected.clone(),
+                            on_close: move |_| {
+                                selected_build.set(None);
+                                log_open.set(false);
+                            },
+                            on_log: move |_| {
+                                active_tab.set(DetailTab::Logs);
+                                log_open.set(true);
+                            },
                             tab: active_tab,
                             on_tab_change: move |tab| active_tab.set(tab),
                             follow_logs: follow_logs,
                             pause_logs: pause_logs,
                             wrap_logs: wrap_logs,
                             log_query: log_query,
+                        }
+                    }
+                }
+            }
+
+            if selected.is_some() && log_open() {
+                div {
+                    class: "fixed inset-0 z-[70] bg-black/70 p-4",
+                    onclick: move |_| log_open.set(false),
+                    div {
+                        class: "mx-auto mt-10 w-full max-w-4xl rounded-xl border {theme::surface::CARD_BORDER} bg-[#0A0F1A]",
+                        onclick: |evt| evt.stop_propagation(),
+                        div {
+                            class: "flex items-center justify-between px-4 py-3 border-b {theme::surface::CARD_BORDER}",
+                            h3 { class: "text-sm font-semibold text-white", "Build log" }
+                            button {
+                                class: "btn-icon focus-ring",
+                                onclick: move |_| log_open.set(false),
+                                "✕"
+                            }
+                        }
+                        pre {
+                            class: "max-h-[60vh] overflow-auto p-4 text-[11px] leading-5 font-mono text-gray-200",
+                            if let Some(build) = selected.clone() {
+                                if let Some(logs) = build.logs.clone() {
+                                    "{logs}"
+                                } else {
+                                    "No logs available"
+                                }
+                            }
                         }
                     }
                 }
