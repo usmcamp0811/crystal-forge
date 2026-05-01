@@ -37,7 +37,7 @@ pub fn WorkerStrip(
                                     }
                                 }
                                 span {
-                                    class: "inline-flex px-2 py-0.5 rounded text-[10px] uppercase font-medium",
+                                    class: "inline-flex px-2 py-0.5 rounded text-[10px] font-medium",
                                     style: "color: {status_color(worker.status)}; background-color: {status_bg(worker.status)};",
                                     "{status_text(worker.status)}"
                                 }

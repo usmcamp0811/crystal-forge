@@ -410,12 +410,12 @@ pub fn BuildsView() -> Element {
             div {
                 class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} overflow-hidden",
                 div {
-                    class: "px-4 border-b {theme::surface::CARD_BORDER} inline-flex items-end gap-0.5",
+                    class: "px-4 border-b {theme::surface::CARD_BORDER} inline-flex items-end gap-0",
                     button {
                         class: if active_view() == BuildsTab::ActiveQueue {
-                            "px-3 py-2 text-sm border-b-2 border-white text-white font-medium"
+                            "px-3 py-2.5 text-sm border-b-2 border-white text-white font-medium"
                         } else {
-                            "px-3 py-2 text-sm border-b-2 border-transparent {theme::text::SECONDARY} hover:text-white transition-colors"
+                            "px-3 py-2.5 text-sm border-b-2 border-transparent {theme::text::SECONDARY} hover:text-white transition-colors"
                         },
                         onclick: move |_| {
                             active_view.set(BuildsTab::ActiveQueue);
@@ -426,9 +426,9 @@ pub fn BuildsView() -> Element {
                     }
                     button {
                         class: if active_view() == BuildsTab::Completed {
-                            "px-3 py-2 text-sm border-b-2 border-white text-white font-medium"
+                            "px-3 py-2.5 text-sm border-b-2 border-white text-white font-medium"
                         } else {
-                            "px-3 py-2 text-sm border-b-2 border-transparent {theme::text::SECONDARY} hover:text-white transition-colors"
+                            "px-3 py-2.5 text-sm border-b-2 border-transparent {theme::text::SECONDARY} hover:text-white transition-colors"
                         },
                         onclick: move |_| {
                             active_view.set(BuildsTab::Completed);

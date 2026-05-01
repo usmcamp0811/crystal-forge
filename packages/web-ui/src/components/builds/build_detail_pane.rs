@@ -72,7 +72,7 @@ pub fn BuildDetailPane(
                             class: "inline-flex mr-2 px-1.5 py-0.5 text-[10px] uppercase rounded border {build_status_badge_class(build.status)}",
                             "{build.status_label()}"
                         }
-                        "{extract_system_name(&build.hostname)}"
+                        "{build.flake}"
                     }
                     p { class: "text-[11px] font-mono {theme::text::MUTED} truncate mt-0.5", "{build.summary}" }
                     p { class: "text-[11px] {theme::text::MUTED} truncate", "{build.flake} · {build.commit}" }
