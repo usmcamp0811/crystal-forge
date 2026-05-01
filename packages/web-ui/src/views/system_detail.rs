@@ -2460,7 +2460,7 @@ fn HardeningTab(
     let mut justification_error = use_signal(|| None::<String>);
     let mut justification_notice = use_signal(|| None::<String>);
     let mut is_saving_justification = use_signal(|| false);
-    let mut modal_tab = use_signal(|| "directives".to_string());
+    let mut modal_tab = use_signal(|| "overview".to_string());
     let mut search_query = use_signal(String::new);
     let mut severity_filter = use_signal(|| "all".to_string());
     let mut sort_mode = use_signal(|| "risk_desc".to_string());
@@ -2667,7 +2667,7 @@ fn HardeningTab(
             } else {
                 div { class: "{theme::presets::CARD} overflow-hidden",
                     div { class: "overflow-x-auto",
-                    table { class: "w-full min-w-[1240px] text-xs table-auto",
+                    table { class: "sys-table w-full min-w-[1240px] text-xs table-auto",
                         thead {
                             tr { class: "{theme::surface::CARD_BG} border-b {theme::surface::CARD_BORDER} text-left {theme::text::SECONDARY}",
                                 th {
@@ -2733,7 +2733,7 @@ fn HardeningTab(
                                             onclick: {
                                                 let service = service.clone();
                                                 move |_| {
-                                                    modal_tab.set("directives".to_string());
+                                                    modal_tab.set("overview".to_string());
                                                     selected_service.set(Some(service.clone()));
                                                 }
                                             },
@@ -2791,7 +2791,7 @@ fn HardeningTab(
                                                         let service = service.clone();
                                                         move |evt| {
                                                             evt.stop_propagation();
-                                                            modal_tab.set("directives".to_string());
+                                                            modal_tab.set("overview".to_string());
                                                             selected_service.set(Some(service.clone()));
                                                         }
                                                     },
@@ -2902,7 +2902,7 @@ fn HardeningTab(
                     }
 
                     div { class: "sd-tabs px-5",
-                        for (key, label) in [("directives", "Directives"), ("nix", "NixOS config"), ("all", "All checks")] {
+                        for (key, label) in [("overview", "Directives"), ("nix", "NixOS config"), ("all", "All checks")] {
                             {
                                 let tab_class = if *modal_tab.read() == key {
                                     "sd-tab active"
@@ -2923,10 +2923,10 @@ fn HardeningTab(
                         }
                     }
 
-                    div { class: "px-5 py-4 overflow-y-auto flex flex-col gap-3.5",
-                        if *modal_tab.read() == "directives" {
+                    div { class: "px-5 py-4 overflow-y-auto flex flex-col gap-3.5", style: "max-height: 60vh; overflow-y: auto;",
+                        if *modal_tab.read() == "overview" {
                             section { class: "space-y-3",
-                                div { class: "grid grid-cols-1 md:grid-cols-2 gap-2",
+                                div { class: "grid gap-2", style: "grid-template-columns: 1fr 1fr;",
                                     for directive in directive_cells(&service) {
                                         {
                                             let status = directive_badge_content(Some(&directive));
@@ -2963,7 +2963,7 @@ fn HardeningTab(
                                         "."
                                     }
                                 }
-                                pre { class: "sd-nix text-[12px] p-3 rounded-lg border {theme::surface::CARD_BORDER} overflow-x-auto",
+                                pre { class: "sd-nix text-[12px] p-3 rounded-lg border {theme::surface::CARD_BORDER} overflow-x-auto", style: "max-height: 45vh;",
                                     "systemd.services.\"{service.service_name}\".serviceConfig = {{\n  # tighten according to your workload\n  PrivateTmp = true;\n  PrivateDevices = true;\n  ProtectSystem = \"strict\";\n  ProtectHome = true;\n  NoNewPrivileges = true;\n}};"
                                 }
                             }
@@ -2971,7 +2971,7 @@ fn HardeningTab(
                             section { class: "space-y-3",
                                 div { class: "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden",
                                     div { class: "h-[320px] overflow-y-scroll pr-1 cf-modal-table-scroll cf-hardening-directives-scroll",
-                                        table { class: "w-full text-sm table-fixed",
+                                        table { class: "sys-table w-full text-sm table-fixed",
                                             thead {
                                                 tr { class: "sticky top-0 z-10 border-b {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG} text-left {theme::text::MUTED}",
                                                     th { class: "px-3 py-2 text-[11px] font-medium", "Directive" }
