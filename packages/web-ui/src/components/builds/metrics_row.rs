@@ -39,7 +39,7 @@ pub fn MetricsRow(
 
     rsx! {
         div {
-            class: "grid gap-3 grid-cols-1 sm:grid-cols-2 xl:grid-cols-5",
+            class: "grid gap-3 grid-cols-2 lg:grid-cols-5",
             MetricBadge { label: "Building", value: building.to_string(), tone_class: "cf-metric-building" }
             MetricBadge { label: "Queued", value: queued.to_string(), tone_class: "cf-metric-queued" }
             MetricBadge { label: "Failed 24h", value: failed_24h.to_string(), tone_class: "cf-metric-failed" }

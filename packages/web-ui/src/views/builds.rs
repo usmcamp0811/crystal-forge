@@ -454,23 +454,26 @@ pub fn BuildsView() -> Element {
 
             if selected.is_some() {
                 div {
-                    class: "pt-1",
-                    BuildDetailPane {
-                        selected: selected.clone(),
-                        on_close: move |_| {
-                            selected_build.set(None);
-                            log_open.set(false);
-                        },
-                        on_log: move |_| {
-                            active_tab.set(DetailTab::Logs);
-                            log_open.set(true);
-                        },
-                        tab: active_tab,
-                        on_tab_change: move |tab| active_tab.set(tab),
-                        follow_logs: follow_logs,
-                        pause_logs: pause_logs,
-                        wrap_logs: wrap_logs,
-                        log_query: log_query,
+                    class: "fixed right-4 top-[88px] z-40 w-full max-w-[440px] max-h-[calc(100vh-112px)] overflow-y-auto",
+                    div {
+                        class: "p-1",
+                        BuildDetailPane {
+                            selected: selected.clone(),
+                            on_close: move |_| {
+                                selected_build.set(None);
+                                log_open.set(false);
+                            },
+                            on_log: move |_| {
+                                active_tab.set(DetailTab::Logs);
+                                log_open.set(true);
+                            },
+                            tab: active_tab,
+                            on_tab_change: move |tab| active_tab.set(tab),
+                            follow_logs: follow_logs,
+                            pause_logs: pause_logs,
+                            wrap_logs: wrap_logs,
+                            log_query: log_query,
+                        }
                     }
                 }
             }
