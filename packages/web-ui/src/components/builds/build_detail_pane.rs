@@ -4,7 +4,9 @@ use dioxus::prelude::*;
 
 use crate::theme;
 
-use super::helpers::{BuildAction, BuildItem, BuildStatus, PendingAction, build_status_badge_class};
+use super::helpers::{
+    BuildAction, BuildItem, BuildStatus, PendingAction, build_status_badge_class, extract_system_name,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DetailTab {
@@ -70,9 +72,10 @@ pub fn BuildDetailPane(
                             class: "inline-flex mr-2 px-2 py-0.5 text-[10px] uppercase rounded border {build_status_badge_class(build.status)}",
                             "{build.status_label()}"
                         }
-                        "{build.flake}"
+                        "{extract_system_name(&build.hostname)}"
                     }
                     p { class: "text-[11px] font-mono {theme::text::MUTED}", "{build.summary}" }
+                    p { class: "text-[11px] {theme::text::MUTED}", "{build.flake} · {build.commit}" }
                 }
                 button {
                     class: "btn-icon focus-ring",

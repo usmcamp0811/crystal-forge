@@ -398,21 +398,6 @@ pub fn BuildsView() -> Element {
                 },
             }
 
-            if let Some(note) = last_action_note.read().clone() {
-                p {
-                    class: "text-xs px-3 py-2 rounded-lg border text-blue-100 cf-chip-info",
-                    "{note}"
-                }
-            }
-
-            if let Some(err) = action_error.read().clone() {
-                p {
-                    class: "text-xs px-3 py-2 rounded-lg border text-red-100",
-                    style: "background-color: #4A252D; border-color: #7A3D48;",
-                    "{err}"
-                }
-            }
-
             Card {
                 title: None,
                 children: rsx! {
@@ -465,7 +450,7 @@ pub fn BuildsView() -> Element {
                         onclick: move |_| selected_build.set(None),
                     }
                     div {
-                        class: "absolute right-0 top-0 h-full w-full max-w-xl overflow-y-auto p-4",
+                        class: "absolute right-0 top-0 h-full w-full max-w-[440px] overflow-y-auto p-4",
                         BuildDetailPane {
                             selected: selected,
                             on_close: move |_| selected_build.set(None),
