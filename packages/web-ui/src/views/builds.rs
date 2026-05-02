@@ -82,32 +82,34 @@ fn truncate_summary(s: &str, max_chars: usize) -> String {
 }
 
 /// Render a single log line with structured formatting (timestamp, level, message).
+/// JSX structure: <div className="sd-log-line sd-log-${lvl}">
 fn render_log_line(line: &str) -> Element {
-    // Try to parse structured log format: "TIMESTAMP LEVEL MESSAGE"
-    // Common patterns: "12:04:01 info ..." or "[2024-01-01 12:00:00] INFO ..."
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return rsx! { div { class: "h-1" } };
     }
 
     // Simple heuristic: look for log level keywords
-    let (level_class, level_label) = if trimmed.contains("error") || trimmed.contains("ERROR") {
-        ("text-red-400", "ERROR")
+    let (log_level_class, level_label) = if trimmed.contains("error") || trimmed.contains("ERROR") {
+        ("sd-log-error", "ERROR")
     } else if trimmed.contains("warn") || trimmed.contains("WARN") {
-        ("text-amber-400", "WARN")
+        ("sd-log-warn", "WARN")
     } else if trimmed.contains("info") || trimmed.contains("INFO") {
-        ("text-cyan-400", "INFO")
+        ("sd-log-info", "INFO")
     } else {
-        ("text-gray-400", "")
+        ("", "")
     };
 
+    // JSX: <div className="sd-log-line sd-log-${lvl}">
     rsx! {
         div {
-            class: "sd-log-line flex gap-3",
+            class: "sd-log-line {log_level_class}",
             if !level_label.is_empty() {
-                span { class: "sd-log-lvl {level_class} w-12 shrink-0", "{level_label}" }
+                // JSX: <span className="sd-log-lvl">{lvl.toUpperCase()}</span>
+                span { class: "sd-log-lvl", "{level_label}" }
             }
-            span { class: "sd-log-m text-gray-200", "{trimmed}" }
+            // JSX: <span className="sd-log-m">{m}</span>
+            span { class: "sd-log-m", "{trimmed}" }
         }
     }
 }
@@ -395,15 +397,20 @@ pub fn BuildsView() -> Element {
     };
 
     rsx! {
+        // JSX: <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+        // gap:16 = 16px = space-y-4 (1rem = 16px)
         div {
-            class: "space-y-6",
+            class: "space-y-4",
 
+            // JSX: <div className="page-head">
             header {
-                class: "flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between",
+                class: "page-head flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between",
                 div {
-                    h1 { class: "{theme::typography::PAGE_TITLE}", "Builds" }
+                    // JSX: <h1 className="page-title">
+                    h1 { class: "page-title", "Builds" }
+                    // JSX: <p className="page-subtitle">
                     p {
-                        class: "text-sm {theme::text::SECONDARY}",
+                        class: "page-subtitle",
                         "{queue_data.iter().filter(|b| matches!(b.status, BuildStatus::Building | BuildStatus::Stopping)).count()} building · {queue_data.iter().filter(|b| b.status == BuildStatus::Queued).count()} queued · {worker_data.iter().filter(|w| w.status == WorkerStatus::Running).count()}/{worker_data.len()} workers active"
                     }
                 }
@@ -444,17 +451,18 @@ pub fn BuildsView() -> Element {
                 }
             }
 
+            // JSX: <div className="card" style={{ overflow:"hidden" }}>
             div {
-                class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} overflow-hidden",
-                // JSX: sd-tabs with padding and border-bottom
+                class: "card overflow-hidden",
+                // JSX: <div className="sd-tabs" style={{ padding:"0 16px", borderBottom:"1px solid var(--cf-card-border)" }}>
                 div {
-                    class: "px-4 border-b {theme::surface::CARD_BORDER} inline-flex items-end",
+                    class: "sd-tabs px-4 border-b {theme::surface::CARD_BORDER}",
+                    // JSX: <button className="sd-tab focus-ring" (+ "active" when selected)>
                     button {
-                        // JSX: sd-tab focus-ring (with active state)
                         class: if active_view() == BuildsTab::ActiveQueue {
-                            "px-3 py-2 text-sm border-b-2 border-white text-white font-medium focus-ring"
+                            "sd-tab focus-ring active"
                         } else {
-                            "px-3 py-2 text-sm border-b-2 border-transparent {theme::text::SECONDARY} hover:text-white transition-colors focus-ring"
+                            "sd-tab focus-ring"
                         },
                         onclick: move |_| {
                             active_view.set(BuildsTab::ActiveQueue);
@@ -465,9 +473,9 @@ pub fn BuildsView() -> Element {
                     }
                     button {
                         class: if active_view() == BuildsTab::Completed {
-                            "px-3 py-2 text-sm border-b-2 border-white text-white font-medium focus-ring"
+                            "sd-tab focus-ring active"
                         } else {
-                            "px-3 py-2 text-sm border-b-2 border-transparent {theme::text::SECONDARY} hover:text-white transition-colors focus-ring"
+                            "sd-tab focus-ring"
                         },
                         onclick: move |_| {
                             active_view.set(BuildsTab::Completed);
@@ -499,60 +507,60 @@ pub fn BuildsView() -> Element {
             }
 
             if selected.is_some() && !log_open() {
-                // Backdrop that closes panel when clicked (JSX parity: side-panel-backdrop)
+                // JSX: <div className="side-panel-backdrop" onClick={onClose} />
                 div {
-                    class: "fixed inset-0 z-30",
+                    class: "side-panel-backdrop",
                     onclick: move |_| {
                         selected_build.set(None);
                         log_open.set(false);
                     },
                 }
-                // Detail panel itself
-                div {
-                    class: "fixed right-4 top-[96px] z-40 w-full max-w-[420px] max-h-[calc(100vh-120px)] overflow-y-auto",
-                    div {
-                        class: "p-1",
-                        onclick: |evt| evt.stop_propagation(),
-                        BuildDetailPane {
-                            selected: selected.clone(),
-                            on_close: move |_| {
-                                selected_build.set(None);
-                                log_open.set(false);
-                            },
-                            on_log: move |_| {
-                                active_tab.set(DetailTab::Logs);
-                                log_open.set(true);
-                            },
-                            tab: active_tab,
-                            on_tab_change: move |tab| active_tab.set(tab),
-                            follow_logs: follow_logs,
-                            pause_logs: pause_logs,
-                            wrap_logs: wrap_logs,
-                            log_query: log_query,
-                        }
+                // JSX: <aside className="side-panel">
+                aside {
+                    class: "side-panel",
+                    onclick: |evt| evt.stop_propagation(),
+                    BuildDetailPane {
+                        selected: selected.clone(),
+                        on_close: move |_| {
+                            selected_build.set(None);
+                            log_open.set(false);
+                        },
+                        on_log: move |_| {
+                            active_tab.set(DetailTab::Logs);
+                            log_open.set(true);
+                        },
+                        tab: active_tab,
+                        on_tab_change: move |tab| active_tab.set(tab),
+                        follow_logs: follow_logs,
+                        pause_logs: pause_logs,
+                        wrap_logs: wrap_logs,
+                        log_query: log_query,
                     }
                 }
             }
 
             if selected.is_some() && log_open() {
-                // Log modal matching JSX BuildLogModal structure
+                // JSX: <div className="modal-backdrop" onClick={onClose}>
                 div {
-                    class: "fixed inset-0 z-[70] bg-black/60 flex items-center justify-center p-4",
+                    class: "modal-backdrop",
                     onclick: move |_| log_open.set(false),
+                    // JSX: <div className="modal" style={{ width:"min(800px,98vw)" }}>
                     div {
-                        class: "w-full max-w-[min(800px,98vw)] rounded-xl border {theme::surface::CARD_BORDER} bg-[#0A0F1A] shadow-2xl",
+                        class: "modal",
+                        style: "width: min(800px, 98vw);",
                         onclick: |evt| evt.stop_propagation(),
-                        // Modal header with pkg title and drv subtitle
+                        // JSX: <div className="modal-head">
                         div {
-                            class: "flex items-start justify-between px-4 py-3 border-b {theme::surface::CARD_BORDER}",
+                            class: "modal-head",
+                            style: "display: flex; justify-content: space-between; align-items: center;",
                             div {
                                 h2 {
-                                    class: "text-[15px] font-semibold text-white m-0",
+                                    style: "margin: 0; font-size: 15px;",
                                     "Build log — "
-                                    span { class: "font-mono", "{extract_system_name(&selected.clone().unwrap().hostname)}" }
+                                    span { class: "mono", "{extract_system_name(&selected.clone().unwrap().hostname)}" }
                                 }
                                 p {
-                                    class: "text-xs {theme::text::MUTED} mt-1 m-0 truncate max-w-[600px]",
+                                    style: "margin: 4px 0 0; font-size: 12px; color: var(--cf-text-muted);",
                                     "{truncate_summary(&selected.clone().unwrap().summary, 50)}"
                                 }
                             }
@@ -562,9 +570,10 @@ pub fn BuildsView() -> Element {
                                 "✕"
                             }
                         }
-                        // Log content with structured lines
+                        // JSX: <pre ref={ref} className="sd-log-stream" style={{ minHeight:340, maxHeight:480 }}>
                         pre {
-                            class: "min-h-[340px] max-h-[480px] overflow-auto p-4 text-[11px] leading-5 font-mono text-gray-200 sd-log-stream",
+                            class: "sd-log-stream",
+                            style: "min-height: 340px; max-height: 480px;",
                             if let Some(build) = selected.clone() {
                                 if let Some(logs) = build.logs.clone() {
                                     // Parse and render structured log lines
@@ -575,19 +584,21 @@ pub fn BuildsView() -> Element {
                                     div { class: "text-gray-500 italic", "No logs available" }
                                 }
                             }
-                            // Caret affordance
-                            div { class: "sd-log-caret text-cyan-400 animate-pulse", "▍" }
+                            // JSX: <div className="sd-log-caret">▍</div>
+                            div { class: "sd-log-caret", "▍" }
                         }
-                        // Modal footer with actions
+                        // JSX: <div className="modal-foot">
                         div {
-                            class: "flex items-center justify-end gap-3 px-4 py-3 border-t {theme::surface::CARD_BORDER}",
+                            class: "modal-foot",
+                            // JSX: <button className="btn btn-ghost focus-ring xs">
                             button {
-                                class: "inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs border transition-colors {theme::interactive::GHOST_BTN}",
-                                span { "↓" }
-                                "Download"
+                                class: "btn btn-ghost focus-ring xs",
+                                span { style: "font-size: 12px;", "↓" }
+                                " Download"
                             }
+                            // JSX: <button className="btn btn-primary focus-ring">
                             button {
-                                class: "inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-medium text-white {theme::interactive::PRIMARY_BTN}",
+                                class: "btn btn-primary focus-ring",
                                 onclick: move |_| log_open.set(false),
                                 "Close"
                             }

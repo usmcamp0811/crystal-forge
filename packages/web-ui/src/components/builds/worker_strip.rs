@@ -25,9 +25,10 @@ pub fn WorkerStrip(
                         ((worker.active_slots as f64 / worker.total_slots as f64) * 100.0).round() as i32
                     };
                     rsx! {
+                        // JSX: <div className="card" style={{ padding:"14px 16px", display:"flex", flexDirection:"column", gap:10 }}>
                         div {
                             key: "{worker.id}",
-                            class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-4 py-[13px] space-y-[9px] min-h-[148px]",
+                            class: "card px-4 py-[14px] space-y-[10px]",
                             div {
                                 class: "flex items-center justify-between gap-2",
                                 div {

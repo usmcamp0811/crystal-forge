@@ -176,8 +176,9 @@ fn BuildQueueTable(
         div {
             class: "min-h-[220px] max-h-[56vh] overflow-auto",
             "data-testid": "build-queue-table",
+            // JSX: <table className="sys-table">
             table {
-                class: "w-full text-xs",
+                class: "sys-table",
                 thead {
                     class: "sticky top-0 {theme::surface::CARD_BG} border-b {theme::surface::CARD_BORDER}",
                     tr {
@@ -194,10 +195,11 @@ fn BuildQueueTable(
                     for build in builds {
                         {
                             let is_selected = *selected_id.read() == Some(build.id);
+                            // JSX: className={selected?.id===b.id?"selected":""}
                             let row_class = if is_selected {
-                                "cf-queue-row-selected cursor-pointer"
+                                "selected cursor-pointer"
                             } else {
-                                "cf-queue-row hover:bg-white/5 cursor-pointer"
+                                "cursor-pointer hover:bg-white/5"
                             };
                             rsx! {
                                 tr {
@@ -269,8 +271,9 @@ fn BuildQueueTable(
                                     }
                                     td {
                                         class: "px-3 py-2 text-right",
+                                        // JSX: <div className="row-actions">
                                         div {
-                                            class: "inline-flex items-center gap-1.5",
+                                            class: "row-actions",
                                             button {
                                                 class: "btn-icon focus-ring",
                                                 title: "Logs",

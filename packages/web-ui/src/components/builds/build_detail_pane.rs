@@ -61,22 +61,26 @@ pub fn BuildDetailPane(
     let duration_label = build.runtime.clone().unwrap_or_else(|| "-".to_string());
 
     rsx! {
-        aside {
-            class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-4 py-3 shadow-2xl",
+        // Note: The aside.side-panel wrapper is in builds.rs
+        div {
+            // JSX: <div className="panel-head">
             div {
-                class: "flex items-start justify-between gap-3",
+                class: "panel-head",
+                // JSX: <div className="panel-title">
                 div {
+                    class: "panel-title",
                     h2 {
-                        class: "text-[15px] font-semibold text-white leading-5 flex items-center",
+                        style: "font-size: 15px;",
                         span {
-                            class: "inline-flex mr-2 px-1.5 py-0.5 text-[10px] rounded border {build_status_badge_class(build.status)}",
+                            class: "chip {build_status_badge_class(build.status)}",
+                            style: "margin-right: 6px;",
                             "{build.status_label()}"
                         }
                         // Title: package/system name (like JSX b.pkg)
                         "{extract_system_name(&build.hostname)}"
                     }
                     // Subtitle: derivation/description (mono, muted) - like JSX b.drv
-                    p { class: "text-[11px] font-mono {theme::text::MUTED} truncate mt-0.5", "{build.summary}" }
+                    span { class: "fqdn mono", "{build.summary}" }
                 }
                 button {
                     class: "btn-icon focus-ring",
@@ -85,8 +89,15 @@ pub fn BuildDetailPane(
                 }
             }
 
-            dl {
-                class: "mt-3.5 grid grid-cols-[92px,1fr] gap-x-3 gap-y-1 text-xs",
+            // JSX: <div className="panel-body">
+            div {
+                class: "panel-body",
+                // JSX: <section className="panel-section">
+                section {
+                    class: "panel-section",
+                    // JSX: <dl className="kv-grid">
+                    dl {
+                        class: "kv-grid",
                 dt { class: "{theme::text::MUTED}", "Flake" } dd { class: "{theme::text::SECONDARY}", "{build.flake}" }
                 dt { class: "{theme::text::MUTED}", "Commit" } dd { class: "font-mono {theme::text::SECONDARY} truncate", "{build.commit}" }
                 dt { class: "{theme::text::MUTED}", "Worker" }
@@ -103,37 +114,56 @@ pub fn BuildDetailPane(
                 dt { class: "{theme::text::MUTED}", "Queued" } dd { class: "{theme::text::SECONDARY}", "{build.queued_for}" }
                 dt { class: "{theme::text::MUTED}", "Duration" } dd { class: "font-mono {theme::text::SECONDARY}", "{duration_label}" }
                 dt { class: "{theme::text::MUTED}", "Attempts" } dd { class: "{theme::text::SECONDARY}", "1" }
-                dt { class: "{theme::text::MUTED}", "Log lines" } dd { class: "{theme::text::SECONDARY}", "{log_line_count}" }
-            }
-
-            if progress > 0 && progress < 100 {
-                section {
-                    class: "mt-3",
-                    h3 { class: "text-xs font-medium {theme::text::SECONDARY} mb-2", "Progress" }
-                    div {
-                        class: "h-1.5 bg-slate-800 rounded-full overflow-hidden",
-                        div { class: "h-full bg-cyan-400", style: "width: {progress}%" }
+                        dt { class: "{theme::text::MUTED}", "Log lines" } dd { class: "{theme::text::SECONDARY}", "{log_line_count}" }
                     }
-                    p { class: "text-[11px] {theme::text::MUTED} mt-1", "{progress}% complete" }
+                }
+
+                if progress > 0 && progress < 100 {
+                    // JSX: <section className="panel-section">
+                    section {
+                        class: "panel-section",
+                        h3 { "Progress" }
+                        div {
+                            style: "height: 6px; background: var(--cf-subtle-bg); border-radius: 99px; overflow: hidden;",
+                            div { style: "width: {progress}%; height: 100%; background: {status_color(build.status)};" }
+                        }
+                        div {
+                            style: "font-size: 11px; color: var(--cf-text-muted); margin-top: 4px;",
+                            "{progress}% complete"
+                        }
+                    }
                 }
             }
 
+            // JSX: <div className="panel-actions">
             div {
-                class: "mt-2.5 flex items-center gap-2 pt-1",
+                class: "panel-actions",
+                // JSX: <button className="btn btn-ghost focus-ring xs">
                 button {
-                    class: "inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs border transition-colors {theme::interactive::GHOST_BTN}",
+                    class: "btn btn-ghost focus-ring xs",
                     onclick: move |_| on_log.call(()),
-                    span { class: "text-[11px]", "⌘" }
-                    "Logs"
+                    span { style: "font-size: 12px;", "⌘" }
+                    " Logs"
                 }
                 button {
-                    class: "inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs border transition-colors {theme::interactive::GHOST_BTN}",
+                    class: "btn btn-ghost focus-ring xs",
                     onclick: move |_| on_close.call(()),
-                    span { class: "text-[11px]", "✕" }
-                    "Cancel"
+                    span { style: "font-size: 12px;", "✕" }
+                    " Cancel"
                 }
             }
         }
+    }
+}
+
+fn status_color(status: BuildStatus) -> &'static str {
+    match status {
+        BuildStatus::Queued => "#a78bfa",
+        BuildStatus::Building => "#60a5fa",
+        BuildStatus::Stopping => "#fbbf24",
+        BuildStatus::Failed => "#f87171",
+        BuildStatus::Complete => "#34d399",
+        BuildStatus::Cancelled => "#94a3b8",
     }
 }
 
