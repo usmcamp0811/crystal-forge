@@ -89,27 +89,42 @@ fn render_log_line(line: &str) -> Element {
         return rsx! { div { class: "h-1" } };
     }
 
+    // Parse timestamp if present (format: HH:MM:SS or similar at start)
+    let (timestamp, rest) = if let Some(pos) = trimmed.find(|c: char| c != ':' && !c.is_numeric()) {
+        if pos > 0 && pos < 12 && trimmed[..pos].contains(':') {
+            (&trimmed[..pos], trimmed[pos..].trim())
+        } else {
+            ("", trimmed)
+        }
+    } else {
+        ("", trimmed)
+    };
+
     // Simple heuristic: look for log level keywords
-    let (log_level_class, level_label) = if trimmed.contains("error") || trimmed.contains("ERROR") {
+    let (log_level_class, level_label) = if rest.contains("error") || rest.contains("ERROR") {
         ("sd-log-error", "ERROR")
-    } else if trimmed.contains("warn") || trimmed.contains("WARN") {
+    } else if rest.contains("warn") || rest.contains("WARN") {
         ("sd-log-warn", "WARN")
-    } else if trimmed.contains("info") || trimmed.contains("INFO") {
+    } else if rest.contains("info") || rest.contains("INFO") {
         ("sd-log-info", "INFO")
     } else {
-        ("", "")
+        ("sd-log-info", "INFO")  // Default to info level
     };
 
     // JSX: <div className="sd-log-line sd-log-${lvl}">
+    //        <span className="sd-log-t">{t}</span>
+    //        <span className="sd-log-lvl">{lvl.toUpperCase()}</span>
+    //        <span className="sd-log-m">{m}</span>
+    //      </div>
     rsx! {
         div {
             class: "sd-log-line {log_level_class}",
-            if !level_label.is_empty() {
-                // JSX: <span className="sd-log-lvl">{lvl.toUpperCase()}</span>
-                span { class: "sd-log-lvl", "{level_label}" }
-            }
+            // JSX: <span className="sd-log-t">{t}</span>
+            span { class: "sd-log-t", "{timestamp}" }
+            // JSX: <span className="sd-log-lvl">{lvl.toUpperCase()}</span>
+            span { class: "sd-log-lvl", "{level_label}" }
             // JSX: <span className="sd-log-m">{m}</span>
-            span { class: "sd-log-m", "{trimmed}" }
+            span { class: "sd-log-m", "{rest}" }
         }
     }
 }
@@ -404,7 +419,7 @@ pub fn BuildsView() -> Element {
 
             // JSX: <div className="page-head">
             header {
-                class: "page-head flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between",
+                class: "page-head",
                 div {
                     // JSX: <h1 className="page-title">
                     h1 { class: "page-title", "Builds" }
@@ -414,8 +429,9 @@ pub fn BuildsView() -> Element {
                         "{queue_data.iter().filter(|b| matches!(b.status, BuildStatus::Building | BuildStatus::Stopping)).count()} building · {queue_data.iter().filter(|b| b.status == BuildStatus::Queued).count()} queued · {worker_data.iter().filter(|w| w.status == WorkerStatus::Running).count()}/{worker_data.len()} workers active"
                     }
                 }
+                // JSX: <div style={{ display:"flex", gap:8 }}>
                 div {
-                    class: "flex flex-wrap items-center gap-2",
+                    style: "display: flex; gap: 8px;",
                     button {
                         class: "inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm border transition-colors {theme::interactive::GHOST_BTN}",
                         onclick: move |_| refresh_trigger.set(refresh_trigger() + 1),
