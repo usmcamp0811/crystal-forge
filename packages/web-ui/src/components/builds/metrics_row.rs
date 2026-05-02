@@ -37,47 +37,47 @@ pub fn MetricsRow(
         ((slot_used as f64 / slot_total as f64) * 100.0).round() as i32
     };
 
+    // JSX: <div className="stat-strip">
     rsx! {
         div {
-            class: "grid gap-2.5 grid-cols-2 xl:grid-cols-5",
-            MetricBadge { label: "Building", value: building.to_string(), tone_class: "cf-metric-building" }
-            MetricBadge { label: "Queued", value: queued.to_string(), tone_class: "cf-metric-queued" }
-            MetricBadge { label: "Failed 24h", value: failed_24h.to_string(), tone_class: "cf-metric-failed" }
-            MetricBadge {
+            class: "stat-strip",
+            Stat { label: "Building", value: building.to_string(), color: "#60a5fa" }
+            Stat { label: "Queued", value: queued.to_string(), color: "#a78bfa" }
+            Stat { label: "Failed 24h", value: failed_24h.to_string(), color: "#f87171" }
+            Stat {
                 label: "Workers",
                 value: format!("{active_workers}/{}", workers.len()),
-                tone_class: "cf-metric-workers",
+                color: "#34d399"
             }
-            MetricBadge {
+            Stat {
                 label: "Slot usage",
                 value: format!("{slot_pct}%"),
-                tone_class: "cf-metric-slots",
+                color: "#22d3ee"
             }
         }
     }
 }
 
-/// Individual metric badge component.
+/// Individual stat card matching JSX structure
+/// JSX: <div className="stat">
 #[component]
-fn MetricBadge(label: &'static str, value: String, tone_class: &'static str) -> Element {
-    let _ = tone_class;
-    let value_color = match label {
-        "Building" => "#60a5fa",
-        "Queued" => "#a78bfa",
-        "Failed 24h" => "#f87171",
-        "Workers" => "#34d399",
-        _ => "#22d3ee",
-    };
-
+fn Stat(label: &'static str, value: String, color: &'static str) -> Element {
     rsx! {
         div {
-            class: "relative rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 min-h-[54px]",
+            class: "stat",
+            // JSX: <span className="stat-accent" style={{ "--stat-color": s.color }} />
             span {
-                class: "absolute left-2 top-3 h-5 w-0.5 rounded-full",
-                style: "background-color: {value_color};"
+                class: "stat-accent",
+                style: "--stat-color: {color};"
             }
-            p { class: "pl-2 text-[10px] uppercase tracking-wide {theme::text::MUTED}", "{label}" }
-            p { class: "pl-2 text-[15px] font-semibold leading-[1.2]", style: "color: {value_color};", "{value}" }
+            // JSX: <div className="stat-label">{s.label}</div>
+            div { class: "stat-label", "{label}" }
+            // JSX: <div className="stat-value" style={{ color:s.color }}>{s.val}</div>
+            div {
+                class: "stat-value",
+                style: "color: {color};",
+                "{value}"
+            }
         }
     }
 }

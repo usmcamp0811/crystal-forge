@@ -343,7 +343,8 @@ pub fn selected_build_data(selected_id: Option<i32>, builds: &[BuildItem]) -> Op
     if let Some(id) = selected_id {
         builds.iter().find(|b| b.id == id).cloned()
     } else {
-        builds.first().cloned()
+        // JSX: selected defaults to null, not first build
+        None
     }
 }
 
