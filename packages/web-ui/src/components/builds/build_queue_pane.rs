@@ -178,13 +178,13 @@ fn BuildQueueTable(
                 thead {
                     class: "sticky top-0 {theme::surface::CARD_BG} border-b {theme::surface::CARD_BORDER}",
                     tr {
-                        th { class: "text-left px-3 py-2.5 {theme::text::MUTED} font-medium", "Package / derivation" }
-                        th { class: "text-left px-3 py-2.5 {theme::text::MUTED} font-medium", "Status" }
-                        th { class: "text-left px-3 py-2.5 {theme::text::MUTED} font-medium", "Worker" }
-                        th { class: "text-left px-3 py-2.5 {theme::text::MUTED} font-medium", "Progress" }
-                        th { class: "text-left px-3 py-2.5 {theme::text::MUTED} font-medium", "Queued" }
-                        th { class: "text-left px-3 py-2.5 {theme::text::MUTED} font-medium", "Duration" }
-                        th { class: "text-right px-3 py-2.5 {theme::text::MUTED} font-medium", " " }
+                        th { class: "text-left px-3 py-2 {theme::text::MUTED} font-medium", "Package / derivation" }
+                        th { class: "text-left px-3 py-2 {theme::text::MUTED} font-medium", "Status" }
+                        th { class: "text-left px-3 py-2 {theme::text::MUTED} font-medium", "Worker" }
+                        th { class: "text-left px-3 py-2 {theme::text::MUTED} font-medium", "Progress" }
+                        th { class: "text-left px-3 py-2 {theme::text::MUTED} font-medium", "Queued" }
+                        th { class: "text-left px-3 py-2 {theme::text::MUTED} font-medium", "Duration" }
+                        th { class: "text-right px-3 py-2 {theme::text::MUTED} font-medium", " " }
                     }
                 }
                 tbody {
@@ -203,7 +203,7 @@ fn BuildQueueTable(
                                     "data-testid": "build-queue-row",
                                     onclick: move |_| selected_id.set(Some(build.id)),
                                     td {
-                                        class: "px-3 py-2.5",
+                                        class: "px-3 py-2",
                                         div {
                                             p { class: "text-[13px] font-semibold leading-[1.15] {theme::text::PRIMARY}", "{build.flake}" }
                                             p { class: "text-[10px] leading-4 font-mono {theme::text::MUTED} truncate max-w-[18rem]", "{truncate_with_ellipsis(&build.summary, 40)}" }
@@ -214,7 +214,7 @@ fn BuildQueueTable(
                                         }
                                     }
                                     td {
-                                        class: "px-3 py-2.5",
+                                        class: "px-3 py-2",
                                         span {
                                             class: "inline-flex items-center gap-1.5 px-2 py-0.5 text-[10px] uppercase rounded border {build_status_badge_class(build.status)}",
                                             span {
@@ -225,11 +225,11 @@ fn BuildQueueTable(
                                         }
                                     }
                                     td {
-                                        class: "px-3 py-2.5 font-mono text-xs {theme::text::SECONDARY} whitespace-nowrap",
+                                        class: "px-3 py-2 font-mono text-xs {theme::text::SECONDARY} whitespace-nowrap",
                                         "{build.worker_id}"
                                     }
                                     td {
-                                        class: "px-3 py-2.5 w-[110px]",
+                                        class: "px-3 py-2 w-[110px]",
                                         if matches!(build.status, BuildStatus::Building | BuildStatus::Stopping) {
                                             div {
                                                 class: "h-1.5 bg-slate-800 rounded-full overflow-hidden",
@@ -240,11 +240,11 @@ fn BuildQueueTable(
                                         }
                                     }
                                     td {
-                                        class: "px-3 py-2.5 text-xs {theme::text::MUTED} whitespace-nowrap",
+                                        class: "px-3 py-2 text-xs {theme::text::MUTED} whitespace-nowrap",
                                         "{build.queued_for}"
                                     }
                                     td {
-                                        class: "px-3 py-2.5 font-mono text-xs {theme::text::SECONDARY} whitespace-nowrap",
+                                        class: "px-3 py-2 font-mono text-xs {theme::text::SECONDARY} whitespace-nowrap",
                                         if let Some(ref runtime) = build.runtime {
                                             "{runtime}"
                                         } else {
@@ -252,7 +252,7 @@ fn BuildQueueTable(
                                         }
                                     }
                                     td {
-                                        class: "px-3 py-2.5 text-right",
+                                        class: "px-3 py-2 text-right",
                                         div {
                                             class: "inline-flex items-center gap-1.5",
                                             button {
