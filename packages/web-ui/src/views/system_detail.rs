@@ -2664,7 +2664,7 @@ fn HardeningTab(
             } else {
                 div { class: "{theme::presets::CARD} overflow-hidden",
                     div { class: "overflow-x-auto",
-                    table { class: "sys-table w-full min-w-[1240px] text-xs table-auto",
+                    table { class: "sys-table",
                         thead {
                             tr { class: "{theme::surface::CARD_BG} border-b {theme::surface::CARD_BORDER} text-left {theme::text::SECONDARY}",
                                 th {
@@ -2672,24 +2672,8 @@ fn HardeningTab(
                                     style: "width: 22%;",
                                     "Service"
                                 }
-                                th {
-                                    class: "sticky top-0 z-10 px-2 py-2 w-[80px] cursor-pointer {theme::interactive::HOVER_BG}",
-                                    onclick: move |_| {
-                                        let current = sort_mode();
-                                        sort_mode.set(if current == "risk_desc" { "score_asc".to_string() } else { "risk_desc".to_string() });
-                                    },
-                                    "Risk"
-                                    {if sort_mode() == "risk_desc" { "↓" } else { "" }}
-                                }
-                                th {
-                                    class: "sticky top-0 z-10 px-2 py-2 w-[120px] cursor-pointer {theme::interactive::HOVER_BG}",
-                                    onclick: move |_| {
-                                        let current = sort_mode();
-                                        sort_mode.set(if current == "score_desc" { "score_asc".to_string() } else { "score_desc".to_string() });
-                                    },
-                                    "Score"
-                                    {if sort_mode() == "score_desc" { "↓" } else if sort_mode() == "score_asc" { "↑" } else { "" }}
-                                }
+                                th { class: "sticky top-0 z-10 px-2 py-2 w-[80px]", "Risk" }
+                                th { class: "sticky top-0 z-10 px-2 py-2 w-[120px]", "Score" }
                                 th {
                                     class: "sticky top-0 z-10 px-2 py-2 w-[84px]",
                                     "User"
@@ -2697,7 +2681,8 @@ fn HardeningTab(
                                 for directive_name in table_directives.iter() {
                                     th {
                                         key: "hdr-{directive_name}",
-                                        class: "sticky top-0 z-10 px-1 py-2 text-center font-mono text-[9px] tracking-wide",
+                                        class: "sticky top-0 z-10 text-center",
+                                        style: "font-size:9px; letter-spacing:0.04em; text-align:center; padding:8px 4px;",
                                         title: "{directive_name}",
                                         "{directive_short_label(directive_name)}"
                                     }
@@ -2854,7 +2839,7 @@ fn HardeningTab(
                     div { class: "modal-head cf-hardening-modal-header",
                         div { class: "flex items-start justify-between gap-3",
                             div { class: "space-y-2 min-w-0 flex-1",
-                                h3 { id: "hardening-modal-title", class: "text-base font-semibold leading-tight {theme::text::PRIMARY} break-words flex items-center gap-2", style: "margin:0;",
+                                h3 { id: "hardening-modal-title", class: "text-base font-semibold leading-tight {theme::text::PRIMARY} break-words flex items-center", style: "margin:0; font-size:16px; gap:10px;",
                                     span {
                                         class: "chip",
                                         style: "color:{risk_level_color(&service.risk_level)}; background:color-mix(in srgb, {risk_level_color(&service.risk_level)} 13%, transparent); font-size:10px;",
