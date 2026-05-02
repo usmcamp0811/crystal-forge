@@ -446,13 +446,15 @@ pub fn BuildsView() -> Element {
 
             div {
                 class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} overflow-hidden",
+                // JSX: sd-tabs with padding and border-bottom
                 div {
-                    class: "px-4 border-b {theme::surface::CARD_BORDER} inline-flex items-end gap-0.5",
+                    class: "px-4 border-b {theme::surface::CARD_BORDER} inline-flex items-end",
                     button {
+                        // JSX: sd-tab focus-ring (with active state)
                         class: if active_view() == BuildsTab::ActiveQueue {
-                            "px-3 py-2 text-sm border-b-2 border-white text-white font-medium"
+                            "px-3 py-2 text-sm border-b-2 border-white text-white font-medium focus-ring"
                         } else {
-                            "px-3 py-2 text-sm border-b-2 border-transparent {theme::text::SECONDARY} hover:text-white transition-colors"
+                            "px-3 py-2 text-sm border-b-2 border-transparent {theme::text::SECONDARY} hover:text-white transition-colors focus-ring"
                         },
                         onclick: move |_| {
                             active_view.set(BuildsTab::ActiveQueue);
@@ -463,9 +465,9 @@ pub fn BuildsView() -> Element {
                     }
                     button {
                         class: if active_view() == BuildsTab::Completed {
-                            "px-3 py-2 text-sm border-b-2 border-white text-white font-medium"
+                            "px-3 py-2 text-sm border-b-2 border-white text-white font-medium focus-ring"
                         } else {
-                            "px-3 py-2 text-sm border-b-2 border-transparent {theme::text::SECONDARY} hover:text-white transition-colors"
+                            "px-3 py-2 text-sm border-b-2 border-transparent {theme::text::SECONDARY} hover:text-white transition-colors focus-ring"
                         },
                         onclick: move |_| {
                             active_view.set(BuildsTab::Completed);
