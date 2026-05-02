@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@ai-agent'
 created_date: '2026-04-30 21:32'
-updated_date: '2026-04-30 21:40'
+updated_date: '2026-05-02 02:46'
 labels:
   - ui
   - ux
@@ -82,5 +82,66 @@ Medium: high visible surface area and potential interaction regressions if styli
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-LOCK: ai-agent on reckless in /home/mcamp/code/crystal-forge/TASK-283-refactor-builds-view-ui-ux
+## JSX Parity Checklist (must be identical to `project/components/BuildsView.jsx`)
+
+### Interaction parity
+- [ ] Queue row **Logs** action opens log modal immediately (same behavior as `onLog(b)`).
+- [ ] Queue row **Cancel** icon visibility/behavior matches JSX treatment.
+- [ ] `Queue build` button behavior/wiring matches JSX (remove extra mocked note behavior).
+- [ ] Remove/adjust Dioxus-only confirm modal flow so parity behavior matches JSX reference.
+
+### Queue table content parity
+- [ ] First line in package column uses package field equivalent to `b.pkg` (not flake name).
+- [ ] Second line uses derivation snippet equivalent to `b.drv.slice(0,40)…`.
+- [ ] Third line shows `flake · commit` formatting matching JSX (no unintended shortening differences).
+- [ ] Worker column fallback matches JSX (`—` when unavailable).
+- [ ] Progress bar width is driven by real progress value (not fixed placeholder width).
+- [ ] Status chip wording/casing/class presentation matches JSX (`b.meta`-style outcome).
+- [ ] Queued time text format matches JSX `queuedAt` presentation.
+
+### Detail panel parity
+- [ ] Restore side-panel backdrop behavior matching JSX `side-panel-backdrop` semantics.
+- [ ] Panel title uses package identity equivalent to `b.pkg`.
+- [ ] Subheader line shows derivation/FQDN equivalent to `b.drv`.
+- [ ] Panel section/class structure matches JSX panel hierarchy (`panel-head`, `panel-body`, `panel-section`, `kv-grid`, `panel-actions`) or renders identically.
+- [ ] Detail metadata values map 1:1 with JSX fields (`flake`, `commit`, `worker`, `arch`, `queuedAt`, `dur`, `attempts`, `logLines`).
+- [ ] Cancel action in panel matches JSX behavior (no unintended close side effects if not present in JSX).
+
+### Log modal parity
+- [ ] Modal header includes `Build log — <pkg>` and derivation subtitle equivalent to JSX.
+- [ ] Log stream renders structured timestamp/level/message lines (not raw blob only).
+- [ ] Include modal footer actions equivalent to JSX (`Download`, `Close`).
+- [ ] Include live-stream caret affordance equivalent to JSX (`▍`) if present.
+- [ ] Modal sizing/width behavior matches JSX (`min(800px,98vw)` equivalent).
+- [ ] Auto-scroll-to-bottom behavior matches JSX mount behavior.
+
+### Worker card parity
+- [ ] Worker card spacing/padding/gap match JSX card rhythm.
+- [ ] Host line typography matches JSX (font size/mono/muted).
+- [ ] Slot bar height/background/radius match JSX metrics.
+- [ ] Status chip presentation matches JSX chip treatment.
+- [ ] Worker status support/visual fallback matches JSX expectations (including offline handling where relevant).
+
+### Metrics strip parity
+- [ ] Metrics strip uses JSX-equivalent card/accent/label/value composition.
+- [ ] Metric card spacing/height/typography match JSX stat-strip proportions.
+- [ ] Accent bar placement/size/color handling matches JSX stat-accent behavior.
+
+### Tabs and shell parity
+- [ ] Tabs match `sd-tabs`/`sd-tab active` visual behavior exactly.
+- [ ] Queue card shell spacing/borders/overflow match JSX card structure.
+- [ ] Table styling matches JSX `sys-table` behavior (header, row, selected state, action alignment).
+
+### Data wording and simplification parity
+- [ ] Reduce non-reference complexity where it alters parity (e.g., completed filter/sort controls/logic not represented in JSX output behavior).
+- [ ] Remove or isolate unused alternate queue-table implementation paths not part of JSX parity target.
+
+### Pixel-level polish parity
+- [ ] Iconography style is equivalent to JSX icon treatment (refresh/log/cancel).
+- [ ] Border radius, shadows, and micro-spacing are visually indistinguishable from JSX.
+- [ ] Typography line-height and size across headers/rows/panel are visually indistinguishable from JSX.
+
+### Final parity proof requirements
+- [ ] Provide side-by-side screenshot evidence for each major section: page head, stat strip, workers, queue tabs/table, detail panel, log modal.
+- [ ] Ensure `nix build .#checks.x86_64-linux.web-ui` captures/validates the updated UI behavior and screenshots.
 <!-- SECTION:NOTES:END -->
