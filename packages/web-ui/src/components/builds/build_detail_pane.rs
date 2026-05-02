@@ -72,10 +72,11 @@ pub fn BuildDetailPane(
                             class: "inline-flex mr-2 px-1.5 py-0.5 text-[10px] uppercase rounded border {build_status_badge_class(build.status)}",
                             "{build.status_label()}"
                         }
-                        "{build.flake}"
+                        // Title: package/system name (like JSX b.pkg)
+                        "{extract_system_name(&build.hostname)}"
                     }
+                    // Subtitle: derivation/description (mono, muted) - like JSX b.drv
                     p { class: "text-[11px] font-mono {theme::text::MUTED} truncate mt-0.5", "{build.summary}" }
-                    p { class: "text-[11px] {theme::text::MUTED} truncate", "{build.flake} · {build.commit}" }
                 }
                 button {
                     class: "btn-icon focus-ring",
@@ -88,7 +89,16 @@ pub fn BuildDetailPane(
                 class: "mt-3.5 grid grid-cols-[92px,1fr] gap-x-3 gap-y-1 text-xs",
                 dt { class: "{theme::text::MUTED}", "Flake" } dd { class: "{theme::text::SECONDARY}", "{build.flake}" }
                 dt { class: "{theme::text::MUTED}", "Commit" } dd { class: "font-mono {theme::text::SECONDARY} truncate", "{build.commit}" }
-                dt { class: "{theme::text::MUTED}", "Worker" } dd { class: "font-mono {theme::text::SECONDARY}", "{build.worker_id}" }
+                dt { class: "{theme::text::MUTED}", "Worker" }
+                dd {
+                    class: "font-mono {theme::text::SECONDARY}",
+                    // JSX: b.worker || "unassigned"
+                    if build.worker_id == "unassigned" {
+                        "unassigned"
+                    } else {
+                        "{build.worker_id}"
+                    }
+                }
                 dt { class: "{theme::text::MUTED}", "Arch" } dd { class: "font-mono {theme::text::SECONDARY}", "x86_64-linux" }
                 dt { class: "{theme::text::MUTED}", "Queued" } dd { class: "{theme::text::SECONDARY}", "{build.queued_for}" }
                 dt { class: "{theme::text::MUTED}", "Duration" } dd { class: "font-mono {theme::text::SECONDARY}", "{duration_label}" }

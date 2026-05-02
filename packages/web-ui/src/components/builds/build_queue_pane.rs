@@ -15,6 +15,7 @@ pub fn BuildQueuePane(
     builds: Vec<BuildItem>,
     selected_id: Signal<Option<i32>>,
     on_build_action: EventHandler<(i32, BuildAction)>,
+    on_log: EventHandler<i32>,
 ) -> Element {
     let filtered = builds;
 
@@ -23,6 +24,7 @@ pub fn BuildQueuePane(
             builds: filtered,
             selected_id: selected_id,
             on_build_action: on_build_action,
+            on_log: on_log,
         }
     }
 }
@@ -168,6 +170,7 @@ fn BuildQueueTable(
     builds: Vec<BuildItem>,
     selected_id: Signal<Option<i32>>,
     on_build_action: EventHandler<(i32, BuildAction)>,
+    on_log: EventHandler<i32>,
 ) -> Element {
     rsx! {
         div {
@@ -205,11 +208,14 @@ fn BuildQueueTable(
                                     td {
                                         class: "px-3 py-2",
                                         div {
-                                            p { class: "text-[13px] font-semibold leading-[1.15] {theme::text::PRIMARY}", "{build.flake}" }
+                                            // Line 1: Package/system name (bold)
+                                            p { class: "text-[13px] font-semibold leading-[1.15] {theme::text::PRIMARY}", "{extract_system_name(&build.hostname)}" }
+                                            // Line 2: Derivation/commit message (mono, muted)
                                             p { class: "text-[10px] leading-4 font-mono {theme::text::MUTED} truncate max-w-[18rem]", "{truncate_with_ellipsis(&build.summary, 40)}" }
+                                            // Line 3: Flake · full commit
                                             p { class: "text-[10px] leading-4 {theme::text::MUTED}",
                                                 "{build.flake} · "
-                                                span { class: "font-mono", "{short_commit(&build.commit)}" }
+                                                span { class: "font-mono", "{build.commit}" }
                                             }
                                         }
                                     }
@@ -226,7 +232,12 @@ fn BuildQueueTable(
                                     }
                                     td {
                                         class: "px-3 py-2 font-mono text-xs {theme::text::SECONDARY} whitespace-nowrap",
-                                        "{build.worker_id}"
+                                        // JSX: {b.worker || "—"}
+                                        if build.worker_id == "unassigned" {
+                                            "—"
+                                        } else {
+                                            "{build.worker_id}"
+                                        }
                                     }
                                     td {
                                         class: "px-3 py-2 w-[110px]",
@@ -260,7 +271,9 @@ fn BuildQueueTable(
                                                 title: "Logs",
                                                 onclick: move |evt| {
                                                     evt.stop_propagation();
+                                                    // Select the build and open log modal immediately (JSX parity)
                                                     selected_id.set(Some(build.id));
+                                                    on_log.call(build.id);
                                                 },
                                                 "⌘"
                                             }

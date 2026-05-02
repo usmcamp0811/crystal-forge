@@ -70,6 +70,48 @@ fn format_environment(item: &BuildItem) -> String {
     item.environment.clone().unwrap_or_else(|| "-".to_string())
 }
 
+/// Truncate a string with ellipsis for log modal display.
+fn truncate_summary(s: &str, max_chars: usize) -> String {
+    let mut chars = s.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
+    }
+}
+
+/// Render a single log line with structured formatting (timestamp, level, message).
+fn render_log_line(line: &str) -> Element {
+    // Try to parse structured log format: "TIMESTAMP LEVEL MESSAGE"
+    // Common patterns: "12:04:01 info ..." or "[2024-01-01 12:00:00] INFO ..."
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return rsx! { div { class: "h-1" } };
+    }
+
+    // Simple heuristic: look for log level keywords
+    let (level_class, level_label) = if trimmed.contains("error") || trimmed.contains("ERROR") {
+        ("text-red-400", "ERROR")
+    } else if trimmed.contains("warn") || trimmed.contains("WARN") {
+        ("text-amber-400", "WARN")
+    } else if trimmed.contains("info") || trimmed.contains("INFO") {
+        ("text-cyan-400", "INFO")
+    } else {
+        ("text-gray-400", "")
+    };
+
+    rsx! {
+        div {
+            class: "sd-log-line flex gap-3",
+            if !level_label.is_empty() {
+                span { class: "sd-log-lvl {level_class} w-12 shrink-0", "{level_label}" }
+            }
+            span { class: "sd-log-m text-gray-200", "{trimmed}" }
+        }
+    }
+}
+
 /// Map a raw `BuildQueueItem` from API into the UI `BuildItem`.
 fn map_queue_item(item: &crate::api::models::BuildQueueItem, idx: usize) -> BuildItem {
     let queued_for =
@@ -450,15 +492,30 @@ pub fn BuildsView() -> Element {
                         on_build_action: move |(build_id, action)| {
                             pending_action.set(Some(PendingAction::Build { build_id, action }))
                         },
+                        on_log: move |build_id| {
+                            // Open log modal immediately when Logs button clicked (JSX parity)
+                            selected_build.set(Some(build_id));
+                            log_open.set(true);
+                        },
                     }
                 }
             }
 
             if selected.is_some() && !log_open() {
+                // Backdrop that closes panel when clicked (JSX parity: side-panel-backdrop)
+                div {
+                    class: "fixed inset-0 z-30",
+                    onclick: move |_| {
+                        selected_build.set(None);
+                        log_open.set(false);
+                    },
+                }
+                // Detail panel itself
                 div {
                     class: "fixed right-4 top-[96px] z-40 w-full max-w-[420px] max-h-[calc(100vh-120px)] overflow-y-auto",
                     div {
                         class: "p-1",
+                        onclick: |evt| evt.stop_propagation(),
                         BuildDetailPane {
                             selected: selected.clone(),
                             on_close: move |_| {
@@ -481,29 +538,61 @@ pub fn BuildsView() -> Element {
             }
 
             if selected.is_some() && log_open() {
+                // Log modal matching JSX BuildLogModal structure
                 div {
-                    class: "fixed inset-0 z-[70] bg-black/70 p-4",
+                    class: "fixed inset-0 z-[70] bg-black/60 flex items-center justify-center p-4",
                     onclick: move |_| log_open.set(false),
                     div {
-                        class: "mx-auto mt-10 w-full max-w-4xl rounded-xl border {theme::surface::CARD_BORDER} bg-[#0A0F1A]",
+                        class: "w-full max-w-[min(800px,98vw)] rounded-xl border {theme::surface::CARD_BORDER} bg-[#0A0F1A] shadow-2xl",
                         onclick: |evt| evt.stop_propagation(),
+                        // Modal header with pkg title and drv subtitle
                         div {
-                            class: "flex items-center justify-between px-4 py-3 border-b {theme::surface::CARD_BORDER}",
-                            h3 { class: "text-sm font-semibold text-white", "Build log" }
+                            class: "flex items-start justify-between px-4 py-3 border-b {theme::surface::CARD_BORDER}",
+                            div {
+                                h2 {
+                                    class: "text-[15px] font-semibold text-white m-0",
+                                    "Build log — "
+                                    span { class: "font-mono", "{extract_system_name(&selected.clone().unwrap().hostname)}" }
+                                }
+                                p {
+                                    class: "text-xs {theme::text::MUTED} mt-1 m-0 truncate max-w-[600px]",
+                                    "{truncate_summary(&selected.clone().unwrap().summary, 50)}"
+                                }
+                            }
                             button {
                                 class: "btn-icon focus-ring",
                                 onclick: move |_| log_open.set(false),
                                 "✕"
                             }
                         }
+                        // Log content with structured lines
                         pre {
-                            class: "max-h-[60vh] overflow-auto p-4 text-[11px] leading-5 font-mono text-gray-200",
+                            class: "min-h-[340px] max-h-[480px] overflow-auto p-4 text-[11px] leading-5 font-mono text-gray-200 sd-log-stream",
                             if let Some(build) = selected.clone() {
                                 if let Some(logs) = build.logs.clone() {
-                                    "{logs}"
+                                    // Parse and render structured log lines
+                                    for line in logs.lines() {
+                                        {render_log_line(line)}
+                                    }
                                 } else {
-                                    "No logs available"
+                                    div { class: "text-gray-500 italic", "No logs available" }
                                 }
+                            }
+                            // Caret affordance
+                            div { class: "sd-log-caret text-cyan-400 animate-pulse", "▍" }
+                        }
+                        // Modal footer with actions
+                        div {
+                            class: "flex items-center justify-end gap-3 px-4 py-3 border-t {theme::surface::CARD_BORDER}",
+                            button {
+                                class: "inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs border transition-colors {theme::interactive::GHOST_BTN}",
+                                span { "↓" }
+                                "Download"
+                            }
+                            button {
+                                class: "inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-medium text-white {theme::interactive::PRIMARY_BTN}",
+                                onclick: move |_| log_open.set(false),
+                                "Close"
                             }
                         }
                     }

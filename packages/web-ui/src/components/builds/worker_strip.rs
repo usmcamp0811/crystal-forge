@@ -32,9 +32,10 @@ pub fn WorkerStrip(
                                 class: "flex items-center justify-between gap-2",
                                 div {
                                     p { class: "text-[13px] leading-[1.15] text-white font-semibold", "{worker.name}" }
-                                    if let Some(host) = worker.host.clone() {
-                                        p { class: "text-[10px] font-mono {theme::text::MUTED} whitespace-nowrap overflow-hidden text-ellipsis", "{host}" }
-                                    }
+                                if let Some(host) = worker.host.clone() {
+                                    // JSX: fontSize:11
+                                    p { class: "text-[11px] font-mono {theme::text::MUTED} whitespace-nowrap overflow-hidden text-ellipsis", "{host}" }
+                                }
                                 }
                                 span {
                                     class: "inline-flex px-2 py-0.5 rounded text-[10px] font-medium",
