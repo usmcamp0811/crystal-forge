@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@ai-agent'
 created_date: '2026-04-30 21:32'
-updated_date: '2026-05-02 13:27'
+updated_date: '2026-05-02 13:29'
 labels:
   - ui
   - ux
@@ -187,4 +187,117 @@ Systematic implementation of all JSX parity checklist items completed across 3 f
 - Some pixel-perfect spacing may vary slightly due to CSS framework differences
 
 All major functional and visual parity requirements met.
+
+## Detailed JSX vs Rust Differences (Part 1: Structure & Layout)
+
+### Page Container
+- JSX: `gap:16` (16px)
+- Rust: `space-y-6` (24px)
+- **FIX: Change to space-y-4**
+
+### Page Header Classes
+- JSX: Uses `page-head`, `page-title`, `page-subtitle` classes
+- Rust: Uses theme constants and custom classes
+- **FIX: Use standard class names**
+
+### Icons - Refresh Button
+- JSX: `<Icon name="sync" size={14} />`
+- Rust: Unicode `⟳`
+- **FIX: Need proper icon rendering**
+
+### Worker Card Padding
+- JSX: `padding:"14px 16px"`
+- Rust: `px-4 py-[13px]` (16px 13px)
+- **FIX: Change to py-[14px]**
+
+### Worker Card Gap
+- JSX: `gap:10`
+- Rust: `space-y-[9px]`
+- **FIX: Change to space-y-[10px]**
+
+## Detailed JSX vs Rust Differences (Part 2: Tabs & Table)
+
+### Tabs Container
+- JSX: `className="sd-tabs"`
+- Rust: Custom classes without `sd-tabs`
+- **FIX: Add sd-tabs class**
+
+### Tab Buttons
+- JSX: `className="sd-tab focus-ring" + "active"`
+- Rust: Conditional inline classes
+- **FIX: Use sd-tab and active classes**
+
+### Table
+- JSX: `className="sys-table"`
+- Rust: `w-full text-xs`
+- **FIX: Add sys-table class**
+
+### Table Row Selected
+- JSX: `className="selected"`
+- Rust: `cf-queue-row-selected`
+- **FIX: Use selected class**
+
+### Row Actions Container
+- JSX: `className="row-actions"`
+- Rust: `inline-flex items-center gap-1.5`
+- **FIX: Add row-actions class**
+
+### Action Button Icons
+- JSX: `<Icon name="terminal" size={14} />`, `<Icon name="x" size={14} />`
+- Rust: Unicode `⌘`, `✕`
+- **FIX: Verify icon size/style match**
+
+## Detailed JSX vs Rust Differences (Part 3: Detail Panel)
+
+### Backdrop
+- JSX: `className="side-panel-backdrop"`
+- Rust: Custom backdrop div
+- **FIX: Add side-panel-backdrop class**
+
+### Panel Container
+- JSX: `<aside className="side-panel">`
+- Rust: Custom aside
+- **FIX: Add side-panel class**
+
+### Panel Sections
+- JSX: Uses `panel-head`, `panel-title`, `panel-body`, `panel-section`, `panel-actions`
+- Rust: Custom structure
+- **FIX: Add all semantic class names**
+
+### Metadata Grid
+- JSX: `className="kv-grid"`
+- Rust: `grid grid-cols-[92px,1fr]...`
+- **FIX: Add kv-grid class**
+
+### Panel Buttons
+- JSX: `className="btn btn-ghost focus-ring xs"`
+- Rust: Custom inline classes
+- **FIX: Use standard btn classes**
+
+## Detailed JSX vs Rust Differences (Part 4: Log Modal)
+
+### Modal Backdrop
+- JSX: `className="modal-backdrop"`
+- Rust: Custom flex classes
+- **FIX: Add modal-backdrop class**
+
+### Modal Container
+- JSX: `className="modal"`
+- Rust: Missing modal class
+- **FIX: Add modal class**
+
+### Modal Sections
+- JSX: Uses `modal-head`, `modal-foot`
+- Rust: Custom classes
+- **FIX: Add modal-head and modal-foot classes**
+
+### Log Lines
+- JSX: `className="sd-log-line sd-log-${lvl}"` with `sd-log-t`, `sd-log-lvl`, `sd-log-m`
+- Rust: Partial implementation, missing level classes
+- **FIX: Add level-specific classes and proper structure**
+
+### Footer Buttons
+- JSX: `btn btn-ghost focus-ring xs` and `btn btn-primary focus-ring`
+- Rust: Custom classes
+- **FIX: Use standard btn classes**
 <!-- SECTION:NOTES:END -->
