@@ -62,7 +62,7 @@ pub fn BuildDetailPane(
 
     rsx! {
         aside {
-            class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-4 py-3.5 shadow-2xl",
+            class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-4 py-3 shadow-2xl",
             div {
                 class: "flex items-start justify-between gap-3",
                 div {
@@ -85,7 +85,7 @@ pub fn BuildDetailPane(
             }
 
             dl {
-                class: "mt-4 grid grid-cols-[92px,1fr] gap-x-3 gap-y-1 text-xs",
+                class: "mt-3.5 grid grid-cols-[92px,1fr] gap-x-3 gap-y-1 text-xs",
                 dt { class: "{theme::text::MUTED}", "Flake" } dd { class: "{theme::text::SECONDARY}", "{build.flake}" }
                 dt { class: "{theme::text::MUTED}", "Commit" } dd { class: "font-mono {theme::text::SECONDARY} truncate", "{build.commit}" }
                 dt { class: "{theme::text::MUTED}", "Worker" } dd { class: "font-mono {theme::text::SECONDARY}", "{build.worker_id}" }
@@ -109,7 +109,7 @@ pub fn BuildDetailPane(
             }
 
             div {
-                class: "mt-3 flex items-center gap-2 pt-1",
+                class: "mt-2.5 flex items-center gap-2 pt-1",
                 button {
                     class: "inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs border transition-colors {theme::interactive::GHOST_BTN}",
                     onclick: move |_| on_log.call(()),
