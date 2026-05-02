@@ -71,13 +71,13 @@ fn MetricBadge(label: &'static str, value: String, tone_class: &'static str) -> 
 
     rsx! {
         div {
-            class: "relative rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2.5 min-h-[56px]",
+            class: "relative rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 min-h-[54px]",
             span {
                 class: "absolute left-2 top-3 h-5 w-0.5 rounded-full",
                 style: "background-color: {value_color};"
             }
             p { class: "pl-2 text-[10px] uppercase tracking-wide {theme::text::MUTED}", "{label}" }
-            p { class: "pl-2 text-base font-semibold leading-5", style: "color: {value_color};", "{value}" }
+            p { class: "pl-2 text-[15px] font-semibold leading-[1.2]", style: "color: {value_color};", "{value}" }
         }
     }
 }

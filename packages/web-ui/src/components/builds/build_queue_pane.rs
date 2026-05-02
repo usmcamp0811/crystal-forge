@@ -205,7 +205,7 @@ fn BuildQueueTable(
                                     td {
                                         class: "px-3 py-2.5",
                                         div {
-                                            p { class: "text-[13px] font-semibold leading-4 {theme::text::PRIMARY}", "{build.flake}" }
+                                            p { class: "text-[13px] font-semibold leading-[1.15] {theme::text::PRIMARY}", "{build.flake}" }
                                             p { class: "text-[10px] leading-4 font-mono {theme::text::MUTED} truncate max-w-[18rem]", "{truncate_with_ellipsis(&build.summary, 40)}" }
                                             p { class: "text-[10px] leading-4 {theme::text::MUTED}",
                                                 "{build.flake} · "
@@ -254,7 +254,7 @@ fn BuildQueueTable(
                                     td {
                                         class: "px-3 py-2.5 text-right",
                                         div {
-                                            class: "inline-flex items-center gap-1",
+                                            class: "inline-flex items-center gap-1.5",
                                             button {
                                                 class: "btn-icon focus-ring",
                                                 title: "Logs",
