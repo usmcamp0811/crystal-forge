@@ -69,7 +69,7 @@ pub fn BuildDetailPane(
                     h2 {
                         class: "text-[15px] font-semibold text-white leading-5 flex items-center",
                         span {
-                            class: "inline-flex mr-2 px-1.5 py-0.5 text-[10px] uppercase rounded border {build_status_badge_class(build.status)}",
+                            class: "inline-flex mr-2 px-1.5 py-0.5 text-[10px] rounded border {build_status_badge_class(build.status)}",
                             "{build.status_label()}"
                         }
                         // Title: package/system name (like JSX b.pkg)

@@ -114,16 +114,11 @@ fn render_log_line(line: &str) -> Element {
 
 /// Map a raw `BuildQueueItem` from API into the UI `BuildItem`.
 fn map_queue_item(item: &crate::api::models::BuildQueueItem, idx: usize) -> BuildItem {
-    let queued_for =
-        if item.status == ApiBuildStatus::Building || item.status == ApiBuildStatus::Cancelling {
-            format!(
-                "running {}",
-                format_human_duration(item.elapsed_secs.unwrap_or(0))
-            )
-        } else {
-            let ago = (Utc::now() - item.queued_at).num_seconds().max(0);
-            format!("queued {} ago", format_human_duration(ago))
-        };
+    // JSX shows simple relative time like "5m" in queuedAt column
+    let queued_for = {
+        let ago = (Utc::now() - item.queued_at).num_seconds().max(0);
+        format_human_duration(ago)
+    };
 
     BuildItem {
         id: (idx + 1) as i32,

@@ -221,8 +221,9 @@ fn BuildQueueTable(
                                     }
                                     td {
                                         class: "px-3 py-2",
+                                        // JSX: chip with chip-dot - no uppercase
                                         span {
-                                            class: "inline-flex items-center gap-1.5 px-2 py-0.5 text-[10px] uppercase rounded border {build_status_badge_class(build.status)}",
+                                            class: "inline-flex items-center gap-1.5 px-2 py-0.5 text-[10px] rounded border {build_status_badge_class(build.status)}",
                                             span {
                                                 class: "inline-block h-1.5 w-1.5 rounded-full",
                                                 style: "background-color: {status_dot_color(build.status)};"
@@ -240,14 +241,18 @@ fn BuildQueueTable(
                                         }
                                     }
                                     td {
-                                        class: "px-3 py-2 w-[110px]",
+                                        class: "px-3 py-2 w-[100px]",
+                                        // JSX: only shows progress bar when b.progress > 0
+                                        // We don't have real progress data, show indeterminate for building
                                         if matches!(build.status, BuildStatus::Building | BuildStatus::Stopping) {
                                             div {
-                                                class: "h-1.5 bg-slate-800 rounded-full overflow-hidden",
-                                                div { class: "h-full bg-cyan-400", style: "width: 56%" }
+                                                class: "h-[5px] bg-slate-800 rounded-full overflow-hidden",
+                                                // Indeterminate progress animation
+                                                div {
+                                                    class: "h-full rounded-full animate-pulse",
+                                                    style: "width: 60%; background-color: {status_dot_color(build.status)}; transition: width 1s;",
+                                                }
                                             }
-                                        } else {
-                                            span { class: "text-xs {theme::text::MUTED}", "—" }
                                         }
                                     }
                                     td {
