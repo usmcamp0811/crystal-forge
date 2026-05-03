@@ -1,11 +1,11 @@
 ---
 id: TASK-283
 title: Refactor Builds view UI/UX to match latest design mockup
-status: In Progress
+status: Review
 assignee:
   - '@ai-agent'
 created_date: '2026-04-30 21:32'
-updated_date: '2026-05-03 02:01'
+updated_date: '2026-05-03 03:26'
 labels:
   - ui
   - ux
@@ -413,4 +413,22 @@ P1 Icon System Issues - FIXED (commit abc963f0):
 - Cancel/Close: x icon (14/16px)
 
 - All icons use Feather Icons style (stroke-based)
+
+MERGE REQUEST CREATED:
+
+- MR !248: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/248
+
+- Branch: TASK-283-refactor-builds-view-ui-ux → dev
+
+- Status: Ready for review
+
+Next Steps:
+
+1. User reviews MR and tests with running server stack
+
+2. CI runs web-ui checks and captures screenshots
+
+3. Address any feedback from review
+
+4. Merge after approval
 <!-- SECTION:NOTES:END -->
