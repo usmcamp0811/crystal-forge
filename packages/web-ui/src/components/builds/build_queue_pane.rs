@@ -2,7 +2,6 @@
 
 use dioxus::prelude::*;
 
-use crate::components::layout::Card;
 use crate::theme;
 
 use super::helpers::{
@@ -10,125 +9,22 @@ use super::helpers::{
     queue_row_style, short_commit,
 };
 
-/// View mode for the build queue display.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum QueueViewMode {
-    #[default]
-    Cards,
-    Table,
-}
-
 /// Build queue pane showing all queued and active builds.
 #[component]
 pub fn BuildQueuePane(
     builds: Vec<BuildItem>,
     selected_id: Signal<Option<i32>>,
     on_build_action: EventHandler<(i32, BuildAction)>,
+    on_log: EventHandler<i32>,
 ) -> Element {
-    let mut search = use_signal(String::new);
-    let mut view_mode = use_signal(QueueViewMode::default);
-
-    let filtered: Vec<BuildItem> = builds
-        .into_iter()
-        .filter(|b| {
-            let q = search.read().trim().to_lowercase();
-            if q.is_empty() {
-                true
-            } else {
-                b.hostname.to_lowercase().contains(&q)
-                    || b.flake.to_lowercase().contains(&q)
-                    || b.commit.to_lowercase().contains(&q)
-            }
-        })
-        .collect();
+    let filtered = builds;
 
     rsx! {
-        Card {
-            title: Some("Queue".to_string()),
-            children: rsx! {
-                div {
-                    class: "space-y-3",
-                    // Search and view mode toggle row
-                    div {
-                        class: "flex items-center gap-2",
-                        input {
-                            class: "flex-1 rounded-lg px-3 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
-                            r#type: "search",
-                            placeholder: "Search by host, flake, or commit...",
-                            value: "{search.read()}",
-                            oninput: move |evt| search.set(evt.value()),
-                        }
-                        // View mode toggle buttons
-                        {
-                            let cards_active = if *view_mode.read() == QueueViewMode::Cards {
-                                "bg-cyan-600/20 text-cyan-300"
-                            } else {
-                                theme::text::MUTED
-                            };
-                            let table_active = if *view_mode.read() == QueueViewMode::Table {
-                                "bg-cyan-600/20 text-cyan-300"
-                            } else {
-                                theme::text::MUTED
-                            };
-                            rsx! {
-                                div {
-                                    class: "inline-flex rounded-lg border {theme::surface::CARD_BORDER} overflow-hidden shrink-0",
-                                    "data-testid": "queue-view-toggle",
-                                    button {
-                                        class: "px-3 py-2 text-xs transition-colors {cards_active}",
-                                        title: "Card view",
-                                        "data-testid": "queue-view-cards",
-                                        onclick: move |_| view_mode.set(QueueViewMode::Cards),
-                                        // Cards icon (grid)
-                                        svg {
-                                            class: "w-4 h-4",
-                                            fill: "none",
-                                            stroke: "currentColor",
-                                            stroke_width: "2",
-                                            view_box: "0 0 24 24",
-                                            path {
-                                                d: "M4 5a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM14 5a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1V5zM4 15a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H5a1 1 0 01-1-1v-4zM14 15a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z"
-                                            }
-                                        }
-                                    }
-                                    button {
-                                        class: "px-3 py-2 text-xs transition-colors {table_active}",
-                                        title: "Table view",
-                                        "data-testid": "queue-view-table",
-                                        onclick: move |_| view_mode.set(QueueViewMode::Table),
-                                        // Table icon (list)
-                                        svg {
-                                            class: "w-4 h-4",
-                                            fill: "none",
-                                            stroke: "currentColor",
-                                            stroke_width: "2",
-                                            view_box: "0 0 24 24",
-                                            path {
-                                                d: "M4 6h16M4 10h16M4 14h16M4 18h16"
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Render based on view mode
-                    if *view_mode.read() == QueueViewMode::Table {
-                        BuildQueueTable {
-                            builds: filtered,
-                            selected_id: selected_id,
-                            on_build_action: on_build_action,
-                        }
-                    } else {
-                        BuildQueueCards {
-                            builds: filtered,
-                            selected_id: selected_id,
-                            on_build_action: on_build_action,
-                        }
-                    }
-                }
-            }
+        BuildQueueTable {
+            builds: filtered,
+            selected_id: selected_id,
+            on_build_action: on_build_action,
+            on_log: on_log,
         }
     }
 }
@@ -274,33 +170,36 @@ fn BuildQueueTable(
     builds: Vec<BuildItem>,
     selected_id: Signal<Option<i32>>,
     on_build_action: EventHandler<(i32, BuildAction)>,
+    on_log: EventHandler<i32>,
 ) -> Element {
     rsx! {
         div {
-            class: "max-h-[56vh] overflow-auto",
+            class: "min-h-[220px] max-h-[56vh] overflow-auto",
             "data-testid": "build-queue-table",
+            // JSX: <table className="sys-table">
             table {
-                class: "w-full text-xs",
+                class: "sys-table",
                 thead {
                     class: "sticky top-0 {theme::surface::CARD_BG} border-b {theme::surface::CARD_BORDER}",
                     tr {
-                        th { class: "text-left px-2 py-2 {theme::text::MUTED} font-medium", "Status" }
-                        th { class: "text-left px-2 py-2 {theme::text::MUTED} font-medium", "System" }
-                        th { class: "text-left px-2 py-2 {theme::text::MUTED} font-medium", "Flake" }
-                        th { class: "text-left px-2 py-2 {theme::text::MUTED} font-medium", "Commit" }
-                        th { class: "text-left px-2 py-2 {theme::text::MUTED} font-medium", "Worker" }
-                        th { class: "text-left px-2 py-2 {theme::text::MUTED} font-medium", "Time" }
-                        th { class: "text-right px-2 py-2 {theme::text::MUTED} font-medium", "Actions" }
+                        th { class: "text-left px-3 py-2 {theme::text::MUTED} font-medium", "Package / derivation" }
+                        th { class: "text-left px-3 py-2 {theme::text::MUTED} font-medium", "Status" }
+                        th { class: "text-left px-3 py-2 {theme::text::MUTED} font-medium", "Worker" }
+                        th { class: "text-left px-3 py-2 {theme::text::MUTED} font-medium", "Progress" }
+                        th { class: "text-left px-3 py-2 {theme::text::MUTED} font-medium", "Queued" }
+                        th { class: "text-left px-3 py-2 {theme::text::MUTED} font-medium", "Duration" }
+                        th { class: "text-right px-3 py-2 {theme::text::MUTED} font-medium", " " }
                     }
                 }
                 tbody {
                     for build in builds {
                         {
                             let is_selected = *selected_id.read() == Some(build.id);
+                            // JSX: className={selected?.id===b.id?"selected":""}
                             let row_class = if is_selected {
-                                "cf-queue-row-selected cursor-pointer"
+                                "selected cursor-pointer"
                             } else {
-                                "cf-queue-row hover:bg-white/5 cursor-pointer"
+                                "cursor-pointer hover:bg-white/5"
                             };
                             rsx! {
                                 tr {
@@ -308,96 +207,119 @@ fn BuildQueueTable(
                                     class: "{row_class} border-b {theme::surface::CARD_BORDER}",
                                     "data-testid": "build-queue-row",
                                     onclick: move |_| selected_id.set(Some(build.id)),
-                                    // Status
                                     td {
-                                        class: "px-2 py-2",
+                                        class: "px-3 py-2",
+                                        div {
+                                            // JSX line 1: b.pkg (package name) - bold
+                                            p { class: "text-[13px] font-semibold leading-[1.15] {theme::text::PRIMARY}", "{build.pkg()}" }
+                                            // JSX line 2: b.drv.slice(0,40) + ellipsis (derivation path) - mono, muted
+                                            p { class: "text-[10px] leading-4 font-mono {theme::text::MUTED} truncate max-w-[18rem]", 
+                                                "{truncate_with_ellipsis(&build.drv(), 40)}" 
+                                            }
+                                            // JSX line 3: flake · commit - muted
+                                            p { class: "text-[10px] leading-4 {theme::text::MUTED}",
+                                                "{build.flake} · "
+                                                span { class: "font-mono", "{build.commit}" }
+                                            }
+                                        }
+                                    }
+                                    td {
+                                        class: "px-3 py-2",
+                                        // JSX: chip with chip-dot - no uppercase
                                         span {
-                                            class: "inline-flex px-2 py-0.5 text-[10px] uppercase rounded border {build_status_badge_class(build.status)}",
+                                            class: "inline-flex items-center gap-1.5 px-2 py-0.5 text-[10px] rounded border {build_status_badge_class(build.status)}",
+                                            span {
+                                                class: "inline-block h-1.5 w-1.5 rounded-full",
+                                                style: "background-color: {status_dot_color(build.status)};"
+                                            }
                                             "{build.status_label()}"
                                         }
                                     }
-                                    // System
                                     td {
-                                        class: "px-2 py-2 {theme::text::PRIMARY} font-medium truncate max-w-[120px]",
-                                        title: "{extract_system_name(&build.hostname)}",
-                                        "{extract_system_name(&build.hostname)}"
-                                    }
-                                    // Flake
-                                    td {
-                                        class: "px-2 py-2",
-                                        span {
-                                            class: "inline-flex px-2 py-0.5 text-[10px] rounded border cf-chip-blue",
-                                            "{build.flake}"
-                                        }
-                                    }
-                                    // Commit
-                                    td {
-                                        class: "px-2 py-2 font-mono {theme::text::SECONDARY}",
-                                        title: "{build.commit}",
-                                        "{short_commit(&build.commit)}"
-                                    }
-                                    // Worker
-                                    td {
-                                        class: "px-2 py-2 {theme::text::MUTED}",
-                                        "{build.worker_id}"
-                                    }
-                                    // Time (runtime or queued_for)
-                                    td {
-                                        class: "px-2 py-2 {theme::text::MUTED} whitespace-nowrap",
-                                        if let Some(ref runtime) = build.runtime {
-                                            span {
-                                                class: "text-teal-400",
-                                                "{runtime}"
-                                            }
+                                        class: "px-3 py-2 font-mono text-xs {theme::text::SECONDARY} whitespace-nowrap",
+                                        // JSX: {b.worker || "—"}
+                                        if build.worker_id == "unassigned" {
+                                            "—"
                                         } else {
-                                            "{build.queued_for}"
+                                            "{build.worker_id}"
                                         }
                                     }
-                                    // Actions
                                     td {
-                                        class: "px-2 py-2 text-right",
+                                        class: "px-3 py-2 w-[100px]",
+                                        // JSX: only shows progress bar when b.progress > 0
+                                        // We don't have real progress data, show indeterminate for building
+                                        if matches!(build.status, BuildStatus::Building | BuildStatus::Stopping) {
+                                            div {
+                                                class: "h-[5px] bg-slate-800 rounded-full overflow-hidden",
+                                                // Indeterminate progress animation
+                                                div {
+                                                    class: "h-full rounded-full animate-pulse",
+                                                    style: "width: 60%; background-color: {status_dot_color(build.status)}; transition: width 1s;",
+                                                }
+                                            }
+                                        }
+                                    }
+                                    td {
+                                        class: "px-3 py-2 text-xs {theme::text::MUTED} whitespace-nowrap",
+                                        "{build.queued_for}"
+                                    }
+                                    td {
+                                        class: "px-3 py-2 font-mono text-xs {theme::text::SECONDARY} whitespace-nowrap",
+                                        if let Some(ref runtime) = build.runtime {
+                                            "{runtime}"
+                                        } else {
+                                            "—"
+                                        }
+                                    }
+                                    td {
+                                        class: "px-3 py-2 text-right",
+                                        // JSX: <div className="row-actions">
                                         div {
-                                            class: "inline-flex items-center gap-1",
-                                            if matches!(build.status, BuildStatus::Building) {
-                                                button {
-                                                    class: "text-[10px] text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors",
-                                                    onclick: move |evt| {
-                                                        evt.stop_propagation();
-                                                        on_build_action.call((build.id, BuildAction::Stop));
-                                                    },
-                                                    "Stop"
+                                            class: "row-actions",
+                                            // JSX: <button title="Logs"><Icon name="terminal" size={14} /></button>
+                                            button {
+                                                class: "btn-icon focus-ring",
+                                                title: "Logs",
+                                                onclick: move |evt| {
+                                                    evt.stop_propagation();
+                                                    // Select the build and open log modal immediately (JSX parity)
+                                                    selected_id.set(Some(build.id));
+                                                    on_log.call(build.id);
+                                                },
+                                                svg {
+                                                    width: "14",
+                                                    height: "14",
+                                                    view_box: "0 0 24 24",
+                                                    fill: "none",
+                                                    stroke: "currentColor",
+                                                    stroke_width: "2",
+                                                    stroke_linecap: "round",
+                                                    stroke_linejoin: "round",
+                                                    polyline { points: "4 17 10 11 4 5" }
+                                                    line { x1: "12", y1: "19", x2: "20", y2: "19" }
                                                 }
                                             }
-                                            // Force Cancel for stuck builds in Stopping state
-                                            if matches!(build.status, BuildStatus::Stopping) {
+                                            if let Some(cancel_action) = cancel_action_for_status(build.status) {
+                                                // JSX: <button title="Cancel"><Icon name="x" size={14} /></button>
                                                 button {
-                                                    class: "text-[10px] text-orange-400 hover:text-orange-300 px-2 py-1 rounded hover:bg-orange-500/10 transition-colors",
+                                                    class: "btn-icon focus-ring",
+                                                    title: "Cancel",
                                                     onclick: move |evt| {
                                                         evt.stop_propagation();
-                                                        on_build_action.call((build.id, BuildAction::ForceCancel));
+                                                        on_build_action.call((build.id, cancel_action));
                                                     },
-                                                    "Force Cancel"
-                                                }
-                                            }
-                                            // Restart only valid for terminal statuses
-                                            if matches!(build.status, BuildStatus::Failed | BuildStatus::Complete | BuildStatus::Cancelled) {
-                                                button {
-                                                    class: "text-[10px] px-2 py-1 rounded transition-colors cf-action-link",
-                                                    onclick: move |evt| {
-                                                        evt.stop_propagation();
-                                                        on_build_action.call((build.id, BuildAction::Restart));
-                                                    },
-                                                    "Restart"
-                                                }
-                                            }
-                                            if build.status == BuildStatus::Queued {
-                                                button {
-                                                    class: "text-[10px] text-cyan-300 hover:text-cyan-200 px-2 py-1 rounded hover:bg-cyan-500/10 transition-colors",
-                                                    onclick: move |evt| {
-                                                        evt.stop_propagation();
-                                                        on_build_action.call((build.id, BuildAction::RunNext));
-                                                    },
-                                                    "Run Next"
+                                                    svg {
+                                                        width: "14",
+                                                        height: "14",
+                                                        view_box: "0 0 24 24",
+                                                        fill: "none",
+                                                        stroke: "currentColor",
+                                                        stroke_width: "2",
+                                                        stroke_linecap: "round",
+                                                        stroke_linejoin: "round",
+                                                        line { x1: "18", y1: "6", x2: "6", y2: "18" }
+                                                        line { x1: "6", y1: "6", x2: "18", y2: "18" }
+                                                    }
                                                 }
                                             }
                                         }
@@ -409,5 +331,35 @@ fn BuildQueueTable(
                 }
             }
         }
+    }
+}
+
+fn truncate_with_ellipsis(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
+    }
+}
+
+fn cancel_action_for_status(status: BuildStatus) -> Option<BuildAction> {
+    match status {
+        BuildStatus::Building => Some(BuildAction::Stop),
+        BuildStatus::Stopping => Some(BuildAction::ForceCancel),
+        BuildStatus::Queued => Some(BuildAction::Stop),
+        _ => None,
+    }
+}
+
+fn status_dot_color(status: BuildStatus) -> &'static str {
+    match status {
+        BuildStatus::Queued => "#a78bfa",
+        BuildStatus::Building => "#34d399",
+        BuildStatus::Stopping => "#fbbf24",
+        BuildStatus::Failed => "#f87171",
+        BuildStatus::Complete => "#34d399",
+        BuildStatus::Cancelled => "#94a3b8",
     }
 }

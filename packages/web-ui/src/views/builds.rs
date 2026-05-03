@@ -13,7 +13,6 @@ use crate::components::builds::{
     DetailTab, MetricsRow, PendingAction, QueueAction, QueueActionButton, WorkerAction, WorkerItem,
     WorkerStatus, WorkerStrip, extract_system_name, selected_build_data,
 };
-use crate::components::layout::Card;
 use crate::theme;
 
 const PAGE_SIZE: i64 = 50;
@@ -22,13 +21,6 @@ const PAGE_SIZE: i64 = 50;
 enum BuildsTab {
     ActiveQueue,
     Completed,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
-enum QueueViewMode {
-    #[default]
-    Cards,
-    Table,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -78,18 +70,72 @@ fn format_environment(item: &BuildItem) -> String {
     item.environment.clone().unwrap_or_else(|| "-".to_string())
 }
 
+/// Truncate a string with ellipsis for display.
+fn truncate_with_ellipsis(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
+    }
+}
+
+/// Render a single log line with structured formatting (timestamp, level, message).
+/// JSX structure: <div className="sd-log-line sd-log-${lvl}">
+fn render_log_line(line: &str) -> Element {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return rsx! { div { class: "h-1" } };
+    }
+
+    // Parse timestamp if present (format: HH:MM:SS or similar at start)
+    let (timestamp, rest) = if let Some(pos) = trimmed.find(|c: char| c != ':' && !c.is_numeric()) {
+        if pos > 0 && pos < 12 && trimmed[..pos].contains(':') {
+            (&trimmed[..pos], trimmed[pos..].trim())
+        } else {
+            ("", trimmed)
+        }
+    } else {
+        ("", trimmed)
+    };
+
+    // Simple heuristic: look for log level keywords
+    let (log_level_class, level_label) = if rest.contains("error") || rest.contains("ERROR") {
+        ("sd-log-error", "ERROR")
+    } else if rest.contains("warn") || rest.contains("WARN") {
+        ("sd-log-warn", "WARN")
+    } else if rest.contains("info") || rest.contains("INFO") {
+        ("sd-log-info", "INFO")
+    } else {
+        ("sd-log-info", "INFO")  // Default to info level
+    };
+
+    // JSX: <div className="sd-log-line sd-log-${lvl}">
+    //        <span className="sd-log-t">{t}</span>
+    //        <span className="sd-log-lvl">{lvl.toUpperCase()}</span>
+    //        <span className="sd-log-m">{m}</span>
+    //      </div>
+    rsx! {
+        div {
+            class: "sd-log-line {log_level_class}",
+            // JSX: <span className="sd-log-t">{t}</span>
+            span { class: "sd-log-t", "{timestamp}" }
+            // JSX: <span className="sd-log-lvl">{lvl.toUpperCase()}</span>
+            span { class: "sd-log-lvl", "{level_label}" }
+            // JSX: <span className="sd-log-m">{m}</span>
+            span { class: "sd-log-m", "{rest}" }
+        }
+    }
+}
+
 /// Map a raw `BuildQueueItem` from API into the UI `BuildItem`.
 fn map_queue_item(item: &crate::api::models::BuildQueueItem, idx: usize) -> BuildItem {
-    let queued_for =
-        if item.status == ApiBuildStatus::Building || item.status == ApiBuildStatus::Cancelling {
-            format!(
-                "running {}",
-                format_human_duration(item.elapsed_secs.unwrap_or(0))
-            )
-        } else {
-            let ago = (Utc::now() - item.queued_at).num_seconds().max(0);
-            format!("queued {} ago", format_human_duration(ago))
-        };
+    // JSX shows simple relative time like "5m" in queuedAt column
+    let queued_for = {
+        let ago = (Utc::now() - item.queued_at).num_seconds().max(0);
+        format_human_duration(ago)
+    };
 
     BuildItem {
         id: (idx + 1) as i32,
@@ -134,7 +180,7 @@ fn map_queue_item(item: &crate::api::models::BuildQueueItem, idx: usize) -> Buil
 #[component]
 pub fn BuildsView() -> Element {
     let mut workers = use_signal(Vec::<WorkerItem>::new);
-    let refresh_trigger = use_signal(|| 0_u64);
+    let mut refresh_trigger = use_signal(|| 0_u64);
 
     // --- Active queue state ---
     let mut queue_page = use_signal(|| 1_i64);
@@ -218,6 +264,10 @@ pub fn BuildsView() -> Element {
                 .map(|builder| WorkerItem {
                     id: builder.id.to_string(),
                     name: builder.name.clone(),
+                    host: Some(format!("{}.builder", builder.name)),
+                    arch: Some("x86_64-linux".to_string()),
+                    cpu_cores: builder.max_cpu_cores,
+                    memory_gb: builder.max_memory_mb.map(|mb| mb / 1024),
                     active_slots: builder.active_jobs.max(0) as usize,
                     total_slots: builder.max_concurrent_jobs.max(1) as usize,
                     queue_depth: builder.queued_jobs.max(0) as usize,
@@ -287,7 +337,6 @@ pub fn BuildsView() -> Element {
                             ApiBuildStatus::Cancelled => BuildStatus::Cancelled,
                             ApiBuildStatus::Building => BuildStatus::Building,
                             ApiBuildStatus::Cancelling => BuildStatus::Stopping,
-                            ApiBuildStatus::Cancelled => BuildStatus::Cancelled,
                             ApiBuildStatus::Queued => BuildStatus::Queued,
                             ApiBuildStatus::Idle => BuildStatus::Queued,
                         },
@@ -306,9 +355,9 @@ pub fn BuildsView() -> Element {
         }
     });
 
-    let mut selected_build = use_signal(|| Some(1_i32));
+    let mut selected_build = use_signal(|| None::<i32>);
+    let mut log_open = use_signal(|| false);
     let mut active_view = use_signal(|| BuildsTab::ActiveQueue);
-    let mut queue_view_mode = use_signal(QueueViewMode::default);
     let mut active_tab = use_signal(|| DetailTab::Logs);
     let mut completed_status_filter = use_signal(|| CompletedStatusFilter::All);
     let mut completed_sort_order = use_signal(|| CompletedSortOrder::NewestFirst);
@@ -324,7 +373,6 @@ pub fn BuildsView() -> Element {
 
     let queue_data = builds.read().clone();
     let worker_data = workers.read().clone();
-    let selected = selected_build_data(selected_build.read().to_owned(), &queue_data);
 
     let mut completed_rows = build_history.read().clone();
     completed_rows.retain(|item| {
@@ -347,6 +395,13 @@ pub fn BuildsView() -> Element {
         }
     });
 
+    let visible_rows = if active_view() == BuildsTab::ActiveQueue {
+        queue_data.clone()
+    } else {
+        completed_rows.clone()
+    };
+    let selected = selected_build_data(selected_build.read().to_owned(), &visible_rows);
+
     let total_pages = {
         let t = queue_total();
         if t == 0 {
@@ -357,36 +412,49 @@ pub fn BuildsView() -> Element {
     };
 
     rsx! {
+        // JSX: <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+        // gap:16 = 16px = space-y-4 (1rem = 16px)
         div {
-            class: "space-y-6",
+            class: "space-y-4",
 
+            // JSX: <div className="page-head">
             header {
-                class: "flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between",
+                class: "page-head",
                 div {
-                    h1 { class: "{theme::typography::PAGE_TITLE}", "Builds" }
+                    // JSX: <h1 className="page-title">
+                    h1 { class: "page-title", "Builds" }
+                    // JSX: <p className="page-subtitle">
                     p {
-                        class: "text-sm {theme::text::SECONDARY}",
-                        "Control active build workers, inspect queue state, and monitor live build logs."
+                        class: "page-subtitle",
+                        "{queue_data.iter().filter(|b| matches!(b.status, BuildStatus::Building | BuildStatus::Stopping)).count()} building · {queue_data.iter().filter(|b| b.status == BuildStatus::Queued).count()} queued · {worker_data.iter().filter(|w| w.status == WorkerStatus::Running).count()}/{worker_data.len()} workers active"
                     }
                 }
+                // JSX: <div style={{ display:"flex", gap:8 }}>
                 div {
-                    class: "flex flex-wrap items-center gap-2",
-                    span {
-                        class: "inline-flex items-center px-2 py-1 text-xs rounded border text-emerald-100 cf-worker-status-running",
-                        span { class: "w-2 h-2 rounded-full bg-emerald-300 mr-2 animate-pulse", }
-                        "Live"
+                    style: "display: flex; gap: 8px;",
+                    // JSX: <button className="btn btn-ghost focus-ring"><Icon name="sync" size={14} /> Refresh</button>
+                    button {
+                        class: "btn btn-ghost focus-ring",
+                        onclick: move |_| refresh_trigger.set(refresh_trigger() + 1),
+                        svg {
+                            width: "14",
+                            height: "14",
+                            view_box: "0 0 24 24",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            style: "display: inline-block; vertical-align: middle; margin-right: 6px;",
+                            path { d: "M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" }
+                        }
+                        "Refresh"
                     }
                     QueueActionButton {
-                        label: "Start All",
-                        onclick: move |_| pending_action.set(Some(PendingAction::Queue(QueueAction::StartAll))),
-                    }
-                    QueueActionButton {
-                        label: "Pause All",
-                        onclick: move |_| pending_action.set(Some(PendingAction::Queue(QueueAction::PauseAll))),
-                    }
-                    QueueActionButton {
-                        label: "Drain All",
-                        onclick: move |_| pending_action.set(Some(PendingAction::Queue(QueueAction::DrainAll))),
+                        label: "Queue build",
+                        onclick: move |_| {
+                            last_action_note.set(Some("Queue build flow is mocked in this UI pass; use Flakes/Evaluations to trigger real builds.".to_string()));
+                        },
                     }
                 }
             }
@@ -394,338 +462,187 @@ pub fn BuildsView() -> Element {
             MetricsRow {
                 workers: worker_data.clone(),
                 builds: queue_data.clone(),
+                history_builds: build_history.read().clone(),
             }
 
-            WorkerStrip {
-                workers: worker_data.clone(),
-                on_action: move |(worker_id, action)| {
-                    pending_action.set(Some(PendingAction::Worker { worker_id, action }))
-                },
-            }
-
-            div {
-                class: "flex border-b border-slate-700",
-                button {
-                    class: if active_view() == BuildsTab::ActiveQueue {
-                        "px-4 py-2 border-b-2 border-blue-500 text-blue-400 font-medium"
-                    } else {
-                        "px-4 py-2 border-b-2 border-transparent text-slate-400 hover:text-white transition-colors"
-                    },
-                    onclick: move |_| active_view.set(BuildsTab::ActiveQueue),
-                    "Active Queue"
-                }
-                button {
-                    class: if active_view() == BuildsTab::Completed {
-                        "px-4 py-2 border-b-2 border-blue-500 text-blue-400 font-medium"
-                    } else {
-                        "px-4 py-2 border-b-2 border-transparent text-slate-400 hover:text-white transition-colors"
-                    },
-                    onclick: move |_| active_view.set(BuildsTab::Completed),
-                    "Completed Builds"
-                }
-            }
-
-            if let Some(note) = last_action_note.read().clone() {
-                p {
-                    class: "text-xs px-3 py-2 rounded-lg border text-blue-100 cf-chip-info",
-                    "{note}"
-                }
-            }
-
-            if let Some(err) = action_error.read().clone() {
-                p {
-                    class: "text-xs px-3 py-2 rounded-lg border text-red-100",
-                    style: "background-color: #4A252D; border-color: #7A3D48;",
-                    "{err}"
-                }
-            }
-
-            if active_view() == BuildsTab::ActiveQueue {
-                // ── Filter / Search bar ──────────────────────────────────────
-                Card {
-                    title: None,
-                    children: rsx! {
-                        div {
-                            class: "flex flex-wrap items-end gap-3",
-
-                            div {
-                                class: "flex flex-col gap-1",
-                                label { class: "text-xs {theme::text::SECONDARY}", "Status" }
-                                select {
-                                    class: "px-2 py-1 rounded border border-slate-600 bg-slate-900 text-xs text-slate-200",
-                                    value: "{filter_status.read()}",
-                                    onchange: move |e| {
-                                        filter_status.set(e.value());
-                                        queue_page.set(1);
-                                    },
-                                    option { value: "queued,building,cancelling", "Active (queued + building + stopping)" }
-                                    option { value: "queued", "Queued only" }
-                                    option { value: "building", "Building only" }
-                                    option { value: "cancelling", "Stopping only" }
-                                    option { value: "success", "Completed" }
-                                    option { value: "failed", "Failed" }
-                                    option { value: "cancelled", "Cancelled" }
-                                    option { value: "", "All statuses" }
-                                }
-                            }
-
-                            div {
-                                class: "flex flex-col gap-1 flex-1 min-w-[10rem]",
-                                label { class: "text-xs {theme::text::SECONDARY}", "Commit hash" }
-                                input {
-                                    class: "px-2 py-1 rounded border border-slate-600 bg-slate-900 text-xs text-slate-200 {theme::interactive::FOCUS_RING}",
-                                    r#type: "search",
-                                    placeholder: "e.g. a1b2c3…",
-                                    value: "{filter_commit.read()}",
-                                    oninput: move |e| {
-                                        filter_commit.set(e.value());
-                                        queue_page.set(1);
-                                    },
-                                }
-                            }
-
-                            div {
-                                class: "flex flex-col gap-1 flex-1 min-w-[10rem]",
-                                label { class: "text-xs {theme::text::SECONDARY}", "Flake / repo" }
-                                input {
-                                    class: "px-2 py-1 rounded border border-slate-600 bg-slate-900 text-xs text-slate-200 {theme::interactive::FOCUS_RING}",
-                                    r#type: "search",
-                                    placeholder: "flake name…",
-                                    value: "{filter_flake.read()}",
-                                    oninput: move |e| {
-                                        filter_flake.set(e.value());
-                                        queue_page.set(1);
-                                    },
-                                }
-                            }
-
-                            div {
-                                class: "flex flex-col gap-1 flex-1 min-w-[10rem]",
-                                label { class: "text-xs {theme::text::SECONDARY}", "System / config" }
-                                input {
-                                    class: "px-2 py-1 rounded border border-slate-600 bg-slate-900 text-xs text-slate-200 {theme::interactive::FOCUS_RING}",
-                                    r#type: "search",
-                                    placeholder: "hostname or config name…",
-                                    value: "{filter_config.read()}",
-                                    oninput: move |e| {
-                                        filter_config.set(e.value());
-                                        queue_page.set(1);
-                                    },
-                                }
-                            }
-
-                            div {
-                                class: "flex flex-col gap-1",
-                                label { class: "text-xs {theme::text::SECONDARY}", "Time range" }
-                                select {
-                                    class: "px-2 py-1 rounded border border-slate-600 bg-slate-900 text-xs text-slate-200",
-                                    value: "{filter_time_range.read()}",
-                                    onchange: move |e| {
-                                        filter_time_range.set(e.value());
-                                        queue_page.set(1);
-                                    },
-                                    option { value: "", "All time" }
-                                    option { value: "today", "Today" }
-                                    option { value: "last7d", "Last 7 days" }
-                                }
-                            }
-
-                            button {
-                                class: "px-3 py-1 rounded border border-slate-600 text-xs text-slate-300 hover:bg-slate-700 transition-colors",
-                                onclick: move |_| {
-                                    // Reset status back to active-only (the intended default for this tab).
-                                    filter_status.set("queued,building,cancelling".to_string());
-                                    filter_commit.set(String::new());
-                                    filter_flake.set(String::new());
-                                    filter_config.set(String::new());
-                                    filter_time_range.set(String::new());
-                                    queue_page.set(1);
-                                },
-                                "Clear filters"
-                            }
-                        }
-
-                        // ── Result summary ────────────────────────────────────
-                        p {
-                            class: "text-xs {theme::text::SECONDARY} mt-2",
-                            {
-                                let total = queue_total();
-                                let page = queue_page();
-                                let from = ((page - 1) * PAGE_SIZE + 1).min(total.max(1));
-                                let to = (page * PAGE_SIZE).min(total);
-                                if total == 0 {
-                                    "No matching jobs.".to_string()
-                                } else {
-                                    format!("Showing {from}–{to} of {total} job(s)")
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // ── Queue + detail split ─────────────────────────────────────
+            section {
                 div {
-                    class: "cf-builds-split",
-                    div {
-                        BuildQueuePane {
-                            builds: queue_data.clone(),
-                            selected_id: selected_build,
-                            on_build_action: move |(build_id, action)| {
-                                pending_action.set(Some(PendingAction::Build { build_id, action }))
-                            },
-                        }
-                    }
-
-                    div {
-                        BuildDetailPane {
-                            selected: selected,
-                            tab: active_tab,
-                            on_tab_change: move |tab| active_tab.set(tab),
-                            follow_logs: follow_logs,
-                            pause_logs: pause_logs,
-                            wrap_logs: wrap_logs,
-                            log_query: log_query,
-                        }
-                    }
+                    class: "text-[12px] font-semibold uppercase tracking-[0.08em] {theme::text::MUTED} mb-[10px]",
+                    "Build Workers"
                 }
 
-                // ── Pagination controls ──────────────────────────────────────
-                if total_pages > 1 {
-                    div {
-                        class: "flex items-center justify-center gap-2 pt-2",
-                        button {
-                            class: "px-3 py-1 rounded border border-slate-600 text-xs text-slate-300 disabled:opacity-40 hover:bg-slate-700 transition-colors",
-                            disabled: queue_page() <= 1,
-                            onclick: move |_| {
-                                let p = queue_page();
-                                if p > 1 { queue_page.set(p - 1); }
-                            },
-                            "← Prev"
-                        }
-                        span {
-                            class: "text-xs {theme::text::SECONDARY}",
-                            "Page {queue_page()} of {total_pages}"
-                        }
-                        button {
-                            class: "px-3 py-1 rounded border border-slate-600 text-xs text-slate-300 disabled:opacity-40 hover:bg-slate-700 transition-colors",
-                            disabled: queue_page() >= total_pages,
-                            onclick: move |_| {
-                                let p = queue_page();
-                                if p < total_pages { queue_page.set(p + 1); }
-                            },
-                            "Next →"
-                        }
-                    }
+                WorkerStrip {
+                    workers: worker_data.clone(),
+                    on_action: move |(worker_id, action)| {
+                        pending_action.set(Some(PendingAction::Worker { worker_id, action }))
+                    },
                 }
-            } else {
-                Card {
-                    title: Some("Completed Builds".to_string()),
-                    children: rsx! {
-                        div {
-                            class: "flex flex-wrap items-center gap-3 pb-3",
-                            label { class: "text-xs {theme::text::SECONDARY}", "Status" }
-                            select {
-                                class: "px-2 py-1 rounded border border-slate-600 bg-slate-900 text-xs text-slate-200",
-                                value: match completed_status_filter() {
-                                    CompletedStatusFilter::All => "all",
-                                    CompletedStatusFilter::Complete => "complete",
-                                    CompletedStatusFilter::Failed => "failed",
-                                    CompletedStatusFilter::Cancelled => "cancelled",
-                                },
-                                onchange: move |event| {
-                                    let value = event.value();
-                                    let next = match value.as_str() {
-                                        "complete" => CompletedStatusFilter::Complete,
-                                        "failed" => CompletedStatusFilter::Failed,
-                                        "cancelled" => CompletedStatusFilter::Cancelled,
-                                        _ => CompletedStatusFilter::All,
-                                    };
-                                    completed_status_filter.set(next);
-                                },
-                                option { value: "all", "All" }
-                                option { value: "complete", "Complete" }
-                                option { value: "failed", "Failed" }
-                                option { value: "cancelled", "Cancelled" }
-                            }
+            }
 
-                            label { class: "text-xs {theme::text::SECONDARY}", "Sort" }
-                            select {
-                                class: "px-2 py-1 rounded border border-slate-600 bg-slate-900 text-xs text-slate-200",
-                                value: match completed_sort_order() {
-                                    CompletedSortOrder::NewestFirst => "newest",
-                                    CompletedSortOrder::OldestFirst => "oldest",
-                                },
-                                onchange: move |event| {
-                                    let next = if event.value() == "oldest" {
-                                        CompletedSortOrder::OldestFirst
-                                    } else {
-                                        CompletedSortOrder::NewestFirst
-                                    };
-                                    completed_sort_order.set(next);
-                                },
-                                option { value: "newest", "Newest completion first" }
-                                option { value: "oldest", "Oldest completion first" }
-                            }
-                        }
-
-                        if completed_rows.is_empty() {
-                            p { class: "text-sm {theme::text::SECONDARY}", "No completed builds yet." }
+            // JSX: <div className="card" style={{ overflow:"hidden" }}>
+            div {
+                class: "card overflow-hidden",
+                // JSX: <div className="sd-tabs" style={{ padding:"0 16px", borderBottom:"1px solid var(--cf-card-border)" }}>
+                div {
+                    class: "sd-tabs px-4 border-b {theme::surface::CARD_BORDER}",
+                    // JSX: <button className="sd-tab focus-ring" (+ "active" when selected)>
+                    button {
+                        class: if active_view() == BuildsTab::ActiveQueue {
+                            "sd-tab focus-ring active"
                         } else {
+                            "sd-tab focus-ring"
+                        },
+                        onclick: move |_| {
+                            active_view.set(BuildsTab::ActiveQueue);
+                            selected_build.set(None);
+                            log_open.set(false);
+                        },
+                        "Active ({queue_data.len()})"
+                    }
+                    button {
+                        class: if active_view() == BuildsTab::Completed {
+                            "sd-tab focus-ring active"
+                        } else {
+                            "sd-tab focus-ring"
+                        },
+                        onclick: move |_| {
+                            active_view.set(BuildsTab::Completed);
+                            selected_build.set(None);
+                            log_open.set(false);
+                        },
+                        "Completed ({build_history.read().len()})"
+                    }
+                }
+                div {
+                    class: "px-4 pt-3 pb-4",
+                    BuildQueuePane {
+                        builds: if active_view() == BuildsTab::ActiveQueue {
+                            queue_data.clone()
+                        } else {
+                            completed_rows.clone()
+                        },
+                        selected_id: selected_build,
+                        on_build_action: move |(build_id, action)| {
+                            pending_action.set(Some(PendingAction::Build { build_id, action }))
+                        },
+                        on_log: move |build_id| {
+                            // Open log modal immediately when Logs button clicked (JSX parity)
+                            selected_build.set(Some(build_id));
+                            log_open.set(true);
+                        },
+                    }
+                }
+            }
+
+            if selected.is_some() && !log_open() {
+                // JSX: <div className="side-panel-backdrop" onClick={onClose} />
+                div {
+                    class: "side-panel-backdrop",
+                    onclick: move |_| {
+                        selected_build.set(None);
+                        log_open.set(false);
+                    },
+                }
+                // JSX: <aside className="side-panel">
+                aside {
+                    class: "side-panel",
+                    onclick: |evt| evt.stop_propagation(),
+                    BuildDetailPane {
+                        selected: selected.clone(),
+                        on_close: move |_| {
+                            selected_build.set(None);
+                            log_open.set(false);
+                        },
+                        on_log: move |_| {
+                            active_tab.set(DetailTab::Logs);
+                            log_open.set(true);
+                        },
+                        tab: active_tab,
+                        on_tab_change: move |tab| active_tab.set(tab),
+                        follow_logs: follow_logs,
+                        pause_logs: pause_logs,
+                        wrap_logs: wrap_logs,
+                        log_query: log_query,
+                    }
+                }
+            }
+
+            if selected.is_some() && log_open() {
+                // JSX: <div className="modal-backdrop" onClick={onClose}>
+                div {
+                    class: "modal-backdrop",
+                    onclick: move |_| log_open.set(false),
+                    // JSX: <div className="modal" style={{ width:"min(800px,98vw)" }}>
+                    div {
+                        class: "modal",
+                        style: "width: min(800px, 98vw);",
+                        onclick: |evt| evt.stop_propagation(),
+                        // JSX: <div className="modal-head">
+                        div {
+                            class: "modal-head",
+                            style: "display: flex; justify-content: space-between; align-items: center;",
                             div {
-                                class: "overflow-x-auto",
-                                table {
-                                    class: "w-full text-xs",
-                                    thead {
-                                        tr { class: "text-left border-b border-slate-700 text-slate-300",
-                                            th { class: "py-2 pr-3", "System" }
-                                            th { class: "py-2 pr-3", "Environment" }
-                                            th { class: "py-2 pr-3", "Status" }
-                                            th { class: "py-2 pr-3", "Completion Time" }
-                                            th { class: "py-2 pr-3", "Duration" }
-                                            th { class: "py-2 pr-3", "Commit" }
-                                            th { class: "py-2 pr-3 text-right", "Actions" }
-                                        }
-                                    }
-                                    tbody {
-                                        for item in completed_rows.iter() {
-                                            {
-                                                let status_class = match item.status {
-                                                    BuildStatus::Complete => "px-2 py-1 text-[10px] rounded border cf-build-status-complete",
-                                                    BuildStatus::Failed => "px-2 py-1 text-[10px] rounded border cf-build-status-failed",
-                                                    _ => "px-2 py-1 text-[10px] rounded border cf-chip-slate",
-                                                };
-                                                let build_id = item.id;
-                                                let item_status = item.status;
-                                                rsx! {
-                                                    tr { key: "completed-{item.id}", class: "border-b border-slate-800/70",
-                                                        td { class: "py-2 pr-3 font-mono text-slate-200", "{extract_system_name(&item.hostname)}" }
-                                                        td { class: "py-2 pr-3 text-slate-300", "{format_environment(item)}" }
-                                                        td { class: "py-2 pr-3",
-                                                            span { class: "{status_class}", "{item.status_label()}" }
-                                                        }
-                                                        td { class: "py-2 pr-3 text-slate-300", "{format_completed_at(item)}" }
-                                                        td { class: "py-2 pr-3 text-slate-300", "{format_duration(item)}" }
-                                                        td { class: "py-2 pr-3 text-slate-400 font-mono", "{item.commit.chars().take(8).collect::<String>()}" }
-                                                        td { class: "py-2 pr-3 text-right",
-                                                            if matches!(item_status, BuildStatus::Failed | BuildStatus::Cancelled) {
-                                                                button {
-                                                                    class: "text-[10px] px-2 py-1 rounded transition-colors cf-action-link",
-                                                                    onclick: move |_| {
-                                                                        pending_action.set(Some(PendingAction::Build {
-                                                                            build_id,
-                                                                            action: BuildAction::Restart,
-                                                                        }));
-                                                                    },
-                                                                    "Restart"
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
+                                h2 {
+                                    style: "margin: 0; font-size: 15px;",
+                                    // JSX: Build log — <span className="mono">{b.pkg}</span>
+                                    "Build log — "
+                                    span { class: "mono", "{selected.clone().unwrap().pkg()}" }
                                 }
+                                // JSX: <p style={{ margin:"4px 0 0", fontSize:12, color:"var(--cf-text-muted)" }}>{b.drv.slice(0,50)}…</p>
+                                p {
+                                    style: "margin: 4px 0 0; font-size: 12px; color: var(--cf-text-muted);",
+                                    "{truncate_with_ellipsis(&selected.clone().unwrap().drv(), 50)}"
+                                }
+                            }
+                            // JSX: <button className="btn-icon focus-ring"><Icon name="x" size={16} /></button>
+                            button {
+                                class: "btn-icon focus-ring",
+                                onclick: move |_| log_open.set(false),
+                                svg {
+                                    width: "16",
+                                    height: "16",
+                                    view_box: "0 0 24 24",
+                                    fill: "none",
+                                    stroke: "currentColor",
+                                    stroke_width: "2",
+                                    stroke_linecap: "round",
+                                    stroke_linejoin: "round",
+                                    line { x1: "18", y1: "6", x2: "6", y2: "18" }
+                                    line { x1: "6", y1: "6", x2: "18", y2: "18" }
+                                }
+                            }
+                        }
+                        // JSX: <pre ref={ref} className="sd-log-stream" style={{ minHeight:340, maxHeight:480 }}>
+                        pre {
+                            class: "sd-log-stream",
+                            style: "min-height: 340px; max-height: 480px;",
+                            if let Some(build) = selected.clone() {
+                                if let Some(logs) = build.logs.clone() {
+                                    // Parse and render structured log lines
+                                    for line in logs.lines() {
+                                        {render_log_line(line)}
+                                    }
+                                } else {
+                                    div { class: "text-gray-500 italic", "No logs available" }
+                                }
+                            }
+                            // JSX: <div className="sd-log-caret">▍</div>
+                            div { class: "sd-log-caret", "▍" }
+                        }
+                        // JSX: <div className="modal-foot">
+                        div {
+                            class: "modal-foot",
+                            // JSX: <button className="btn btn-ghost focus-ring xs">
+                            button {
+                                class: "btn btn-ghost focus-ring xs",
+                                span { style: "font-size: 12px;", "↓" }
+                                " Download"
+                            }
+                            // JSX: <button className="btn btn-primary focus-ring">
+                            button {
+                                class: "btn btn-primary focus-ring",
+                                onclick: move |_| log_open.set(false),
+                                "Close"
                             }
                         }
                     }
