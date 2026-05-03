@@ -3027,8 +3027,8 @@ fn HardeningTab(
                                             }
                                         }
                                         textarea {
-                                            class: "w-full min-h-[120px] px-3.5 py-3 rounded-lg text-[13px] leading-relaxed resize-none {theme::interactive::INPUT} {theme::text::PRIMARY} focus:ring-2 focus:ring-offset-1",
-                                            style: "max-height: 240px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;",
+                                            class: "w-full min-h-[120px] rounded-lg text-[13px] leading-relaxed resize-none {theme::interactive::INPUT} {theme::text::PRIMARY} focus:ring-2 focus:ring-offset-1",
+                                            style: "max-height: 240px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 0.75rem 1rem;",
                                             placeholder: "Example: This service runs in an isolated container with read-only filesystem and network restrictions enforced by podman security policies…",
                                     value: "{reason}",
                                     oninput: move |evt| {
