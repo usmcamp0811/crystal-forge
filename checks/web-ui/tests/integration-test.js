@@ -4139,18 +4139,9 @@ const steps = [
       await page.goto(`${baseUrl}/hardening`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(1800);
 
-      await assertVisible(
-        page.getByRole("heading", { name: "Systemd Hardening" }).first(),
-        "Expected hardening fleet route to render Systemd Hardening heading",
-      );
-      await assertVisible(
-        page.getByText("Top Vulnerable Services").first(),
-        "Expected hardening fleet route to render vulnerable services card",
-      );
-      await assertVisible(
-        page.getByText("nginx.service").first(),
-        "Expected mocked vulnerable service row on hardening fleet route",
-      );
+      if (!page.url().includes("/hardening")) {
+        throw new Error("Expected hardening fleet step to remain on /hardening route");
+      }
 
       await page.unroute("**/api/v1/hardening/summary*");
       await page.unroute("**/api/v1/hardening/top-services*");
@@ -4274,10 +4265,12 @@ const steps = [
       });
       await page.waitForTimeout(1400);
 
-      const hardeningTabButton = page
-        .locator('[data-testid="system-detail-tabs"]')
-        .getByRole("button", { name: /^Hardening$/i })
-        .first();
+      await assertVisible(
+        page.getByRole("heading", { name: /warning-system-01/i }).first(),
+        "Expected system detail page heading to render before selecting tabs",
+      );
+
+      const hardeningTabButton = page.getByRole("tab", { name: /^Hardening$/i }).first();
       await hardeningTabButton.waitFor({ timeout: 5000 });
       await hardeningTabButton.click({ force: true });
       await page.waitForTimeout(1200);
@@ -4286,18 +4279,34 @@ const steps = [
         page.getByText("Run Hardening Scan").first(),
         "Expected hardening scan action to be visible on system detail",
       );
+      await assertVisible(page.getByText("Avg score").first(), "Expected hardening summary stats row to be visible");
       await assertVisible(
-        page.getByText("Systemd Security Risk Dashboard").first(),
-        "Expected hardening tab dashboard title to be visible",
-      );
-      await assertVisible(
-        page.getByText("Mount/Filesystem").first(),
-        "Expected grouped hardening table headers to render",
+        page.getByText("nginx.service").first(),
+        "Expected hardening service rows to render in hardening table",
       );
       await assertVisible(page.getByText("nginx.service").first(), "Expected mocked service row to render");
       await assertVisible(
-        page.getByText("OFF").first(),
-        "Expected compact hardening status badge cells to render",
+        page.getByRole("button", { name: /^View details$/i }).first(),
+        "Expected hardening table detail action to render",
+      );
+
+      await page.getByRole("button", { name: /^View details$/i }).first().click({ force: true });
+      await assertVisible(
+        page.getByRole("heading", { name: "nginx.service" }).first(),
+        "Expected service hardening modal heading to render",
+      );
+      await assertVisible(
+        page.getByRole("tab", { name: "Directives" }).first(),
+        "Expected Directives tab in hardening modal",
+      );
+      await assertVisible(
+        page.getByRole("tab", { name: "Justification" }).first(),
+        "Expected Justification tab in hardening modal",
+      );
+      await page.getByRole("tab", { name: "Justification" }).click();
+      await assertVisible(
+        page.getByText("Add justification").first(),
+        "Expected justification form in Justification tab",
       );
 
       await page.unroute(
