@@ -2589,9 +2589,11 @@ fn HardeningTab(
                     div { class: "hd-stat-val {theme::text::SECONDARY}", "{total_services}" }
                     div { class: "hd-stat-label", "Total" }
                 }
-                div { class: "sd-callout sd-callout-info", style: "flex: 1; min-width: 260px; margin-left: 8px; padding: 8px 12px;",
+                div { class: "sd-callout sd-callout-info", style: "flex: 1; min-width: 260px; margin-left: 8px; padding: 8px 12px; display: flex; align-items: flex-start; gap: 8px;",
                     svg {
-                        class: "w-[13px] h-[13px] shrink-0 mt-0.5",
+                        class: "shrink-0",
+                        width: "13",
+                        height: "13",
                         fill: "none",
                         stroke: "currentColor",
                         stroke_width: "2",
@@ -2602,7 +2604,7 @@ fn HardeningTab(
                             d: "M12 9v4m0 4h.01M10.29 3.86l-7.4 12.82A2 2 0 004.61 20h14.78a2 2 0 001.72-3.32l-7.4-12.82a2 2 0 00-3.42 0z"
                         }
                     }
-                    p { class: "text-[12px] {theme::text::SECONDARY}",
+                    p { class: "text-[12px] {theme::text::SECONDARY}", style: "flex: 1;",
                         "Mirrors "
                         code { class: "font-mono text-[11px]", "systemd-analyze security" }
                         ". Higher score = more directives enforced. Set directives in NixOS via "
@@ -2619,9 +2621,10 @@ fn HardeningTab(
                     style: "max-width: 280px;",
                     span {
                         class: "{theme::text::MUTED}",
-                        style: "position: absolute; left: 0.75rem; top: 50%; transform: translateY(-50%); pointer-events: none; line-height: 1;",
+                        style: "position: absolute; left: 0.75rem; top: 50%; transform: translateY(-50%); pointer-events: none; line-height: 1; display: inline-flex;",
                         svg {
-                            class: "w-[13px] h-[13px]",
+                            width: "13",
+                            height: "13",
                             fill: "none",
                             stroke: "currentColor",
                             stroke_width: "2",
@@ -2954,9 +2957,11 @@ fn HardeningTab(
                             }
                         } else if *modal_tab.read() == "nix" {
                             section { class: "space-y-3",
-                                div { class: "sd-callout sd-callout-info",
+                                div { class: "sd-callout sd-callout-info", style: "display: flex; align-items: flex-start; gap: 8px;",
                                     svg {
-                                        class: "w-[13px] h-[13px] shrink-0 mt-0.5",
+                                        class: "shrink-0",
+                                        width: "13",
+                                        height: "13",
                                         fill: "none",
                                         stroke: "currentColor",
                                         stroke_width: "2",
@@ -2967,7 +2972,7 @@ fn HardeningTab(
                                             d: "M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8zm0 0v6h6"
                                         }
                                     }
-                                    p { class: "text-[12px] {theme::text::SECONDARY}",
+                                    p { class: "text-[12px] {theme::text::SECONDARY}", style: "flex: 1;",
                                         "Add these options to your NixOS module to harden "
                                         span { class: "font-mono {theme::text::PRIMARY}", "{service.service_name}" }
                                         "."
