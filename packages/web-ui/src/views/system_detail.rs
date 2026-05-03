@@ -3017,36 +3017,64 @@ fn HardeningTab(
                             }
                         } else {
                             // Justification tab
-                            section { class: "space-y-3",
+                            section { class: "space-y-4",
                                 if allow_mutations {
-                                    div { class: "space-y-2.5 rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-3.5 py-3.5 cf-hardening-justification-card",
-                                div { class: "space-y-1",
-                                    p { class: "text-sm font-semibold {theme::text::PRIMARY}", "Add justification" }
-                                    p { class: "text-[11px] leading-5 {theme::text::SECONDARY}",
-                                        "Document why this service posture is acceptable (compensating controls, constrained runtime, or accepted risk)."
-                                    }
-                                }
-                                textarea {
-                                    class: "w-full min-h-[108px] max-h-40 px-3 py-2.5 rounded-lg text-[13px] leading-5 resize-none overflow-y-auto {theme::interactive::INPUT} {theme::text::PRIMARY}",
-                                    style: "max-height: 10rem;",
-                                    placeholder: "Explain why this service posture is acceptable…",
+                                    div { class: "space-y-3",
+                                        div { class: "space-y-1.5",
+                                            h4 { class: "text-sm font-semibold {theme::text::PRIMARY}", "Add justification" }
+                                            p { class: "text-[12px] leading-5 {theme::text::MUTED}",
+                                                "Document why this service posture is acceptable (compensating controls, constrained runtime, or accepted risk)."
+                                            }
+                                        }
+                                        textarea {
+                                            class: "w-full min-h-[120px] px-3.5 py-3 rounded-lg text-[13px] leading-relaxed resize-none {theme::interactive::INPUT} {theme::text::PRIMARY} focus:ring-2 focus:ring-offset-1",
+                                            style: "max-height: 240px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;",
+                                            placeholder: "Example: This service runs in an isolated container with read-only filesystem and network restrictions enforced by podman security policies…",
                                     value: "{reason}",
                                     oninput: move |evt| {
                                         reason.set(evt.value());
                                         justification_error.set(None);
                                         justification_notice.set(None);
                                     },
-                                }
-                                if let Some(message) = justification_error() {
-                                    p { class: "text-[11px] {theme::health::CRITICAL_TEXT}", "{message}" }
-                                }
-                                if let Some(message) = justification_notice() {
-                                    p { class: "text-[11px] {theme::health::HEALTHY_TEXT}", "{message}" }
-                                }
-                                div { class: "flex flex-col items-stretch gap-2 pt-1 sm:flex-row sm:items-center sm:justify-between",
-                                    p { class: "text-[11px] leading-5 {theme::text::MUTED}", "Required for audit history when accepting a weaker service posture." }
-                                    button {
-                                        class: "h-9 px-3 rounded-lg {theme::interactive::PRIMARY_BTN} text-xs font-medium {theme::interactive::FOCUS_RING} self-start sm:self-auto",
+                                        }
+                                        if let Some(message) = justification_error() {
+                                            div { class: "flex items-start gap-2 p-3 rounded-lg bg-red-500/10 border border-red-500/30",
+                                                svg {
+                                                    class: "w-4 h-4 shrink-0 mt-0.5",
+                                                    fill: "none",
+                                                    stroke: "currentColor",
+                                                    stroke_width: "2",
+                                                    view_box: "0 0 24 24",
+                                                    path {
+                                                        stroke_linecap: "round",
+                                                        stroke_linejoin: "round",
+                                                        d: "M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                                                    }
+                                                }
+                                                p { class: "text-[12px] {theme::health::CRITICAL_TEXT}", "{message}" }
+                                            }
+                                        }
+                                        if let Some(message) = justification_notice() {
+                                            div { class: "flex items-start gap-2 p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/30",
+                                                svg {
+                                                    class: "w-4 h-4 shrink-0 mt-0.5",
+                                                    fill: "none",
+                                                    stroke: "currentColor",
+                                                    stroke_width: "2",
+                                                    view_box: "0 0 24 24",
+                                                    path {
+                                                        stroke_linecap: "round",
+                                                        stroke_linejoin: "round",
+                                                        d: "M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
+                                                    }
+                                                }
+                                                p { class: "text-[12px] {theme::health::HEALTHY_TEXT}", "{message}" }
+                                            }
+                                        }
+                                        div { class: "flex items-center justify-between gap-3 pt-1",
+                                            p { class: "text-[11px] leading-5 {theme::text::MUTED}", "Required for audit compliance when accepting weaker posture." }
+                                            button {
+                                                class: "px-4 py-2 rounded-lg {theme::interactive::PRIMARY_BTN} text-sm font-medium {theme::interactive::FOCUS_RING} transition-colors",
                                         disabled: is_saving_justification() || reason.read().trim().is_empty(),
                                         onclick: {
                                             let service_name = service.service_name.clone();
@@ -3084,44 +3112,60 @@ fn HardeningTab(
                                                 });
                                             }
                                         },
-                                        if is_saving_justification() {
-                                            "Saving…"
-                                        } else {
-                                            "Save justification"
-                                        }
-                                    }
-                                    }
-                                }
-                                }
-
-                                div { class: "space-y-2.5",
-                            div { class: "space-y-1",
-                                p { class: "text-sm font-medium {theme::text::PRIMARY}", "Existing justification history" }
-                                p { class: "text-[12px] leading-5 {theme::text::MUTED}", "Previous notes are kept here for audit context." }
-                            }
-                            if justifications.iter().all(|j| j.service_name != service.service_name) {
-                                div { class: "rounded-xl border {theme::surface::CARD_BORDER} px-3 py-3 text-[12px] {theme::text::SECONDARY}",
-                                    "No justifications yet."
-                                }
-                            } else {
-                                div { class: "flex flex-col gap-2 max-h-[170px] overflow-y-auto pr-1",
-                                    for item in justifications.iter().filter(|j| j.service_name == service.service_name) {
-                                        div { class: "rounded-xl border {theme::surface::CARD_BORDER} px-3 py-2.5 text-[12px] space-y-1.5",
-                                            div { class: "flex items-center gap-1.5 flex-wrap",
-                                                span {
-                                                    class: "inline-flex items-center rounded border {theme::surface::CARD_BORDER} px-1.5 py-0.5 text-[10px] font-medium {theme::text::SECONDARY}",
-                                                    "{item.category.clone().unwrap_or_else(|| \"uncategorized\".to_string())}"
-                                                }
-                                                if let Some(directive) = item.directive_name.clone() {
-                                                    span { class: "font-mono text-[10px] {theme::text::MUTED}", "{directive}" }
+                                                if is_saving_justification() {
+                                                    "Saving…"
+                                                } else {
+                                                    "Save justification"
                                                 }
                                             }
-                                            p { class: "{theme::text::SECONDARY} leading-5", "{item.reason}" }
                                         }
                                     }
                                 }
-                            }
-                        }
+
+                                div { class: "space-y-3 pt-2",
+                                    div { class: "border-t {theme::surface::DIVIDER} pt-4" }
+                                    div { class: "space-y-1.5",
+                                        h4 { class: "text-sm font-semibold {theme::text::PRIMARY}", "Justification history" }
+                                        p { class: "text-[12px] leading-5 {theme::text::MUTED}", "Audit trail of accepted risk documentation for this service." }
+                                    }
+                                    if justifications.iter().all(|j| j.service_name != service.service_name) {
+                                        div { class: "flex flex-col items-center justify-center py-8 px-4 rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG}",
+                                            svg {
+                                                class: "w-12 h-12 mb-3 {theme::text::MUTED}",
+                                                fill: "none",
+                                                stroke: "currentColor",
+                                                stroke_width: "1.5",
+                                                view_box: "0 0 24 24",
+                                                path {
+                                                    stroke_linecap: "round",
+                                                    stroke_linejoin: "round",
+                                                    d: "M9 12h3.75M9 15h3.75M9 18h3.75m3 .75H18a2.25 2.25 0 002.25-2.25V6.108c0-1.135-.845-2.098-1.976-2.192a48.424 48.424 0 00-1.123-.08m-5.801 0c-.065.21-.1.433-.1.664 0 .414.336.75.75.75h4.5a.75.75 0 00.75-.75 2.25 2.25 0 00-.1-.664m-5.8 0A2.251 2.251 0 0113.5 2.25H15c1.012 0 1.867.668 2.15 1.586m-5.8 0c-.376.023-.75.05-1.124.08C9.095 4.01 8.25 4.973 8.25 6.108V8.25m0 0H4.875c-.621 0-1.125.504-1.125 1.125v11.25c0 .621.504 1.125 1.125 1.125h9.75c.621 0 1.125-.504 1.125-1.125V9.375c0-.621-.504-1.125-1.125-1.125H8.25zM6.75 12h.008v.008H6.75V12zm0 3h.008v.008H6.75V15zm0 3h.008v.008H6.75V18z"
+                                                }
+                                            }
+                                            p { class: "text-sm {theme::text::MUTED} text-center", "No justifications recorded yet" }
+                                            p { class: "text-[11px] {theme::text::MUTED} text-center mt-1", "Add a justification above to document accepted risks" }
+                                        }
+                                    } else {
+                                        div { class: "flex flex-col gap-2.5 max-h-[280px] overflow-y-auto pr-1",
+                                            for item in justifications.iter().filter(|j| j.service_name == service.service_name) {
+                                                div { class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-3.5 py-3 space-y-2",
+                                                    div { class: "flex items-center justify-between gap-2",
+                                                        div { class: "flex items-center gap-2 flex-wrap",
+                                                            span {
+                                                                class: "inline-flex items-center rounded-md border {theme::surface::CARD_BORDER} px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide {theme::text::MUTED}",
+                                                                "{item.category.clone().unwrap_or_else(|| \"service\".to_string())}"
+                                                            }
+                                                            if let Some(directive) = item.directive_name.clone() {
+                                                                span { class: "font-mono text-[11px] {theme::text::MUTED} bg-black/5 dark:bg-white/5 px-2 py-0.5 rounded", "{directive}" }
+                                                            }
+                                                        }
+                                                    }
+                                                    p { class: "text-[13px] {theme::text::PRIMARY} leading-relaxed", "{item.reason}" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
