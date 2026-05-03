@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@ai-agent'
 created_date: '2026-04-30 21:32'
-updated_date: '2026-05-03 01:51'
+updated_date: '2026-05-03 01:52'
 labels:
   - ui
   - ux
@@ -78,6 +78,71 @@ Medium: high visible surface area and potential interaction regressions if styli
 - [x] #5 `nix develop -c cargo check` (web-ui) succeeds after implementation.
 - [x] #6 `nix build .#checks.x86_64-linux.web-ui` succeeds and includes updated Builds-view screenshot/assertion coverage proving intended UI behavior.
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+## CRITICAL: The Implementation Does NOT Match JSX Reference
+
+### Root Cause Analysis
+
+The JSX reference (BuildsView.jsx) uses mock data from data-builds.js with this structure:
+- `b.pkg`: Package name (e.g., "linux-6.6.72", "nginx-1.27.4")
+- `b.drv`: Derivation store path (e.g., "/nix/store/abc1234xxxx-linux.drv")
+- `b.commit`: Git commit hash (7 chars)
+- `b.flake`: Flake name
+
+The Dioxus implementation incorrectly maps:
+- `hostname` → pkg (WRONG: hostname is system name, not package)
+- `summary` (commit message) → drv (WRONG: commit message ≠ derivation path)
+
+### Required Corrections
+
+#### 1. Queue Table Package Column (build_queue_pane.rs:210-222)
+**Current (WRONG):**
+- Line 1: hostname (system name like "atlas-01")
+- Line 2: summary (commit message)
+- Line 3: flake · commit
+
+**Should be (JSX lines 124-126):**
+- Line 1: Package name in bold (need to extract from API or derive)
+- Line 2: Derivation path truncated to 40 chars with ellipsis
+- Line 3: flake · commit (already correct)
+
+#### 2. Detail Panel (build_detail_pane.rs:72-83)
+**Current (WRONG):**
+- Title: hostname
+- Subtitle: summary
+
+**Should be (JSX lines 159-163):**
+- Title: Package name
+- Subtitle: Full derivation path
+
+#### 3. Log Modal Header (builds.rs:574-581)
+**Current (WRONG):**
+- Title: hostname
+- Subtitle: truncated summary
+
+**Should be (JSX lines 224-225):**
+- Title: Package name
+- Subtitle: Derivation path truncated to 50 chars
+
+### Icon System Issues
+
+All button icons use Unicode fallbacks instead of proper Icon component:
+- Refresh: ⟳ instead of Icon sync size=14
+- Logs: ⌘ instead of Icon terminal size=14
+- Cancel: ✕ instead of Icon x size=14
+
+### Implementation Strategy
+
+1. Examine API response structure to determine if derivation paths are available
+2. If not available: Create synthetic derivation-like identifier using available data
+3. Determine proper package name field (may need to parse from build metadata)
+4. Implement proper icon component or create Icon wrapper for consistent sizing
+5. Update all three locations with correct field mappings
+6. Capture before/after screenshots showing the corrections
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
