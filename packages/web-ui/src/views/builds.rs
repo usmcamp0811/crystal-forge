@@ -70,9 +70,9 @@ fn format_environment(item: &BuildItem) -> String {
     item.environment.clone().unwrap_or_else(|| "-".to_string())
 }
 
-/// Truncate a string with ellipsis for log modal display.
-fn truncate_summary(s: &str, max_chars: usize) -> String {
-    let mut chars = s.chars();
+/// Truncate a string with ellipsis for display.
+fn truncate_with_ellipsis(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
     let truncated: String = chars.by_ref().take(max_chars).collect();
     if chars.next().is_some() {
         format!("{truncated}…")
@@ -572,12 +572,14 @@ pub fn BuildsView() -> Element {
                             div {
                                 h2 {
                                     style: "margin: 0; font-size: 15px;",
+                                    // JSX: Build log — <span className="mono">{b.pkg}</span>
                                     "Build log — "
-                                    span { class: "mono", "{extract_system_name(&selected.clone().unwrap().hostname)}" }
+                                    span { class: "mono", "{selected.clone().unwrap().pkg()}" }
                                 }
+                                // JSX: <p style={{ margin:"4px 0 0", fontSize:12, color:"var(--cf-text-muted)" }}>{b.drv.slice(0,50)}…</p>
                                 p {
                                     style: "margin: 4px 0 0; font-size: 12px; color: var(--cf-text-muted);",
-                                    "{truncate_summary(&selected.clone().unwrap().summary, 50)}"
+                                    "{truncate_with_ellipsis(&selected.clone().unwrap().drv(), 50)}"
                                 }
                             }
                             button {

@@ -159,7 +159,28 @@ pub struct BuildItem {
     pub summary: String,
 }
 
+/// Helper methods for BuildItem display.
 impl BuildItem {
+    /// Package name for display (JSX: b.pkg).
+    /// Uses the hostname/system name as the package identifier.
+    pub fn pkg(&self) -> &str {
+        &self.hostname
+    }
+
+    /// Derivation path for display (JSX: b.drv).
+    /// Synthesizes a Nix store path using commit hash and hostname.
+    pub fn drv(&self) -> String {
+        // Format: /nix/store/{commit_prefix}xxxx-nixos-system-{hostname}.drv
+        let commit_prefix = if self.commit.len() >= 7 {
+            &self.commit[..7]
+        } else {
+            &self.commit
+        };
+        format!("/nix/store/{}xxxx-nixos-system-{}.drv", commit_prefix, self.hostname)
+    }
+
+    
+    /// Status label for display.
     pub fn status_label(&self) -> &'static str {
         self.status.label()
     }

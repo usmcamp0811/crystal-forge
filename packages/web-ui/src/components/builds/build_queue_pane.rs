@@ -210,11 +210,13 @@ fn BuildQueueTable(
                                     td {
                                         class: "px-3 py-2",
                                         div {
-                                            // Line 1: Package/system name (bold)
-                                            p { class: "text-[13px] font-semibold leading-[1.15] {theme::text::PRIMARY}", "{extract_system_name(&build.hostname)}" }
-                                            // Line 2: Derivation/commit message (mono, muted)
-                                            p { class: "text-[10px] leading-4 font-mono {theme::text::MUTED} truncate max-w-[18rem]", "{truncate_with_ellipsis(&build.summary, 40)}" }
-                                            // Line 3: Flake · full commit
+                                            // JSX line 1: b.pkg (package name) - bold
+                                            p { class: "text-[13px] font-semibold leading-[1.15] {theme::text::PRIMARY}", "{build.pkg()}" }
+                                            // JSX line 2: b.drv.slice(0,40) + ellipsis (derivation path) - mono, muted
+                                            p { class: "text-[10px] leading-4 font-mono {theme::text::MUTED} truncate max-w-[18rem]", 
+                                                "{truncate_with_ellipsis(&build.drv(), 40)}" 
+                                            }
+                                            // JSX line 3: flake · commit - muted
                                             p { class: "text-[10px] leading-4 {theme::text::MUTED}",
                                                 "{build.flake} · "
                                                 span { class: "font-mono", "{build.commit}" }

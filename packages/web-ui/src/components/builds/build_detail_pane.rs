@@ -76,11 +76,11 @@ pub fn BuildDetailPane(
                             style: "margin-right: 6px;",
                             "{build.status_label()}"
                         }
-                        // Title: package/system name (like JSX b.pkg)
-                        "{extract_system_name(&build.hostname)}"
+                        // JSX title: Build {b.pkg}
+                        "Build {build.pkg()}"
                     }
-                    // Subtitle: derivation/description (mono, muted) - like JSX b.drv
-                    span { class: "fqdn mono", "{build.summary}" }
+                    // JSX subtitle: {b.drv} (full derivation path, mono, muted)
+                    span { class: "fqdn mono", "{build.drv()}" }
                 }
                 button {
                     class: "btn-icon focus-ring",
