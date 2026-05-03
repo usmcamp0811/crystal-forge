@@ -276,6 +276,7 @@ fn BuildQueueTable(
                                         // JSX: <div className="row-actions">
                                         div {
                                             class: "row-actions",
+                                            // JSX: <button title="Logs"><Icon name="terminal" size={14} /></button>
                                             button {
                                                 class: "btn-icon focus-ring",
                                                 title: "Logs",
@@ -285,9 +286,21 @@ fn BuildQueueTable(
                                                     selected_id.set(Some(build.id));
                                                     on_log.call(build.id);
                                                 },
-                                                "⌘"
+                                                svg {
+                                                    width: "14",
+                                                    height: "14",
+                                                    view_box: "0 0 24 24",
+                                                    fill: "none",
+                                                    stroke: "currentColor",
+                                                    stroke_width: "2",
+                                                    stroke_linecap: "round",
+                                                    stroke_linejoin: "round",
+                                                    polyline { points: "4 17 10 11 4 5" }
+                                                    line { x1: "12", y1: "19", x2: "20", y2: "19" }
+                                                }
                                             }
                                             if let Some(cancel_action) = cancel_action_for_status(build.status) {
+                                                // JSX: <button title="Cancel"><Icon name="x" size={14} /></button>
                                                 button {
                                                     class: "btn-icon focus-ring",
                                                     title: "Cancel",
@@ -295,7 +308,18 @@ fn BuildQueueTable(
                                                         evt.stop_propagation();
                                                         on_build_action.call((build.id, cancel_action));
                                                     },
-                                                    "✕"
+                                                    svg {
+                                                        width: "14",
+                                                        height: "14",
+                                                        view_box: "0 0 24 24",
+                                                        fill: "none",
+                                                        stroke: "currentColor",
+                                                        stroke_width: "2",
+                                                        stroke_linecap: "round",
+                                                        stroke_linejoin: "round",
+                                                        line { x1: "18", y1: "6", x2: "6", y2: "18" }
+                                                        line { x1: "6", y1: "6", x2: "18", y2: "18" }
+                                                    }
                                                 }
                                             }
                                         }

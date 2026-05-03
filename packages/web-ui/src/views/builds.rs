@@ -432,10 +432,22 @@ pub fn BuildsView() -> Element {
                 // JSX: <div style={{ display:"flex", gap:8 }}>
                 div {
                     style: "display: flex; gap: 8px;",
+                    // JSX: <button className="btn btn-ghost focus-ring"><Icon name="sync" size={14} /> Refresh</button>
                     button {
-                        class: "inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm border transition-colors {theme::interactive::GHOST_BTN}",
+                        class: "btn btn-ghost focus-ring",
                         onclick: move |_| refresh_trigger.set(refresh_trigger() + 1),
-                        span { class: "text-xs", "⟳" }
+                        svg {
+                            width: "14",
+                            height: "14",
+                            view_box: "0 0 24 24",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            style: "display: inline-block; vertical-align: middle; margin-right: 6px;",
+                            path { d: "M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" }
+                        }
                         "Refresh"
                     }
                     QueueActionButton {
@@ -582,10 +594,22 @@ pub fn BuildsView() -> Element {
                                     "{truncate_with_ellipsis(&selected.clone().unwrap().drv(), 50)}"
                                 }
                             }
+                            // JSX: <button className="btn-icon focus-ring"><Icon name="x" size={16} /></button>
                             button {
                                 class: "btn-icon focus-ring",
                                 onclick: move |_| log_open.set(false),
-                                "✕"
+                                svg {
+                                    width: "16",
+                                    height: "16",
+                                    view_box: "0 0 24 24",
+                                    fill: "none",
+                                    stroke: "currentColor",
+                                    stroke_width: "2",
+                                    stroke_linecap: "round",
+                                    stroke_linejoin: "round",
+                                    line { x1: "18", y1: "6", x2: "6", y2: "18" }
+                                    line { x1: "6", y1: "6", x2: "18", y2: "18" }
+                                }
                             }
                         }
                         // JSX: <pre ref={ref} className="sd-log-stream" style={{ minHeight:340, maxHeight:480 }}>

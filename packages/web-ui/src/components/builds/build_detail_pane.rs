@@ -82,10 +82,22 @@ pub fn BuildDetailPane(
                     // JSX subtitle: {b.drv} (full derivation path, mono, muted)
                     span { class: "fqdn mono", "{build.drv()}" }
                 }
+                // JSX: <button className="btn-icon focus-ring"><Icon name="x" size={16} /></button>
                 button {
                     class: "btn-icon focus-ring",
                     onclick: move |_| on_close.call(()),
-                    "✕"
+                    svg {
+                        width: "16",
+                        height: "16",
+                        view_box: "0 0 24 24",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        stroke_linecap: "round",
+                        stroke_linejoin: "round",
+                        line { x1: "18", y1: "6", x2: "6", y2: "18" }
+                        line { x1: "6", y1: "6", x2: "18", y2: "18" }
+                    }
                 }
             }
 
