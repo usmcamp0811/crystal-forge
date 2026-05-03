@@ -2463,7 +2463,6 @@ fn HardeningTab(
     let mut modal_tab = use_signal(|| "overview".to_string());
     let mut search_query = use_signal(String::new);
     let mut severity_filter = use_signal(|| "all".to_string());
-    let mut sort_mode = use_signal(|| "risk_desc".to_string());
 
     let total_services = results.len();
     let avg_score = if total_services > 0 {
@@ -2500,7 +2499,6 @@ fn HardeningTab(
 
     let query = search_query.read().trim().to_lowercase();
     let active_severity = severity_filter.read().clone();
-    let active_sort = sort_mode.read().clone();
 
     let mut filtered_results = results
         .iter()
@@ -2523,25 +2521,12 @@ fn HardeningTab(
         .cloned()
         .collect::<Vec<_>>();
 
-    match active_sort.as_str() {
-        "service_asc" => {
-            filtered_results.sort_by(|a, b| a.service_name.cmp(&b.service_name));
-        }
-        "score_desc" => {
-            filtered_results.sort_by(|a, b| b.hardening_score.cmp(&a.hardening_score));
-        }
-        "score_asc" => {
-            filtered_results.sort_by(|a, b| a.hardening_score.cmp(&b.hardening_score));
-        }
-        _ => {
-            // Highest risk first (lowest score first), then highest missing controls.
-            filtered_results.sort_by(|a, b| {
-                a.hardening_score
-                    .cmp(&b.hardening_score)
-                    .then_with(|| b.missing_directives_count.cmp(&a.missing_directives_count))
-            });
-        }
-    }
+    // Sort by risk: highest risk first (lowest score), then by missing directives count
+    filtered_results.sort_by(|a, b| {
+        a.hardening_score
+            .cmp(&b.hardening_score)
+            .then_with(|| b.missing_directives_count.cmp(&a.missing_directives_count))
+    });
 
     let filtered_count = filtered_results.len();
     let table_directives = vec![

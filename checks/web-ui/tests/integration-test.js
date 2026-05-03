@@ -4296,12 +4296,17 @@ const steps = [
         "Expected service hardening modal heading to render",
       );
       await assertVisible(
-        page.getByText("Add justification").first(),
-        "Expected service hardening modal to emphasize justification action",
+        page.getByRole("tab", { name: "Directives" }).first(),
+        "Expected Directives tab in hardening modal",
       );
       await assertVisible(
-        page.getByText("Tip: scroll to review all directives and scores.").first(),
-        "Expected directive table scroll affordance helper text in service hardening modal",
+        page.getByRole("tab", { name: "Justification" }).first(),
+        "Expected Justification tab in hardening modal",
+      );
+      await page.getByRole("tab", { name: "Justification" }).click();
+      await assertVisible(
+        page.getByText("Add justification").first(),
+        "Expected justification form in Justification tab",
       );
 
       await page.unroute(
