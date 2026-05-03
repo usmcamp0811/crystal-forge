@@ -71,13 +71,15 @@ Medium: high visible surface area and potential interaction regressions if styli
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [x] #1 Builds view visual layout and styling match the latest local design mockup for desktop and mobile breakpoints.
-- [x] #2 Build queue, active jobs, history, worker/status sections, and key badges/controls reflect the mockup’s information hierarchy and wording.
+- [ ] #1 Builds view visual layout and styling match the latest local design mockup for desktop and mobile breakpoints.
+- [ ] #2 Build queue, active jobs, history, worker/status sections, and key badges/controls reflect the mockup’s information hierarchy and wording.
 - [x] #3 Any new/changed Builds-specific components are reusable and keep presentation separated from state/data mapping.
 - [x] #4 No backend/API contract is changed as part of this task (unless separately approved and tracked).
-- [x] #5 `nix develop -c cargo check` (web-ui) succeeds after implementation.
-- [x] #6 `nix build .#checks.x86_64-linux.web-ui` succeeds and includes updated Builds-view screenshot/assertion coverage proving intended UI behavior.
+- [ ] #5 `nix develop -c cargo check` (web-ui) succeeds after implementation.
+- [ ] #6 `nix build .#checks.x86_64-linux.web-ui` succeeds and includes updated Builds-view screenshot/assertion coverage proving intended UI behavior.
 <!-- AC:END -->
+
+
 
 ## Implementation Plan
 
