@@ -2590,6 +2590,18 @@ fn HardeningTab(
                     div { class: "hd-stat-label", "Total" }
                 }
                 div { class: "sd-callout sd-callout-info", style: "flex: 1; min-width: 260px; margin-left: 8px; padding: 8px 12px;",
+                    svg {
+                        class: "w-[13px] h-[13px] shrink-0 mt-0.5",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        view_box: "0 0 24 24",
+                        path {
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            d: "M12 9v4m0 4h.01M10.29 3.86l-7.4 12.82A2 2 0 004.61 20h14.78a2 2 0 001.72-3.32l-7.4-12.82a2 2 0 00-3.42 0z"
+                        }
+                    }
                     p { class: "text-[12px] {theme::text::SECONDARY}",
                         "Mirrors "
                         code { class: "font-mono text-[11px]", "systemd-analyze security" }
@@ -2607,8 +2619,19 @@ fn HardeningTab(
                     style: "max-width: 280px;",
                     span {
                         class: "{theme::text::MUTED}",
-                        style: "position: absolute; left: 0.75rem; top: 50%; transform: translateY(-50%); pointer-events: none; font-size: 0.875rem; line-height: 1;",
-                        "🔍"
+                        style: "position: absolute; left: 0.75rem; top: 50%; transform: translateY(-50%); pointer-events: none; line-height: 1;",
+                        svg {
+                            class: "w-[13px] h-[13px]",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            view_box: "0 0 24 24",
+                            path {
+                                stroke_linecap: "round",
+                                stroke_linejoin: "round",
+                                d: "M21 21l-4.35-4.35m1.85-4.65a7 7 0 11-14 0 7 7 0 0114 0z"
+                            }
+                        }
                     }
                     input {
                         class: "input focus-ring",
@@ -2909,7 +2932,6 @@ fn HardeningTab(
                                 div { class: "grid gap-2", style: "grid-template-columns: 1fr 1fr;",
                                     for directive in directive_cells(&service) {
                                         {
-                                            let status = directive_badge_content(Some(&directive));
                                             let tile_class = if directive.enabled {
                                                 "bg-emerald-500/10 border-emerald-500/30"
                                             } else {
@@ -2924,19 +2946,27 @@ fn HardeningTab(
                                                             if directive.enabled { "enforced" } else { "not set" }
                                                         }
                                                     }
-                                                    span { class: "ml-auto text-[10px] {status.class_name}", "{status.label}" }
                                                 }
                                             }
                                         }
                                     }
                                 }
-                                p { class: "text-[11px] {theme::text::MUTED}",
-                                    "Tip: scroll to review all directives and scores."
-                                }
                             }
                         } else if *modal_tab.read() == "nix" {
                             section { class: "space-y-3",
                                 div { class: "sd-callout sd-callout-info",
+                                    svg {
+                                        class: "w-[13px] h-[13px] shrink-0 mt-0.5",
+                                        fill: "none",
+                                        stroke: "currentColor",
+                                        stroke_width: "2",
+                                        view_box: "0 0 24 24",
+                                        path {
+                                            stroke_linecap: "round",
+                                            stroke_linejoin: "round",
+                                            d: "M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8zm0 0v6h6"
+                                        }
+                                    }
                                     p { class: "text-[12px] {theme::text::SECONDARY}",
                                         "Add these options to your NixOS module to harden "
                                         span { class: "font-mono {theme::text::PRIMARY}", "{service.service_name}" }
@@ -3353,13 +3383,14 @@ fn risk_level_color(level: &str) -> &'static str {
 }
 
 fn directive_short_label(name: &str) -> String {
-    name.replace("Private", "")
-        .replace("Protect", "")
-        .replace("Restrict", "")
-        .replace("Capability", "Cap")
-        .chars()
-        .take(4)
-        .collect::<String>()
+    let mut expanded = String::with_capacity(name.len() + 8);
+    for (idx, ch) in name.chars().enumerate() {
+        if idx > 0 && ch.is_uppercase() {
+            expanded.push(' ');
+        }
+        expanded.push(ch);
+    }
+    expanded.trim().chars().take(4).collect::<String>()
 }
 
 fn service_user_label(service: &HardeningServiceResultResponse) -> String {
