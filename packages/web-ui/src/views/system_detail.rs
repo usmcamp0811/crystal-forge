@@ -2908,7 +2908,7 @@ fn HardeningTab(
                     }
 
                     div { class: "sd-tabs", style: "padding:0 22px; margin-top:0;",
-                        for (key, label) in [("overview", "Directives"), ("nix", "NixOS config"), ("all", "All checks")] {
+                        for (key, label) in [("overview", "Directives"), ("nix", "NixOS config"), ("all", "All checks"), ("justification", "Justification")] {
                             {
                                 let tab_class = if *modal_tab.read() == key {
                                     "sd-tab active"
@@ -2982,7 +2982,7 @@ fn HardeningTab(
                                     "systemd.services.\"{service.service_name}\".serviceConfig = {{\n  # tighten according to your workload\n  PrivateTmp = true;\n  PrivateDevices = true;\n  ProtectSystem = \"strict\";\n  ProtectHome = true;\n  NoNewPrivileges = true;\n}};"
                                 }
                             }
-                        } else {
+                        } else if *modal_tab.read() == "all" {
                             section { class: "space-y-3",
                                 div { class: "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden",
                                     div { class: "h-[320px] overflow-y-scroll pr-1 cf-modal-table-scroll cf-hardening-directives-scroll",
@@ -3015,10 +3015,11 @@ fn HardeningTab(
                                     }
                                 }
                             }
-                        }
-
-                        if allow_mutations {
-                            section { class: "space-y-2.5 rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-3.5 py-3.5 cf-hardening-justification-card",
+                        } else {
+                            // Justification tab
+                            section { class: "space-y-3",
+                                if allow_mutations {
+                                    div { class: "space-y-2.5 rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-3.5 py-3.5 cf-hardening-justification-card",
                                 div { class: "space-y-1",
                                     p { class: "text-sm font-semibold {theme::text::PRIMARY}", "Add justification" }
                                     p { class: "text-[11px] leading-5 {theme::text::SECONDARY}",
@@ -3089,11 +3090,11 @@ fn HardeningTab(
                                             "Save justification"
                                         }
                                     }
+                                    }
                                 }
-                            }
-                        }
+                                }
 
-                        section { class: "space-y-2.5",
+                                div { class: "space-y-2.5",
                             div { class: "space-y-1",
                                 p { class: "text-sm font-medium {theme::text::PRIMARY}", "Existing justification history" }
                                 p { class: "text-[12px] leading-5 {theme::text::MUTED}", "Previous notes are kept here for audit context." }
@@ -3119,6 +3120,8 @@ fn HardeningTab(
                                         }
                                     }
                                 }
+                            }
+                        }
                             }
                         }
                     }
