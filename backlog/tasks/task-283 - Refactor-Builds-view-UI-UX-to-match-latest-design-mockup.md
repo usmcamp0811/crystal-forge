@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@ai-agent'
 created_date: '2026-04-30 21:32'
-updated_date: '2026-05-03 01:52'
+updated_date: '2026-05-03 02:01'
 labels:
   - ui
   - ux
@@ -78,8 +78,6 @@ Medium: high visible surface area and potential interaction regressions if styli
 - [ ] #5 `nix develop -c cargo check` (web-ui) succeeds after implementation.
 - [ ] #6 `nix build .#checks.x86_64-linux.web-ui` succeeds and includes updated Builds-view screenshot/assertion coverage proving intended UI behavior.
 <!-- AC:END -->
-
-
 
 ## Implementation Plan
 
@@ -391,4 +389,28 @@ REQUIRED FIXES:
 3. Document acceptable differences (auto-scroll, progress data)
 
 4. Provide side-by-side screenshots in MR
+
+CRITICAL ISSUES RESOLVED (2026-05-03)
+
+P0 Data Mapping Issues - FIXED (commit c3e8700b):
+
+- Added BuildItem::pkg() and drv() methods
+
+- pkg() returns hostname as package identifier
+
+- drv() synthesizes Nix store path from commit + hostname
+
+- Updated 5 locations: queue table, detail panel, log modal
+
+P1 Icon System Issues - FIXED (commit abc963f0):
+
+- Replaced Unicode fallbacks with inline SVG icons
+
+- Refresh: sync icon (14px)
+
+- Logs: terminal icon (14px)
+
+- Cancel/Close: x icon (14/16px)
+
+- All icons use Feather Icons style (stroke-based)
 <!-- SECTION:NOTES:END -->
