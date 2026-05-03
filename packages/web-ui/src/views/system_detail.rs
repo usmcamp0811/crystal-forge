@@ -2460,9 +2460,9 @@ fn HardeningTab(
     let mut justification_error = use_signal(|| None::<String>);
     let mut justification_notice = use_signal(|| None::<String>);
     let mut is_saving_justification = use_signal(|| false);
+    let mut modal_tab = use_signal(|| "overview".to_string());
     let mut search_query = use_signal(String::new);
     let mut severity_filter = use_signal(|| "all".to_string());
-    let mut sort_mode = use_signal(|| "risk_desc".to_string());
 
     let total_services = results.len();
     let avg_score = if total_services > 0 {
@@ -2474,20 +2474,22 @@ fn HardeningTab(
     } else {
         0.0
     };
-    let high_risk_count = results
+    let vuln_count = results
         .iter()
-        .filter(|service| {
-            matches!(
-                service.risk_level.as_str(),
-                "vulnerable" | "poorly_hardened"
-            )
-        })
+        .filter(|service| matches!(service.risk_level.as_str(), "vulnerable"))
         .count();
-    let cumulative_exposure = results
+    let high_count = results
         .iter()
-        .map(|service| service.missing_directives_count + service.disabled_directives_count)
-        .sum::<i32>();
-
+        .filter(|service| matches!(service.risk_level.as_str(), "poorly_hardened"))
+        .count();
+    let med_count = results
+        .iter()
+        .filter(|service| matches!(service.risk_level.as_str(), "moderately_hardened"))
+        .count();
+    let ok_count = results
+        .iter()
+        .filter(|service| matches!(service.risk_level.as_str(), "well_hardened"))
+        .count();
     let justifications_for = |service_name: &str| {
         justifications
             .iter()
@@ -2497,7 +2499,6 @@ fn HardeningTab(
 
     let query = search_query.read().trim().to_lowercase();
     let active_severity = severity_filter.read().clone();
-    let active_sort = sort_mode.read().clone();
 
     let mut filtered_results = results
         .iter()
@@ -2520,146 +2521,134 @@ fn HardeningTab(
         .cloned()
         .collect::<Vec<_>>();
 
-    match active_sort.as_str() {
-        "service_asc" => {
-            filtered_results.sort_by(|a, b| a.service_name.cmp(&b.service_name));
-        }
-        "score_desc" => {
-            filtered_results.sort_by(|a, b| b.hardening_score.cmp(&a.hardening_score));
-        }
-        "score_asc" => {
-            filtered_results.sort_by(|a, b| a.hardening_score.cmp(&b.hardening_score));
-        }
-        _ => {
-            // Highest risk first (lowest score first), then highest missing controls.
-            filtered_results.sort_by(|a, b| {
-                a.hardening_score
-                    .cmp(&b.hardening_score)
-                    .then_with(|| b.missing_directives_count.cmp(&a.missing_directives_count))
-            });
-        }
-    }
+    // Sort by risk: highest risk first (lowest score), then by missing directives count
+    filtered_results.sort_by(|a, b| {
+        a.hardening_score
+            .cmp(&b.hardening_score)
+            .then_with(|| b.missing_directives_count.cmp(&a.missing_directives_count))
+    });
 
     let filtered_count = filtered_results.len();
-    let has_active_filters =
-        !query.is_empty() || active_severity != "all" || active_sort != "risk_desc";
-
-    let directive_groups: Vec<(&str, Vec<(&str, &str)>)> = vec![
-        (
-            "Isolation",
-            vec![
-                ("PrivateTmp", "Tmp"),
-                ("PrivateDevices", "Dev"),
-                ("PrivateNetwork", "Net"),
-                ("PrivateUsers", "Usr"),
-            ],
-        ),
-        (
-            "Mount/Filesystem",
-            vec![
-                ("ProtectHome", "PHm"),
-                ("ProtectSystem", "PSys"),
-                ("ProtectKernelTunables", "PKT"),
-                ("ProtectKernelModules", "PKM"),
-            ],
-        ),
-        (
-            "Capabilities",
-            vec![
-                ("NoNewPrivileges", "NNP"),
-                ("CapabilityBoundingSet", "CapB"),
-                ("AmbientCapabilities", "AmbC"),
-            ],
-        ),
-        (
-            "Seccomp",
-            vec![
-                ("SystemCallFilter", "SCF"),
-                ("SystemCallArchitectures", "SCA"),
-            ],
-        ),
-        (
-            "Runtime Guards",
-            vec![
-                ("MemoryDenyWriteExecute", "WX"),
-                ("LockPersonality", "Pers"),
-                ("RestrictRealtime", "RT"),
-                ("RestrictSUIDSGID", "SUID"),
-                ("RestrictNamespaces", "NS"),
-                ("RestrictAddressFamilies", "AF"),
-            ],
-        ),
+    let table_directives = vec![
+        "PrivateTmp",
+        "PrivateDevices",
+        "ProtectHome",
+        "ProtectSystem",
+        "NoNewPrivileges",
+        "CapabilityBoundingSet",
+        "MemoryDenyWriteExecute",
+        "RestrictSUIDSGID",
     ];
+
+    let avg_tone_class = if avg_score < 30.0 {
+        theme::health::CRITICAL_TEXT
+    } else {
+        theme::health::HEALTHY_TEXT
+    };
 
     rsx! {
         // Main content
         div { class: "space-y-4",
-            div { class: "flex gap-2 overflow-x-auto pb-1",
-                div { class: "min-w-[168px] flex-1",
-                    CompactMetricCard { label: "Scanned services", value: format!("{}", total_services), tone: "neutral" }
+            div { class: "hd-stat-row",
+                div { class: "hd-stat",
+                    div { class: "hd-stat-val {avg_tone_class}", "{avg_score.round()}%" }
+                    div { class: "hd-stat-label", "Avg score" }
                 }
-                div { class: "min-w-[168px] flex-1",
-                    CompactMetricCard { label: "Average score", value: format!("{avg_score:.1}"), tone: "neutral" }
+                div { class: "hd-stat",
+                    div { class: "hd-stat-val {theme::health::CRITICAL_TEXT}", "{vuln_count}" }
+                    div { class: "hd-stat-label", "VULN" }
                 }
-                div { class: "min-w-[168px] flex-1",
-                    CompactMetricCard { label: "High risk services", value: format!("{}", high_risk_count), tone: "danger" }
+                div { class: "hd-stat",
+                    div { class: "hd-stat-val {theme::health::WARNING_TEXT}", "{high_count}" }
+                    div { class: "hd-stat-label", "HIGH" }
                 }
-                div { class: "min-w-[168px] flex-1",
-                    CompactMetricCard { label: "Cumulative exposure", value: format!("{}", cumulative_exposure), tone: "warning" }
+                div { class: "hd-stat",
+                    div { class: "hd-stat-val text-amber-400", "{med_count}" }
+                    div { class: "hd-stat-label", "MED" }
                 }
-                div { class: "min-w-[168px] flex-1",
-                    CompactMetricCard { label: "Showing", value: format!("{}", filtered_count), tone: "neutral" }
+                div { class: "hd-stat",
+                    div { class: "hd-stat-val {theme::health::HEALTHY_TEXT}", "{ok_count}" }
+                    div { class: "hd-stat-label", "OK" }
+                }
+                div { class: "hd-stat",
+                    div { class: "hd-stat-val {theme::text::SECONDARY}", "{total_services}" }
+                    div { class: "hd-stat-label", "Total" }
+                }
+                div { class: "sd-callout sd-callout-info", style: "flex: 1; min-width: 260px; margin-left: 8px; padding: 8px 12px; display: flex; align-items: flex-start; gap: 8px;",
+                    svg {
+                        class: "shrink-0",
+                        width: "13",
+                        height: "13",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        view_box: "0 0 24 24",
+                        path {
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            d: "M12 9v4m0 4h.01M10.29 3.86l-7.4 12.82A2 2 0 004.61 20h14.78a2 2 0 001.72-3.32l-7.4-12.82a2 2 0 00-3.42 0z"
+                        }
+                    }
+                    p { class: "text-[12px] {theme::text::SECONDARY}", style: "flex: 1;",
+                        "Mirrors "
+                        code { class: "font-mono text-[11px]", "systemd-analyze security" }
+                        ". Higher score = more directives enforced. Set directives in NixOS via "
+                        code { class: "font-mono text-[11px]", "systemd.services.<name>.serviceConfig" }
+                        "."
+                    }
                 }
             }
 
-            // Filter bar (matching design standards)
-            div { class: "flex flex-wrap items-center gap-4 mb-4 mt-1",
-                style: "row-gap: 0.75rem;",
-                // Search input with icon (flex-1 with min/max width)
+            // Filter bar
+            div { class: "filterbar", style: "margin-bottom: 10px;",
                 div {
-                    class: "relative",
-                    style: "position: relative; flex: 1 1 auto; min-width: 240px; max-width: 420px;",
-                    // Search icon (using simple text character instead of SVG for reliability)
+                    class: "filter-search",
+                    style: "max-width: 280px;",
                     span {
                         class: "{theme::text::MUTED}",
-                        style: "position: absolute; left: 0.75rem; top: 50%; transform: translateY(-50%); pointer-events: none; font-size: 0.875rem; line-height: 1;",
-                        "🔍"
+                        style: "position: absolute; left: 0.75rem; top: 50%; transform: translateY(-50%); pointer-events: none; line-height: 1; display: inline-flex;",
+                        svg {
+                            width: "13",
+                            height: "13",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            view_box: "0 0 24 24",
+                            path {
+                                stroke_linecap: "round",
+                                stroke_linejoin: "round",
+                                d: "M21 21l-4.35-4.35m1.85-4.65a7 7 0 11-14 0 7 7 0 0114 0z"
+                            }
+                        }
                     }
                     input {
-                        class: "{theme::interactive::INPUT} {theme::interactive::FOCUS_RING} h-10 w-full rounded-lg",
-                        style: "padding-left: 2.25rem; min-height: 2.5rem;",
-                        placeholder: "Filter by service name or type…",
+                        class: "input focus-ring",
+                        placeholder: "Filter service…",
                         value: "{search_query}",
                         oninput: move |evt| search_query.set(evt.value()),
                     }
                 }
 
-                // Severity filter dropdown
-                select {
-                    class: "{theme::interactive::INPUT} {theme::interactive::FOCUS_RING} h-10 rounded-lg px-3 min-w-[170px]",
-                    style: "min-height: 2.5rem;",
-                    value: "{severity_filter}",
-                    onchange: move |evt| severity_filter.set(evt.value()),
-                    option { value: "all", "All severities" }
-                    option { value: "high_risk", "High risk" }
-                    option { value: "vulnerable", "Vulnerable" }
-                    option { value: "poorly_hardened", "Poorly hardened" }
-                    option { value: "moderately_hardened", "Moderate" }
-                    option { value: "well_hardened", "Well hardened" }
-                }
-
-                // Reset button (only show when filters active)
-                if has_active_filters {
-                    button {
-                        class: "ml-auto px-3 h-10 rounded-lg border {theme::surface::CARD_BORDER} text-xs font-medium {theme::text::SECONDARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors",
-                        onclick: move |_| {
-                            search_query.set(String::new());
-                            severity_filter.set("all".to_string());
-                            sort_mode.set("risk_desc".to_string());
-                        },
-                        "Reset"
+                div { class: "seg",
+                    for (value, label) in [
+                        ("all", "all"),
+                        ("vulnerable", "VULN"),
+                        ("poorly_hardened", "HIGH"),
+                        ("moderately_hardened", "MED"),
+                        ("well_hardened", "OK"),
+                    ] {
+                        button {
+                            class: if *severity_filter.read() == value { "active" } else { "" },
+                            onclick: {
+                                let value = value.to_string();
+                                move |_| severity_filter.set(value.clone())
+                            },
+                            "{label}"
+                        }
                     }
                 }
+
+                span { class: "filter-count text-xs {theme::text::MUTED}", "{filtered_count} services" }
             }
 
             if results.is_empty() {
@@ -2684,122 +2673,133 @@ fn HardeningTab(
                     }
                 }
             } else {
-                div { class: "{theme::presets::TABLE_CONTAINER}",
+                div { class: "{theme::presets::CARD} overflow-hidden",
                     div { class: "overflow-x-auto",
-                    table { class: "w-full min-w-[1540px] text-xs table-auto",
+                    table { class: "sys-table",
                         thead {
-                            tr { class: "{theme::surface::SUBTLE_BG} border-b {theme::surface::CARD_BORDER} uppercase tracking-wide text-[10px] {theme::text::MUTED}",
-                                th { class: "sticky top-0 z-10 px-2 py-2 text-left", colspan: "5", "Target" }
-                                for (group_name, directives) in directive_groups.iter() {
-                                    th { class: "sticky top-0 z-10 px-2 py-2 text-center", colspan: "{directives.len()}", "{group_name}" }
-                                }
-                                th { class: "sticky top-0 z-10 px-2 py-2 text-center", colspan: "2", "Audit" }
-                            }
                             tr { class: "{theme::surface::CARD_BG} border-b {theme::surface::CARD_BORDER} text-left {theme::text::SECONDARY}",
                                 th {
-                                    class: "sticky top-7 z-10 px-2 py-2 w-[68px] cursor-pointer {theme::interactive::HOVER_BG}",
-                                    onclick: move |_| {
-                                        let current = sort_mode();
-                                        sort_mode.set(if current == "risk_desc" { "score_asc".to_string() } else { "risk_desc".to_string() });
-                                    },
-                                    "Risk "
-                                    {if sort_mode() == "risk_desc" { "↓" } else { "" }}
+                                    class: "sticky top-0 z-10 px-2 py-2",
+                                    style: "width: 22%;",
+                                    "Service"
                                 }
+                                th { class: "sticky top-0 z-10 px-2 py-2 w-[80px]", "Risk" }
+                                th { class: "sticky top-0 z-10 px-2 py-2 w-[120px]", "Score" }
                                 th {
-                                    class: "sticky top-7 z-10 px-2 py-2 w-[72px] cursor-pointer {theme::interactive::HOVER_BG}",
-                                    onclick: move |_| {
-                                        let current = sort_mode();
-                                        sort_mode.set(if current == "score_desc" { "score_asc".to_string() } else { "score_desc".to_string() });
-                                    },
-                                    "Score "
-                                    {if sort_mode() == "score_desc" { "↓" } else if sort_mode() == "score_asc" { "↑" } else { "" }}
+                                    class: "sticky top-0 z-10 px-2 py-2 w-[84px]",
+                                    "User"
                                 }
-                                th {
-                                    class: "sticky top-7 z-10 px-2 py-2 w-[240px] cursor-pointer {theme::interactive::HOVER_BG}",
-                                    onclick: move |_| {
-                                        sort_mode.set("service_asc".to_string());
-                                    },
-                                    "Service unit "
-                                    {if sort_mode() == "service_asc" { "↑" } else { "" }}
-                                }
-                                th { class: "sticky top-7 z-10 px-2 py-2 w-[120px]", "Identity" }
-                                th { class: "sticky top-7 z-10 px-2 py-2 w-[112px]", "Findings" }
-                                for (_, directives) in directive_groups.iter() {
-                                    for (directive_name, short_label) in directives.iter().copied() {
-                                        th {
-                                            key: "hdr-{directive_name}",
-                                            class: "sticky top-7 z-10 px-1.5 py-2 text-center font-mono text-[10px]",
-                                            title: "{directive_name}",
-                                            "{short_label}"
-                                        }
+                                for directive_name in table_directives.iter() {
+                                    th {
+                                        key: "hdr-{directive_name}",
+                                        class: "sticky top-0 z-10 text-center",
+                                        style: "font-size:9px; letter-spacing:0.04em; text-align:center; padding:8px 4px;",
+                                        title: "{directive_name}",
+                                        "{directive_short_label(directive_name)}"
                                     }
                                 }
-                                th { class: "sticky top-7 z-10 px-2 py-2 text-center", "J" }
-                                th { class: "sticky top-7 z-10 px-2 py-2 text-center", "Detail" }
+                                th { class: "sticky top-0 z-10 px-2 py-2 w-[90px]", "Missing" }
+                                th { class: "sticky top-0 z-10 px-2 py-2 text-right w-[84px]", "" }
                             }
                         }
                         tbody {
                             for service in filtered_results.iter() {
                                 {
                                     let directives = directive_cells(service);
-                                    let risk_chip = risk_level_compact_badge_class(&service.risk_level);
-                                    let identity_label = service
+                                    let risk_color = risk_level_color(&service.risk_level);
+                                    let user_label = service
                                         .service_type
                                         .clone()
                                         .unwrap_or_else(|| "system".to_string());
-                                    let row_highlight = if matches!(service.risk_level.as_str(), "vulnerable" | "poorly_hardened") {
-                                        theme::health::CRITICAL_BG
+                                    let bar_width = service.hardening_score.clamp(0, 100);
+                                    let missing_text_class = if service.missing_directives_count > 15 {
+                                        theme::health::CRITICAL_TEXT
                                     } else {
-                                        ""
+                                        theme::text::MUTED
                                     };
 
                                     rsx! {
                                         tr {
                                             key: "svc-{service.id}",
-                                            class: "border-b {theme::surface::DIVIDER} {theme::interactive::HOVER_BG} {row_highlight}",
-                                            td { class: "px-2 py-1.5",
+                                            class: "border-b {theme::surface::DIVIDER} {theme::interactive::HOVER_BG}",
+                                            onclick: {
+                                                let service = service.clone();
+                                                move |_| {
+                                                    modal_tab.set("overview".to_string());
+                                                    selected_service.set(Some(service.clone()));
+                                                }
+                                            },
+                                            td { class: "px-2 py-2 font-mono text-[12px] {theme::text::PRIMARY} whitespace-nowrap font-semibold",
+                                                "{service.service_name}"
+                                                if !justifications_for(&service.service_name).is_empty() {
+                                                    div { class: "text-[10px] mt-0.5 {theme::text::MUTED}", "⚠ waiver" }
+                                                }
+                                            }
+                                            td { class: "px-2 py-2",
                                                 span {
-                                                    class: "inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide {risk_chip}",
+                                                    class: "chip",
+                                                    style: "color:{risk_color}; background:color-mix(in srgb, {risk_color} 13%, transparent); border:1px solid color-mix(in srgb, {risk_color} 30%, transparent); font-size:10px; font-weight:700;",
                                                     "{short_risk_label(&service.risk_level)}"
                                                 }
                                             }
-                                            td { class: "px-2 py-1.5 font-semibold {theme::text::PRIMARY}", "{service.hardening_score}" }
-                                            td { class: "px-2 py-1.5 font-mono text-[11px] {theme::text::PRIMARY} whitespace-nowrap", "{service.service_name}" }
-                                            td { class: "px-2 py-1.5 text-[11px] {theme::text::SECONDARY}",
-                                                "{identity_label}"
+                                            td { class: "px-2 py-2",
+                                                div { class: "flex items-center gap-2",
+                                                    div { class: "h-1.5 w-[60px] rounded-full {theme::surface::SUBTLE_BG} overflow-hidden",
+                                                        div { style: "height:100%; width: {bar_width}%; background: {risk_color};" }
+                                                    }
+                                                    span { class: "font-mono text-[11px] {theme::text::MUTED}", "{service.hardening_score}%" }
+                                                }
                                             }
-                                            td { class: "px-2 py-1.5 text-[11px] {theme::text::SECONDARY}",
-                                                span { class: "{theme::health::CRITICAL_TEXT}", "M:{service.missing_directives_count}" }
-                                                span { class: "mx-1 {theme::text::MUTED}", "·" }
-                                                span { class: "{theme::health::WARNING_TEXT}", "D:{service.disabled_directives_count}" }
+                                            td { class: "px-2 py-2",
+                                                span { class: "font-mono text-[11px] {theme::text::MUTED}", "{user_label}" }
                                             }
 
-                                            for (_, group_directives) in directive_groups.iter() {
-                                                for (directive_name, _) in group_directives.iter().copied() {
+                                            for directive_name in table_directives.iter() {
                                                     {
                                                         let status = directive_badge_content(directive_for(&directives, directive_name));
                                                         rsx! {
-                                                            td { class: "px-1 py-1 text-center",
-                                                                span {
-                                                                    class: "inline-flex min-w-[34px] justify-center rounded border px-1 py-0.5 text-[10px] font-semibold {status.class_name}",
-                                                                    title: "{status.title}",
-                                                                    "{status.label}"
+                                                            td { class: "px-1 py-2 text-center",
+                                                                if status.label == "on" || status.label == "partial" {
+                                                                    span { class: "text-emerald-400 text-[11px]", "✓" }
+                                                                } else {
+                                                                    span { class: "{theme::text::DISABLED} text-[11px]", "–" }
                                                                 }
                                                             }
                                                         }
                                                     }
-                                                }
                                             }
 
-                                            td { class: "px-2 py-1.5 text-center text-[11px] {theme::text::PRIMARY}", "{justifications_for(&service.service_name).len()}" }
-                                            td { class: "px-2 py-1.5 text-center",
+                                            td { class: "px-2 py-2",
+                                                span {
+                                                    class: "text-[11px] {missing_text_class}",
+                                                    "{service.missing_directives_count}/{directive_cells(service).len()}"
+                                                }
+                                            }
+                                            td { class: "px-2 py-2 text-right",
                                                 button {
-                                                    class: "px-2 py-1 rounded border {theme::surface::CARD_BORDER} text-[10px] {theme::text::SECONDARY} {theme::interactive::HOVER_BG}",
+                                                    class: "btn-icon focus-ring",
+                                                    aria_label: "View details",
+                                                    title: "View details",
                                                     onclick: {
                                                         let service = service.clone();
-                                                        move |_| selected_service.set(Some(service.clone()))
+                                                        move |evt| {
+                                                            evt.stop_propagation();
+                                                            modal_tab.set("overview".to_string());
+                                                            selected_service.set(Some(service.clone()));
+                                                        }
                                                     },
-                                                    "Open"
+                                                    svg {
+                                                        class: "w-3.5 h-3.5 inline-block",
+                                                        fill: "none",
+                                                        stroke: "currentColor",
+                                                        stroke_width: "2",
+                                                        view_box: "0 0 24 24",
+                                                        path {
+                                                            stroke_linecap: "round",
+                                                            stroke_linejoin: "round",
+                                                            d: "M5 12h14m-7-7l7 7-7 7"
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
@@ -2810,7 +2810,7 @@ fn HardeningTab(
                                 tr {
                                     td {
                                         class: "px-3 py-6 text-sm text-center {theme::text::SECONDARY}",
-                                        colspan: "{5 + directive_groups.iter().map(|(_, d)| d.len()).sum::<usize>() + 2}",
+                                        colspan: "{5 + table_directives.len() + 2}",
                                         "No services match the current filters."
                                     }
                                 }
@@ -2825,9 +2825,8 @@ fn HardeningTab(
         // Modal - rendered as sibling to main content for proper overlay
         if let Some(service) = selected_service() {
             div {
-                class: "fixed inset-0 z-50 bg-black/65 backdrop-blur-[1px] p-4 cf-modal-overlay",
+                class: "modal-backdrop cf-modal-overlay",
                 tabindex: "0",
-                style: "display: grid; place-items: center;",
                 onkeydown: move |evt| {
                     if evt.key() == Key::Escape && confirm_discard_unsaved_justification(!reason.read().trim().is_empty()) {
                         evt.prevent_default();
@@ -2840,42 +2839,36 @@ fn HardeningTab(
                     }
                 },
 
-                div {
-                    class: "relative w-full {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl shadow-2xl cursor-default overflow-hidden",
-                    style: "width: 100%; max-width: 52rem; max-height: 88vh; display: flex; flex-direction: column;",
+                    div {
+                        class: "modal cf-hardening-modal",
+                        style: "width:min(720px,98vw);",
                     onclick: move |evt| evt.stop_propagation(),
                     role: "dialog",
                     aria_modal: "true",
                     aria_labelledby: "hardening-modal-title",
 
-                    // Header
-                    div { class: "px-5 py-4 border-b {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG}",
+                    div { class: "modal-head cf-hardening-modal-header",
                         div { class: "flex items-start justify-between gap-3",
-                            div { class: "space-y-1.5 min-w-0 flex-1",
-                                div { class: "flex items-center gap-2 flex-wrap",
-                                    h3 { id: "hardening-modal-title", class: "text-lg font-semibold leading-tight {theme::text::PRIMARY} break-words", "{service.service_name}" }
-                                    span { class: "text-[10px] font-medium uppercase tracking-[0.16em] {theme::text::MUTED}", "Service hardening" }
+                            div { class: "space-y-2 min-w-0 flex-1",
+                                h3 { id: "hardening-modal-title", class: "text-base font-semibold leading-tight {theme::text::PRIMARY} break-words flex items-center", style: "margin:0; font-size:16px; gap:10px;",
                                     span {
-                                        class: "inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wide {risk_level_compact_badge_class(&service.risk_level)}",
-                                        span { class: "h-1.5 w-1.5 rounded-full bg-current opacity-80" }
+                                        class: "chip",
+                                        style: "color:{risk_level_color(&service.risk_level)}; background:color-mix(in srgb, {risk_level_color(&service.risk_level)} 13%, transparent); font-size:10px;",
                                         "{short_risk_label(&service.risk_level)}"
                                     }
+                                    span { class: "font-mono", "{service.service_name}" }
                                 }
-                                p { class: "text-sm {theme::text::SECONDARY}",
-                                    "Score "
-                                    span { class: "font-semibold {theme::text::PRIMARY}", "{service.hardening_score}/100" }
-                                    " · Missing "
-                                    span { class: "font-semibold {theme::health::CRITICAL_TEXT}", "{service.missing_directives_count}" }
-                                    " · Disabled "
-                                    span { class: "font-semibold {theme::health::WARNING_TEXT}", "{service.disabled_directives_count}" }
-                                    " · Notes "
-                                    span { class: "font-semibold {theme::text::PRIMARY}",
-                                        "{justifications.iter().filter(|j| j.service_name == service.service_name).count()}"
-                                    }
+                                p { class: "text-[12px] leading-5 {theme::text::MUTED}", style: "margin-top:4px;",
+                                    "Score: "
+                                    span { class: "font-semibold", style: "color: {risk_level_color(&service.risk_level)};", "{service.hardening_score}%" }
+                                    " · "
+                                    "{service.missing_directives_count} missing directives"
+                                    " · user: "
+                                    span { class: "font-mono", "{service_user_label(&service)}" }
                                 }
                             }
                             button {
-                                class: "shrink-0 h-8 w-8 rounded-lg border {theme::surface::CARD_BORDER} {theme::text::SECONDARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors",
+                                class: "btn-icon focus-ring",
                                 autofocus: "true",
                                 onclick: move |_| {
                                     if confirm_discard_unsaved_justification(!reason.read().trim().is_empty()) {
@@ -2883,42 +2876,190 @@ fn HardeningTab(
                                     }
                                 },
                                 aria_label: "Close service hardening modal",
-                                "✕"
+                                svg {
+                                    class: "w-4 h-4 inline-block",
+                                    fill: "none",
+                                    stroke: "currentColor",
+                                    stroke_width: "2",
+                                    view_box: "0 0 24 24",
+                                    path {
+                                        stroke_linecap: "round",
+                                        stroke_linejoin: "round",
+                                        d: "M6 18L18 6M6 6l12 12"
+                                    }
+                                }
                             }
                         }
                     }
 
-                    // Body
-                    div { class: "px-5 py-4 overflow-y-auto flex flex-col gap-3",
-                        if allow_mutations {
-                            section { class: "space-y-2.5 rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-3.5 py-3.5",
-                                div { class: "space-y-1",
-                                    p { class: "text-sm font-semibold {theme::text::PRIMARY}", "Add justification" }
-                                    p { class: "text-[10px] leading-4 {theme::text::SECONDARY}",
-                                        "Document why this service posture is acceptable (compensating controls, constrained runtime, or accepted risk)."
+                    div { class: "sd-tabs", style: "padding:0 22px; margin-top:0;",
+                        for (key, label) in [("overview", "Directives"), ("nix", "NixOS config"), ("all", "All checks"), ("justification", "Justification")] {
+                            {
+                                let tab_class = if *modal_tab.read() == key {
+                                    "sd-tab active"
+                                } else {
+                                    "sd-tab"
+                                };
+                                rsx! {
+                                    button {
+                                        class: "{tab_class}",
+                                        onclick: {
+                                            let key = key.to_string();
+                                            move |_| modal_tab.set(key.clone())
+                                        },
+                                        "{label}"
                                     }
                                 }
-                                textarea {
-                                    class: "w-full min-h-[108px] max-h-40 px-3 py-2.5 rounded-lg text-[13px] leading-5 resize-none overflow-y-auto {theme::interactive::INPUT} {theme::text::PRIMARY}",
-                                    style: "max-height: 10rem;",
-                                    placeholder: "Explain why this service posture is acceptable…",
+                            }
+                        }
+                    }
+
+                    div { class: "modal-body", style: "padding:16px 22px; max-height:60vh; overflow-y:auto;",
+                        if *modal_tab.read() == "overview" {
+                            section { class: "space-y-3",
+                                div { class: "grid gap-2", style: "grid-template-columns: 1fr 1fr;",
+                                    for directive in directive_cells(&service) {
+                                        {
+                                            let tile_class = if directive.enabled {
+                                                "bg-emerald-500/10 border-emerald-500/30"
+                                            } else {
+                                                "bg-red-500/10 border-red-500/30"
+                                            };
+                                            rsx! {
+                                                div { class: "flex items-center gap-2 px-3 py-2 rounded-lg border {tile_class}",
+                                                    span { class: "text-base", if directive.enabled { "✅" } else { "❌" } }
+                                                    div {
+                                                        div { class: "font-mono text-[12px] font-semibold {theme::text::PRIMARY}", "{directive.name}" }
+                                                        div { class: "text-[10px] {theme::text::MUTED}",
+                                                            if directive.enabled { "enforced" } else { "not set" }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } else if *modal_tab.read() == "nix" {
+                            section { class: "space-y-3",
+                                div { class: "sd-callout sd-callout-info", style: "display: flex; align-items: flex-start; gap: 8px;",
+                                    svg {
+                                        class: "shrink-0",
+                                        width: "13",
+                                        height: "13",
+                                        fill: "none",
+                                        stroke: "currentColor",
+                                        stroke_width: "2",
+                                        view_box: "0 0 24 24",
+                                        path {
+                                            stroke_linecap: "round",
+                                            stroke_linejoin: "round",
+                                            d: "M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8zm0 0v6h6"
+                                        }
+                                    }
+                                    p { class: "text-[12px] {theme::text::SECONDARY}", style: "flex: 1;",
+                                        "Add these options to your NixOS module to harden "
+                                        span { class: "font-mono {theme::text::PRIMARY}", "{service.service_name}" }
+                                        "."
+                                    }
+                                }
+                                pre { class: "sd-nix text-[12px] p-3 rounded-lg border {theme::surface::CARD_BORDER} overflow-x-auto", style: "max-height: 45vh;",
+                                    "systemd.services.\"{service.service_name}\".serviceConfig = {{\n  # tighten according to your workload\n  PrivateTmp = true;\n  PrivateDevices = true;\n  ProtectSystem = \"strict\";\n  ProtectHome = true;\n  NoNewPrivileges = true;\n}};"
+                                }
+                            }
+                        } else if *modal_tab.read() == "all" {
+                            section { class: "space-y-3",
+                                div { class: "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden",
+                                    div { class: "h-[320px] overflow-y-scroll pr-1 cf-modal-table-scroll cf-hardening-directives-scroll",
+                                        table { class: "sys-table w-full text-sm table-fixed",
+                                            thead {
+                                                tr { class: "sticky top-0 z-10 border-b {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG} text-left {theme::text::MUTED}",
+                                                    th { class: "px-3 py-2 text-[11px] font-medium", "Directive" }
+                                                    th { class: "px-3 py-2 text-[11px] font-medium", "Category" }
+                                                    th { class: "px-3 py-2 text-[11px] font-medium", "Points" }
+                                                    th { class: "px-3 py-2 text-[11px] font-medium", "Status" }
+                                                }
+                                            }
+                                            tbody {
+                                                for directive in directive_cells(&service) {
+                                                    tr { class: "border-b {theme::surface::DIVIDER}",
+                                                        td { class: "px-3 py-2 font-mono text-[12px] {theme::text::PRIMARY}", "{directive.name}" }
+                                                        td { class: "px-3 py-2 text-[12px] {theme::text::MUTED}", "security" }
+                                                        td { class: "px-3 py-2 font-mono text-[12px] {theme::text::MUTED}", "—" }
+                                                        td { class: "px-3 py-2",
+                                                            if directive.enabled {
+                                                                span { class: "chip chip-healthy", "enforced" }
+                                                            } else {
+                                                                span { class: "chip chip-critical", "missing" }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            // Justification tab
+                            section { class: "space-y-4",
+                                if allow_mutations {
+                                    div { class: "space-y-3",
+                                        div { class: "space-y-1.5",
+                                            h4 { class: "text-sm font-semibold {theme::text::PRIMARY}", "Add justification" }
+                                            p { class: "text-[12px] leading-5 {theme::text::MUTED}",
+                                                "Document why this service posture is acceptable (compensating controls, constrained runtime, or accepted risk)."
+                                            }
+                                        }
+                                        textarea {
+                                            class: "w-full min-h-[120px] rounded-lg text-[13px] leading-relaxed resize-none {theme::interactive::INPUT} {theme::text::PRIMARY} focus:ring-2 focus:ring-offset-1",
+                                            style: "max-height: 240px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 0.75rem 1rem;",
+                                            placeholder: "Example: This service runs in an isolated container with read-only filesystem and network restrictions enforced by podman security policies…",
                                     value: "{reason}",
                                     oninput: move |evt| {
                                         reason.set(evt.value());
                                         justification_error.set(None);
                                         justification_notice.set(None);
                                     },
-                                }
-                                if let Some(message) = justification_error() {
-                                    p { class: "text-[11px] {theme::health::CRITICAL_TEXT}", "{message}" }
-                                }
-                                if let Some(message) = justification_notice() {
-                                    p { class: "text-[11px] {theme::health::HEALTHY_TEXT}", "{message}" }
-                                }
-                                div { class: "flex flex-col items-stretch gap-2 pt-1 sm:flex-row sm:items-center sm:justify-between",
-                                    p { class: "text-[11px] leading-5 {theme::text::MUTED}", "Required for audit history when accepting a weaker service posture." }
-                                    button {
-                                        class: "h-9 px-3 rounded-lg {theme::interactive::PRIMARY_BTN} text-xs font-medium {theme::interactive::FOCUS_RING} self-start sm:self-auto",
+                                        }
+                                        if let Some(message) = justification_error() {
+                                            div { class: "flex items-start gap-2 p-3 rounded-lg bg-red-500/10 border border-red-500/30",
+                                                svg {
+                                                    class: "w-4 h-4 shrink-0 mt-0.5",
+                                                    fill: "none",
+                                                    stroke: "currentColor",
+                                                    stroke_width: "2",
+                                                    view_box: "0 0 24 24",
+                                                    path {
+                                                        stroke_linecap: "round",
+                                                        stroke_linejoin: "round",
+                                                        d: "M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                                                    }
+                                                }
+                                                p { class: "text-[12px] {theme::health::CRITICAL_TEXT}", "{message}" }
+                                            }
+                                        }
+                                        if let Some(message) = justification_notice() {
+                                            div { class: "flex items-start gap-2 p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/30",
+                                                svg {
+                                                    class: "w-4 h-4 shrink-0 mt-0.5",
+                                                    fill: "none",
+                                                    stroke: "currentColor",
+                                                    stroke_width: "2",
+                                                    view_box: "0 0 24 24",
+                                                    path {
+                                                        stroke_linecap: "round",
+                                                        stroke_linejoin: "round",
+                                                        d: "M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
+                                                    }
+                                                }
+                                                p { class: "text-[12px] {theme::health::HEALTHY_TEXT}", "{message}" }
+                                            }
+                                        }
+                                        div { class: "flex items-center justify-between gap-3 pt-1",
+                                            p { class: "text-[11px] leading-5 {theme::text::MUTED}", "Required for audit compliance when accepting weaker posture." }
+                                            button {
+                                                class: "px-4 py-2 rounded-lg {theme::interactive::PRIMARY_BTN} text-sm font-medium {theme::interactive::FOCUS_RING} transition-colors",
                                         disabled: is_saving_justification() || reason.read().trim().is_empty(),
                                         onclick: {
                                             let service_name = service.service_name.clone();
@@ -2956,89 +3097,44 @@ fn HardeningTab(
                                                 });
                                             }
                                         },
-                                        if is_saving_justification() {
-                                            "Saving…"
-                                        } else {
-                                            "Save justification"
+                                                if is_saving_justification() {
+                                                    "Saving…"
+                                                } else {
+                                                    "Save justification"
+                                                }
+                                            }
                                         }
                                     }
                                 }
-                            }
-                        }
 
-                        section { class: "space-y-3",
-                            div { class: "flex items-end justify-between gap-2 flex-wrap",
-                                div { class: "space-y-1",
-                                    p { class: "text-sm font-medium {theme::text::PRIMARY}", "Control detail" }
-                                    p { class: "text-[10px] leading-4 {theme::text::SECONDARY}",
-                                        "Showing the most relevant controls first so you can quickly understand why this service scored as it did."
+                                div { class: "space-y-3 pt-2",
+                                    div { class: "border-t {theme::surface::DIVIDER} pt-4" }
+                                    div { class: "space-y-1.5",
+                                        h4 { class: "text-sm font-semibold {theme::text::PRIMARY}", "Justification history" }
+                                        p { class: "text-[12px] leading-5 {theme::text::MUTED}", "Audit trail of accepted risk documentation for this service." }
                                     }
-                                }
-                                span { class: "text-[11px] {theme::text::MUTED}", "status · points" }
-                            }
-
-                            if directive_cells(&service).is_empty() {
-                                div { class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-4 py-4 text-sm {theme::text::SECONDARY}",
-                                    "No directive details were returned for this service."
-                                }
-                            } else {
-                                div { class: "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden",
-                                    div { class: "h-[260px] overflow-y-scroll pr-1 cf-modal-table-scroll",
-                                        style: "scrollbar-gutter: stable both-edges;",
-                                        table { class: "w-full text-sm table-fixed",
-                                            thead {
-                                                tr { class: "sticky top-0 z-10 border-b {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG} text-left {theme::text::MUTED}",
-                                                    th { class: "px-3 py-2 text-[11px] font-medium w-[52%]", "Directive" }
-                                                    th { class: "px-3 py-2 text-[11px] font-medium text-center w-[22%]", "Status" }
-                                                    th { class: "px-3 py-2 text-[11px] font-medium text-right w-[26%]", "Points" }
-                                                }
-                                            }
-                                            tbody {
-                                                for directive in modal_directives(&service) {
-                                                    tr { class: "border-b {theme::surface::DIVIDER} {theme::interactive::HOVER_BG} last:border-b-0",
-                                                        td { class: "px-3 py-2 font-mono text-[12px] leading-5 {theme::text::PRIMARY} break-all", "{directive.name}" }
-                                                        td { class: "px-3 py-2 text-center",
+                                    if justifications.iter().all(|j| j.service_name != service.service_name) {
+                                        div { class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-4 py-3 text-center",
+                                            p { class: "text-[12px] {theme::text::MUTED}", "No justifications recorded yet. Add one above to document accepted risks." }
+                                        }
+                                    } else {
+                                        div { class: "flex flex-col gap-2.5 max-h-[280px] overflow-y-auto pr-1",
+                                            for item in justifications.iter().filter(|j| j.service_name == service.service_name) {
+                                                div { class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-3.5 py-3 space-y-2",
+                                                    div { class: "flex items-center justify-between gap-2",
+                                                        div { class: "flex items-center gap-2 flex-wrap",
                                                             span {
-                                                                class: "inline-flex rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide {directive_badge_content(Some(&directive)).class_name}",
-                                                                title: "{directive_badge_content(Some(&directive)).title}",
-                                                                "{directive_badge_content(Some(&directive)).label}"
+                                                                class: "inline-flex items-center rounded-md border {theme::surface::CARD_BORDER} px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide {theme::text::MUTED}",
+                                                                "{item.category.clone().unwrap_or_else(|| \"service\".to_string())}"
+                                                            }
+                                                            if let Some(directive) = item.directive_name.clone() {
+                                                                span { class: "font-mono text-[11px] {theme::text::MUTED} bg-black/5 dark:bg-white/5 px-2 py-0.5 rounded", "{directive}" }
                                                             }
                                                         }
-                                                        td { class: "px-3 py-2 text-right font-mono text-[12px] {theme::text::SECONDARY}",
-                                                            "{directive.points}/{directive.max_points}"
-                                                        }
                                                     }
+                                                    p { class: "text-[13px] {theme::text::PRIMARY} leading-relaxed", style: "padding-left: 0.25rem;", "{item.reason}" }
                                                 }
                                             }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        section { class: "space-y-2.5",
-                            div { class: "space-y-1",
-                                p { class: "text-sm font-medium {theme::text::PRIMARY}", "Existing justification history" }
-                                p { class: "text-[12px] leading-5 {theme::text::MUTED}", "Previous notes are kept here for audit context." }
-                            }
-                            if justifications.iter().all(|j| j.service_name != service.service_name) {
-                                div { class: "rounded-xl border {theme::surface::CARD_BORDER} px-3 py-3 text-[12px] {theme::text::SECONDARY}",
-                                    "No justifications yet."
-                                }
-                            } else {
-                                div { class: "flex flex-col gap-2 max-h-[170px] overflow-y-auto pr-1",
-                                    for item in justifications.iter().filter(|j| j.service_name == service.service_name) {
-                                        div { class: "rounded-xl border {theme::surface::CARD_BORDER} px-3 py-2.5 text-[12px] space-y-1.5",
-                                            div { class: "flex items-center gap-1.5 flex-wrap",
-                                                span {
-                                                    class: "inline-flex items-center rounded border {theme::surface::CARD_BORDER} px-1.5 py-0.5 text-[10px] font-medium {theme::text::SECONDARY}",
-                                                    "{item.category.clone().unwrap_or_else(|| \"uncategorized\".to_string())}"
-                                                }
-                                                if let Some(directive) = item.directive_name.clone() {
-                                                    span { class: "font-mono text-[10px] {theme::text::MUTED}", "{directive}" }
-                                                }
-                                            }
-                                            p { class: "{theme::text::SECONDARY} leading-5", "{item.reason}" }
                                         }
                                     }
                                 }
@@ -3047,9 +3143,25 @@ fn HardeningTab(
                     }
 
                     // Footer
-                    div { class: "px-5 py-3.5 border-t {theme::surface::DIVIDER} flex justify-end gap-2",
+                    div { class: "modal-foot",
                         button {
-                            class: "h-9 px-3 rounded-lg border {theme::surface::CARD_BORDER} text-xs font-medium {theme::text::SECONDARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors",
+                            class: "btn btn-ghost focus-ring xs",
+                            svg {
+                                class: "w-3 h-3 inline-block",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                view_box: "0 0 24 24",
+                                path {
+                                    stroke_linecap: "round",
+                                    stroke_linejoin: "round",
+                                    d: "M12 3v12m0 0l4-4m-4 4l-4-4M5 21h14"
+                                }
+                            }
+                            "Export report"
+                        }
+                        button {
+                            class: "btn btn-primary focus-ring",
                             onclick: move |_| {
                                 if confirm_discard_unsaved_justification(!reason.read().trim().is_empty()) {
                                     selected_service.set(None);
@@ -3278,11 +3390,38 @@ fn severity_matches(service: &HardeningServiceResultResponse, filter_value: &str
 
 fn short_risk_label(level: &str) -> &'static str {
     match level {
-        "well_hardened" => "GOOD",
-        "moderately_hardened" => "MOD",
-        "poorly_hardened" => "POOR",
+        "well_hardened" => "OK",
+        "moderately_hardened" => "MED",
+        "poorly_hardened" => "HIGH",
         _ => "VULN",
     }
+}
+
+fn risk_level_color(level: &str) -> &'static str {
+    match level {
+        "well_hardened" => "#34d399",
+        "moderately_hardened" => "#fbbf24",
+        "poorly_hardened" => "#f97316",
+        _ => "#f87171",
+    }
+}
+
+fn directive_short_label(name: &str) -> String {
+    let mut expanded = String::with_capacity(name.len() + 8);
+    for (idx, ch) in name.chars().enumerate() {
+        if idx > 0 && ch.is_uppercase() {
+            expanded.push(' ');
+        }
+        expanded.push(ch);
+    }
+    expanded.trim().chars().take(4).collect::<String>()
+}
+
+fn service_user_label(service: &HardeningServiceResultResponse) -> String {
+    service
+        .service_type
+        .clone()
+        .unwrap_or_else(|| "system".to_string())
 }
 
 fn risk_level_compact_badge_class(level: &str) -> String {
