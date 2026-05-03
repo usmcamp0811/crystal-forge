@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@ai-agent'
 created_date: '2026-04-30 21:32'
-updated_date: '2026-05-02 13:29'
+updated_date: '2026-05-03 01:51'
 labels:
   - ui
   - ux
@@ -300,4 +300,28 @@ All major functional and visual parity requirements met.
 - JSX: `btn btn-ghost focus-ring xs` and `btn btn-primary focus-ring`
 - Rust: Custom classes
 - **FIX: Use standard btn classes**
+
+=== CRITICAL REVIEW FINDINGS ===
+
+CRITICAL P0 DATA MISMATCHES:
+
+Queue table line 2 + detail panel subtitle + log modal subtitle all show commit message (summary) instead of derivation path (b.drv). JSX shows truncated derivation identifier on these lines.
+
+MEDIUM P1 ICON ISSUES:
+
+Refresh/Logs/Cancel buttons use Unicode fallbacks instead of proper icon system. JSX uses Icon component at 14px size.
+
+CONFIRMED CORRECT:
+
+Page spacing, semantic classes, backdrop, modal sizing, log rendering, worker cards, tabs, status chips, em-dash all match JSX.
+
+REQUIRED FIXES:
+
+1. Replace summary with derivation-like identifier in 3 locations
+
+2. Implement proper icon system replacing Unicode
+
+3. Document acceptable differences (auto-scroll, progress data)
+
+4. Provide side-by-side screenshots in MR
 <!-- SECTION:NOTES:END -->
