@@ -120,6 +120,10 @@ pub enum BuildAction {
 pub struct WorkerItem {
     pub id: String,
     pub name: String,
+    pub host: Option<String>,
+    pub arch: Option<String>,
+    pub cpu_cores: Option<i32>,
+    pub memory_gb: Option<i32>,
     pub active_slots: usize,
     pub total_slots: usize,
     pub queue_depth: usize,
@@ -155,7 +159,28 @@ pub struct BuildItem {
     pub summary: String,
 }
 
+/// Helper methods for BuildItem display.
 impl BuildItem {
+    /// Package name for display (JSX: b.pkg).
+    /// Uses the hostname/system name as the package identifier.
+    pub fn pkg(&self) -> &str {
+        &self.hostname
+    }
+
+    /// Derivation path for display (JSX: b.drv).
+    /// Synthesizes a Nix store path using commit hash and hostname.
+    pub fn drv(&self) -> String {
+        // Format: /nix/store/{commit_prefix}xxxx-nixos-system-{hostname}.drv
+        let commit_prefix = if self.commit.len() >= 7 {
+            &self.commit[..7]
+        } else {
+            &self.commit
+        };
+        format!("/nix/store/{}xxxx-nixos-system-{}.drv", commit_prefix, self.hostname)
+    }
+
+    
+    /// Status label for display.
     pub fn status_label(&self) -> &'static str {
         self.status.label()
     }
@@ -339,7 +364,8 @@ pub fn selected_build_data(selected_id: Option<i32>, builds: &[BuildItem]) -> Op
     if let Some(id) = selected_id {
         builds.iter().find(|b| b.id == id).cloned()
     } else {
-        builds.first().cloned()
+        // JSX: selected defaults to null, not first build
+        None
     }
 }
 
@@ -350,6 +376,10 @@ pub fn mock_workers() -> Vec<WorkerItem> {
         WorkerItem {
             id: "worker-a".to_string(),
             name: "worker-a".to_string(),
+            host: Some("worker-a.lab".to_string()),
+            arch: Some("x86_64-linux".to_string()),
+            cpu_cores: Some(16),
+            memory_gb: Some(64),
             active_slots: 2,
             total_slots: 4,
             queue_depth: 6,
@@ -358,6 +388,10 @@ pub fn mock_workers() -> Vec<WorkerItem> {
         WorkerItem {
             id: "worker-b".to_string(),
             name: "worker-b".to_string(),
+            host: Some("worker-b.lab".to_string()),
+            arch: Some("x86_64-linux".to_string()),
+            cpu_cores: Some(16),
+            memory_gb: Some(64),
             active_slots: 3,
             total_slots: 4,
             queue_depth: 4,

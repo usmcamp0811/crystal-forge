@@ -1,13 +1,18 @@
 //! Metrics row component for the builds control center.
 
 use dioxus::prelude::*;
+use crate::theme;
 
 use super::helpers::BuildStatus;
 use super::helpers::WorkerItem;
 
 /// Metrics row showing build queue and worker statistics.
 #[component]
-pub fn MetricsRow(workers: Vec<WorkerItem>, builds: Vec<super::helpers::BuildItem>) -> Element {
+pub fn MetricsRow(
+    workers: Vec<WorkerItem>,
+    builds: Vec<super::helpers::BuildItem>,
+    history_builds: Vec<super::helpers::BuildItem>,
+) -> Element {
     let building = builds
         .iter()
         .filter(|b| matches!(b.status, BuildStatus::Building | BuildStatus::Stopping))
@@ -16,7 +21,7 @@ pub fn MetricsRow(workers: Vec<WorkerItem>, builds: Vec<super::helpers::BuildIte
         .iter()
         .filter(|b| matches!(b.status, BuildStatus::Queued))
         .count();
-    let failed = builds
+    let failed_24h = history_builds
         .iter()
         .filter(|b| matches!(b.status, BuildStatus::Failed))
         .count();
@@ -24,30 +29,55 @@ pub fn MetricsRow(workers: Vec<WorkerItem>, builds: Vec<super::helpers::BuildIte
         .iter()
         .filter(|w| w.status == super::helpers::WorkerStatus::Running)
         .count();
+    let slot_total = workers.iter().map(|w| w.total_slots).sum::<usize>();
+    let slot_used = workers.iter().map(|w| w.active_slots).sum::<usize>();
+    let slot_pct = if slot_total == 0 {
+        0
+    } else {
+        ((slot_used as f64 / slot_total as f64) * 100.0).round() as i32
+    };
 
+    // JSX: <div className="stat-strip">
     rsx! {
         div {
-            class: "grid grid-cols-2 md:grid-cols-4 gap-3",
-            MetricBadge { label: "Building", value: building.to_string(), tone_class: "cf-metric-building" }
-            MetricBadge { label: "Queued", value: queued.to_string(), tone_class: "cf-metric-queued" }
-            MetricBadge { label: "Failed", value: failed.to_string(), tone_class: "cf-metric-failed" }
-            MetricBadge {
+            class: "stat-strip",
+            Stat { label: "Building", value: building.to_string(), color: "#60a5fa" }
+            Stat { label: "Queued", value: queued.to_string(), color: "#a78bfa" }
+            Stat { label: "Failed 24h", value: failed_24h.to_string(), color: "#f87171" }
+            Stat {
                 label: "Workers",
                 value: format!("{active_workers}/{}", workers.len()),
-                tone_class: "cf-metric-workers",
+                color: "#34d399"
+            }
+            Stat {
+                label: "Slot usage",
+                value: format!("{slot_pct}%"),
+                color: "#22d3ee"
             }
         }
     }
 }
 
-/// Individual metric badge component.
+/// Individual stat card matching JSX structure
+/// JSX: <div className="stat">
 #[component]
-fn MetricBadge(label: &'static str, value: String, tone_class: &'static str) -> Element {
+fn Stat(label: &'static str, value: String, color: &'static str) -> Element {
     rsx! {
         div {
-            class: "rounded-lg border px-3 py-2 {tone_class}",
-            p { class: "text-[10px] uppercase tracking-wide text-gray-400", "{label}" }
-            p { class: "text-sm text-white font-semibold", "{value}" }
+            class: "stat",
+            // JSX: <span className="stat-accent" style={{ "--stat-color": s.color }} />
+            span {
+                class: "stat-accent",
+                style: "--stat-color: {color};"
+            }
+            // JSX: <div className="stat-label">{s.label}</div>
+            div { class: "stat-label", "{label}" }
+            // JSX: <div className="stat-value" style={{ color:s.color }}>{s.val}</div>
+            div {
+                class: "stat-value",
+                style: "color: {color};",
+                "{value}"
+            }
         }
     }
 }

@@ -4,7 +4,7 @@ use dioxus::prelude::*;
 
 use crate::theme;
 
-use super::helpers::{WorkerAction, WorkerItem, worker_status_class};
+use super::helpers::{WorkerAction, WorkerItem};
 
 /// Worker strip showing all build workers and their status.
 #[component]
@@ -12,49 +12,58 @@ pub fn WorkerStrip(
     workers: Vec<WorkerItem>,
     on_action: EventHandler<(String, WorkerAction)>,
 ) -> Element {
+    let _ = &on_action;
     rsx! {
         div {
-            class: "grid grid-cols-1 lg:grid-cols-2 gap-3",
+            class: "grid gap-2",
+            style: "grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));",
             for worker in workers {
                 {
-                    let worker_id = worker.id.clone();
+                    let slot_pct = if worker.total_slots == 0 {
+                        0
+                    } else {
+                        ((worker.active_slots as f64 / worker.total_slots as f64) * 100.0).round() as i32
+                    };
                     rsx! {
+                        // JSX: <div className="card" style={{ padding:"14px 16px", display:"flex", flexDirection:"column", gap:10 }}>
                         div {
                             key: "{worker.id}",
-                            class: "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden shadow-sm",
+                            class: "card px-4 py-[14px] space-y-[10px]",
                             div {
-                                class: "px-4 py-3 border-b border-gray-800 flex items-center justify-between cf-worker-header-gradient",
+                                class: "flex items-center justify-between gap-2",
                                 div {
-                                    p { class: "text-sm text-white font-semibold", "{worker.name}" }
-                                    p { class: "text-xs {theme::text::SECONDARY}", "{worker.active_slots}/{worker.total_slots} active slots" }
+                                    p { class: "text-[13px] leading-[1.15] text-white font-semibold", "{worker.name}" }
+                                if let Some(host) = worker.host.clone() {
+                                    // JSX: fontSize:11
+                                    p { class: "text-[11px] font-mono {theme::text::MUTED} whitespace-nowrap overflow-hidden text-ellipsis", "{host}" }
+                                }
                                 }
                                 span {
-                                    class: "inline-flex px-2 py-1 text-[10px] uppercase rounded border {worker_status_class(worker.status)}",
-                                    "{worker.status_label()}"
+                                    class: "inline-flex px-2 py-0.5 rounded text-[10px] font-medium",
+                                    style: "color: {status_color(worker.status)}; background-color: {status_bg(worker.status)};",
+                                    "{status_text(worker.status)}"
                                 }
                             }
                             div {
-                                class: "px-4 py-3 bg-gray-900/80 flex items-center justify-between",
-                                p { class: "text-xs text-gray-400", "Queue depth: {worker.queue_depth}" }
+                                class: "text-[11px] {theme::text::SECONDARY} flex items-center gap-3",
+                                if let Some(arch) = worker.arch.clone() {
+                                    span { class: "font-mono", "{arch}" }
+                                }
+                                if let (Some(cores), Some(mem)) = (worker.cpu_cores, worker.memory_gb) {
+                                    span { "{cores}c · {mem}GB" }
+                                }
+                            }
+                            div {
                                 div {
-                                    class: "inline-flex items-center gap-2",
-                                    WorkerTextAction {
-                                        label: "Start",
-                                        on_click: {
-                                            let worker_id = worker_id.clone();
-                                            move |_| on_action.call((worker_id.clone(), WorkerAction::Start))
-                                        },
-                                    }
-                                    WorkerTextAction {
-                                        label: "Pause",
-                                        on_click: {
-                                            let worker_id = worker_id.clone();
-                                            move |_| on_action.call((worker_id.clone(), WorkerAction::Pause))
-                                        },
-                                    }
-                                    WorkerTextAction {
-                                        label: "Drain",
-                                        on_click: move |_| on_action.call((worker_id.clone(), WorkerAction::Drain)),
+                                    class: "flex items-center justify-between text-[11px] {theme::text::MUTED} mb-1",
+                                    span { "Slots" }
+                                    span { "{worker.active_slots}/{worker.total_slots}" }
+                                }
+                                div {
+                                    class: "h-1 rounded-full bg-slate-800 overflow-hidden",
+                                    div {
+                                        class: "h-full rounded-full transition-all",
+                                        style: "width: {slot_pct}%; background-color: {status_color(worker.status)};",
                                     }
                                 }
                             }
@@ -66,14 +75,26 @@ pub fn WorkerStrip(
     }
 }
 
-/// Worker text action button component.
-#[component]
-fn WorkerTextAction(label: &'static str, on_click: EventHandler<MouseEvent>) -> Element {
-    rsx! {
-        button {
-            class: "text-xs px-2 py-1 rounded transition-colors cf-action-link",
-            onclick: move |evt| on_click.call(evt),
-            "{label}"
-        }
+fn status_color(status: super::helpers::WorkerStatus) -> &'static str {
+    match status {
+        super::helpers::WorkerStatus::Running => "#34d399",
+        super::helpers::WorkerStatus::Paused => "#fbbf24",
+        super::helpers::WorkerStatus::Draining => "#60a5fa",
+    }
+}
+
+fn status_bg(status: super::helpers::WorkerStatus) -> &'static str {
+    match status {
+        super::helpers::WorkerStatus::Running => "rgba(52, 211, 153, 0.14)",
+        super::helpers::WorkerStatus::Paused => "rgba(251, 191, 36, 0.14)",
+        super::helpers::WorkerStatus::Draining => "rgba(96, 165, 250, 0.14)",
+    }
+}
+
+fn status_text(status: super::helpers::WorkerStatus) -> &'static str {
+    match status {
+        super::helpers::WorkerStatus::Running => "running",
+        super::helpers::WorkerStatus::Paused => "paused",
+        super::helpers::WorkerStatus::Draining => "draining",
     }
 }
