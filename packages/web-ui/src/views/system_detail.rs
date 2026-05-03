@@ -3147,7 +3147,7 @@ fn HardeningTab(
                                                             }
                                                         }
                                                     }
-                                                    p { class: "text-[13px] {theme::text::PRIMARY} leading-relaxed", "{item.reason}" }
+                                                    p { class: "text-[13px] {theme::text::PRIMARY} leading-relaxed", style: "padding-left: 0.25rem;", "{item.reason}" }
                                                 }
                                             }
                                         }
