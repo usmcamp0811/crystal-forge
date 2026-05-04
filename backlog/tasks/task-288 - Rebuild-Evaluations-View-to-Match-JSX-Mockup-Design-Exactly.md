@@ -4,7 +4,7 @@ title: Rebuild Evaluations View to Match JSX Mockup Design Exactly
 status: Backlog
 assignee: []
 created_date: '2026-05-04 01:18'
-updated_date: '2026-05-04 01:20'
+updated_date: '2026-05-04 01:21'
 labels:
   - ui
   - web-ui
@@ -20,6 +20,7 @@ references:
   - /home/mcamp/code/crystal-forge/dev/packages/web-ui/src/views/evaluations.rs
   - >-
     /home/mcamp/code/crystal-forge/dev/packages/web-ui/src/components/eval_log_modal.rs
+  - backlog/docs/doc-6 - TASK-288-Complete-Implementation-Checklist.md
 priority: high
 ---
 
