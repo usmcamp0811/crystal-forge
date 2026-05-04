@@ -1,10 +1,10 @@
 ---
 id: TASK-288
 title: Rebuild Evaluations View to Match JSX Mockup Design Exactly
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-05-04 01:18'
-updated_date: '2026-05-04 01:27'
+updated_date: '2026-05-04 01:28'
 labels:
   - ui
   - web-ui
@@ -151,3 +151,9 @@ This is a **complete rewrite**, not an incremental update. The existing card-bas
 3. Responsive testing
 4. Real-time log streaming verification
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: agent on gray in ~/code/crystal-forge/TASK-288-rebuild-evaluations-view
+<!-- SECTION:NOTES:END -->
