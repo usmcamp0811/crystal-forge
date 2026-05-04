@@ -11,19 +11,21 @@ use web_sys::{Node, window};
 ///
 /// Examples:
 /// - `git+https://...#nixosConfigurations.test.gray` → `gray`
-/// - `git+https://...#nixosConfigurations.gray` → `gray`
+/// - `nixosConfigurations.test.gray` → `gray`
+/// - `nixosConfigurations.gray` → `gray`
 /// - `gray` → `gray`
 pub fn extract_system_name(hostname: &str) -> &str {
-    // If there's a # (flake attribute path), extract everything after it
-    if let Some(attr_path) = hostname.split('#').nth(1) {
-        // Split by dots and take the last segment (the actual system name)
-        // Examples:
-        //   nixosConfigurations.test.gray -> gray
-        //   nixosConfigurations.gray -> gray
-        attr_path.split('.').last().unwrap_or(attr_path)
+    // Split on # to handle full flake refs, use everything after # or the whole string
+    let attr_path = hostname
+        .rsplit_once('#')
+        .map(|(_, attr_path)| attr_path)
+        .unwrap_or(hostname);
+
+    // If this is a nixosConfigurations path, extract the last segment
+    if attr_path.starts_with("nixosConfigurations.") {
+        attr_path.rsplit('.').next().unwrap_or(attr_path)
     } else {
-        // No flake path, just return the hostname as-is
-        hostname
+        attr_path
     }
 }
 
@@ -570,5 +572,21 @@ pub fn mock_artifacts(build_id: i32) -> Vec<BuildArtifact> {
                 hash: "sha256-csY0+fZq0xobLqD7zh9sPXoW3DkQMY8qv5cz4S9xRMo=",
             },
         ],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_system_name;
+
+    #[test]
+    fn extracts_system_name_from_flake_attribute_paths() {
+        assert_eq!(extract_system_name("nixosConfigurations.daly"), "daly");
+        assert_eq!(extract_system_name("nixosConfigurations.test.gray"), "gray");
+        assert_eq!(
+            extract_system_name("git+https://example.test/repo#nixosConfigurations.test.gray"),
+            "gray"
+        );
+        assert_eq!(extract_system_name("gray"), "gray");
     }
 }
