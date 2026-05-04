@@ -4,6 +4,7 @@ title: Rebuild Evaluations View to Match JSX Mockup Design Exactly
 status: Backlog
 assignee: []
 created_date: '2026-05-04 01:18'
+updated_date: '2026-05-04 01:20'
 labels:
   - ui
   - web-ui
@@ -101,3 +102,51 @@ This is broken into 15 major sections (A-O) with ~150 specific tasks. See accept
 - [ ] #35 All 15 structural differences resolved (see task description)
 - [ ] #36 ~150 detailed implementation tasks completed (see full checklist in references)
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+## IMPLEMENTATION APPROACH
+
+This is a **complete rewrite**, not an incremental update. The existing card-based implementation must be replaced with a table-based design.
+
+### Phase 1: Structure (Priority 1)
+1. Replace two-column layout with single-column
+2. Build stat strip at page top (5 metrics)
+3. Restructure page header with correct buttons
+4. Wrap tabs in card container
+
+### Phase 2: Active Queue Table (Priority 1)
+1. Delete all card-based queue components
+2. Build HTML table with 8 columns
+3. Implement each column as specified (see detailed checklist in notes)
+4. Wire up move/cancel/log actions
+
+### Phase 3: History Table (Priority 2)
+1. Reorder and combine columns
+2. Add Policy column
+3. Replace action buttons with icons
+4. Update filter bar to use segmented control + select
+
+### Phase 4: Log Modal (Priority 2)
+1. Remove inline log card
+2. Build modal-only log viewer
+3. Implement structured log line display
+4. Add verbosity filtering and blinking cursor
+
+### Phase 5: CSS & Icons (Priority 3)
+1. Create or import Icon component
+2. Replace ALL Tailwind classes with design system classes
+3. Apply exact typography and spacing
+
+### Phase 6: Data & Behavior (Priority 3)
+1. Update data models with new fields
+2. Implement move/cancel/log functions
+3. Remove drag-drop and selection behavior
+
+### Phase 7: Testing (Priority 4)
+1. Visual comparison with mockup
+2. Interaction testing
+3. Responsive testing
+4. Real-time log streaming verification
+<!-- SECTION:PLAN:END -->
