@@ -108,7 +108,7 @@ fn render_log_line(line: &str) -> Element {
     } else if rest.contains("info") || rest.contains("INFO") {
         ("sd-log-info", "INFO")
     } else {
-        ("sd-log-info", "INFO")  // Default to info level
+        ("sd-log-info", "INFO") // Default to info level
     };
 
     // JSX: <div className="sd-log-line sd-log-${lvl}">
