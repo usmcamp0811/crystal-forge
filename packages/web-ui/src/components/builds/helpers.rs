@@ -170,17 +170,15 @@ impl BuildItem {
     /// Derivation path for display (JSX: b.drv).
     /// Synthesizes a Nix store path using commit hash and clean system name.
     pub fn drv(&self) -> String {
-        // Format: /nix/store/{commit_prefix}xxxx-nixos-system-{clean_name}.drv
-        let commit_prefix = if self.commit.len() >= 7 {
-            &self.commit[..7]
+        // Format: /nix/store/{hash_prefix}-nixos-system-{clean_name}.drv
+        // Use first 11 chars of commit to create plausible store hash prefix
+        let hash_prefix = if self.commit.len() >= 11 {
+            &self.commit[..11]
         } else {
             &self.commit
         };
         let clean_name = extract_system_name(&self.hostname);
-        format!(
-            "/nix/store/{}xxxx-nixos-system-{}.drv",
-            commit_prefix, clean_name
-        )
+        format!("/nix/store/{}-nixos-system-{}.drv", hash_prefix, clean_name)
     }
 
     /// Status label for display.
