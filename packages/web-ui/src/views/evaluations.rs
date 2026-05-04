@@ -891,7 +891,7 @@ fn eval_status_meta(status: &str) -> StatusMeta {
             cls: "chip-critical",
         },
         _ => StatusMeta {
-            label: status,
+            label: "Unknown",
             color: "#6b7280",
             cls: "chip-unknown",
         },
