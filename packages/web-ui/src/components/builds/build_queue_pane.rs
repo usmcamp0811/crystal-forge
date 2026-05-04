@@ -213,8 +213,8 @@ fn BuildQueueTable(
                                             // JSX line 1: b.pkg (package name) - bold
                                             p { class: "text-[13px] font-semibold leading-[1.15] {theme::text::PRIMARY}", "{build.pkg()}" }
                                             // JSX line 2: b.drv.slice(0,40) + ellipsis (derivation path) - mono, muted
-                                            p { class: "text-[10px] leading-4 font-mono {theme::text::MUTED} truncate max-w-[18rem]", 
-                                                "{truncate_with_ellipsis(&build.drv(), 40)}" 
+                                            p { class: "text-[10px] leading-4 font-mono {theme::text::MUTED} truncate max-w-[18rem]",
+                                                "{truncate_with_ellipsis(&build.drv(), 40)}"
                                             }
                                             // JSX line 3: flake · commit - muted
                                             p { class: "text-[10px] leading-4 {theme::text::MUTED}",

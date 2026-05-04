@@ -1,7 +1,7 @@
 //! Metrics row component for the builds control center.
 
-use dioxus::prelude::*;
 use crate::theme;
+use dioxus::prelude::*;
 
 use super::helpers::BuildStatus;
 use super::helpers::WorkerItem;

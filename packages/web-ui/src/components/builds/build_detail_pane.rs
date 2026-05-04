@@ -5,7 +5,8 @@ use dioxus::prelude::*;
 use crate::theme;
 
 use super::helpers::{
-    BuildAction, BuildItem, BuildStatus, PendingAction, build_status_badge_class, extract_system_name,
+    BuildAction, BuildItem, BuildStatus, PendingAction, build_status_badge_class,
+    extract_system_name,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
