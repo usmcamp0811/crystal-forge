@@ -1,10 +1,10 @@
 ---
 id: TASK-288
 title: Rebuild Evaluations View to Match JSX Mockup Design Exactly
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-05-04 01:18'
-updated_date: '2026-05-04 01:21'
+updated_date: '2026-05-04 01:27'
 labels:
   - ui
   - web-ui
