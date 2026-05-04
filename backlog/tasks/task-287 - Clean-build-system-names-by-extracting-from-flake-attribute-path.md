@@ -1,9 +1,10 @@
 ---
 id: TASK-287
 title: Clean build system names by extracting from flake attribute path
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-05-04 00:25'
+updated_date: '2026-05-04 00:25'
 labels:
   - ui
   - web-ui
@@ -63,3 +64,9 @@ pub fn drv(&self) -> String {
 - [ ] #6 cargo check passes for web-ui package
 - [ ] #7 No visual regressions in build queue, detail panel, or log modal
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: AI agent on gray in ~/code/crystal-forge/TASK-287-clean-build-names
+<!-- SECTION:NOTES:END -->
