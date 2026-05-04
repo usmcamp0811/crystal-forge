@@ -1270,11 +1270,12 @@ fn OverviewTab(
         .generation
         .map(|generation| format!("#{generation}"))
         .unwrap_or_else(|| "#—".to_string());
-    let generation_mismatch_note = if matches!(system.generation_matches_current_store_path, Some(false)) {
-        " (profile/current mismatch)"
-    } else {
-        ""
-    };
+    let generation_mismatch_note =
+        if matches!(system.generation_matches_current_store_path, Some(false)) {
+            " (profile/current mismatch)"
+        } else {
+            ""
+        };
     let commit_message_text = current_commit
         .as_ref()
         .map(|commit| commit.message.clone())

@@ -162,24 +162,27 @@ pub struct BuildItem {
 /// Helper methods for BuildItem display.
 impl BuildItem {
     /// Package name for display (JSX: b.pkg).
-    /// Uses the hostname/system name as the package identifier.
-    pub fn pkg(&self) -> &str {
-        &self.hostname
+    /// Extracts clean system name from flake attribute path (e.g., "daly" from "nixosConfigurations.daly").
+    pub fn pkg(&self) -> String {
+        extract_system_name(&self.hostname).to_string()
     }
 
     /// Derivation path for display (JSX: b.drv).
-    /// Synthesizes a Nix store path using commit hash and hostname.
+    /// Synthesizes a Nix store path using commit hash and clean system name.
     pub fn drv(&self) -> String {
-        // Format: /nix/store/{commit_prefix}xxxx-nixos-system-{hostname}.drv
+        // Format: /nix/store/{commit_prefix}xxxx-nixos-system-{clean_name}.drv
         let commit_prefix = if self.commit.len() >= 7 {
             &self.commit[..7]
         } else {
             &self.commit
         };
-        format!("/nix/store/{}xxxx-nixos-system-{}.drv", commit_prefix, self.hostname)
+        let clean_name = extract_system_name(&self.hostname);
+        format!(
+            "/nix/store/{}xxxx-nixos-system-{}.drv",
+            commit_prefix, clean_name
+        )
     }
 
-    
     /// Status label for display.
     pub fn status_label(&self) -> &'static str {
         self.status.label()
