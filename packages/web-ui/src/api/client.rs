@@ -82,8 +82,8 @@ pub async fn fetch_cve_scan_freshness() -> Result<Vec<CveScanFreshnessRow>, ApiC
     fetch_json(&url).await
 }
 
-pub async fn fetch_hardening_fleet_summary() -> Result<HardeningFleetSummaryResponse, ApiClientError>
-{
+pub async fn fetch_hardening_fleet_summary(
+) -> Result<HardeningFleetSummaryResponse, ApiClientError> {
     let url = format!("{}/hardening/summary", base_url());
     fetch_json(&url).await
 }
@@ -98,8 +98,8 @@ pub async fn fetch_hardening_top_services(
     fetch_json(&url).await
 }
 
-pub async fn fetch_hardening_system_postures()
--> Result<Vec<HardeningSystemPostureResponse>, ApiClientError> {
+pub async fn fetch_hardening_system_postures(
+) -> Result<Vec<HardeningSystemPostureResponse>, ApiClientError> {
     let url = format!("{}/hardening/systems", base_url());
     fetch_json(&url).await
 }
