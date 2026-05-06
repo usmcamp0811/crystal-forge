@@ -6,10 +6,10 @@ use gloo_timers::future::TimeoutFuture;
 
 use crate::api::{
     client::{
-        ApiClientError, cancel_commit_evaluation, fetch_eval_history, fetch_eval_queue,
-        re_evaluate_commit,
+        cancel_commit_evaluation, fetch_eval_history, fetch_eval_queue, re_evaluate_commit,
+        reorder_eval_queue, ApiClientError,
     },
-    models::{EvalHistoryItem, EvalHistoryPage, EvalQueueItem, EvalQueueSummary},
+    models::{EvalHistoryItem, EvalHistoryPage, EvalQueueItem},
 };
 use crate::components::{Icon, IconName};
 
@@ -26,9 +26,7 @@ pub fn EvaluationsView() -> Element {
 
 #[component]
 pub fn EvaluationsCommitView(commit_id: i32) -> Element {
-    // For now, just redirect to main evaluations view
-    // This can be enhanced later to focus on a specific commit
-    let _ = commit_id; // Suppress unused warning
+    let _ = commit_id;
     rsx! { EvaluationsPage {} }
 }
 
@@ -72,7 +70,7 @@ fn EvaluationsPage() -> Element {
     });
 
     {
-        let mut refresh = refresh.clone();
+        let refresh = refresh.clone();
         use_future(move || async move {
             loop {
                 #[cfg(target_arch = "wasm32")]
@@ -213,18 +211,17 @@ fn EvaluationsPage() -> Element {
                 }
             }
 
-            // Tabs + content wrapped in card
+            // Tabs
             div {
                 class: "card",
                 style: "overflow: hidden;",
 
-                // Tab bar
                 div {
                     class: "sd-tabs",
                     style: "padding: 0 16px; border-bottom: 1px solid var(--cf-card-border);",
                     button {
                         class: if active_tab() == EvaluationsTab::ActiveQueue {
-                            "sd-tab active focus-ring"
+                            "sd-tab focus-ring active"
                         } else {
                             "sd-tab focus-ring"
                         },
@@ -238,7 +235,7 @@ fn EvaluationsPage() -> Element {
                     }
                     button {
                         class: if active_tab() == EvaluationsTab::History {
-                            "sd-tab active focus-ring"
+                            "sd-tab focus-ring active"
                         } else {
                             "sd-tab focus-ring"
                         },
@@ -247,12 +244,12 @@ fn EvaluationsPage() -> Element {
                     }
                 }
 
-                // Tab content
                 if active_tab() == EvaluationsTab::ActiveQueue {
                     EvalActiveQueue {
                         evals: active_items.clone(),
-                        on_log: move |item| log_modal_target.set(Some(item)),
                         refresh: refresh,
+                        queue_items: queue_items,
+                        log_modal_target: log_modal_target,
                     }
                 }
 
@@ -270,7 +267,7 @@ fn EvaluationsPage() -> Element {
             // Log modal
             if let Some(target) = log_modal_target.read().clone() {
                 EvalLogModal {
-                    eval_item: target,
+                    ev: target,
                     on_close: move |_| log_modal_target.set(None),
                 }
             }
@@ -281,8 +278,9 @@ fn EvaluationsPage() -> Element {
 #[component]
 fn EvalActiveQueue(
     evals: Vec<EvalQueueItem>,
-    on_log: EventHandler<EvalQueueItem>,
-    refresh: Signal<u64>,
+    mut refresh: Signal<u64>,
+    queue_items: Signal<Vec<EvalQueueItem>>,
+    mut log_modal_target: Signal<Option<EvalQueueItem>>,
 ) -> Element {
     if evals.is_empty() {
         return rsx! {
@@ -311,15 +309,15 @@ fn EvalActiveQueue(
                 }
             }
             tbody {
-                for (index , ev) in evals.iter().enumerate() {
+                for (i , ev) in evals.iter().enumerate() {
                     {
-                        let ev = ev.clone();
+                        let ev_clone = ev.clone();
                         let commit_id = ev.commit_id;
-                        let can_move_up = index > 0;
-                        let can_move_down = index + 1 < evals.len();
-                        let can_cancel = matches!(ev.evaluation_status.as_str(), "pending" | "in_progress");
-                        let is_cancelling = ev.evaluation_status == "cancelling";
                         let status_meta = eval_status_meta(&ev.evaluation_status);
+                        let can_cancel = matches!(ev.evaluation_status.as_str(), "pending" | "in_progress");
+                        let can_force_cancel = ev.evaluation_status == "in_progress";
+                        let is_first = i == 0;
+                        let is_last = i == evals.len() - 1;
 
                         rsx! {
                             tr {
@@ -331,16 +329,16 @@ fn EvalActiveQueue(
                                 td {
                                     div {
                                         style: "font-weight: 600; font-size: 13px;",
-                                        "{ev.flake_name}"
+                                        "{ev_clone.flake_name}"
                                     }
                                     div {
                                         class: "mono",
                                         style: "font-size: 11px; color: var(--cf-text-muted);",
-                                        "{ev.commit_hash.chars().take(12).collect::<String>()}"
+                                        "{ev_clone.commit_hash.chars().take(12).collect::<String>()}"
                                     }
                                 }
                                 td {
-                                    span { class: "chip chip-unknown", "{ev.branch}" }
+                                    span { class: "chip chip-unknown", "{ev_clone.branch}" }
                                 }
                                 td {
                                     span {
@@ -354,77 +352,125 @@ fn EvalActiveQueue(
                                 }
                                 td {
                                     style: "font-size: 12px; color: var(--cf-text-secondary);",
-                                    "{ev.system_count} hosts"
+                                    "{ev_clone.system_count} hosts"
                                 }
                                 td {
                                     div {
                                         style: "display: flex; gap: 6px;",
                                         span {
                                             class: "chip chip-healthy",
-                                            "{ev.passed_count} ✓"
+                                            "{ev_clone.passed_count} ✓"
                                         }
-                                        if ev.policy_failed_count > 0 {
+                                        if ev_clone.policy_failed_count > 0 {
                                             span {
                                                 class: "chip chip-critical",
-                                                "{ev.policy_failed_count} ✗"
+                                                "{ev_clone.policy_failed_count} ✗"
                                             }
                                         }
                                     }
                                 }
                                 td {
                                     style: "font-size: 12px; color: var(--cf-text-muted);",
-                                    "{format_relative_time(ev.committed_at)}"
+                                    "{format_relative_time(ev_clone.committed_at)}"
                                 }
                                 td {
                                     div {
                                         class: "row-actions",
                                         style: "opacity: 1; gap: 4px; justify-content: flex-end;",
 
-                                        // Move up button
                                         button {
                                             class: "btn-icon focus-ring",
                                             title: "Move up",
-                                            disabled: !can_move_up,
-                                            style: if !can_move_up { "opacity: 0.3;" } else { "" },
+                                            disabled: is_first,
+                                            style: if is_first { "opacity: 0.3;" } else { "" },
+                                            onclick: move |_| {
+                                                if is_first { return; }
+                                                let items = queue_items.clone();
+                                                let mut refresh_sig = refresh.clone();
+                                                
+                                                spawn(async move {
+                                                    let mut active: Vec<_> = items
+                                                        .read()
+                                                        .iter()
+                                                        .filter(|item| is_active_eval_status(&item.evaluation_status))
+                                                        .cloned()
+                                                        .collect();
+                                                    
+                                                    if let Some(idx) = active.iter().position(|e| e.commit_id == commit_id) {
+                                                        if idx > 0 {
+                                                            active.swap(idx - 1, idx);
+                                                            let ordered_ids: Vec<i32> = active.iter().map(|e| e.commit_id).collect();
+                                                            let _ = reorder_eval_queue(&ordered_ids).await;
+                                                            refresh_sig.set(refresh_sig() + 1);
+                                                        }
+                                                    }
+                                                });
+                                            },
                                             "↑"
                                         }
 
-                                        // Move down button
                                         button {
                                             class: "btn-icon focus-ring",
                                             title: "Move down",
-                                            disabled: !can_move_down,
-                                            style: if !can_move_down { "opacity: 0.3;" } else { "" },
+                                            disabled: is_last,
+                                            style: if is_last { "opacity: 0.3;" } else { "" },
+                                            onclick: move |_| {
+                                                if is_last { return; }
+                                                let items = queue_items.clone();
+                                                let mut refresh_sig = refresh.clone();
+                                                
+                                                spawn(async move {
+                                                    let mut active: Vec<_> = items
+                                                        .read()
+                                                        .iter()
+                                                        .filter(|item| is_active_eval_status(&item.evaluation_status))
+                                                        .cloned()
+                                                        .collect();
+                                                    
+                                                    if let Some(idx) = active.iter().position(|e| e.commit_id == commit_id) {
+                                                        if idx + 1 < active.len() {
+                                                            active.swap(idx, idx + 1);
+                                                            let ordered_ids: Vec<i32> = active.iter().map(|e| e.commit_id).collect();
+                                                            let _ = reorder_eval_queue(&ordered_ids).await;
+                                                            refresh_sig.set(refresh_sig() + 1);
+                                                        }
+                                                    }
+                                                });
+                                            },
                                             "↓"
                                         }
 
-                                        // View logs button
                                         button {
                                             class: "btn-icon focus-ring",
                                             title: "View logs",
-                                            onclick: move |_| on_log.call(ev.clone()),
+                                            onclick: move |_| log_modal_target.set(Some(ev_clone.clone())),
                                             Icon { name: IconName::Terminal, size: 14 }
                                         }
 
-                                        // Force cancel button (if cancelling)
-                                        if is_cancelling {
+                                        if can_force_cancel {
                                             button {
                                                 class: "btn btn-danger focus-ring",
                                                 style: "padding: 3px 8px; font-size: 11px;",
+                                                onclick: move |_| {
+                                                    let mut refresh_sig = refresh.clone();
+                                                    spawn(async move {
+                                                        let _ = cancel_commit_evaluation(commit_id).await;
+                                                        refresh_sig.set(refresh_sig() + 1);
+                                                    });
+                                                },
                                                 "Force cancel"
                                             }
                                         }
 
-                                        // Cancel button (if can cancel)
                                         if can_cancel {
                                             button {
                                                 class: "btn btn-ghost focus-ring",
                                                 style: "padding: 3px 8px; font-size: 11px;",
                                                 onclick: move |_| {
-                                                    let mut refresh_clone = refresh.clone();
+                                                    let mut refresh_sig = refresh.clone();
                                                     spawn(async move {
                                                         let _ = cancel_commit_evaluation(commit_id).await;
-                                                        refresh_clone.set(refresh_clone() + 1);
+                                                        refresh_sig.set(refresh_sig() + 1);
                                                     });
                                                 },
                                                 "Cancel"
@@ -447,7 +493,7 @@ fn EvalHistory(
     mut history_status_filter: Signal<String>,
     mut history_flake_filter: Signal<String>,
     mut history_page: Signal<i64>,
-    refresh: Signal<u64>,
+    mut refresh: Signal<u64>,
 ) -> Element {
     rsx! {
         div {
@@ -455,7 +501,6 @@ fn EvalHistory(
             div {
                 style: "padding: 12px 16px; border-bottom: 1px solid var(--cf-divider); display: flex; gap: 10px; flex-wrap: wrap; align-items: center;",
 
-                // Status filter segmented control
                 div {
                     class: "seg",
                     for (label, value) in [("all", ""), ("complete", "complete"), ("failed", "failed"), ("cancelled", "cancelled")] {
@@ -478,7 +523,6 @@ fn EvalHistory(
                     }
                 }
 
-                // Flake filter select
                 select {
                     class: "input filter-select focus-ring",
                     style: "width: auto;",
@@ -491,7 +535,6 @@ fn EvalHistory(
                     option { value: "", "All flakes" }
                 }
 
-                // Entry count
                 if let Some(Ok(page_data)) = &*history_resource.read() {
                     span {
                         class: "filter-count",
@@ -594,10 +637,10 @@ fn EvalHistory(
                                                             class: "btn-icon focus-ring",
                                                             title: "Re-evaluate",
                                                             onclick: move |_| {
-                                                                let mut refresh_clone = refresh.clone();
+                                                                let mut refresh_sig = refresh.clone();
                                                                 spawn(async move {
                                                                     let _ = re_evaluate_commit(commit_id).await;
-                                                                    refresh_clone.set(refresh_clone() + 1);
+                                                                    refresh_sig.set(refresh_sig() + 1);
                                                                 });
                                                             },
                                                             Icon { name: IconName::Sync, size: 14 }
@@ -607,53 +650,6 @@ fn EvalHistory(
                                             }
                                         }
                                     }
-                                }
-                            }
-                            if page_data.items.is_empty() {
-                                tr {
-                                    td {
-                                        colspan: "8",
-                                        style: "text-align: center; padding: 24px;",
-                                        "No evaluation history yet."
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Pagination (if needed)
-                    if page_data.total_count > page_data.limit {
-                        div {
-                            style: "display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-top: 1px solid var(--cf-divider);",
-                            span {
-                                style: "font-size: 12px; color: var(--cf-text-muted);",
-                                "Showing {((page_data.page - 1) * page_data.limit) + 1}–{(page_data.page * page_data.limit).min(page_data.total_count)} of {page_data.total_count}"
-                            }
-                            div {
-                                style: "display: flex; gap: 8px;",
-                                button {
-                                    class: "btn btn-ghost focus-ring",
-                                    style: "padding: 4px 8px; font-size: 11px;",
-                                    disabled: page_data.page <= 1,
-                                    onclick: move |_| {
-                                        history_page.set((history_page() - 1).max(1));
-                                        refresh.set(refresh() + 1);
-                                    },
-                                    "← Prev"
-                                }
-                                span {
-                                    style: "font-size: 12px; color: var(--cf-text-muted);",
-                                    "Page {page_data.page}"
-                                }
-                                button {
-                                    class: "btn btn-ghost focus-ring",
-                                    style: "padding: 4px 8px; font-size: 11px;",
-                                    disabled: page_data.page * page_data.limit >= page_data.total_count,
-                                    onclick: move |_| {
-                                        history_page.set(history_page() + 1);
-                                        refresh.set(refresh() + 1);
-                                    },
-                                    "Next →"
                                 }
                             }
                         }
@@ -668,9 +664,6 @@ fn EvalHistory(
                 None => rsx! {
                     div {
                         style: "padding: 24px; display: flex; align-items: center; gap: 12px; color: var(--cf-text-muted);",
-                        div {
-                            style: "width: 16px; height: 16px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; animation: spin 1s linear infinite;"
-                        }
                         "Loading history…"
                     }
                 }
@@ -680,19 +673,19 @@ fn EvalHistory(
 }
 
 #[component]
-fn EvalLogModal(eval_item: EvalQueueItem, on_close: EventHandler<()>) -> Element {
-    let mut log_verbosity = use_signal(|| LogVerbosity::Concise);
-    let status_meta = eval_status_meta(&eval_item.evaluation_status);
+fn EvalLogModal(ev: EvalQueueItem, on_close: EventHandler<()>) -> Element {
+    let mut verbose = use_signal(|| false);
+    let status_meta = eval_status_meta(&ev.evaluation_status);
 
-    // Mock log lines for demonstration
+    // Mock log lines
     let mock_logs = vec![
         LogLine {
             t: "12:04:01".to_string(),
             lvl: "info".to_string(),
             m: format!(
                 "eval: starting {}@{}",
-                eval_item.flake_name,
-                eval_item.commit_hash.chars().take(8).collect::<String>()
+                ev.flake_name,
+                ev.commit_hash.chars().take(8).collect::<String>()
             ),
         },
         LogLine {
@@ -705,23 +698,20 @@ fn EvalLogModal(eval_item: EvalQueueItem, on_close: EventHandler<()>) -> Element
             lvl: "info".to_string(),
             m: format!(
                 "eval: running nix-eval-jobs --flake {}#nixosConfigurations",
-                eval_item.flake_name
+                ev.flake_name
             ),
         },
         LogLine {
             t: "12:04:12".to_string(),
             lvl: "info".to_string(),
-            m: format!(
-                "eval: found {} NixOS configurations",
-                eval_item.system_count
-            ),
+            m: format!("eval: found {} NixOS configurations", ev.system_count),
         },
         LogLine {
             t: "12:04:18".to_string(),
             lvl: "info".to_string(),
             m: format!(
                 "eval: policy check — {} pass, {} fail",
-                eval_item.passed_count, eval_item.policy_failed_count
+                ev.passed_count, ev.policy_failed_count
             ),
         },
         LogLine {
@@ -731,12 +721,14 @@ fn EvalLogModal(eval_item: EvalQueueItem, on_close: EventHandler<()>) -> Element
         },
     ];
 
-    let shown_logs = if *log_verbosity.read() == LogVerbosity::Verbose {
+    let shown = if *verbose.read() {
         mock_logs.clone()
     } else {
         mock_logs
             .iter()
-            .filter(|l| l.lvl != "debug")
+            .filter(|l| {
+                l.lvl != "info" || l.m.contains("eval:") || l.m.contains("policy:")
+            })
             .cloned()
             .collect()
     };
@@ -751,7 +743,6 @@ fn EvalLogModal(eval_item: EvalQueueItem, on_close: EventHandler<()>) -> Element
                 style: "width: min(800px, 98vw);",
                 onclick: move |evt| evt.stop_propagation(),
 
-                // Modal header
                 div {
                     class: "modal-head",
                     style: "display: flex; justify-content: space-between; align-items: center;",
@@ -763,27 +754,33 @@ fn EvalLogModal(eval_item: EvalQueueItem, on_close: EventHandler<()>) -> Element
                                 style: "margin-right: 8px;",
                                 "{status_meta.label}"
                             }
-                            "{eval_item.flake_name}"
+                            "{ev.flake_name}"
                         }
                         p {
                             style: "margin: 4px 0 0; font-size: 12px; color: var(--cf-text-muted);",
-                            span { class: "mono", "{eval_item.commit_hash.chars().take(12).collect::<String>()}" }
-                            " · {eval_item.branch} · {eval_item.system_count} systems"
+                            span {
+                                class: "mono",
+                                "{ev.commit_hash.chars().take(12).collect::<String>()}"
+                            }
+                            " · {ev.branch} · {ev.system_count} systems"
                         }
                     }
                     div {
                         style: "display: flex; gap: 8px; align-items: center;",
                         div {
-                            class: "seg",
-                            button {
-                                class: if *log_verbosity.read() == LogVerbosity::Concise { "active" } else { "" },
-                                onclick: move |_| log_verbosity.set(LogVerbosity::Concise),
-                                "Concise"
-                            }
-                            button {
-                                class: if *log_verbosity.read() == LogVerbosity::Verbose { "active" } else { "" },
-                                onclick: move |_| log_verbosity.set(LogVerbosity::Verbose),
-                                "Verbose"
+                            class: "sd-logs-controls",
+                            div {
+                                class: "seg",
+                                button {
+                                    class: if !*verbose.read() { "active" } else { "" },
+                                    onclick: move |_| verbose.set(false),
+                                    "Concise"
+                                }
+                                button {
+                                    class: if *verbose.read() { "active" } else { "" },
+                                    onclick: move |_| verbose.set(true),
+                                    "Verbose"
+                                }
                             }
                         }
                         button {
@@ -794,29 +791,28 @@ fn EvalLogModal(eval_item: EvalQueueItem, on_close: EventHandler<()>) -> Element
                     }
                 }
 
-                // Log stream
                 pre {
                     class: "sd-log-stream",
                     style: "min-height: 360px; max-height: 520px;",
-                    for line in shown_logs.iter() {
+                    for (i, line) in shown.iter().enumerate() {
                         div {
+                            key: "{i}",
                             class: "sd-log-line sd-log-{line.lvl}",
                             span { class: "sd-log-t", "{line.t}" }
                             span { class: "sd-log-lvl", "{line.lvl.to_uppercase()}" }
                             span { class: "sd-log-m", "{line.m}" }
                         }
                     }
-                    if eval_item.evaluation_status == "in_progress" {
+                    if ev.evaluation_status == "in_progress" {
                         div { class: "sd-log-caret", "▍" }
                     }
                 }
 
-                // Modal footer
                 div {
                     class: "modal-foot",
                     span {
                         style: "font-size: 12px; color: var(--cf-text-muted); margin-right: auto;",
-                        "{shown_logs.len()} lines shown"
+                        "{shown.len()} lines shown"
                     }
                     button {
                         class: "btn btn-ghost focus-ring xs",
@@ -843,12 +839,6 @@ struct LogLine {
     t: String,
     lvl: String,
     m: String,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum LogVerbosity {
-    Concise,
-    Verbose,
 }
 
 struct StatusMeta {
