@@ -29,3 +29,6 @@ mod cve_scans_tests;
 
 #[cfg(test)]
 mod hardening_scans_tests;
+
+#[cfg(test)]
+mod eval_logs_tests;
