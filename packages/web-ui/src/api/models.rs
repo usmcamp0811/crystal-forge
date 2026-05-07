@@ -863,6 +863,15 @@ pub struct EvalHistoryPage {
     pub items: Vec<EvalHistoryItem>,
 }
 
+/// A single evaluation log entry (persisted to database).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvalLogEntry {
+    pub timestamp: DateTime<Utc>,
+    pub sequence: i32,
+    pub level: Option<String>,
+    pub message: String,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Pagination
 // ─────────────────────────────────────────────────────────────────────────────

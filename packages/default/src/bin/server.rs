@@ -427,6 +427,10 @@ async fn main() -> anyhow::Result<()> {
             get(commits::stream_eval_logs),
         )
         .route(
+            "/api/v1/commits/:commit_id/eval/logs",
+            get(commits::get_eval_logs_history),
+        )
+        .route(
             "/api/v1/commits/:commit_id/re-evaluate",
             post(commits::re_evaluate_commit),
         )
