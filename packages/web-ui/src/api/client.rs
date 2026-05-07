@@ -408,6 +408,15 @@ pub async fn force_cancel_commit_evaluation(commit_id: i32) -> Result<(), ApiCli
     send_empty_with_csrf("POST", &url, None::<&()>).await
 }
 
+/// Fetch historical evaluation logs from database for a specific commit.
+///
+/// Returns persisted logs for completed/failed/cancelled evaluations.
+/// For in-progress evaluations, use WebSocket streaming instead.
+pub async fn fetch_eval_logs(commit_id: i32) -> Result<Vec<EvalLogEntry>, ApiClientError> {
+    let url = format!("{}/commits/{}/eval/logs", base_url(), commit_id);
+    send_get_json::<Vec<EvalLogEntry>>(&url).await
+}
+
 /// Fetch paginated evaluation history (complete, failed, cancelled).
 pub async fn fetch_eval_history(
     page: i64,
