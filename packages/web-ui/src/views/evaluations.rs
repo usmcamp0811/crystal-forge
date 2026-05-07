@@ -6,8 +6,8 @@ use gloo_timers::future::TimeoutFuture;
 
 use crate::api::{
     client::{
-        cancel_commit_evaluation, fetch_eval_history, fetch_eval_queue, re_evaluate_commit,
-        reorder_eval_queue, ApiClientError,
+        ApiClientError, cancel_commit_evaluation, fetch_eval_history, fetch_eval_queue,
+        force_cancel_commit_evaluation, re_evaluate_commit, reorder_eval_queue,
     },
     models::{EvalHistoryItem, EvalHistoryPage, EvalQueueItem},
 };
@@ -137,14 +137,17 @@ fn EvaluationsPage() -> Element {
                     style: "display: flex; gap: 8px;",
                     button {
                         class: "btn btn-ghost focus-ring",
+                        disabled: true,
+                        title: "Flake sync not yet implemented",
                         Icon { name: IconName::Sync, size: 14 }
                         " Sync flakes"
                     }
                     button {
                         class: "btn btn-primary focus-ring",
                         onclick: move |_| refresh.set(refresh() + 1),
+                        title: "Refresh evaluations data",
                         Icon { name: IconName::Plus, size: 14 }
-                        " Queue eval"
+                        " Refresh"
                     }
                 }
             }
@@ -315,7 +318,7 @@ fn EvalActiveQueue(
                         let commit_id = ev.commit_id;
                         let status_meta = eval_status_meta(&ev.evaluation_status);
                         let can_cancel = matches!(ev.evaluation_status.as_str(), "pending" | "in_progress");
-                        let can_force_cancel = ev.evaluation_status == "in_progress";
+                        let can_force_cancel = ev.evaluation_status == "cancelling";
                         let is_first = i == 0;
                         let is_last = i == evals.len() - 1;
 
@@ -387,7 +390,7 @@ fn EvalActiveQueue(
                                                 if is_first { return; }
                                                 let items = queue_items.clone();
                                                 let mut refresh_sig = refresh.clone();
-                                                
+
                                                 spawn(async move {
                                                     let mut active: Vec<_> = items
                                                         .read()
@@ -395,7 +398,7 @@ fn EvalActiveQueue(
                                                         .filter(|item| is_active_eval_status(&item.evaluation_status))
                                                         .cloned()
                                                         .collect();
-                                                    
+
                                                     if let Some(idx) = active.iter().position(|e| e.commit_id == commit_id) {
                                                         if idx > 0 {
                                                             active.swap(idx - 1, idx);
@@ -418,7 +421,7 @@ fn EvalActiveQueue(
                                                 if is_last { return; }
                                                 let items = queue_items.clone();
                                                 let mut refresh_sig = refresh.clone();
-                                                
+
                                                 spawn(async move {
                                                     let mut active: Vec<_> = items
                                                         .read()
@@ -426,7 +429,7 @@ fn EvalActiveQueue(
                                                         .filter(|item| is_active_eval_status(&item.evaluation_status))
                                                         .cloned()
                                                         .collect();
-                                                    
+
                                                     if let Some(idx) = active.iter().position(|e| e.commit_id == commit_id) {
                                                         if idx + 1 < active.len() {
                                                             active.swap(idx, idx + 1);
@@ -454,7 +457,7 @@ fn EvalActiveQueue(
                                                 onclick: move |_| {
                                                     let mut refresh_sig = refresh.clone();
                                                     spawn(async move {
-                                                        let _ = cancel_commit_evaluation(commit_id).await;
+                                                        let _ = force_cancel_commit_evaluation(commit_id).await;
                                                         refresh_sig.set(refresh_sig() + 1);
                                                     });
                                                 },
@@ -533,6 +536,24 @@ fn EvalHistory(
                         refresh.set(refresh() + 1);
                     },
                     option { value: "", "All flakes" }
+                    if let Some(Ok(page_data)) = &*history_resource.read() {
+                        {
+                            let mut flakes: Vec<String> = page_data
+                                .items
+                                .iter()
+                                .map(|item| item.flake_name.clone())
+                                .collect();
+                            flakes.sort();
+                            flakes.dedup();
+                            flakes.into_iter().map(|flake_name| rsx! {
+                                option {
+                                    key: "{flake_name}",
+                                    value: "{flake_name}",
+                                    "{flake_name}"
+                                }
+                            })
+                        }
+                    }
                 }
 
                 if let Some(Ok(page_data)) = &*history_resource.read() {
@@ -629,7 +650,8 @@ fn EvalHistory(
                                                     class: "row-actions",
                                                     button {
                                                         class: "btn-icon focus-ring",
-                                                        title: "Logs",
+                                                        disabled: true,
+                                                        title: "Historical logs not yet available",
                                                         Icon { name: IconName::Terminal, size: 14 }
                                                     }
                                                     if ev.evaluation_status != "complete" {
@@ -677,61 +699,9 @@ fn EvalLogModal(ev: EvalQueueItem, on_close: EventHandler<()>) -> Element {
     let mut verbose = use_signal(|| false);
     let status_meta = eval_status_meta(&ev.evaluation_status);
 
-    // Mock log lines
-    let mock_logs = vec![
-        LogLine {
-            t: "12:04:01".to_string(),
-            lvl: "info".to_string(),
-            m: format!(
-                "eval: starting {}@{}",
-                ev.flake_name,
-                ev.commit_hash.chars().take(8).collect::<String>()
-            ),
-        },
-        LogLine {
-            t: "12:04:02".to_string(),
-            lvl: "info".to_string(),
-            m: "eval: fetching flake from git+ssh://...".to_string(),
-        },
-        LogLine {
-            t: "12:04:05".to_string(),
-            lvl: "info".to_string(),
-            m: format!(
-                "eval: running nix-eval-jobs --flake {}#nixosConfigurations",
-                ev.flake_name
-            ),
-        },
-        LogLine {
-            t: "12:04:12".to_string(),
-            lvl: "info".to_string(),
-            m: format!("eval: found {} NixOS configurations", ev.system_count),
-        },
-        LogLine {
-            t: "12:04:18".to_string(),
-            lvl: "info".to_string(),
-            m: format!(
-                "eval: policy check — {} pass, {} fail",
-                ev.passed_count, ev.policy_failed_count
-            ),
-        },
-        LogLine {
-            t: "12:04:20".to_string(),
-            lvl: "info".to_string(),
-            m: "eval: queuing build jobs for passing systems...".to_string(),
-        },
-    ];
-
-    let shown = if *verbose.read() {
-        mock_logs.clone()
-    } else {
-        mock_logs
-            .iter()
-            .filter(|l| {
-                l.lvl != "info" || l.m.contains("eval:") || l.m.contains("policy:")
-            })
-            .cloned()
-            .collect()
-    };
+    // Real-time log streaming is not yet implemented
+    // This will be replaced with actual log data from the backend/websocket
+    let shown: Vec<LogLine> = vec![];
 
     rsx! {
         div {
@@ -794,17 +764,24 @@ fn EvalLogModal(ev: EvalQueueItem, on_close: EventHandler<()>) -> Element {
                 pre {
                     class: "sd-log-stream",
                     style: "min-height: 360px; max-height: 520px;",
-                    for (i, line) in shown.iter().enumerate() {
+                    if shown.is_empty() {
                         div {
-                            key: "{i}",
-                            class: "sd-log-line sd-log-{line.lvl}",
-                            span { class: "sd-log-t", "{line.t}" }
-                            span { class: "sd-log-lvl", "{line.lvl.to_uppercase()}" }
-                            span { class: "sd-log-m", "{line.m}" }
+                            style: "padding: 24px; color: var(--cf-text-muted); text-align: center;",
+                            "Real-time log streaming is not yet implemented."
                         }
-                    }
-                    if ev.evaluation_status == "in_progress" {
-                        div { class: "sd-log-caret", "▍" }
+                    } else {
+                        for (i, line) in shown.iter().enumerate() {
+                            div {
+                                key: "{i}",
+                                class: "sd-log-line sd-log-{line.lvl}",
+                                span { class: "sd-log-t", "{line.t}" }
+                                span { class: "sd-log-lvl", "{line.lvl.to_uppercase()}" }
+                                span { class: "sd-log-m", "{line.m}" }
+                            }
+                        }
+                        if ev.evaluation_status == "in_progress" {
+                            div { class: "sd-log-caret", "▍" }
+                        }
                     }
                 }
 
@@ -816,6 +793,8 @@ fn EvalLogModal(ev: EvalQueueItem, on_close: EventHandler<()>) -> Element {
                     }
                     button {
                         class: "btn btn-ghost focus-ring xs",
+                        disabled: true,
+                        title: "Log download not yet implemented",
                         Icon { name: IconName::Download, size: 12 }
                         " Download"
                     }
