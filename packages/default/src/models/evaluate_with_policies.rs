@@ -132,6 +132,8 @@ async fn broadcast_and_persist_eval_log(
     sequence: &mut i32,
     message: String,
 ) {
+    let lower = message.to_ascii_lowercase();
+
     // Broadcast via WebSocket (existing infrastructure)
     if let Some(state) = state {
         crate::handlers::api::commits::broadcast_eval_log(state, commit_id, message.clone()).await;
@@ -139,9 +141,9 @@ async fn broadcast_and_persist_eval_log(
 
     // Persist to database (new functionality)
     // Parse log level from message format if possible
-    let log_level = if message.starts_with("❌") || message.contains("error") {
+    let log_level = if message.starts_with("❌") || lower.contains("error") {
         Some("error")
-    } else if message.starts_with("⚠️") || message.contains("warning") {
+    } else if message.starts_with("⚠️") || lower.contains("warning") {
         Some("warn")
     } else if message.starts_with("✅") {
         Some("info")
@@ -184,6 +186,10 @@ pub async fn evaluate_with_nix_eval_jobs(
     cf_state: Option<&crate::handlers::agent_request::CFState>,
     queue_notifier: Option<&QueueNotifier>,
 ) -> Result<(Vec<NixEvalJobResult>, Vec<PolicyCheckResult>)> {
+    // Re-evaluation safety: clear previous persisted logs for this commit so
+    // (commit_id, log_sequence) uniqueness cannot collide on subsequent runs.
+    crate::queries::eval_logs::delete_eval_logs_by_commit(pool, commit.id).await?;
+
     // Sequence counter for log persistence (1-indexed)
     let mut log_sequence = 1i32;
     
@@ -290,6 +296,8 @@ pub async fn evaluate_with_nix_eval_jobs(
     let mut policy_checks = Vec::new();
     let mut found_target = false;
     let mut stderr_output = Vec::new();
+    let mut stderr_log_batch: Vec<(i32, Option<String>, String)> = Vec::new();
+    const STDERR_LOG_BATCH_SIZE: usize = 100;
     let mut stdout_done = false;
     let mut stderr_done = false;
 
@@ -658,7 +666,35 @@ pub async fn evaluate_with_nix_eval_jobs(
 
                         // Broadcast stderr to WebSocket clients
                         if let Some(state) = cf_state {
-                            broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, line.clone()).await;
+                            // Keep live streaming immediate.
+                            crate::handlers::api::commits::broadcast_eval_log(state, commit.id, line.clone()).await;
+
+                            // Persist stderr logs in batches to avoid per-line DB latency on hot path.
+                            let level = if line.to_ascii_lowercase().contains("error") {
+                                Some("error".to_string())
+                            } else if line.to_ascii_lowercase().contains("warn") {
+                                Some("warn".to_string())
+                            } else {
+                                Some("debug".to_string())
+                            };
+                            stderr_log_batch.push((log_sequence, level, line.clone()));
+                            log_sequence += 1;
+
+                            if stderr_log_batch.len() >= STDERR_LOG_BATCH_SIZE {
+                                if let Err(e) = crate::queries::eval_logs::insert_eval_logs_batch(
+                                    pool,
+                                    commit.id,
+                                    &stderr_log_batch,
+                                )
+                                .await
+                                {
+                                    warn!(
+                                        "Failed to batch-persist stderr logs for commit {}: {}",
+                                        commit.id, e
+                                    );
+                                }
+                                stderr_log_batch.clear();
+                            }
                         }
 
                         stderr_output.push(line);
@@ -670,6 +706,22 @@ pub async fn evaluate_with_nix_eval_jobs(
 
         if stdout_done && stderr_done {
             break;
+        }
+    }
+
+    // Flush any remaining buffered stderr logs.
+    if !stderr_log_batch.is_empty() {
+        if let Err(e) = crate::queries::eval_logs::insert_eval_logs_batch(
+            pool,
+            commit.id,
+            &stderr_log_batch,
+        )
+        .await
+        {
+            warn!(
+                "Failed to flush batched stderr logs for commit {}: {}",
+                commit.id, e
+            );
         }
     }
 
@@ -905,6 +957,10 @@ pub async fn evaluate_with_mock_eval_jobs(
     cf_state: Option<&crate::handlers::agent_request::CFState>,
     queue_notifier: Option<&QueueNotifier>,
 ) -> Result<(Vec<NixEvalJobResult>, Vec<PolicyCheckResult>)> {
+    // Re-evaluation safety: clear previous persisted logs for this commit so
+    // (commit_id, log_sequence) uniqueness cannot collide on subsequent runs.
+    crate::queries::eval_logs::delete_eval_logs_by_commit(pool, commit.id).await?;
+
     // Sequence counter for persisted/mock streamed logs (1-indexed)
     let mut log_sequence = 1i32;
 
