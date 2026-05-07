@@ -43,6 +43,7 @@ pub mod tables;
 
 // Top-level component modules
 pub mod chips;
+pub mod icon;
 pub mod layout;
 pub mod loading;
 pub mod stat_card;
@@ -61,6 +62,7 @@ pub use filters::{
     ViewToggle,
 };
 pub use heartbeat_spinner::HeartbeatSpinner;
+pub use icon::{Icon, IconName};
 pub use layout::{AppShell, Card, SidebarNav, TopBar};
 pub use loading::{ErrorMessage, LoadingSpinner};
 pub use modals::{ConfirmDialog, RollbackConfirmDialog, SyncConfirmDialog};
