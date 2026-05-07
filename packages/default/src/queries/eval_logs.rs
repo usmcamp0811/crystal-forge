@@ -3,7 +3,7 @@
 //! Database queries for evaluation logs.
 
 use chrono::{DateTime, Utc};
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 /// A single evaluation log entry from the database.
@@ -25,21 +25,21 @@ pub async fn insert_eval_log(
     level: Option<&str>,
     message: &str,
 ) -> Result<Uuid, sqlx::Error> {
-    let rec = sqlx::query!(
+    let rec = sqlx::query(
         r#"
         INSERT INTO eval_logs (commit_id, log_sequence, log_level, log_message)
         VALUES ($1, $2, $3, $4)
         RETURNING id
         "#,
-        commit_id,
-        sequence,
-        level,
-        message
     )
+    .bind(commit_id)
+    .bind(sequence)
+    .bind(level)
+    .bind(message)
     .fetch_one(pool)
     .await?;
 
-    Ok(rec.id)
+    rec.try_get("id")
 }
 
 /// Batch insert multiple evaluation log entries for performance.
@@ -62,17 +62,17 @@ pub async fn insert_eval_logs_batch(
         messages.push(msg.as_str());
     }
 
-    let result = sqlx::query!(
+    let result = sqlx::query(
         r#"
         INSERT INTO eval_logs (commit_id, log_sequence, log_level, log_message)
         SELECT $1, * FROM UNNEST($2::int[], $3::text[], $4::text[])
         ON CONFLICT (commit_id, log_sequence) DO NOTHING
         "#,
-        commit_id,
-        &sequences,
-        &levels as &[Option<&str>],
-        &messages as &[&str]
     )
+    .bind(commit_id)
+    .bind(&sequences)
+    .bind(&levels as &[Option<&str>])
+    .bind(&messages as &[&str])
     .execute(pool)
     .await?;
 
@@ -84,16 +84,15 @@ pub async fn fetch_eval_logs_by_commit(
     pool: &PgPool,
     commit_id: i32,
 ) -> Result<Vec<EvalLogRow>, sqlx::Error> {
-    sqlx::query_as!(
-        EvalLogRow,
+    sqlx::query_as::<_, EvalLogRow>(
         r#"
         SELECT id, commit_id, log_timestamp, log_sequence, log_level, log_message
         FROM eval_logs
         WHERE commit_id = $1
         ORDER BY log_sequence ASC
         "#,
-        commit_id
     )
+    .bind(commit_id)
     .fetch_all(pool)
     .await
 }
@@ -103,12 +102,12 @@ pub async fn delete_eval_logs_by_commit(
     pool: &PgPool,
     commit_id: i32,
 ) -> Result<u64, sqlx::Error> {
-    let result = sqlx::query!(
+    let result = sqlx::query(
         r#"
         DELETE FROM eval_logs WHERE commit_id = $1
         "#,
-        commit_id
     )
+    .bind(commit_id)
     .execute(pool)
     .await?;
 
@@ -120,12 +119,12 @@ pub async fn delete_eval_logs_before(
     pool: &PgPool,
     before: DateTime<Utc>,
 ) -> Result<u64, sqlx::Error> {
-    let result = sqlx::query!(
+    let result = sqlx::query(
         r#"
         DELETE FROM eval_logs WHERE log_timestamp < $1
         "#,
-        before
     )
+    .bind(before)
     .execute(pool)
     .await?;
 
@@ -134,7 +133,7 @@ pub async fn delete_eval_logs_before(
 
 /// Count total evaluation log entries across all commits.
 pub async fn count_eval_logs(pool: &PgPool) -> Result<i64, sqlx::Error> {
-    let rec = sqlx::query!(
+    let rec = sqlx::query(
         r#"
         SELECT COUNT(*)::bigint as count FROM eval_logs
         "#
@@ -142,5 +141,5 @@ pub async fn count_eval_logs(pool: &PgPool) -> Result<i64, sqlx::Error> {
     .fetch_one(pool)
     .await?;
 
-    Ok(rec.count.unwrap_or(0))
+    Ok(rec.try_get::<Option<i64>, _>("count")?.unwrap_or(0))
 }

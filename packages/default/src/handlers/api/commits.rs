@@ -290,17 +290,23 @@ pub async fn get_eval_logs_history(
     Path(commit_id): Path<i32>,
     State(state): State<CFState>,
     headers: HeaderMap,
-) -> Result<Json<Vec<EvalLogEntry>>, ApiError> {
-    require_viewer_or_above(&state.pool, &headers)
+) -> impl IntoResponse {
+    if require_viewer_or_above(&state.pool, &headers)
         .await
-        .ok_or(ApiError::Forbidden)?;
+        .is_none()
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
 
-    let logs = crate::queries::eval_logs::fetch_eval_logs_by_commit(&state.pool, commit_id)
+    let logs = match crate::queries::eval_logs::fetch_eval_logs_by_commit(&state.pool, commit_id)
         .await
-        .map_err(|e| {
+    {
+        Ok(logs) => logs,
+        Err(e) => {
             tracing::error!("Failed to fetch eval logs for commit {}: {}", commit_id, e);
-            ApiError::Internal(format!("Failed to fetch evaluation logs: {}", e))
-        })?;
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
 
     let entries: Vec<EvalLogEntry> = logs
         .into_iter()
@@ -312,7 +318,7 @@ pub async fn get_eval_logs_history(
         })
         .collect();
 
-    Ok(Json(entries))
+    Json(entries).into_response()
 }
 
 /// DTO for a single evaluation log entry (REST API response).

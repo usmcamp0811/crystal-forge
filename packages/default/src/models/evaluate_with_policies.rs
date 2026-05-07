@@ -905,6 +905,9 @@ pub async fn evaluate_with_mock_eval_jobs(
     cf_state: Option<&crate::handlers::agent_request::CFState>,
     queue_notifier: Option<&QueueNotifier>,
 ) -> Result<(Vec<NixEvalJobResult>, Vec<PolicyCheckResult>)> {
+    // Sequence counter for persisted/mock streamed logs (1-indexed)
+    let mut log_sequence = 1i32;
+
     let systems = resolve_mock_systems(&flake.name, target_system, configured_systems)?;
     let stage_delay = mock_eval_stage_delay(systems.len());
 
