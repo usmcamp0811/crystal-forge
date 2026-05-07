@@ -70,7 +70,7 @@ fn EvaluationsPage() -> Element {
     });
 
     {
-        let refresh = refresh.clone();
+        let mut refresh = refresh.clone();
         use_future(move || async move {
             loop {
                 #[cfg(target_arch = "wasm32")]
