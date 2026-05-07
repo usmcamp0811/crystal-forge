@@ -11,7 +11,7 @@ use crate::api::{
     },
     models::{EvalHistoryItem, EvalHistoryPage, EvalQueueItem},
 };
-use crate::components::{Icon, IconName};
+use crate::components::{EvalLogModal, Icon, IconName};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EvaluationsTab {
@@ -36,6 +36,7 @@ fn EvaluationsPage() -> Element {
     let mut refresh = use_signal(|| 0_u64);
     let mut active_tab = use_signal(|| EvaluationsTab::ActiveQueue);
     let mut log_modal_target = use_signal(|| None::<EvalQueueItem>);
+    let mut history_log_modal_target = use_signal(|| None::<EvalHistoryItem>);
 
     // History tab state
     let mut history_page = use_signal(|| 1_i64);
@@ -263,15 +264,28 @@ fn EvaluationsPage() -> Element {
                         history_flake_filter: history_flake_filter,
                         history_page: history_page,
                         refresh: refresh,
+                        history_log_modal_target: history_log_modal_target,
                     }
                 }
             }
 
-            // Log modal
+            // Log modal (from active queue)
             if let Some(target) = log_modal_target.read().clone() {
                 EvalLogModal {
-                    ev: target,
+                    commit_id: target.commit_id,
+                    commit_hash: target.commit_hash,
+                    evaluation_status: target.evaluation_status,
                     on_close: move |_| log_modal_target.set(None),
+                }
+            }
+
+            // Log modal (from history tab)
+            if let Some(target) = history_log_modal_target.read().clone() {
+                EvalLogModal {
+                    commit_id: target.commit_id,
+                    commit_hash: target.commit_hash,
+                    evaluation_status: target.evaluation_status,
+                    on_close: move |_| history_log_modal_target.set(None),
                 }
             }
         }
@@ -497,6 +511,7 @@ fn EvalHistory(
     mut history_flake_filter: Signal<String>,
     mut history_page: Signal<i64>,
     mut refresh: Signal<u64>,
+    mut history_log_modal_target: Signal<Option<EvalHistoryItem>>,
 ) -> Element {
     rsx! {
         div {
@@ -645,13 +660,13 @@ fn EvalHistory(
                                                 style: "font-size: 12px; color: var(--cf-text-muted);",
                                                 "{format_eval_completed_at(&ev)}"
                                             }
-                                            td {
+                                             td {
                                                 div {
                                                     class: "row-actions",
                                                     button {
                                                         class: "btn-icon focus-ring",
-                                                        disabled: true,
-                                                        title: "Historical logs not yet available",
+                                                        title: "View evaluation logs",
+                                                        onclick: move |_| history_log_modal_target.set(Some(ev.clone())),
                                                         Icon { name: IconName::Terminal, size: 14 }
                                                     }
                                                     if ev.evaluation_status != "complete" {
@@ -694,131 +709,9 @@ fn EvalHistory(
     }
 }
 
-#[component]
-fn EvalLogModal(ev: EvalQueueItem, on_close: EventHandler<()>) -> Element {
-    let mut verbose = use_signal(|| false);
-    let status_meta = eval_status_meta(&ev.evaluation_status);
-
-    // Real-time log streaming is not yet implemented
-    // This will be replaced with actual log data from the backend/websocket
-    let shown: Vec<LogLine> = vec![];
-
-    rsx! {
-        div {
-            class: "modal-backdrop",
-            onclick: move |_| on_close.call(()),
-
-            div {
-                class: "modal",
-                style: "width: min(800px, 98vw);",
-                onclick: move |evt| evt.stop_propagation(),
-
-                div {
-                    class: "modal-head",
-                    style: "display: flex; justify-content: space-between; align-items: center;",
-                    div {
-                        h2 {
-                            style: "margin: 0; font-size: 15px;",
-                            span {
-                                class: "chip {status_meta.cls}",
-                                style: "margin-right: 8px;",
-                                "{status_meta.label}"
-                            }
-                            "{ev.flake_name}"
-                        }
-                        p {
-                            style: "margin: 4px 0 0; font-size: 12px; color: var(--cf-text-muted);",
-                            span {
-                                class: "mono",
-                                "{ev.commit_hash.chars().take(12).collect::<String>()}"
-                            }
-                            " · {ev.branch} · {ev.system_count} systems"
-                        }
-                    }
-                    div {
-                        style: "display: flex; gap: 8px; align-items: center;",
-                        div {
-                            class: "sd-logs-controls",
-                            div {
-                                class: "seg",
-                                button {
-                                    class: if !*verbose.read() { "active" } else { "" },
-                                    onclick: move |_| verbose.set(false),
-                                    "Concise"
-                                }
-                                button {
-                                    class: if *verbose.read() { "active" } else { "" },
-                                    onclick: move |_| verbose.set(true),
-                                    "Verbose"
-                                }
-                            }
-                        }
-                        button {
-                            class: "btn-icon focus-ring",
-                            onclick: move |_| on_close.call(()),
-                            Icon { name: IconName::X, size: 16 }
-                        }
-                    }
-                }
-
-                pre {
-                    class: "sd-log-stream",
-                    style: "min-height: 360px; max-height: 520px;",
-                    if shown.is_empty() {
-                        div {
-                            style: "padding: 24px; color: var(--cf-text-muted); text-align: center;",
-                            "Real-time log streaming is not yet implemented."
-                        }
-                    } else {
-                        for (i, line) in shown.iter().enumerate() {
-                            div {
-                                key: "{i}",
-                                class: "sd-log-line sd-log-{line.lvl}",
-                                span { class: "sd-log-t", "{line.t}" }
-                                span { class: "sd-log-lvl", "{line.lvl.to_uppercase()}" }
-                                span { class: "sd-log-m", "{line.m}" }
-                            }
-                        }
-                        if ev.evaluation_status == "in_progress" {
-                            div { class: "sd-log-caret", "▍" }
-                        }
-                    }
-                }
-
-                div {
-                    class: "modal-foot",
-                    span {
-                        style: "font-size: 12px; color: var(--cf-text-muted); margin-right: auto;",
-                        "{shown.len()} lines shown"
-                    }
-                    button {
-                        class: "btn btn-ghost focus-ring xs",
-                        disabled: true,
-                        title: "Log download not yet implemented",
-                        Icon { name: IconName::Download, size: 12 }
-                        " Download"
-                    }
-                    button {
-                        class: "btn btn-primary focus-ring",
-                        onclick: move |_| on_close.call(()),
-                        "Close"
-                    }
-                }
-            }
-        }
-    }
-}
-
 // ============================================================================
 // Helper types and functions
 // ============================================================================
-
-#[derive(Clone)]
-struct LogLine {
-    t: String,
-    lvl: String,
-    m: String,
-}
 
 struct StatusMeta {
     label: &'static str,

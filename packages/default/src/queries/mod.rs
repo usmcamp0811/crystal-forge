@@ -15,6 +15,7 @@ pub mod deployment;
 pub mod deployment_policies;
 pub mod derivations;
 pub mod environments;
+pub mod eval_logs;
 pub mod flake_credentials;
 pub mod flakes;
 pub mod hardening_scans;
@@ -28,3 +29,6 @@ mod cve_scans_tests;
 
 #[cfg(test)]
 mod hardening_scans_tests;
+
+#[cfg(test)]
+mod eval_logs_tests;
