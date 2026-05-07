@@ -282,6 +282,48 @@ async fn handle_eval_stream(mut socket: WebSocket, commit_id: i32, state: CFStat
     tracing::info!("WebSocket connection closed for commit {} eval", commit_id);
 }
 
+/// Fetch historical evaluation logs from database for a specific commit.
+/// 
+/// This endpoint retrieves persisted logs for completed/failed/cancelled evaluations.
+/// For in-progress evaluations, clients should use the WebSocket stream instead.
+pub async fn get_eval_logs_history(
+    Path(commit_id): Path<i32>,
+    State(state): State<CFState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<EvalLogEntry>>, ApiError> {
+    require_viewer_or_above(&state.pool, &headers)
+        .await
+        .ok_or(ApiError::Forbidden)?;
+
+    let logs = crate::queries::eval_logs::fetch_eval_logs_by_commit(&state.pool, commit_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to fetch eval logs for commit {}: {}", commit_id, e);
+            ApiError::Internal(format!("Failed to fetch evaluation logs: {}", e))
+        })?;
+
+    let entries: Vec<EvalLogEntry> = logs
+        .into_iter()
+        .map(|row| EvalLogEntry {
+            timestamp: row.log_timestamp,
+            sequence: row.log_sequence,
+            level: row.log_level,
+            message: row.log_message,
+        })
+        .collect();
+
+    Ok(Json(entries))
+}
+
+/// DTO for a single evaluation log entry (REST API response).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvalLogEntry {
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub sequence: i32,
+    pub level: Option<String>,
+    pub message: String,
+}
+
 /// Ensure a broadcast channel exists for this commit (create if needed)
 pub async fn ensure_eval_channel(state: &CFState, commit_id: i32) {
     let _ = get_or_create_eval_channel(state, commit_id).await;
