@@ -11,7 +11,8 @@ labels:
   - nixos-module
   - documentation
   - ui
-dependencies: []
+dependencies:
+  - TASK-293
 priority: high
 ---
 
