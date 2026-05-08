@@ -1,9 +1,10 @@
 ---
 id: TASK-293
 title: Add non-interactive flag to cf-keygen for automated key generation
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-05-08 03:12'
+updated_date: '2026-05-08 03:41'
 labels:
   - enhancement
   - blocker
