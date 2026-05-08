@@ -13,6 +13,8 @@ use crate::components::builds::{
     DetailTab, MetricsRow, PendingAction, QueueAction, QueueActionButton, WorkerAction, WorkerItem,
     WorkerStatus, WorkerStrip, extract_system_name, selected_build_data,
 };
+use crate::state::app_state::AppState;
+use crate::state::auth;
 use crate::theme;
 
 const PAGE_SIZE: i64 = 50;
@@ -179,6 +181,9 @@ fn map_queue_item(item: &crate::api::models::BuildQueueItem, idx: usize) -> Buil
 /// Builds control center page.
 #[component]
 pub fn BuildsView() -> Element {
+    let app_state = use_context::<Signal<AppState>>();
+    let can_requeue = auth::is_operator_or_above(&app_state.read().auth);
+
     let mut workers = use_signal(Vec::<WorkerItem>::new);
     let mut refresh_trigger = use_signal(|| 0_u64);
 
@@ -522,6 +527,7 @@ pub fn BuildsView() -> Element {
                             completed_rows.clone()
                         },
                         selected_id: selected_build,
+                        can_requeue,
                         on_build_action: move |(build_id, action)| {
                             pending_action.set(Some(PendingAction::Build { build_id, action }))
                         },
