@@ -1,10 +1,10 @@
 ---
 id: TASK-290
 title: 'Allow requeueing cancelled, failed, or successful builds from Build view'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-05-08 02:20'
-updated_date: '2026-05-08 02:23'
+updated_date: '2026-05-08 02:24'
 labels:
   - feature
   - builds
@@ -118,9 +118,7 @@ Medium:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Sprint-ready refinement completed with explicit goal, non-goals, constraints, verification plan, and risk profile.
-
-Execution decisions captured: statuses=cancelled|failed|success; new attempt model; row action; no retry cap; Operator/Admin; append to tail; full-stack scope.
+LOCK: gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-290-requeue-build-view
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
@@ -128,4 +126,7 @@ Execution decisions captured: statuses=cancelled|failed|success; new attempt mod
 - [ ] #1 Add/extend backend tests covering eligibility matrix and RBAC for requeue endpoint.
 - [ ] #2 Add/extend query/service tests asserting new-attempt creation and immutable prior attempts.
 - [ ] #3 Capture manual validation evidence for requeue from cancelled/failed/success in local stack run.
+- [ ] #4 Add/extend backend tests covering eligibility matrix and RBAC for requeue endpoint.
+- [ ] #5 Add/extend query/service tests asserting new-attempt creation and immutable prior attempts.
+- [ ] #6 Capture manual validation evidence for requeue from cancelled/failed/success in local stack run.
 <!-- DOD:END -->
