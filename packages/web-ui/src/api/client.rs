@@ -524,10 +524,10 @@ pub async fn cancel_build_job(job_id: &uuid::Uuid) -> Result<(), ApiClientError>
     send_empty_with_csrf("POST", &url, None::<&()>).await
 }
 
-/// Re-enqueue a cancelled or failed job (admin).
+/// Re-enqueue a terminal job (operator/admin).
 ///
-/// Resets the existing `build_jobs` row to `queued` in-place. Does not trigger
-/// a flake re-evaluation; the derivation is already known.
+/// Creates a new queued build attempt row for the same derivation/context while
+/// preserving immutable history on prior attempts.
 pub async fn requeue_build_job(job_id: &uuid::Uuid) -> Result<(), ApiClientError> {
     let url = format!("{}/build-jobs/{}/requeue", base_url(), job_id);
     send_empty_with_csrf("POST", &url, None::<&()>).await
