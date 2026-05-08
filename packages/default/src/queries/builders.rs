@@ -1207,39 +1207,58 @@ pub async fn finalize_cancelled_job(
     Ok(job)
 }
 
-/// Reset a `cancelled` (or `failed`) job back to `queued` in-place, reusing
-/// the existing `build_jobs` row.  This avoids the `NOT EXISTS` duplicate guard
-/// that would block a fresh `INSERT` for the same derivation.
+/// Create a new queued build attempt from a terminal job.
 ///
-/// Priority is reset to the job's original `priority_weight` (stored on the
-/// row).  `retry_count`, `builder_id`, `started_at`, and `completed_at` are
-/// all cleared so the job enters the queue as if freshly created.
-pub async fn requeue_cancelled_job(pool: &PgPool, job_id: &Uuid) -> Result<BuildJob> {
-    let updated = sqlx::query_as::<_, BuildJob>(
+/// This preserves immutable build history by keeping the original row intact
+/// and inserting a brand-new `build_jobs` row for the same derivation/context.
+///
+/// Requeue-eligible terminal statuses: `cancelled`, `failed`, `success`.
+/// New attempts are appended to the queue tail by assigning a weight lower than
+/// the current minimum queued weight.
+pub async fn requeue_build_job_as_new_attempt(pool: &PgPool, job_id: &Uuid) -> Result<BuildJob> {
+    let inserted = sqlx::query_as::<_, BuildJob>(
         r#"
-        UPDATE build_jobs
-        SET status       = 'queued',
-            builder_id   = NULL,
-            started_at   = NULL,
-            completed_at = NULL,
-            retry_count  = 0,
-            updated_at   = now()
-        WHERE id = $1
-          AND status IN ('cancelled', 'failed')
+        WITH source_job AS (
+            SELECT derivation_id, environment_id, max_retries
+            FROM build_jobs
+            WHERE id = $1
+              AND status IN ('cancelled', 'failed', 'success')
+        ), queue_tail AS (
+            SELECT COALESCE(MIN(priority_weight) - 0.000001, 0.0) AS tail_weight
+            FROM build_jobs
+            WHERE status = 'queued'
+        )
+        INSERT INTO build_jobs (
+            derivation_id,
+            environment_id,
+            status,
+            retry_count,
+            max_retries,
+            priority_weight
+        )
+        SELECT
+            s.derivation_id,
+            s.environment_id,
+            'queued',
+            0,
+            s.max_retries,
+            q.tail_weight
+        FROM source_job s
+        CROSS JOIN queue_tail q
         RETURNING *
         "#,
     )
     .bind(job_id)
     .fetch_optional(pool)
     .await
-    .context("Failed to requeue build job")?
+    .context("Failed to requeue build job as new attempt")?
     .ok_or_else(|| {
         anyhow::anyhow!(
-            "Build job not found or not in a requeue-eligible status (cancelled/failed)"
+            "Build job not found or not in a requeue-eligible status (cancelled/failed/success)"
         )
     })?;
 
-    Ok(updated)
+    Ok(inserted)
 }
 
 #[cfg(test)]
@@ -1358,6 +1377,52 @@ mod tests {
         .execute(pool)
         .await
         .expect("Failed to update test job status");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_requeue_creates_new_attempt_and_preserves_original_for_terminal_statuses() {
+        let pool = queue_test_pool().await;
+        let now = Utc::now();
+
+        for (idx, terminal_status) in ["cancelled", "failed", "success"].iter().enumerate() {
+            let job_id = create_queued_job(
+                &pool,
+                &format!("https://example.com/task-290-requeue-{}.git", idx),
+                &format!("task-290-requeue-{}", idx),
+                &format!("task290requeue{:024}", idx),
+                now - Duration::minutes(5),
+                &format!("drv-task-290-requeue-{}", idx),
+                5.0,
+                now - Duration::minutes(4),
+            )
+            .await;
+
+            set_build_job_status(&pool, job_id, terminal_status).await;
+
+            let original = get_build_job_by_id(&pool, &job_id)
+                .await
+                .expect("fetch original job")
+                .expect("original job exists");
+            assert_eq!(original.status, *terminal_status);
+
+            let requeued = requeue_build_job_as_new_attempt(&pool, &job_id)
+                .await
+                .expect("requeue should create new attempt");
+
+            assert_ne!(requeued.id, original.id, "new attempt must have new id");
+            assert_eq!(requeued.status, "queued");
+            assert_eq!(requeued.derivation_id, original.derivation_id);
+            assert_eq!(requeued.environment_id, original.environment_id);
+            assert_eq!(requeued.retry_count, 0);
+
+            // Original attempt remains immutable.
+            let original_after = get_build_job_by_id(&pool, &job_id)
+                .await
+                .expect("fetch original job after requeue")
+                .expect("original job still exists");
+            assert_eq!(original_after.status, *terminal_status);
+        }
     }
 
     #[tokio::test]

@@ -762,7 +762,7 @@ pub fn BuildsView() -> Element {
                                                 }
                                             }
                                             BuildAction::Restart => {
-                                                // Prefer direct requeue if we have a job_id (cancelled/failed).
+                                                // Prefer direct requeue if we have a job_id (terminal statuses).
                                                 // Fall back to system sync for statuses without a job_id.
                                                 if let Some(ref jid) = selected.job_id {
                                                     match api::client::requeue_build_job(jid).await {
@@ -953,7 +953,7 @@ fn BuildQueueFullTable(
                                                         evt.stop_propagation();
                                                         on_build_action.call((build.id, BuildAction::Restart));
                                                     },
-                                                    "Restart"
+                                                    "Requeue"
                                                 }
                                             }
                                             if build.status == BuildStatus::Queued {
