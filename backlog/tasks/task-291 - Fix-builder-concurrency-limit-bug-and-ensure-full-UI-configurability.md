@@ -4,7 +4,7 @@ title: Fix builder concurrency limit bug and ensure full UI configurability
 status: In Progress
 assignee: []
 created_date: '2026-05-08 02:46'
-updated_date: '2026-05-08 02:49'
+updated_date: '2026-05-08 02:55'
 labels:
   - bug
   - builders
@@ -169,15 +169,15 @@ If config is only read at startup, we may need to add a config refresh mechanism
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 ### Bug Fix
-- [ ] #1 Line 225 in builder.rs uses builder_config.max_concurrent_jobs.unwrap_or(1) instead of build_config.max_concurrent_derivations
-- [ ] #2 Comment added explaining the distinction between builder_config.max_concurrent_jobs (builder-level concurrency) and build_config.max_concurrent_derivations (Nix-level parallelism)
+- [x] #1 Line 225 in builder.rs uses builder_config.max_concurrent_jobs.unwrap_or(1) instead of build_config.max_concurrent_derivations
+- [x] #2 Comment added explaining the distinction between builder_config.max_concurrent_jobs (builder-level concurrency) and build_config.max_concurrent_derivations (Nix-level parallelism)
 - [ ] #3 Builder with max_concurrent_jobs = 2 successfully claims and processes up to 2 jobs concurrently
 - [ ] #4 Builder with max_concurrent_jobs = 1 successfully claims and processes only 1 job at a time
 - [ ] #5 Builder respects the max_concurrent_jobs value from the database (not config file) if they differ
 
 ### UI Configurability
-- [ ] #6 UI builder management view exposes all configurable builder fields: name, status, max_concurrent_jobs, max_cpu_cores, max_memory_mb, environment assignments
-- [ ] #7 UI validates that max_concurrent_jobs must be >= 1
+- [x] #6 UI builder management view exposes all configurable builder fields: name, status, max_concurrent_jobs, max_cpu_cores, max_memory_mb, environment assignments
+- [x] #7 UI validates that max_concurrent_jobs must be >= 1
 - [ ] #8 Changes to max_concurrent_jobs made via UI are persisted to database and reflected in builder behavior
 - [ ] #9 Builder either immediately respects updated max_concurrent_jobs or picks up changes on next heartbeat cycle
 
@@ -200,10 +200,44 @@ If config is only read at startup, we may need to add a config refresh mechanism
 - Test thoroughly with different config scenarios
 <!-- SECTION:DESCRIPTION:END -->
 
-<!-- AC:END -->
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+## Phase 1: Critical Bug Fix - COMPLETE
+
+- Fixed line 225 to use builder_config.max_concurrent_jobs
+- Added max_concurrent_jobs parameter to run_api_job_loop
+- Added explanatory comment distinguishing builder vs build config
+- All code formatted with cargo fmt
+
+## Phase 2: UI Audit - COMPLETE
+
+Reviewed:
+- edit_builder_modal.rs (lines 300-313)
+- add_builder_modal.rs  
+- builder_card.rs
+
+UI Configuration Status:
+✅ Name - exposed and editable
+✅ Status (active/inactive/offline) - exposed and editable  
+✅ max_concurrent_jobs - exposed and editable (with min=1 validation)
+✅ max_cpu_cores - exposed and editable
+✅ max_memory_mb - exposed and editable
+✅ Environment assignments - exposed and editable
+✅ Public key rotation - exposed with generate keypair functionality
+
+All builder configuration fields are fully exposed in UI.
+API already supports all update operations via UpdateBuilderRequest.
+
+## Phase 3: Testing - IN PROGRESS
+
+Requires database running for full verification.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: agent on gray in ~/code/crystal-forge/TASK-291-fix-builder-concurrency
 <!-- SECTION:NOTES:END -->
+
+<!-- AC:END -->
