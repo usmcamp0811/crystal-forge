@@ -6,6 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-05-08 02:59'
+updated_date: '2026-05-08 03:10'
 labels:
   - bug
   - dx
@@ -21,57 +22,83 @@ priority: high
 <!-- SECTION:DESCRIPTION:BEGIN -->
 ## Problem
 
-Users deploying Crystal Forge for the first time encounter a confusing situation where:
-1. The builder starts successfully and shows `Worker 0: Idle`
-2. Logs show `SELECT ... FROM view_buildable_derivations` returning 0 rows
-3. No error messages explain WHY there's no work
-4. The UI doesn't indicate what's missing (flake not configured, SSH keys not set up, etc.)
+Users deploying Crystal Forge encounter confusing builder behavior:
 
-This creates the impression that the builder is "broken" when the actual root cause is:
-- No flake configured yet
-- Flake sync failing due to SSH key permissions (documented gotcha: auto-generated key has 0755 perms, SSH requires 0600)
-- `cf_agent_enabled` eval failing silently, causing derivations to be filtered out
-- Build scope set to "Only Crystal Forge systems" but no systems have `cf_agent_enabled=true`
+1. **Builder API mode not supported by NixOS module:**
+   - Module only configures legacy database mode
+   - `CRYSTAL_FORGE__BUILDER__PRIVATE_KEY_PATH` not set
+   - Builder shows deprecation warning: "Starting builder in deprecated legacy direct-database mode"
+   - No way to enable builder API mode via module options
+
+2. **Silent failures confuse users:**
+   - Builder shows `Worker 0: Idle` with no explanation
+   - `view_buildable_derivations` returns 0 rows with no diagnostic info
+   - Flake sync failures are silent (SSH key perms, missing credentials)
+   - `cf_agent_enabled` eval failures cause derivations to be invisibly filtered out
+
+3. **First-time deployment gotchas:**
+   - SSH keys auto-generated with 0755 perms (SSH requires 0600)
+   - tmpfiles fixes perms on reboot but not on first activation
+   - No setup checklist or wizard
+   - Build scope defaults can filter out all work
 
 ## Current State
 
-The NixOS module has several known issues documented in the deployment setup guide:
-- SSH key auto-generated with 0755 permissions (SSH refuses keys > 0600)
-- tmpfiles rules fix this on boot BUT not on first activation
-- Flake evaluation failures are silent
-- Builder logs don't explain why `view_buildable_derivations` is empty
-- No first-run checklist or setup wizard in UI
+The NixOS module:
+- Only supports legacy database mode (deprecated)
+- Has no builder API mode support (the recommended architecture)
+- Auto-generates SSH keys with wrong permissions
+- Provides no diagnostic output when builder is idle
+- Has no first-run validation
 
 ## Desired Outcome
 
-1. **NixOS module improvements:**
-   - Fix SSH key permissions DURING preStart, not just via tmpfiles
-   - Add validation checks that warn/fail if flake credentials aren't configured
-   - Ensure tmpfiles directories exist before services start (first activation race condition)
+1. **Deprecate legacy database mode, migrate to builder API mode:**
+   - Add `build.api_mode` option (default: true)
+   - Auto-generate builder API key if not provided (like SSH keys)
+   - Set `CRYSTAL_FORGE__BUILDER__PRIVATE_KEY_PATH` environment variable
+   - Register builder with server on first start
+   - Emit deprecation warnings if `api_mode = false`
 
-2. **Builder diagnostics improvements:**
-   - When `view_buildable_derivations` returns 0 rows, log WHY (debug mode):
+2. **NixOS module hardening:**
+   - Fix SSH key permissions in preStart (before services need them)
+   - Validate required setup exists (flakes configured, credentials present)
+   - Ensure tmpfiles directories exist before service start
+
+3. **Builder diagnostics:**
+   - Log WHY `view_buildable_derivations` is empty:
      - "No flakes configured"
-     - "No derivations in pending state"
-     - "All pending derivations filtered: cf_agent_enabled=NULL/false"
-     - "Build scope restricts to CF systems, but no systems have cf_agent_enabled=true"
-   
-3. **UI/UX improvements:**
-   - First-run setup checklist or wizard
-   - Dashboard shows missing setup items (no flakes, SSH keys not configured, no systems registered)
-   - Builder status page explains when idle due to configuration vs actually no work
+     - "All derivations filtered: cf_agent_enabled=NULL/false"
+     - "Build scope restricts to CF systems but none qualified"
+   - Make these visible in INFO or WARN level logs
 
-4. **Documentation improvements:**
-   - Add "Deployment Checklist" to docs
-   - Sequence setup steps correctly (SSH keys → flake credentials → system registration → first sync)
-   - Add troubleshooting section with "builder idle but I expected builds" diagnostic steps
+4. **UI/UX improvements:**
+   - First-run setup wizard or checklist
+   - Dashboard warnings for missing critical setup
+   - Builder page explains idle state (config missing vs no work)
+
+5. **Documentation:**
+   - Deployment checklist with correct sequence
+   - Troubleshooting: "builder idle but I expected work"
+   - Migration guide: legacy → API mode
+   - Deprecation timeline for database mode
+
+## Migration Path
+
+For existing deployments using legacy database mode:
+- Phase 1: Make API mode available, keep legacy as deprecated default
+- Phase 2: Switch default to API mode, warn on legacy mode
+- Phase 3: Remove legacy database mode entirely
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 NixOS module sets SSH key permissions to 0600 in preStart script before first use
-- [ ] #2 NixOS module validates required directories exist before services start (no NAMESPACE errors on first activation)
-- [ ] #3 Builder logs explain why view_buildable_derivations is empty when in debug mode (at least 3 common scenarios covered)
-- [ ] #4 Documentation includes a First Deployment Checklist with sequenced setup steps
-- [ ] #5 UI dashboard shows actionable warnings when critical setup is missing (no flakes configured, no valid credentials, etc.)
+- [ ] #1 NixOS module supports builder API mode with build.api_mode option (default: true)
+- [ ] #2 Module auto-generates builder API key at /var/lib/crystal-forge/builder-api.key if not provided
+- [ ] #3 Module sets CRYSTAL_FORGE__BUILDER__PRIVATE_KEY_PATH environment variable when api_mode enabled
+- [ ] #4 Builder registers with server API on first start in API mode
+- [ ] #5 Module emits deprecation warning when build.api_mode = false (legacy database mode)
+- [ ] #6 SSH key permissions set to 0600 in preStart before first use
+- [ ] #7 Builder logs explain why view_buildable_derivations is empty (at least 3 scenarios)
+- [ ] #8 Documentation includes builder API mode setup and legacy deprecation notice
 <!-- AC:END -->
