@@ -1,10 +1,10 @@
 ---
 id: TASK-292
 title: Deprecate legacy database mode and implement builder API mode in NixOS module
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-05-08 02:59'
-updated_date: '2026-05-08 03:12'
+updated_date: '2026-05-08 03:50'
 labels:
   - bug
   - dx
