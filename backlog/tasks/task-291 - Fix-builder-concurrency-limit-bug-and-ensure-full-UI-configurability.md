@@ -247,3 +247,5 @@ LOCK: agent on gray in ~/code/crystal-forge/TASK-291-fix-builder-concurrency
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: agent on gray in ~/code/crystal-forge/TASK-291-fix-builder-concurrency
 <!-- SECTION:NOTES:END -->
+
+<!-- AC:END -->
