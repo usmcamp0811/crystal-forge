@@ -140,4 +140,7 @@ Verification: web-ui cargo check passes; default cargo check blocked by SQLx DB 
 - [ ] #1 Add/extend backend tests covering eligibility matrix and RBAC for requeue endpoint.
 - [ ] #2 Add/extend query/service tests asserting new-attempt creation and immutable prior attempts.
 - [ ] #3 Capture manual validation evidence for requeue from cancelled/failed/success in local stack run.
+- [ ] #4 Add/extend backend tests covering eligibility matrix and RBAC for requeue endpoint.
+- [ ] #5 Add/extend query/service tests asserting new-attempt creation and immutable prior attempts.
+- [ ] #6 Capture manual validation evidence for requeue from cancelled/failed/success in local stack run.
 <!-- DOD:END -->
