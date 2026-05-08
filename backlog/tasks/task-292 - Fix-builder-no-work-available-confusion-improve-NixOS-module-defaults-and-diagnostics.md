@@ -1,12 +1,10 @@
 ---
 id: TASK-292
-title: >-
-  Fix builder "no work available" confusion: improve NixOS module defaults and
-  diagnostics
+title: Deprecate legacy database mode and implement builder API mode in NixOS module
 status: Backlog
 assignee: []
 created_date: '2026-05-08 02:59'
-updated_date: '2026-05-08 03:10'
+updated_date: '2026-05-08 03:12'
 labels:
   - bug
   - dx
@@ -20,75 +18,199 @@ priority: high
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-## Problem
+## Problem Statement
 
-Users deploying Crystal Forge encounter confusing builder behavior:
+The Crystal Forge NixOS module only supports legacy database mode (direct database access), which is deprecated. The recommended builder API mode is not supported by the module, forcing users to either:
+1. Use deprecated legacy mode with warnings
+2. Manually configure builder API mode outside the module
 
-1. **Builder API mode not supported by NixOS module:**
-   - Module only configures legacy database mode
-   - `CRYSTAL_FORGE__BUILDER__PRIVATE_KEY_PATH` not set
-   - Builder shows deprecation warning: "Starting builder in deprecated legacy direct-database mode"
-   - No way to enable builder API mode via module options
-
-2. **Silent failures confuse users:**
-   - Builder shows `Worker 0: Idle` with no explanation
-   - `view_buildable_derivations` returns 0 rows with no diagnostic info
-   - Flake sync failures are silent (SSH key perms, missing credentials)
-   - `cf_agent_enabled` eval failures cause derivations to be invisibly filtered out
-
-3. **First-time deployment gotchas:**
-   - SSH keys auto-generated with 0755 perms (SSH requires 0600)
-   - tmpfiles fixes perms on reboot but not on first activation
-   - No setup checklist or wizard
-   - Build scope defaults can filter out all work
+This creates deployment confusion and prevents users from following best practices.
 
 ## Current State
 
-The NixOS module:
-- Only supports legacy database mode (deprecated)
-- Has no builder API mode support (the recommended architecture)
-- Auto-generates SSH keys with wrong permissions
-- Provides no diagnostic output when builder is idle
-- Has no first-run validation
+**NixOS Module (`modules/nixos/crystal-forge/default.nix`):**
+- Only configures legacy database mode
+- Does NOT set `CRYSTAL_FORGE__BUILDER__PRIVATE_KEY_PATH`
+- Does NOT generate builder API keys
+- Does NOT register builders with the server API
+- Builder logs show: "⚠️  Starting builder in deprecated legacy direct-database mode"
+
+**Missing from Module:**
+- `build.api_mode` option
+- Builder API key generation (similar to SSH key auto-generation)
+- Builder registration flow
+- Environment variable configuration for API mode
+- Documentation for builder API mode setup
+
+## Root Cause Analysis
+
+The module was written before builder API mode existed. It needs to be updated to:
+1. Support the new architecture as the default
+2. Deprecate the old database mode
+3. Provide migration path for existing deployments
 
 ## Desired Outcome
 
-1. **Deprecate legacy database mode, migrate to builder API mode:**
-   - Add `build.api_mode` option (default: true)
-   - Auto-generate builder API key if not provided (like SSH keys)
-   - Set `CRYSTAL_FORGE__BUILDER__PRIVATE_KEY_PATH` environment variable
-   - Register builder with server on first start
-   - Emit deprecation warnings if `api_mode = false`
+### Phase 1: Add Builder API Mode Support (This Task)
 
-2. **NixOS module hardening:**
-   - Fix SSH key permissions in preStart (before services need them)
-   - Validate required setup exists (flakes configured, credentials present)
-   - Ensure tmpfiles directories exist before service start
+**NixOS Module Changes:**
 
-3. **Builder diagnostics:**
-   - Log WHY `view_buildable_derivations` is empty:
-     - "No flakes configured"
-     - "All derivations filtered: cf_agent_enabled=NULL/false"
-     - "Build scope restricts to CF systems but none qualified"
-   - Make these visible in INFO or WARN level logs
+1. **Add new options:**
+   ```nix
+   services.crystal-forge.build = {
+     api_mode = lib.mkOption {
+       type = lib.types.bool;
+       default = true;
+       description = "Use builder API mode (recommended). Set to false for legacy database mode (deprecated).";
+     };
+     
+     api_key_file = lib.mkOption {
+       type = lib.types.nullOr lib.types.path;
+       default = null;
+       description = "Path to builder API private key. If null, key will be auto-generated.";
+     };
+     
+     server_url = lib.mkOption {
+       type = lib.types.str;
+       default = "http://127.0.0.1:3000";
+       description = "Crystal Forge server URL for builder API mode";
+     };
+   };
+   ```
 
-4. **UI/UX improvements:**
-   - First-run setup wizard or checklist
-   - Dashboard warnings for missing critical setup
-   - Builder page explains idle state (config missing vs no work)
+2. **Auto-generate builder API keys in preStart:**
+   ```bash
+   # Similar to SSH key generation (lines 208-223)
+   if [ ! -f /var/lib/crystal-forge/builder-api.key ]; then
+     echo "Generating builder API key..."
+     cf-keygen -f /var/lib/crystal-forge/builder-api.key
+     chmod 0600 /var/lib/crystal-forge/builder-api.key
+     chown crystal-forge:crystal-forge /var/lib/crystal-forge/builder-api.key
+     echo "Builder API public key (register this in Crystal Forge UI):"
+     cat /var/lib/crystal-forge/builder-api.key.pub
+   fi
+   ```
 
-5. **Documentation:**
-   - Deployment checklist with correct sequence
-   - Troubleshooting: "builder idle but I expected work"
-   - Migration guide: legacy → API mode
-   - Deprecation timeline for database mode
+3. **Set environment variables for API mode:**
+   ```nix
+   environment = {
+     CRYSTAL_FORGE__BUILDER__PRIVATE_KEY_PATH = 
+       if cfg.build.api_mode then 
+         cfg.build.api_key_file or "/var/lib/crystal-forge/builder-api.key"
+       else null;
+     CRYSTAL_FORGE__BUILDER__SERVER_URL = 
+       if cfg.build.api_mode then cfg.build.server_url else null;
+   };
+   ```
 
-## Migration Path
+4. **Emit deprecation warning for legacy mode:**
+   ```nix
+   warnings = lib.optional (!cfg.build.api_mode) 
+     "Crystal Forge legacy database mode is deprecated. Please migrate to builder API mode by setting services.crystal-forge.build.api_mode = true";
+   ```
 
-For existing deployments using legacy database mode:
-- Phase 1: Make API mode available, keep legacy as deprecated default
-- Phase 2: Switch default to API mode, warn on legacy mode
-- Phase 3: Remove legacy database mode entirely
+5. **Fix SSH key permissions BEFORE first use:**
+   ```bash
+   # In preStart, BEFORE key generation check
+   if [ -f /var/lib/crystal-forge/.ssh/id_ed25519 ]; then
+     chmod 0600 /var/lib/crystal-forge/.ssh/id_ed25519
+   fi
+   ```
+
+**Documentation Changes:**
+
+1. **Update deployment guide:**
+   - Add "Builder API Mode Setup" section
+   - Document builder registration flow
+   - Show how to get builder public key
+   - Explain API mode vs legacy mode
+
+2. **Add migration guide:**
+   - Step-by-step: legacy → API mode
+   - How to verify API mode is working
+   - Troubleshooting common issues
+
+3. **Update NixOS module reference:**
+   - Document all new `build.*` options
+   - Show example configurations
+   - Mark legacy options as deprecated
+
+4. **First-time deployment checklist:**
+   - SSH key setup and permissions
+   - Flake credentials configuration
+   - Builder registration (API mode)
+   - System registration
+   - First flake sync verification
+
+### Phase 2: Deprecation Timeline
+
+- **Now (this task):** Add API mode support, keep legacy as option with warning
+- **Next release:** Make API mode the default (`api_mode = true`)
+- **Future release:** Remove legacy database mode entirely
+
+## Acceptance Criteria
+
+Module Implementation:
+- [ ] #1 Add `build.api_mode` option (default: true)
+- [ ] #2 Add `build.api_key_file` option with auto-generation fallback
+- [ ] #3 Add `build.server_url` option for API endpoint
+- [ ] #4 Auto-generate builder API key in preStart if not provided
+- [ ] #5 Set `CRYSTAL_FORGE__BUILDER__PRIVATE_KEY_PATH` environment variable when api_mode enabled
+- [ ] #6 Set `CRYSTAL_FORGE__BUILDER__SERVER_URL` environment variable when api_mode enabled
+- [ ] #7 Emit deprecation warning when `api_mode = false`
+- [ ] #8 Fix SSH key permissions to 0600 in preStart before any key operations
+
+Documentation:
+- [ ] #9 Add "Builder API Mode" section to deployment guide
+- [ ] #10 Document builder registration flow with screenshots
+- [ ] #11 Add migration guide: legacy database mode → API mode
+- [ ] #12 Update NixOS module reference with new `build.*` options
+- [ ] #13 Mark legacy mode options as deprecated in docs
+- [ ] #14 Add first-time deployment checklist with API mode steps
+
+Verification:
+- [ ] #15 Test fresh deployment with `api_mode = true` (default)
+- [ ] #16 Test migration from legacy mode to API mode
+- [ ] #17 Verify builder registers with server API on first start
+- [ ] #18 Verify auto-generated keys have correct permissions (0600)
+- [ ] #19 Verify deprecation warning appears when `api_mode = false`
+
+## Out of Scope
+
+- UI improvements (first-run wizard) - separate task
+- Builder diagnostics improvements - separate task
+- Automatic builder registration via module - requires server API changes
+
+## Implementation Notes
+
+**Key Generation Tool:**
+The module needs access to `cf-keygen` binary. Verify this is available in the package:
+```nix
+${pkgs.crystal-forge.default.server}/bin/cf-keygen
+```
+
+**Builder Registration:**
+For now, users must manually register the builder public key via UI. Future enhancement: auto-register via server API.
+
+**Backward Compatibility:**
+Existing deployments with legacy mode continue to work. They just get a warning encouraging migration.
+
+## Files to Modify
+
+- `modules/nixos/crystal-forge/default.nix` - Add API mode support
+- `docs/deployment.md` (or equivalent) - Add builder API mode docs
+- `docs/nixos-module.md` (or equivalent) - Document new options
+- `docs/migration-legacy-to-api.md` - New migration guide
+- `docs/troubleshooting.md` - Add builder API mode troubleshooting
+
+## Definition of Done
+
+- NixOS module supports builder API mode as default
+- Fresh deployments use API mode without manual configuration
+- Documentation covers all new options and migration path
+- Existing deployments show deprecation warning for legacy mode
+- Tests verify API mode works end-to-end
+- Builder public key is displayed on first activation for easy registration
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
