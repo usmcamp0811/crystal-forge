@@ -1,9 +1,10 @@
 ---
 id: TASK-291
 title: Fix builder concurrency limit bug and ensure full UI configurability
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-05-08 02:46'
+updated_date: '2026-05-08 02:49'
 labels:
   - bug
   - builders
@@ -198,4 +199,11 @@ If config is only read at startup, we may need to add a config refresh mechanism
 - UI enhancement can be iterative (phase 2)
 - Test thoroughly with different config scenarios
 <!-- SECTION:DESCRIPTION:END -->
+
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: agent on gray in ~/code/crystal-forge/TASK-291-fix-builder-concurrency
+<!-- SECTION:NOTES:END -->
