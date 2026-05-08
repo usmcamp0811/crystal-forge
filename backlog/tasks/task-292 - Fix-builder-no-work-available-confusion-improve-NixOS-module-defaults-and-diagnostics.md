@@ -224,3 +224,17 @@ Existing deployments with legacy mode continue to work. They just get a warning 
 - [ ] #7 Builder logs explain why view_buildable_derivations is empty (at least 3 scenarios)
 - [ ] #8 Documentation includes builder API mode setup and legacy deprecation notice
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+## Implementation Blocker Found
+
+The cf-keygen binary has an interactive confirmation prompt that will block in automated scripts.
+
+Required Fix: Add -y or --force flag to cf-keygen to skip confirmation for automated use.
+
+Workaround: Use echo y | cf-keygen -f ... in preStart script.
+
+See cf-keygen.rs lines 84-92 for the blocking prompt code.
+<!-- SECTION:NOTES:END -->
