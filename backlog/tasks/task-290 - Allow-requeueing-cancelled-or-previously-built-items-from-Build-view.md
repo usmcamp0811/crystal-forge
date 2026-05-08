@@ -1,10 +1,10 @@
 ---
 id: TASK-290
 title: 'Allow requeueing cancelled, failed, or successful builds from Build view'
-status: To Do
+status: Review
 assignee: []
 created_date: '2026-05-08 02:20'
-updated_date: '2026-05-08 02:23'
+updated_date: '2026-05-08 02:44'
 labels:
   - feature
   - builds
@@ -24,6 +24,10 @@ modified_files:
   - packages/web-ui/src/views/builds.rs
   - packages/default/src/handlers/api/*.rs
   - packages/default/src/queries/build_jobs.rs
+  - packages/web-ui/src/components/builds/build_queue_pane.rs
+  - packages/web-ui/src/api/client.rs
+  - packages/default/src/queries/builders.rs
+  - packages/default/src/handlers/api/builders.rs
 priority: high
 ordinal: 2900
 ---
@@ -121,6 +125,14 @@ Medium:
 Sprint-ready refinement completed with explicit goal, non-goals, constraints, verification plan, and risk profile.
 
 Execution decisions captured: statuses=cancelled|failed|success; new attempt model; row action; no retry cap; Operator/Admin; append to tail; full-stack scope.
+
+MR !252 created: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/252
+
+Implemented backend requeue as new attempt row with immutable history and operator/admin RBAC
+
+Implemented UI requeue visibility gating to operator-or-above users and relabeled action to Requeue
+
+Verification: web-ui cargo check passes; default cargo check blocked by SQLx DB connectivity in current environment
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

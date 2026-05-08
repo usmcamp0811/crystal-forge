@@ -11,17 +11,19 @@ use std::{
 fn print_help(program: &str) {
     eprintln!(
         "\
-Usage: {program} [-t ed25519] [-f <output_file>]
+Usage: {program} [-t ed25519] [-f <output_file>] [-y]
 
 Generates an Ed25519 key pair for Crystal Forge agents.
 
 Options:
   -t <type>         Key type (must be 'ed25519'; default)
   -f <path>         File to save the private key (default: /var/lib/crystal_forge/<hostname>.key)
+  -y, --yes         Skip confirmation prompt (for automated use)
   -h, --help        Show this help message
 
-Example:
+Examples:
   {program} -f /var/lib/crystal_forge/agent.key
+  {program} -y -f /var/lib/crystal_forge/builder-api.key
 "
     );
 }
@@ -39,6 +41,7 @@ fn main() {
 
     let mut key_type = "ed25519";
     let mut file: Option<PathBuf> = None;
+    let mut skip_confirm = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -61,6 +64,9 @@ fn main() {
                 }
                 file = Some(PathBuf::from(&args[i]));
             }
+            "-y" | "--yes" => {
+                skip_confirm = true;
+            }
             "-h" | "--help" => {
                 print_help(&args[0]);
                 return;
@@ -81,14 +87,16 @@ fn main() {
 
     let path = file.unwrap_or_else(get_default_path);
 
-    eprint!("📝 Save key to {}? [Y/n] ", path.display());
-    io::stdout().flush().unwrap();
-    let mut input = String::new();
-    io::stdin().read_line(&mut input).unwrap();
-    let trimmed = input.trim();
-    if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("y") {
-        eprintln!("Aborted.");
-        process::exit(0);
+    if !skip_confirm {
+        eprint!("📝 Save key to {}? [Y/n] ", path.display());
+        io::stdout().flush().unwrap();
+        let mut input = String::new();
+        io::stdin().read_line(&mut input).unwrap();
+        let trimmed = input.trim();
+        if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("y") {
+            eprintln!("Aborted.");
+            process::exit(0);
+        }
     }
 
     let signing_key = SigningKey::generate(&mut OsRng);
