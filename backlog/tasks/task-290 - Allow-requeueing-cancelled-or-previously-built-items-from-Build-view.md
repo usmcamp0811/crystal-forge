@@ -1,10 +1,10 @@
 ---
 id: TASK-290
 title: 'Allow requeueing cancelled, failed, or successful builds from Build view'
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-05-08 02:20'
-updated_date: '2026-05-08 02:24'
+updated_date: '2026-05-08 02:44'
 labels:
   - feature
   - builds
@@ -24,6 +24,10 @@ modified_files:
   - packages/web-ui/src/views/builds.rs
   - packages/default/src/handlers/api/*.rs
   - packages/default/src/queries/build_jobs.rs
+  - packages/web-ui/src/components/builds/build_queue_pane.rs
+  - packages/web-ui/src/api/client.rs
+  - packages/default/src/queries/builders.rs
+  - packages/default/src/handlers/api/builders.rs
 priority: high
 ordinal: 2900
 ---
@@ -118,7 +122,13 @@ Medium:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-LOCK: gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-290-requeue-build-view
+MR !252 created: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/252
+
+Implemented backend requeue as new attempt row with immutable history and operator/admin RBAC
+
+Implemented UI requeue visibility gating to operator-or-above users and relabeled action to Requeue
+
+Verification: web-ui cargo check passes; default cargo check blocked by SQLx DB connectivity in current environment
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
@@ -129,4 +139,7 @@ LOCK: gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-290-reque
 - [ ] #4 Add/extend backend tests covering eligibility matrix and RBAC for requeue endpoint.
 - [ ] #5 Add/extend query/service tests asserting new-attempt creation and immutable prior attempts.
 - [ ] #6 Capture manual validation evidence for requeue from cancelled/failed/success in local stack run.
+- [ ] #7 Add/extend backend tests covering eligibility matrix and RBAC for requeue endpoint.
+- [ ] #8 Add/extend query/service tests asserting new-attempt creation and immutable prior attempts.
+- [ ] #9 Capture manual validation evidence for requeue from cancelled/failed/success in local stack run.
 <!-- DOD:END -->
