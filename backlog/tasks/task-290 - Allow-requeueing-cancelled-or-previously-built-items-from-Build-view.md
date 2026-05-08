@@ -122,6 +122,10 @@ Medium:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
+Sprint-ready refinement completed with explicit goal, non-goals, constraints, verification plan, and risk profile.
+
+Execution decisions captured: statuses=cancelled|failed|success; new attempt model; row action; no retry cap; Operator/Admin; append to tail; full-stack scope.
+
 MR !252 created: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/252
 
 Implemented backend requeue as new attempt row with immutable history and operator/admin RBAC
@@ -136,10 +140,4 @@ Verification: web-ui cargo check passes; default cargo check blocked by SQLx DB 
 - [ ] #1 Add/extend backend tests covering eligibility matrix and RBAC for requeue endpoint.
 - [ ] #2 Add/extend query/service tests asserting new-attempt creation and immutable prior attempts.
 - [ ] #3 Capture manual validation evidence for requeue from cancelled/failed/success in local stack run.
-- [ ] #4 Add/extend backend tests covering eligibility matrix and RBAC for requeue endpoint.
-- [ ] #5 Add/extend query/service tests asserting new-attempt creation and immutable prior attempts.
-- [ ] #6 Capture manual validation evidence for requeue from cancelled/failed/success in local stack run.
-- [ ] #7 Add/extend backend tests covering eligibility matrix and RBAC for requeue endpoint.
-- [ ] #8 Add/extend query/service tests asserting new-attempt creation and immutable prior attempts.
-- [ ] #9 Capture manual validation evidence for requeue from cancelled/failed/success in local stack run.
 <!-- DOD:END -->

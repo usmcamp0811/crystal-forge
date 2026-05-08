@@ -19,7 +19,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::handlers::agent_request::CFState;
-use crate::handlers::api::rbac::{require_admin, require_viewer_or_above};
+use crate::handlers::api::rbac::{
+    require_admin, require_operator_or_admin, require_viewer_or_above,
+};
 use crate::handlers::builder_request::{
     authenticate_builder_request, authenticate_builder_request_allow_inactive,
 };
@@ -351,17 +353,20 @@ pub async fn cancel_build_job(
         })
 }
 
-/// POST /api/v1/build-jobs/:id/requeue - Requeue a cancelled/failed build job (admin-only)
+/// POST /api/v1/build-jobs/:id/requeue - Requeue a terminal build job (operator/admin)
 pub async fn requeue_build_job(
     State(state): State<CFState>,
     Path(job_id): Path<Uuid>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<BuildJob>, (StatusCode, String)> {
-    let Some(_admin_user) = require_admin(&state.pool, &headers).await else {
-        return Err((StatusCode::FORBIDDEN, "Admin access required".to_string()));
+    let Some(_operator_or_admin) = require_operator_or_admin(&state.pool, &headers).await else {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Operator or admin access required".to_string(),
+        ));
     };
 
-    builders::requeue_cancelled_job(&state.pool, &job_id)
+    builders::requeue_build_job_as_new_attempt(&state.pool, &job_id)
         .await
         .map(Json)
         .map_err(|e| {
