@@ -1,7 +1,7 @@
 ---
 id: TASK-292
 title: Deprecate legacy database mode and implement builder API mode in NixOS module
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-05-08 02:59'
 updated_date: '2026-05-08 03:50'
@@ -238,4 +238,8 @@ Required Fix: Add -y or --force flag to cf-keygen to skip confirmation for autom
 Workaround: Use echo y | cf-keygen -f ... in preStart script.
 
 See cf-keygen.rs lines 84-92 for the blocking prompt code.
+
+LOCK: claude-agent on gray in ~/code/crystal-forge/dev
+
+NOTE: TASK-293 completed - cf-keygen now supports -y flag for non-interactive use
 <!-- SECTION:NOTES:END -->
