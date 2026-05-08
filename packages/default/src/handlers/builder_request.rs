@@ -569,12 +569,7 @@ mod tests {
         );
 
         let result = authenticate_builder_request_with_lookup_options(
-            &headers,
-            body,
-            method,
-            path,
-            &lookup,
-            true,
+            &headers, body, method, path, &lookup, true,
         )
         .await;
 

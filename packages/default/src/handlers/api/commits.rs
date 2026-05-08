@@ -283,7 +283,7 @@ async fn handle_eval_stream(mut socket: WebSocket, commit_id: i32, state: CFStat
 }
 
 /// Fetch historical evaluation logs from database for a specific commit.
-/// 
+///
 /// This endpoint retrieves persisted logs for completed/failed/cancelled evaluations.
 /// For in-progress evaluations, clients should use the WebSocket stream instead.
 pub async fn get_eval_logs_history(
@@ -298,15 +298,14 @@ pub async fn get_eval_logs_history(
         return StatusCode::FORBIDDEN.into_response();
     }
 
-    let logs = match crate::queries::eval_logs::fetch_eval_logs_by_commit(&state.pool, commit_id)
-        .await
-    {
-        Ok(logs) => logs,
-        Err(e) => {
-            tracing::error!("Failed to fetch eval logs for commit {}: {}", commit_id, e);
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    };
+    let logs =
+        match crate::queries::eval_logs::fetch_eval_logs_by_commit(&state.pool, commit_id).await {
+            Ok(logs) => logs,
+            Err(e) => {
+                tracing::error!("Failed to fetch eval logs for commit {}: {}", commit_id, e);
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        };
 
     let entries: Vec<EvalLogEntry> = logs
         .into_iter()

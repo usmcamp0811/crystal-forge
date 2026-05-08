@@ -167,6 +167,7 @@ async fn run_api_mode(cfg: &CrystalForgeConfig) -> anyhow::Result<()> {
         result = run_api_job_loop(
             poll_client,
             poll_interval,
+            max_concurrent,
             build_config.clone(),
             cache_config.clone(),
             cfg.server.execution_mode,
@@ -213,6 +214,7 @@ async fn run_heartbeat_loop(client: BuilderApiClient, interval: std::time::Durat
 async fn run_api_job_loop(
     client: BuilderApiClient,
     poll_interval: std::time::Duration,
+    max_concurrent_jobs: i32,
     build_config: crystal_forge::config::BuildConfig,
     cache_config: crystal_forge::config::CacheConfig,
     execution_mode: crystal_forge::config::ExecutionMode,
@@ -221,11 +223,13 @@ async fn run_api_job_loop(
     let pool = crystal_forge::config::CrystalForgeConfig::db_pool().await?;
     let mut ticker = tokio::time::interval(poll_interval);
 
-    // Limit concurrent builds to max_concurrent_jobs
-    let max_concurrent = build_config.max_concurrent_derivations;
+    // CRITICAL: Use builder-level max_concurrent_jobs (how many build jobs this builder handles),
+    // NOT build_config.max_concurrent_derivations (Nix-level parallelism within a single build).
+    // Confusing these causes builder stalls when max_concurrent_derivations is 0.
+    let max_concurrent = max_concurrent_jobs as usize;
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrent));
     info!(
-        "🔨 Starting job polling loop (max concurrent: {})...",
+        "🔨 Starting job polling loop (max concurrent jobs: {})...",
         max_concurrent
     );
 
