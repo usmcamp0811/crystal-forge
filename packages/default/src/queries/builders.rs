@@ -1224,7 +1224,7 @@ pub async fn requeue_build_job_as_new_attempt(pool: &PgPool, job_id: &Uuid) -> R
             WHERE id = $1
               AND status IN ('cancelled', 'failed', 'success')
         ), queue_tail AS (
-            SELECT COALESCE(MIN(priority_weight) - 0.000001, 0.0) AS tail_weight
+            SELECT COALESCE(MIN(priority_weight) / 2.0, 1.0) AS tail_weight
             FROM build_jobs
             WHERE status = 'queued'
         )
@@ -1423,6 +1423,38 @@ mod tests {
                 .expect("original job still exists");
             assert_eq!(original_after.status, *terminal_status);
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_requeue_when_queue_is_empty_assigns_positive_priority_weight() {
+        let pool = queue_test_pool().await;
+        let now = Utc::now();
+
+        let job_id = create_queued_job(
+            &pool,
+            "https://example.com/task-290-requeue-empty.git",
+            "task-290-requeue-empty",
+            "task290requeueempty000000000000",
+            now - Duration::minutes(5),
+            "drv-task-290-requeue-empty",
+            1.0,
+            now - Duration::minutes(4),
+        )
+        .await;
+
+        // Make queue empty by taking source job out of queued state.
+        set_build_job_status(&pool, job_id, "success").await;
+
+        let requeued = requeue_build_job_as_new_attempt(&pool, &job_id)
+            .await
+            .expect("requeue should succeed on empty queue");
+
+        assert_eq!(requeued.status, "queued");
+        assert!(
+            requeued.priority_weight > 0.0,
+            "priority_weight must satisfy DB CHECK (priority_weight > 0)"
+        );
     }
 
     #[tokio::test]

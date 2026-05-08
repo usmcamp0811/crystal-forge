@@ -864,6 +864,9 @@ fn BuildQueueFullTable(
     selected_id: Signal<Option<i32>>,
     on_build_action: EventHandler<(i32, BuildAction)>,
 ) -> Element {
+    let app_state = use_context::<Signal<AppState>>();
+    let can_requeue = auth::is_operator_or_above(&app_state.read().auth);
+
     let mut sorted = builds;
     sorted.sort_by_key(|b| queue_sort_rank(b.status));
 
@@ -952,7 +955,7 @@ fn BuildQueueFullTable(
                                                     "Force Cancel"
                                                 }
                                             }
-                                            if matches!(build.status, BuildStatus::Failed | BuildStatus::Complete | BuildStatus::Cancelled) {
+                                            if can_requeue && matches!(build.status, BuildStatus::Failed | BuildStatus::Complete | BuildStatus::Cancelled) {
                                                 button {
                                                     class: "text-[10px] px-2 py-1 rounded transition-colors cf-action-link",
                                                     onclick: move |evt| {
