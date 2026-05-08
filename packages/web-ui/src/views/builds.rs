@@ -13,6 +13,8 @@ use crate::components::builds::{
     DetailTab, MetricsRow, PendingAction, QueueAction, QueueActionButton, WorkerAction, WorkerItem,
     WorkerStatus, WorkerStrip, extract_system_name, selected_build_data,
 };
+use crate::state::app_state::AppState;
+use crate::state::auth;
 use crate::theme;
 
 const PAGE_SIZE: i64 = 50;
@@ -179,6 +181,9 @@ fn map_queue_item(item: &crate::api::models::BuildQueueItem, idx: usize) -> Buil
 /// Builds control center page.
 #[component]
 pub fn BuildsView() -> Element {
+    let app_state = use_context::<Signal<AppState>>();
+    let can_requeue = auth::is_operator_or_above(&app_state.read().auth);
+
     let mut workers = use_signal(Vec::<WorkerItem>::new);
     let mut refresh_trigger = use_signal(|| 0_u64);
 
@@ -522,6 +527,7 @@ pub fn BuildsView() -> Element {
                             completed_rows.clone()
                         },
                         selected_id: selected_build,
+                        can_requeue,
                         on_build_action: move |(build_id, action)| {
                             pending_action.set(Some(PendingAction::Build { build_id, action }))
                         },
@@ -762,7 +768,7 @@ pub fn BuildsView() -> Element {
                                                 }
                                             }
                                             BuildAction::Restart => {
-                                                // Prefer direct requeue if we have a job_id (cancelled/failed).
+                                                // Prefer direct requeue if we have a job_id (terminal statuses).
                                                 // Fall back to system sync for statuses without a job_id.
                                                 if let Some(ref jid) = selected.job_id {
                                                     match api::client::requeue_build_job(jid).await {
@@ -858,6 +864,9 @@ fn BuildQueueFullTable(
     selected_id: Signal<Option<i32>>,
     on_build_action: EventHandler<(i32, BuildAction)>,
 ) -> Element {
+    let app_state = use_context::<Signal<AppState>>();
+    let can_requeue = auth::is_operator_or_above(&app_state.read().auth);
+
     let mut sorted = builds;
     sorted.sort_by_key(|b| queue_sort_rank(b.status));
 
@@ -946,14 +955,14 @@ fn BuildQueueFullTable(
                                                     "Force Cancel"
                                                 }
                                             }
-                                            if matches!(build.status, BuildStatus::Failed | BuildStatus::Complete | BuildStatus::Cancelled) {
+                                            if can_requeue && matches!(build.status, BuildStatus::Failed | BuildStatus::Complete | BuildStatus::Cancelled) {
                                                 button {
                                                     class: "text-[10px] px-2 py-1 rounded transition-colors cf-action-link",
                                                     onclick: move |evt| {
                                                         evt.stop_propagation();
                                                         on_build_action.call((build.id, BuildAction::Restart));
                                                     },
-                                                    "Restart"
+                                                    "Requeue"
                                                 }
                                             }
                                             if build.status == BuildStatus::Queued {
