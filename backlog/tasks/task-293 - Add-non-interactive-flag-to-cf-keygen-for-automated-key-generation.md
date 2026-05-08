@@ -1,10 +1,10 @@
 ---
 id: TASK-293
 title: Add non-interactive flag to cf-keygen for automated key generation
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-05-08 03:12'
-updated_date: '2026-05-08 03:41'
+updated_date: '2026-05-08 03:50'
 labels:
   - enhancement
   - blocker
@@ -95,4 +95,6 @@ if !skip_confirm {
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: claude-agent on gray in ~/code/crystal-forge/dev
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/253
 <!-- SECTION:NOTES:END -->
