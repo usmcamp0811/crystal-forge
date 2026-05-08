@@ -1,17 +1,29 @@
 ---
 id: TASK-290
-title: Allow requeueing cancelled or previously built items from Build view
-status: Backlog
+title: 'Allow requeueing cancelled, failed, or successful builds from Build view'
+status: To Do
 assignee: []
 created_date: '2026-05-08 02:20'
+updated_date: '2026-05-08 02:23'
 labels:
   - feature
   - builds
   - ui
   - api
   - requeue
+  - sprint-ready
 milestone: Build Queue UX
 dependencies: []
+references:
+  - /packages/web-ui/src/views/builds.rs
+  - /packages/default/src/handlers/api
+  - /packages/default/src/queries/build_jobs.rs
+documentation:
+  - /AGENTS.md
+modified_files:
+  - packages/web-ui/src/views/builds.rs
+  - packages/default/src/handlers/api/*.rs
+  - packages/default/src/queries/build_jobs.rs
 priority: high
 ordinal: 2900
 ---
@@ -19,34 +31,101 @@ ordinal: 2900
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Enable operators to requeue build jobs from the Build view for entries that are currently cancelled or already completed, so they can be rebuilt on demand.
+## Problem Statement
+Operators cannot currently trigger a rebuild from the Build view for terminal build outcomes (cancelled, failed, successful). This blocks recovery and re-validation workflows after transient infrastructure errors, cache issues, or post-change verification needs.
 
-## Problem
-In the current Build view workflow, users cannot reliably trigger a rebuild for jobs that were cancelled or already built. This blocks common recovery and re-validation flows (e.g., rerun after transient infra issues, cache issues, or policy changes).
+## Goal
+Implement end-to-end requeue capability in Build view so eligible terminal builds can be requeued and executed again as a new build attempt.
 
-## Desired Outcome
-From the Build view, users can select eligible jobs (cancelled and completed) and explicitly requeue them so the system creates a new build execution for the same derivation/commit target.
+## Decisions (Confirmed)
+- Eligible statuses: cancelled, failed, success
+- Attempt model: create a brand-new build attempt record (do not mutate prior attempt)
+- UI placement: per-row action icon/menu in Build view
+- Retry guardrail: no hard retry limit in this task
+- Authorization: Operator or Admin
+- Queue insertion: append new attempt to queue tail
+- Scope depth: full-stack (UI + API)
 
-## Scope Notes
-- This task should cover Build view UX and backend/API behavior needed to initiate a rebuild.
-- Eligibility rules and guardrails should be explicit (e.g., which statuses are requeueable).
-- Requeue actions should be auditable and reflected in queue/history state.
+## Non-Goals
+- Bulk requeue UX
+- Retry cooldowns or max-attempt throttling
+- Priority override/reinsert-at-position controls
+- Changes to queue reorder semantics beyond append-on-requeue
+- Historical data backfill/migration for prior attempts
 
-## Initial Acceptance Direction
-- Requeue action visible for cancelled/completed entries in Build view.
-- Triggering requeue creates a new queued build attempt.
-- UI updates clearly show the new queued/running attempt.
-- Existing queue ordering and cancellation flows remain intact.
+## Architectural Constraints
+- Preserve immutable build attempt history (no state mutation on previous attempt records)
+- New requeue attempts must be represented as new rows/attempts linked to original target context
+- UI must remain presentation-focused; API/business logic stays server-side
+- RBAC enforcement must occur server-side regardless of UI visibility
 
-This is backlog capture and will need sprint-ready refinement before implementation (non-goals, architecture constraints, verification plan, and objective AC details).
+## Verification Plan
+Tier 0 (targeted):
+- API/handler tests for requeue endpoint behavior and RBAC
+- Query-layer tests for attempt creation semantics
+- UI tests/component checks for requeue action visibility + optimistic refresh behavior
+
+Tier 1 (feature-level):
+- Run server stack and manually validate:
+  1) Requeue cancelled build => new queued attempt appears
+  2) Requeue failed build => new queued attempt appears
+  3) Requeue successful build => new queued attempt appears
+  4) Viewer cannot requeue (403 / no action)
+  5) Existing queue reorder/cancel still works
+
+## Impact Areas
+- Build view row actions and refresh logic
+- Build-related API routes/handlers
+- Build job persistence/query logic for new attempt creation
+- Authorization checks for requeue action
+
+## Risk Level
+Medium:
+- Queue integrity and ordering side effects if insertion semantics are wrong
+- Potential duplicate rebuild pressure if users repeatedly requeue
+- RBAC gaps could expose unintended queue control
+
+## Dependencies
+- No blocking upstream task dependency declared
+- Must align with existing queue/cancel behavior contracts in current dev branch
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Build view shows a requeue action for eligible cancelled/completed build entries
-- [ ] #2 Requeue action creates a new build attempt in queued state for the same target
-- [ ] #3 User receives clear success/failure feedback when requeue is requested
-- [ ] #4 New attempt appears in queue/history without corrupting existing attempt records
-- [ ] #5 Unauthorized users cannot requeue builds
-- [ ] #6 Existing cancel/reorder queue behavior is unaffected
+- [ ] #1 Build view displays a requeue row action for build entries with terminal statuses cancelled, failed, or success.
+- [ ] #2 Requeue action is visible only to Operator/Admin-capable users in UI, and API rejects unauthorized callers with 403.
+- [ ] #3 Invoking requeue creates a brand-new build attempt record (new id) without mutating existing attempt records.
+- [ ] #4 New attempt is inserted at queue tail in queued state and is eligible for normal worker pickup.
+- [ ] #5 Original build attempt remains intact in history with its original terminal status and timestamps.
+- [ ] #6 Requeue works for each eligible terminal status: cancelled, failed, and success.
+- [ ] #7 After requeue, UI refresh shows the new queued attempt and no corruption of queue ordering.
+- [ ] #8 Existing cancel and queue reorder flows continue to work unchanged for other entries.
+- [ ] #9 Failure paths (invalid status, missing target context, unauthorized caller) return explicit API errors and user-facing feedback.
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Add server-side requeue API action guarded by Operator/Admin role.
+2. Implement query/service logic to create a new queued build attempt from eligible prior attempt context.
+3. Ensure queue insertion is tail-appended and previous attempts remain immutable.
+4. Add Build view row action for eligible terminal statuses with success/error feedback.
+5. Refresh queue/history state after requeue action.
+6. Add targeted tests for eligibility, RBAC, and attempt creation semantics.
+7. Run feature validation against local stack for cancelled/failed/success requeue flows.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Sprint-ready refinement completed with explicit goal, non-goals, constraints, verification plan, and risk profile.
+
+Execution decisions captured: statuses=cancelled|failed|success; new attempt model; row action; no retry cap; Operator/Admin; append to tail; full-stack scope.
+<!-- SECTION:NOTES:END -->
+
+## Definition of Done
+<!-- DOD:BEGIN -->
+- [ ] #1 Add/extend backend tests covering eligibility matrix and RBAC for requeue endpoint.
+- [ ] #2 Add/extend query/service tests asserting new-attempt creation and immutable prior attempts.
+- [ ] #3 Capture manual validation evidence for requeue from cancelled/failed/success in local stack run.
+<!-- DOD:END -->
