@@ -1,10 +1,10 @@
 ---
 id: TASK-294
 title: Fix Deploy tab commit deployment and add generation rollback selector
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-05-10 13:23'
-updated_date: '2026-05-10 13:36'
+updated_date: '2026-05-10 17:05'
 labels:
   - bug
   - feature
@@ -171,4 +171,24 @@ Failure to follow the design EXACTLY will result in: Task rejection, agent termi
 This is not hyperbole. The design is final. Follow it exactly.
 
 LOCK: agent on gray in /home/mcamp/code/crystal-forge/TASK-294-fix-deploy-tab
+
+MR created: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/254
+
+All implementation complete and verified:
+
+- Backend: fetch_system_generations query, API models, handler, route
+
+- Frontend: Complete DeployTab rewrite with 2-column picker
+
+- UI/UX matches design specification exactly
+
+- Fixed commit deployment to pass SHA directly
+
+- Added generation rollback selector with exact CSS
+
+- All bugs fixed (missing function, field names, handler signature)
+
+- sqlx metadata restored from dev worktree
+
+Waiting for manual testing and merge approval.
 <!-- SECTION:NOTES:END -->
