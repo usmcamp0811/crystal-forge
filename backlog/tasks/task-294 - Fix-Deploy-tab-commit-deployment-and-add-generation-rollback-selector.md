@@ -1,9 +1,10 @@
 ---
 id: TASK-294
 title: Fix Deploy tab commit deployment and add generation rollback selector
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-05-10 13:23'
+updated_date: '2026-05-10 13:27'
 labels:
   - bug
   - feature
