@@ -111,6 +111,25 @@ pub async fn get_last_system_state_by_hostname(
     Ok(row)
 }
 
+pub async fn get_latest_system_state_id(
+    pool: &PgPool,
+    hostname: &str,
+) -> Result<Option<i32>> {
+    let row = sqlx::query_scalar!(
+        r#"
+        SELECT id
+        FROM system_states
+        WHERE hostname = $1
+        ORDER BY timestamp DESC
+        LIMIT 1
+        "#,
+        hostname
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
 /// Row type for system generation history
 #[derive(Debug, sqlx::FromRow)]
 pub struct SystemGenerationRow {
