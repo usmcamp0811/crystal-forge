@@ -146,7 +146,7 @@ pub async fn fetch_system_generations(
 ) -> Result<Vec<SystemGenerationRow>> {
     let rows = sqlx::query_as::<_, SystemGenerationRow>(
         r#"
-        SELECT DISTINCT 
+        SELECT DISTINCT ON (ss.generation)
             ss.generation,
             ss.store_path,
             ss.timestamp
@@ -155,7 +155,7 @@ pub async fn fetch_system_generations(
         WHERE s.id = $1
           AND ss.generation IS NOT NULL
           AND ss.store_path IS NOT NULL
-        ORDER BY ss.generation DESC
+        ORDER BY ss.generation DESC, ss.timestamp DESC
         "#,
     )
     .bind(system_id)
