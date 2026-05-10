@@ -1751,8 +1751,14 @@ fn DeployTab(
                                 };
                                 let gen_num = generation.generation;
                                 let gen_label = format!("gen #{}", gen_num);
+                                let commit_short = generation
+                                    .commit_hash
+                                    .as_ref()
+                                    .map(|c| c.chars().take(7).collect::<String>());
                                 let store_leaf = generation
                                     .store_path
+                                    .as_deref()
+                                    .unwrap_or("")
                                     .split('/')
                                     .last()
                                     .unwrap_or("")
@@ -1760,7 +1766,7 @@ fn DeployTab(
                                 let msg_text = if store_leaf.is_empty() {
                                     "store path unavailable".to_string()
                                 } else {
-                                    format!("{}", store_leaf)
+                                    store_leaf
                                 };
                                 let when_text = {
                                     let now = chrono::Utc::now();
@@ -1781,8 +1787,12 @@ fn DeployTab(
                                         class: "{item_class}",
                                         onclick: move |_| selected_generation.set(Some(gen_num)),
                                         span { class: "mono sd-commit-sha", "{gen_label}" }
-                                        span { class: "sd-commit-msg", title: "{generation.store_path}", "{msg_text}" }
-                                        span { class: "chip chip-unknown", "unknown / not in CF" }
+                                        span { class: "sd-commit-msg", title: "{generation.store_path.clone().unwrap_or_default()}", "{msg_text}" }
+                                        if let Some(short) = commit_short {
+                                            span { class: "chip chip-info", "{short}" }
+                                        } else {
+                                            span { class: "chip chip-unknown", "unknown / not in CF" }
+                                        }
                                         span { class: "sd-commit-meta mono", "store" }
                                         span { class: "sd-commit-meta", "{when_text}" }
                                         if generation.is_current {
@@ -1824,8 +1834,16 @@ fn DeployTab(
                     // Determine what to deploy (generation or commit)
                     if mode() == "generation" {
                         if let Some(generation_data) = selected_generation_data {
+                        let can_rollback = generation_data.store_path.is_some();
                         let gen_num = generation_data.generation;
-                        let store_path_short = generation_data.store_path.split('/').last().unwrap_or("").chars().take(7).collect::<String>();
+                        let store_path_full = generation_data.store_path.clone().unwrap_or_default();
+                        let store_path_short = store_path_full
+                            .split('/')
+                            .last()
+                            .unwrap_or("")
+                            .chars()
+                            .take(7)
+                            .collect::<String>();
                         let deploy_label = if allow_mutations {
                             format!("Switch to gen #{}", gen_num)
                         } else {
@@ -1833,7 +1851,11 @@ fn DeployTab(
                         };
                         let policy_for_callout = policy_name.clone();
                         let current_gen_display = current_generation.map(|g| format!("gen #{}", g)).unwrap_or_else(|| "—".to_string());
-                        let store_path_for_deploy = generation_data.store_path.clone();
+                        let store_path_for_deploy = generation_data.store_path.clone().unwrap_or_default();
+                        let commit_display = generation_data
+                            .commit_hash
+                            .clone()
+                            .unwrap_or_else(|| "unknown".to_string());
 
                         rsx! {
                             dl {
@@ -1848,7 +1870,14 @@ fn DeployTab(
                                 dd { class: "mono", "gen #{gen_num}" }
 
                                 dt { "Store Path" }
-                                dd { class: "mono", title: "{generation_data.store_path}", "{store_path_short}" }
+                                dd {
+                                    class: "mono",
+                                    title: "{store_path_full}",
+                                    if store_path_full.is_empty() { "unavailable" } else { "{store_path_short}" }
+                                }
+
+                                dt { "Commit" }
+                                dd { class: "mono", "{commit_display}" }
 
                                 dt { "Strategy" }
                                 dd { "rollback" }
@@ -1883,7 +1912,7 @@ fn DeployTab(
                                 }
                                 button {
                                     class: "btn btn-primary focus-ring",
-                                    disabled: !allow_mutations,
+                                    disabled: !allow_mutations || !can_rollback,
                                     onclick: move |_| on_deploy_commit.call(store_path_for_deploy.clone()),
                                     svg {
                                         class: "w-3.5 h-3.5",

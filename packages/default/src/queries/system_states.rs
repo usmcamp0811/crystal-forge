@@ -134,7 +134,8 @@ pub async fn get_latest_system_state_id(
 #[derive(Debug, sqlx::FromRow)]
 pub struct SystemGenerationRow {
     pub generation: i32,
-    pub store_path: String,
+    pub store_path: Option<String>,
+    pub commit_hash: Option<String>,
     pub timestamp: DateTime<Utc>,
 }
 
@@ -149,12 +150,18 @@ pub async fn fetch_system_generations(
         SELECT DISTINCT ON (ss.generation)
             ss.generation,
             ss.store_path,
+            c.git_commit_hash AS commit_hash,
             ss.timestamp
         FROM system_states ss
         JOIN systems s ON s.hostname = ss.hostname
+        LEFT JOIN derivations d
+          ON ss.store_path IS NOT NULL
+         AND ss.store_path = COALESCE(d.store_path, d.expected_store_path)
+         AND d.derivation_type = 'nixos'
+         AND d.derivation_name = COALESCE(NULLIF(s.system_configuration_name, ''), s.hostname)
+        LEFT JOIN commits c ON c.id = d.commit_id
         WHERE s.id = $1
           AND ss.generation IS NOT NULL
-          AND ss.store_path IS NOT NULL
         ORDER BY ss.generation DESC, ss.timestamp DESC
         "#,
     )

@@ -1647,6 +1647,7 @@ pub async fn get_system_generations(
         .map(|row| SystemGeneration {
             generation: row.generation,
             store_path: row.store_path,
+            commit_hash: row.commit_hash,
             timestamp: row.timestamp,
             is_current: Some(row.generation) == current_generation,
         })

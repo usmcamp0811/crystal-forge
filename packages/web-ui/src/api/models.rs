@@ -941,7 +941,8 @@ pub struct SystemGenerationsResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SystemGeneration {
     pub generation: i32,
-    pub store_path: String,
+    pub store_path: Option<String>,
+    pub commit_hash: Option<String>,
     pub timestamp: DateTime<Utc>,
     pub is_current: bool,
 }
