@@ -933,6 +933,20 @@ pub struct CommitInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemGenerationsResponse {
+    pub generations: Vec<SystemGeneration>,
+    pub current_generation: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemGeneration {
+    pub generation: i32,
+    pub store_path: String,
+    pub timestamp: DateTime<Utc>,
+    pub is_current: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SystemHistoryEntry {
     pub timestamp: DateTime<Utc>,
     pub store_path: Option<String>,

@@ -1,6 +1,8 @@
 use crate::models::system_states::SystemState;
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use sqlx::PgPool;
+use uuid::Uuid;
 
 pub async fn insert_system_state(
     pool: &PgPool,
@@ -109,15 +111,38 @@ pub async fn get_last_system_state_by_hostname(
     Ok(row)
 }
 
-pub async fn get_latest_system_state_id(pool: &PgPool, hostname: &str) -> Result<Option<i32>> {
-    let id = sqlx::query_scalar!(
-        "SELECT id FROM system_states WHERE hostname = $1 ORDER BY timestamp DESC LIMIT 1",
-        hostname
-    )
-    .fetch_optional(pool)
-    .await?;
+/// Row type for system generation history
+#[derive(Debug, sqlx::FromRow)]
+pub struct SystemGenerationRow {
+    pub generation: i32,
+    pub store_path: String,
+    pub timestamp: DateTime<Utc>,
+}
 
-    Ok(id)
+/// Fetch historical generations for a system by its UUID
+/// Returns generations in descending order (newest first)
+pub async fn fetch_system_generations(
+    pool: &PgPool,
+    system_id: Uuid,
+) -> Result<Vec<SystemGenerationRow>> {
+    let rows = sqlx::query_as::<_, SystemGenerationRow>(
+        r#"
+        SELECT DISTINCT 
+            ss.generation,
+            ss.store_path,
+            ss.timestamp
+        FROM system_states ss
+        JOIN systems s ON s.hostname = ss.hostname
+        WHERE s.id = $1
+          AND ss.generation IS NOT NULL
+          AND ss.store_path IS NOT NULL
+        ORDER BY ss.generation DESC
+        "#,
+    )
+    .bind(system_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
 }
 
 #[cfg(test)]

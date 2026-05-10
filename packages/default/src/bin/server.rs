@@ -254,6 +254,10 @@ async fn main() -> anyhow::Result<()> {
             get(systems::get_system_commits),
         )
         .route(
+            "/api/v1/systems/:id/generations",
+            get(systems::get_system_generations),
+        )
+        .route(
             "/api/v1/systems/:id/history",
             get(systems::get_system_history),
         )

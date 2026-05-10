@@ -13,10 +13,10 @@ use crate::api::models::{
     ApiError, AuditAction, CommitInfo, CreateSystemRequest, CveScanEligibilityResponse,
     CveScanStatusResponse, CveScanTriggerResponse, CveSummary, DeploySystemRequest,
     DeploymentStatus, PipelineStage, SaveSystemCveJustificationRequest, SortOrder,
-    SystemAgentEvent, SystemCommitsResponse, SystemDetail, SystemHardwareInfo, SystemHistoryEntry,
-    SystemMutationResponse, SystemNetworkInfo, SystemRollbackRequest, SystemSecurityInfo,
-    SystemSummary, SystemVulnerability, SystemsListParams, UpdateSystemPublicKeyRequest,
-    UpdateSystemRequest,
+    SystemAgentEvent, SystemCommitsResponse, SystemDetail, SystemGeneration,
+    SystemGenerationsResponse, SystemHardwareInfo, SystemHistoryEntry, SystemMutationResponse,
+    SystemNetworkInfo, SystemRollbackRequest, SystemSecurityInfo, SystemSummary,
+    SystemVulnerability, SystemsListParams, UpdateSystemPublicKeyRequest, UpdateSystemRequest,
 };
 use crate::auth::models::Role;
 use crate::handlers::api::rbac::{
@@ -24,6 +24,7 @@ use crate::handlers::api::rbac::{
 };
 use crate::models::auth_identity::AuthRole;
 use crate::queries::cve_scans::{get_scan_by_id, resolve_system_cve_scan_target};
+use crate::queries::system_states::fetch_system_generations;
 use crate::queries::systems::{
     SystemAccessRow, SystemDetailRow, SystemListRow, commit_belongs_to_system_flake,
     deactivate_system, find_system_access_row, get_system_detail_by_id,
@@ -1532,6 +1533,128 @@ pub async fn get_system_commits(
     let response = SystemCommitsResponse {
         commits,
         current_commit: None,
+    };
+
+    (StatusCode::OK, Json(response)).into_response()
+}
+
+pub async fn get_system_generations(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(system_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ApiError {
+                error: "forbidden".to_string(),
+                message: "Authentication required".to_string(),
+                details: None,
+            }),
+        )
+            .into_response();
+    };
+
+    let Some(caller_role) = highest_role(&roles) else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ApiError {
+                error: "forbidden".to_string(),
+                message: "Authentication required".to_string(),
+                details: None,
+            }),
+        )
+            .into_response();
+    };
+
+    let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    error: "internal_error".to_string(),
+                    message: "Failed to load environment memberships".to_string(),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let row = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiError {
+                    error: "not_found".to_string(),
+                    message: "System not found".to_string(),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    error: "internal_error".to_string(),
+                    message: "Failed to load system".to_string(),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    if !caller_role.can_access_system_environment(row.environment_id, &environment_memberships) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(ApiError {
+                error: "not_found".to_string(),
+                message: "System not found".to_string(),
+                details: None,
+            }),
+        )
+            .into_response();
+    }
+
+    // Fetch generation history
+    let generation_rows = match fetch_system_generations(&pool, system_id).await {
+        Ok(rows) => rows,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    error: "internal_error".to_string(),
+                    message: "Failed to load system generations".to_string(),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    // Get current generation from system detail
+    let current_generation = match get_system_detail_by_id(&pool, system_id).await {
+        Ok(Some(detail)) => detail.current_generation,
+        _ => None,
+    };
+
+    let generations = generation_rows
+        .into_iter()
+        .map(|row| SystemGeneration {
+            generation: row.generation,
+            store_path: row.store_path,
+            timestamp: row.timestamp,
+            is_current: Some(row.generation) == current_generation,
+        })
+        .collect::<Vec<_>>();
+
+    let response = SystemGenerationsResponse {
+        generations,
+        current_generation,
     };
 
     (StatusCode::OK, Json(response)).into_response()

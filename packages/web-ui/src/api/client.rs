@@ -343,6 +343,13 @@ pub async fn fetch_system_commits(
     fetch_json(&url).await
 }
 
+pub async fn fetch_system_generations(
+    id: &uuid::Uuid,
+) -> Result<crate::api::models::SystemGenerationsResponse, ApiClientError> {
+    let url = format!("{}/systems/{}/generations", base_url(), id);
+    fetch_json(&url).await
+}
+
 pub async fn fetch_system_history(
     id: &uuid::Uuid,
 ) -> Result<Vec<crate::api::models::SystemHistoryEntry>, ApiClientError> {

@@ -852,6 +852,22 @@ pub struct CommitInfo {
     pub timestamp: String,
 }
 
+/// Response containing available generations for rollback.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemGenerationsResponse {
+    pub generations: Vec<SystemGeneration>,
+    pub current_generation: Option<i32>,
+}
+
+/// Information about a NixOS generation available for rollback.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemGeneration {
+    pub generation: i32,
+    pub store_path: String,
+    pub timestamp: DateTime<Utc>,
+    pub is_current: bool,
+}
+
 /// A single system state transition for timeline/history views.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemHistoryEntry {
