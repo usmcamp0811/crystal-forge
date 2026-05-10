@@ -4,7 +4,7 @@ title: Fix Deploy tab commit deployment and add generation rollback selector
 status: To Do
 assignee: []
 created_date: '2026-05-10 13:23'
-updated_date: '2026-05-10 13:27'
+updated_date: '2026-05-10 13:35'
 labels:
   - bug
   - feature
@@ -23,6 +23,34 @@ The Deploy tab in the system detail view has two critical issues:
 1. **Commit deployment not working**: Selecting a commit and clicking "Deploy" does not actually deploy that specific commit. The system appears to deploy the HEAD of the flake instead of the selected commit.
 
 2. **Missing generation rollback feature**: Users cannot select a previous NixOS generation to rollback to, which is a standard NixOS feature that should be available.
+
+## ⚠️ CRITICAL UI/UX IMPLEMENTATION REQUIREMENT ⚠️
+
+**The UI/UX implementation MUST be EXACTLY as designed in `/home/mcamp/code/crystal-forge/crystal-forge/CrystalForgeSystemsUpdated.html`.**
+
+This HTML file contains the complete, finalized design for the Deploy tab including:
+- The exact layout, styling, and component structure
+- The generation selector design and behavior
+- All CSS classes and visual treatment
+- Interaction patterns and state management
+
+**DEVIATION FROM THIS DESIGN WILL RESULT IN TASK REJECTION.**
+
+The design file is a bundled HTML with embedded React/JSX components. The CSS shows:
+- `.sd-deploy-picker` with a 2-column grid layout
+- `.sd-field` for labeled form controls (Flake dropdown, Generation selector)
+- `.sd-commit-list` with scrollable commit/generation items
+- `.sd-commit-item` with 5-column grid layout (sha, message, author, time, badge)
+- `.selected` state with purple accent and inset shadow
+- `.sd-deploy-panel` for the deployment plan preview
+- `.sd-deploy-actions` for action buttons
+
+The agent implementing this task MUST:
+1. Open and study `/home/mcamp/code/crystal-forge/crystal-forge/CrystalForgeSystemsUpdated.html` thoroughly
+2. Extract the exact CSS classes, layout patterns, and component structure
+3. Replicate the design EXACTLY in the Rust/Dioxus implementation
+4. Match spacing, colors, typography, borders, shadows, and all visual details
+5. Preserve the interaction patterns (hover states, selection, scrolling)
 
 ## Current Behavior
 
@@ -70,12 +98,13 @@ The Deploy tab in the system detail view has two critical issues:
 
 ## Design Consistency Requirement
 
-The implementation MUST follow the established design system in this codebase:
-- Use existing CSS classes from the design system (`sd-*`, `btn`, `chip`, `focus-ring`, etc.)
+The implementation MUST follow the EXACT design in `/home/mcamp/code/crystal-forge/crystal-forge/CrystalForgeSystemsUpdated.html`:
+- Use the exact CSS classes from the design system (`sd-*`, `btn`, `chip`, `focus-ring`, etc.)
 - Match the visual style of the current Deploy tab (card layout, kv-grid, callouts)
 - Maintain the two-panel layout (left: selector, right: deployment plan)
 - Use consistent spacing, colors, typography, and interaction patterns
 - Follow the design patterns from surrounding components (Overview, History, Config tabs)
+- Replicate ALL visual details: borders, shadows, hover states, selection styles
 
 ## Architecture Requirements
 
