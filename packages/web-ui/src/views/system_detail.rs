@@ -1751,7 +1751,17 @@ fn DeployTab(
                                 };
                                 let gen_num = generation.generation;
                                 let gen_label = format!("gen #{}", gen_num);
-                                let store_path_short = generation.store_path.split('/').last().unwrap_or("").chars().take(7).collect::<String>();
+                                let store_leaf = generation
+                                    .store_path
+                                    .split('/')
+                                    .last()
+                                    .unwrap_or("")
+                                    .to_string();
+                                let msg_text = if store_leaf.is_empty() {
+                                    "store path unavailable".to_string()
+                                } else {
+                                    format!("{}", store_leaf)
+                                };
                                 let when_text = {
                                     let now = chrono::Utc::now();
                                     let d = now.signed_duration_since(generation.timestamp);
@@ -1771,9 +1781,9 @@ fn DeployTab(
                                         class: "{item_class}",
                                         onclick: move |_| selected_generation.set(Some(gen_num)),
                                         span { class: "mono sd-commit-sha", "{gen_label}" }
-                                        span { class: "sd-commit-msg mono", title: "{generation.store_path}", "{store_path_short}" }
-                                        span { class: "chip chip-info", "commit" }
-                                        span { class: "sd-commit-meta mono", "k?" }
+                                        span { class: "sd-commit-msg", title: "{generation.store_path}", "{msg_text}" }
+                                        span { class: "chip chip-unknown", "unknown / not in CF" }
+                                        span { class: "sd-commit-meta mono", "store" }
                                         span { class: "sd-commit-meta", "{when_text}" }
                                         if generation.is_current {
                                             span { class: "chip chip-healthy", "active" }
