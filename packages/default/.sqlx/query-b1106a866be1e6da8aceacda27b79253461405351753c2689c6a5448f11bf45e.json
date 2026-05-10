@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                INSERT INTO package_vulnerabilities (\n                    derivation_id, cve_id, detection_method, is_whitelisted, whitelist_reason\n                )\n                VALUES ($1, $2, $3, $4, $5)\n                ON CONFLICT (derivation_id, cve_id) DO UPDATE SET\n                    detection_method = EXCLUDED.detection_method,\n                    is_whitelisted = EXCLUDED.is_whitelisted,\n                    whitelist_reason = EXCLUDED.whitelist_reason,\n                    updated_at = NOW()\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Varchar",
+        "Varchar",
+        "Bool",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b1106a866be1e6da8aceacda27b79253461405351753c2689c6a5448f11bf45e"
+}

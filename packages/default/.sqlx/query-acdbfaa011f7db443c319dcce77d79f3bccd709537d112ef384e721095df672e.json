@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                INSERT INTO cves (id, cvss_v3_score)\n                VALUES ($1, $2)\n                ON CONFLICT (id) DO UPDATE SET\n                    cvss_v3_score = COALESCE(EXCLUDED.cvss_v3_score, cves.cvss_v3_score),\n                    updated_at = NOW()\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Numeric"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "acdbfaa011f7db443c319dcce77d79f3bccd709537d112ef384e721095df672e"
+}

@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE derivations\n        SET scheduled_at = NOW() \n        WHERE status_id NOT IN ($1, $2, $3, $4)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b81bfd1ee152cac8bd09de5673df5f820b16d5af4a9e050aa35cfc1fb8d6ab22"
+}

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE derivations \n        SET status_id = (SELECT id FROM derivation_statuses WHERE name = 'cache-pushed')\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a4e8a4eafe070ed75a52c1569b3b32e4f4312435d05de5e70ba5cc69a22e351f"
+}

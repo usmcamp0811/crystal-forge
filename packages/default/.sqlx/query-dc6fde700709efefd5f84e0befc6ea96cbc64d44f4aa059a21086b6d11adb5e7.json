@@ -1,0 +1,82 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            id,\n            scan_id,\n            service_name as \"service_name!\",\n            service_type,\n            hardening_score as \"hardening_score!\",\n            risk_level as \"risk_level!: RiskLevel\",\n            directives_detail as \"directives_detail!\",\n            enabled_directives_count as \"enabled_directives_count!\",\n            disabled_directives_count as \"disabled_directives_count!\",\n            missing_directives_count as \"missing_directives_count!\",\n            created_at as \"created_at!\"\n        FROM service_hardening_results\n        WHERE scan_id = $1\n        ORDER BY hardening_score ASC, service_name ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "scan_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "service_name!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "service_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "hardening_score!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "risk_level!: RiskLevel",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "directives_detail!",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 7,
+        "name": "enabled_directives_count!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 8,
+        "name": "disabled_directives_count!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 9,
+        "name": "missing_directives_count!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 10,
+        "name": "created_at!",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "dc6fde700709efefd5f84e0befc6ea96cbc64d44f4aa059a21086b6d11adb5e7"
+}

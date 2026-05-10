@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE commits\n        SET \n            evaluation_status = 'in_progress',\n            evaluation_started_at = NOW(),\n            evaluation_attempt_count = COALESCE(evaluation_attempt_count, 0) + 1\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "56450859490e2aeef800dbf2b7250256de566921961c5f9827b4f685da98181a"
+}
