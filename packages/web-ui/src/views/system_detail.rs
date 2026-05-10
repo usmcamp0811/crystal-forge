@@ -1568,8 +1568,16 @@ fn DeployTab(
         .or_else(|| commits.first().map(|c| c.hash.clone()))
         .unwrap_or_default();
 
+    let default_generation = generations
+        .iter()
+        .find(|g| !g.is_current)
+        .or_else(|| generations.get(1))
+        .or_else(|| generations.first())
+        .map(|g| g.generation);
+
+    let mut mode = use_signal(|| "commit".to_string());
     let mut selected_commit = use_signal(|| default_commit);
-    let mut selected_generation: Signal<Option<i32>> = use_signal(|| None);
+    let mut selected_generation: Signal<Option<i32>> = use_signal(|| default_generation);
     let mut show_diff = use_signal(|| false);
 
     let displayed_commits = {
@@ -1583,11 +1591,16 @@ fn DeployTab(
             .collect::<Vec<_>>()
     };
 
-    let selected = displayed_commits
+    let selected_commit_data = displayed_commits
         .iter()
         .find(|c| c.hash == *selected_commit.read())
         .cloned()
         .or_else(|| displayed_commits.first().cloned());
+
+    let selected_generation_data = selected_generation
+        .read()
+        .and_then(|g| generations.iter().find(|x| x.generation == g).cloned())
+        .or_else(|| default_generation.and_then(|g| generations.iter().find(|x| x.generation == g).cloned()));
 
     // Pre-compute values for the plan panel (outside rsx! to avoid borrow issues)
     let from_commit = system
@@ -1608,144 +1621,164 @@ fn DeployTab(
                 class: "card sd-card",
                 div {
                     class: "sd-card-head",
-                    h2 { "Select deployment source" }
+                    style: "flex-direction: column; align-items: stretch; gap: 12px;",
+                    div {
+                        style: "display: flex; align-items: center; justify-content: space-between; gap: 12px;",
+                        h2 { "Select target" }
+                        span { class: "sd-card-meta mono", "{flake_name}" }
+                    }
+                    div {
+                        class: "seg",
+                        style: "align-self: flex-start;",
+                        button {
+                            class: if mode() == "commit" { "active" } else { "" },
+                            onclick: move |_| {
+                                mode.set("commit".to_string());
+                                show_diff.set(false);
+                            },
+                            svg {
+                                class: "w-3 h-3",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                view_box: "0 0 24 24",
+                                path { d: "M7 7h10M7 12h10M7 17h10M4 7h.01M4 12h.01M4 17h.01" }
+                            }
+                            " Commit"
+                        }
+                        button {
+                            class: if mode() == "generation" { "active" } else { "" },
+                            onclick: move |_| {
+                                mode.set("generation".to_string());
+                                show_diff.set(false);
+                            },
+                            svg {
+                                class: "w-3 h-3",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                view_box: "0 0 24 24",
+                                path { d: "M3 12a9 9 0 1018 0 9 9 0 10-18 0m9-5v5l3 3" }
+                            }
+                            " Generation"
+                        }
+                    }
                 }
 
-                // 2-column picker grid
-                div {
-                    class: "sd-deploy-picker",
-                    
-                    // Commits column
+                if mode() == "commit" {
                     div {
-                        class: "sd-field",
-                        label { "Commit" }
-                        div {
-                            class: "sd-commit-list",
-                            if displayed_commits.is_empty() {
-                                div {
-                                    style: "padding: 16px; color: var(--cf-text-muted); font-size: 13px;",
-                                    "No commits available."
-                                }
+                        class: "sd-commit-list",
+                        if displayed_commits.is_empty() {
+                            div {
+                                style: "padding: 16px; color: var(--cf-text-muted); font-size: 13px;",
+                                "No commits available."
                             }
-                            for commit in displayed_commits.iter().cloned() {
-                                {
-                                    let is_selected = selected_generation.read().is_none() && selected_commit() == commit.hash;
-                                    let item_class = if is_selected {
-                                        "sd-commit-item selected focus-ring"
+                        }
+                        for commit in displayed_commits.iter().cloned() {
+                            {
+                                let is_selected = selected_commit() == commit.hash;
+                                let item_class = if is_selected {
+                                    "sd-commit-item selected focus-ring"
+                                } else {
+                                    "sd-commit-item focus-ring"
+                                };
+                                let commit_hash_for_key = commit.hash.clone();
+                                let commit_hash_for_select = commit.hash.clone();
+                                let commit_hash_for_title = commit.hash.clone();
+                                let short_hash = commit.hash.chars().take(7).collect::<String>();
+                                let commit_message = commit.message.clone();
+                                let commit_author = commit.author.clone();
+                                let when_text = {
+                                    let now = chrono::Utc::now();
+                                    let d = now.signed_duration_since(commit.committed_at);
+                                    if d.num_minutes() < 1 {
+                                        "just now".to_string()
+                                    } else if d.num_hours() < 1 {
+                                        format!("{}m ago", d.num_minutes())
+                                    } else if d.num_days() < 1 {
+                                        format!("{}h ago", d.num_hours())
                                     } else {
-                                        "sd-commit-item focus-ring"
-                                    };
-                                    let commit_hash_for_key = commit.hash.clone();
-                                    let commit_hash_for_select = commit.hash.clone();
-                                    let commit_hash_for_title = commit.hash.clone();
-                                    let short_hash = commit.hash.chars().take(7).collect::<String>();
-                                    let commit_message = commit.message.clone();
-                                    let commit_author = commit.author.clone();
-                                    let when_text = {
-                                        let now = chrono::Utc::now();
-                                        let d = now.signed_duration_since(commit.committed_at);
-                                        if d.num_minutes() < 1 {
-                                            "just now".to_string()
-                                        } else if d.num_hours() < 1 {
-                                            format!("{}m ago", d.num_minutes())
-                                        } else if d.num_days() < 1 {
-                                            format!("{}h ago", d.num_hours())
-                                        } else {
-                                            format!("{}d ago", d.num_days())
+                                        format!("{}d ago", d.num_days())
+                                    }
+                                };
+                                rsx! {
+                                    button {
+                                        key: "{commit_hash_for_key}",
+                                        class: "{item_class}",
+                                        onclick: move |_| selected_commit.set(commit_hash_for_select.clone()),
+                                        span {
+                                            class: "mono sd-commit-sha",
+                                            title: "{commit_hash_for_title}",
+                                            "{short_hash}"
                                         }
-                                    };
-                                    rsx! {
-                                        button {
-                                            key: "{commit_hash_for_key}",
-                                            class: "{item_class}",
-                                            onclick: move |_| {
-                                                selected_commit.set(commit_hash_for_select.clone());
-                                                selected_generation.set(None);
-                                            },
-                                            span {
-                                                class: "mono sd-commit-sha",
-                                                title: "{commit_hash_for_title}",
-                                                "{short_hash}"
-                                            }
-                                            span {
-                                                class: "sd-commit-msg",
-                                                title: "{commit_message}",
-                                                "{commit_message}"
-                                            }
-                                            span {
-                                                class: "sd-commit-meta mono",
-                                                title: "{commit_author}",
-                                                "{commit_author}"
-                                            }
-                                            span { class: "sd-commit-meta", "{when_text}" }
-                                            if commit.is_current {
-                                                span { class: "chip chip-info", "current" }
-                                            }
+                                        span {
+                                            class: "sd-commit-msg",
+                                            title: "{commit_message}",
+                                            "{commit_message}"
+                                        }
+                                        span {
+                                            class: "sd-commit-meta mono",
+                                            title: "{commit_author}",
+                                            "{commit_author}"
+                                        }
+                                        span { class: "sd-commit-meta", "{when_text}" }
+                                        if commit.is_current {
+                                            span { class: "chip chip-info", "deployed" }
+                                        } else {
+                                            span { class: "chip chip-healthy", "cached" }
                                         }
                                     }
                                 }
                             }
                         }
                     }
-
-                    // Generations column
+                } else {
                     div {
-                        class: "sd-field",
-                        label { "Generation" }
-                        div {
-                            class: "sd-commit-list",
-                            if generations.is_empty() {
-                                div {
-                                    style: "padding: 16px; color: var(--cf-text-muted); font-size: 13px;",
-                                    "No historical generations available."
-                                }
+                        class: "sd-commit-list",
+                        if generations.is_empty() {
+                            div {
+                                style: "padding: 16px; color: var(--cf-text-muted); font-size: 13px;",
+                                "No historical generations available."
                             }
-                            for generation in generations.iter().cloned() {
-                                {
-                                    let is_selected = *selected_generation.read() == Some(generation.generation);
-                                    let item_class = if is_selected {
-                                        "sd-commit-item selected focus-ring"
+                        }
+                        for generation in generations.iter().cloned() {
+                            {
+                                let is_selected = *selected_generation.read() == Some(generation.generation);
+                                let item_class = if is_selected {
+                                    "sd-commit-item selected focus-ring"
+                                } else {
+                                    "sd-commit-item focus-ring"
+                                };
+                                let gen_num = generation.generation;
+                                let gen_label = format!("gen #{}", gen_num);
+                                let store_path_short = generation.store_path.split('/').last().unwrap_or("").chars().take(7).collect::<String>();
+                                let when_text = {
+                                    let now = chrono::Utc::now();
+                                    let d = now.signed_duration_since(generation.timestamp);
+                                    if d.num_minutes() < 1 {
+                                        "just now".to_string()
+                                    } else if d.num_hours() < 1 {
+                                        format!("{}m ago", d.num_minutes())
+                                    } else if d.num_days() < 1 {
+                                        format!("{}h ago", d.num_hours())
                                     } else {
-                                        "sd-commit-item focus-ring"
-                                    };
-                                    let gen_num = generation.generation;
-                                    let gen_label = format!("Generation {}", gen_num);
-                                    let store_path_short = generation.store_path.split('/').last().unwrap_or("").chars().take(7).collect::<String>();
-                                    let when_text = {
-                                        let now = chrono::Utc::now();
-                                        let d = now.signed_duration_since(generation.timestamp);
-                                        if d.num_minutes() < 1 {
-                                            "just now".to_string()
-                                        } else if d.num_hours() < 1 {
-                                            format!("{}m ago", d.num_minutes())
-                                        } else if d.num_days() < 1 {
-                                            format!("{}h ago", d.num_hours())
+                                        format!("{}d ago", d.num_days())
+                                    }
+                                };
+                                rsx! {
+                                    button {
+                                        key: "gen-{gen_num}",
+                                        class: "{item_class}",
+                                        onclick: move |_| selected_generation.set(Some(gen_num)),
+                                        span { class: "mono sd-commit-sha", "{gen_label}" }
+                                        span { class: "sd-commit-msg mono", title: "{generation.store_path}", "{store_path_short}" }
+                                        span { class: "chip chip-info", "commit" }
+                                        span { class: "sd-commit-meta mono", "k?" }
+                                        span { class: "sd-commit-meta", "{when_text}" }
+                                        if generation.is_current {
+                                            span { class: "chip chip-healthy", "active" }
                                         } else {
-                                            format!("{}d ago", d.num_days())
-                                        }
-                                    };
-                                    rsx! {
-                                        button {
-                                            key: "gen-{gen_num}",
-                                            class: "{item_class}",
-                                            onclick: move |_| {
-                                                selected_generation.set(Some(gen_num));
-                                            },
-                                            span {
-                                                class: "mono sd-commit-sha",
-                                                title: "Generation {gen_num}",
-                                                "{gen_label}"
-                                            }
-                                            span {
-                                                class: "sd-commit-msg mono",
-                                                title: "{generation.store_path}",
-                                                "{store_path_short}"
-                                            }
-                                            span { class: "sd-commit-meta", "{when_text}" }
-                                            span { class: "sd-commit-meta", "" }
-                                            if generation.is_current {
-                                                span { class: "chip chip-info", "current" }
-                                            }
+                                            span { class: "chip chip-unknown", "rollback" }
                                         }
                                     }
                                 }
@@ -1760,7 +1793,7 @@ fn DeployTab(
                 class: "card sd-card sd-deploy-panel",
                 div {
                     class: "sd-card-head",
-                    h2 { "Deployment plan" }
+                    h2 { if mode() == "generation" { "Rollback plan" } else { "Deployment plan" } }
                     button {
                         class: "btn btn-ghost xs focus-ring",
                         onclick: move |_| show_diff.set(!show_diff()),
@@ -1779,15 +1812,12 @@ fn DeployTab(
 
                 {
                     // Determine what to deploy (generation or commit)
-                    let selected_gen_data = selected_generation.read().and_then(|gen_num| {
-                        generations.iter().find(|g| g.generation == gen_num).cloned()
-                    });
-
-                    if let Some(generation_data) = selected_gen_data {
+                    if mode() == "generation" {
+                        if let Some(generation_data) = selected_generation_data {
                         let gen_num = generation_data.generation;
                         let store_path_short = generation_data.store_path.split('/').last().unwrap_or("").chars().take(7).collect::<String>();
                         let deploy_label = if allow_mutations {
-                            format!("Rollback to Gen {}", gen_num)
+                            format!("Switch to gen #{}", gen_num)
                         } else {
                             "Deploy (Operator/Admin required)".to_string()
                         };
@@ -1805,13 +1835,13 @@ fn DeployTab(
                                 dd { class: "mono", "{from_short} · {current_gen_display}" }
 
                                 dt { "To" }
-                                dd { class: "mono", "Generation {gen_num}" }
+                                dd { class: "mono", "gen #{gen_num}" }
 
                                 dt { "Store Path" }
                                 dd { class: "mono", title: "{generation_data.store_path}", "{store_path_short}" }
 
                                 dt { "Strategy" }
-                                dd { "generation_rollback" }
+                                dd { "rollback" }
 
                                 dt { "Policy" }
                                 dd { class: "mono", "{policy_name}" }
@@ -1839,7 +1869,7 @@ fn DeployTab(
                                 class: "sd-deploy-actions",
                                 button {
                                     class: "btn btn-ghost focus-ring",
-                                    "Dry-run build"
+                                    "Verify closure"
                                 }
                                 button {
                                     class: "btn btn-primary focus-ring",
@@ -1857,7 +1887,15 @@ fn DeployTab(
                                 }
                             }
                         }
-                    } else if let Some(commit) = selected {
+                        } else {
+                            rsx! {
+                                div {
+                                    style: "padding: 24px; color: var(--cf-text-muted); font-size: 13px; text-align: center;",
+                                    "Select a generation to see the rollback plan."
+                                }
+                            }
+                        }
+                    } else if let Some(commit) = selected_commit_data {
                         let to_short = commit.hash.chars().take(7).collect::<String>();
                         let diff_text = commit.diff_summary.clone().unwrap_or_else(|| {
                             "--- a/nixos/modules/services/nginx.nix\n+++ b/nixos/modules/services/nginx.nix\n@@ -14,7 +14,7 @@\n  services.nginx = {\n    enable = true;\n-   recommendedTlsSettings = false;\n+   recommendedTlsSettings = true;".to_string()
