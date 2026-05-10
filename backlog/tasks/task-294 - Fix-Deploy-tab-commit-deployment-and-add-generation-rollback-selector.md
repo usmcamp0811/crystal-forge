@@ -144,4 +144,13 @@ The implementation MUST follow the EXACT design in `/home/mcamp/code/crystal-for
 - [ ] #15 Error handling if generation list fetch fails
 - [ ] #16 Verification: Manual test deploying specific commits works
 - [ ] #17 Verification: Manual test rolling back to previous generation works
+- [ ] #18 UI/UX matches CrystalForgeSystemsUpdated.html design EXACTLY - all spacing, colors, borders, shadows, layout
+- [ ] #19 All CSS classes from design file are used correctly (sd-deploy-picker, sd-field, sd-commit-list, sd-commit-item, etc.)
+- [ ] #20 Two-column picker layout matches design (Flake/Generation selectors)
+- [ ] #21 Commit/generation list has exact 5-column grid layout (90px sha, 1fr message, auto author, auto time, auto badge)
+- [ ] #22 Selected state has purple accent with inset shadow matching design
+- [ ] #23 Scrollable list styling matches design (max-height: 420px, border, padding)
+- [ ] #24 Deploy panel layout and styling matches design exactly
+- [ ] #25 All hover states, transitions, and interactions match design
+- [ ] #26 Visual appearance is pixel-perfect match to design file
 <!-- AC:END -->
