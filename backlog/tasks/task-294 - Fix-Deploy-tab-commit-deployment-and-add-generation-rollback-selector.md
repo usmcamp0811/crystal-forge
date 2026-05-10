@@ -1,10 +1,10 @@
 ---
 id: TASK-294
 title: Fix Deploy tab commit deployment and add generation rollback selector
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-05-10 13:23'
-updated_date: '2026-05-10 13:35'
+updated_date: '2026-05-10 13:36'
 labels:
   - bug
   - feature
@@ -169,4 +169,6 @@ DO: Study the design file thoroughly before writing any code, extract and replic
 Failure to follow the design EXACTLY will result in: Task rejection, agent termination, hard drive shredding.
 
 This is not hyperbole. The design is final. Follow it exactly.
+
+LOCK: agent on gray in /home/mcamp/code/crystal-forge/TASK-294-fix-deploy-tab
 <!-- SECTION:NOTES:END -->
