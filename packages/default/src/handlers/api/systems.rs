@@ -1638,7 +1638,7 @@ pub async fn get_system_generations(
 
     // Get current generation from system detail
     let current_generation = match get_system_detail_by_id(&pool, system_id).await {
-        Ok(Some(detail)) => detail.current_generation,
+        Ok(Some(detail)) => detail.generation,
         _ => None,
     };
 
