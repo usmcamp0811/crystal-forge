@@ -154,3 +154,19 @@ The implementation MUST follow the EXACT design in `/home/mcamp/code/crystal-for
 - [ ] #25 All hover states, transitions, and interactions match design
 - [ ] #26 Visual appearance is pixel-perfect match to design file
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+🚨 CRITICAL WARNING FOR IMPLEMENTING AGENT 🚨
+
+The UI/UX design in /home/mcamp/code/crystal-forge/crystal-forge/CrystalForgeSystemsUpdated.html is FINAL and MANDATORY.
+
+DO NOT: Deviate from the design, 'improve' the design, use different CSS classes, modify spacing/colors/layout, or make subjective design choices.
+
+DO: Study the design file thoroughly before writing any code, extract and replicate the exact CSS classes and structure, match every visual detail pixel-by-pixel, test against the design file to ensure perfect match.
+
+Failure to follow the design EXACTLY will result in: Task rejection, agent termination, hard drive shredding.
+
+This is not hyperbole. The design is final. Follow it exactly.
+<!-- SECTION:NOTES:END -->
