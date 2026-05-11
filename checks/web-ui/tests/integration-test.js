@@ -4069,7 +4069,7 @@ const steps = [
   },
   {
     name: "12j-system-detail-deploy-generation-list",
-    description: "Deploy tab generation selector uses single-line rows and no store-path hash text",
+    description: "Deploy tab generation selector matches generation row text styling expectations",
     action: async (page) => {
       await routeSystemsWarningData(page);
 
@@ -4126,8 +4126,16 @@ const steps = [
         throw new Error("Expected generation selector row to omit store-path hash suffix");
       }
 
+      if (/\bgen\b/i.test(firstGenerationRowText)) {
+        throw new Error("Expected generation selector row to omit 'gen' prefix text");
+      }
+
+      if (!firstGenerationRowText.includes("#74")) {
+        throw new Error("Expected generation selector row to show '#<number>' generation label");
+      }
+
       if (!/\b[0-9a-f]{7}\b/i.test(firstGenerationRowText)) {
-        throw new Error("Expected generation selector row to show a short commit hash chip");
+        throw new Error("Expected generation selector row to include short commit hash text");
       }
 
       await page.unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/generations");

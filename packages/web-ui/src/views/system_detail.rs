@@ -1788,7 +1788,7 @@ fn DeployTab(
                                     "sd-commit-item focus-ring"
                                 };
                                 let gen_num = generation.generation;
-                                let gen_label = format!("gen #{}", gen_num);
+                                let gen_label = format!("#{}", gen_num);
                                 let commit_short = generation
                                     .commit_hash
                                     .as_ref()
@@ -1814,14 +1814,13 @@ fn DeployTab(
                                             selected_generation.set(Some(gen_num));
                                             verify_notice.set(None);
                                         },
-                                        span { class: "mono sd-commit-sha", "{gen_label}" }
+                                        span { class: "mono sd-commit-sha sd-generation-number", "{gen_label}" }
                                         span { class: "sd-commit-msg", "generation rollback" }
                                         if let Some(short) = commit_short {
-                                            span { class: "chip chip-info", "{short}" }
+                                            span { class: "sd-commit-meta mono", "{short}" }
                                         } else {
-                                            span { class: "chip chip-unknown", "unknown / not in CF" }
+                                            span { class: "sd-commit-meta mono", "unknown / not in CF" }
                                         }
-                                        span { class: "sd-commit-meta mono", "" }
                                         span { class: "sd-commit-meta", "{when_text}" }
                                         if generation.is_current {
                                             span { class: "chip chip-healthy", "active" }
