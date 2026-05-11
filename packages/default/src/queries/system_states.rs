@@ -161,7 +161,7 @@ pub async fn fetch_system_generations(
           WHERE ss.store_path IS NOT NULL
             AND ss.store_path = COALESCE(d.store_path, d.expected_store_path)
             AND d.derivation_type = 'nixos'
-          ORDER BY d.created_at DESC NULLS LAST, d.id DESC
+          ORDER BY d.id DESC
           LIMIT 1
         ) commit_link ON TRUE
         WHERE s.id = $1
