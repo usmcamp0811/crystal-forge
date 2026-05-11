@@ -4,7 +4,7 @@ title: Deprecate legacy database mode and implement builder API mode in NixOS mo
 status: In Progress
 assignee: []
 created_date: '2026-05-08 02:59'
-updated_date: '2026-05-08 03:50'
+updated_date: '2026-05-11 12:48'
 labels:
   - bug
   - dx
@@ -14,6 +14,7 @@ labels:
 dependencies:
   - TASK-293
 priority: high
+ordinal: 7595
 ---
 
 ## Description
