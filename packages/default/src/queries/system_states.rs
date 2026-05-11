@@ -150,16 +150,20 @@ pub async fn fetch_system_generations(
         SELECT DISTINCT ON (ss.generation)
             ss.generation,
             ss.store_path,
-            c.git_commit_hash AS commit_hash,
+            commit_link.commit_hash,
             ss.timestamp
         FROM system_states ss
         JOIN systems s ON s.hostname = ss.hostname
-        LEFT JOIN derivations d
-          ON ss.store_path IS NOT NULL
-         AND ss.store_path = COALESCE(d.store_path, d.expected_store_path)
-         AND d.derivation_type = 'nixos'
-         AND d.derivation_name = COALESCE(NULLIF(s.system_configuration_name, ''), s.hostname)
-        LEFT JOIN commits c ON c.id = d.commit_id
+        LEFT JOIN LATERAL (
+          SELECT c.git_commit_hash AS commit_hash
+          FROM derivations d
+          JOIN commits c ON c.id = d.commit_id
+          WHERE ss.store_path IS NOT NULL
+            AND ss.store_path = COALESCE(d.store_path, d.expected_store_path)
+            AND d.derivation_type = 'nixos'
+          ORDER BY d.created_at DESC NULLS LAST, d.id DESC
+          LIMIT 1
+        ) commit_link ON TRUE
         WHERE s.id = $1
           AND ss.generation IS NOT NULL
         ORDER BY ss.generation DESC, ss.timestamp DESC
@@ -175,9 +179,123 @@ pub async fn fetch_system_generations(
 mod tests {
 
     use crate::handlers::agent_request::deserialize_system_state_versioned;
+    use crate::models::public_key::PublicKey;
     use crate::models::system_states::{SystemState, SystemStateV1};
+    use crate::models::systems::System;
+    use crate::queries::commits::{get_commit_by_hash, insert_commit_with_metadata};
+    use crate::queries::derivations::insert_derivation;
+    use crate::queries::flakes::insert_flake;
+    use crate::queries::systems::insert_system;
+    use crate::test_utils::builders::SystemStateBuilder;
 
     use chrono::Utc;
+    use ed25519_dalek::SigningKey;
+    use sqlx::PgPool;
+    use uuid::Uuid;
+
+    async fn test_pool_from_env() -> PgPool {
+        let db_url = std::env::var("DATABASE_URL")
+            .expect("DATABASE_URL must be set for db-backed generation query tests");
+
+        PgPool::connect(&db_url)
+            .await
+            .expect("failed to connect to DATABASE_URL")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn fetch_system_generations_includes_all_generations_and_links_commit_when_available() {
+        let pool = test_pool_from_env().await;
+        let suffix = Uuid::new_v4().simple().to_string();
+        let hostname = format!("task294-gen-test-{suffix}");
+        let repo_url = format!("https://example.com/task294-{suffix}.git");
+        let commit_hash = format!("task294{suffix}");
+
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let public_key = PublicKey::from_verifying_key(key.verifying_key());
+
+        let flake = insert_flake(&pool, &format!("flake-{suffix}"), &repo_url, "main", "full")
+            .await
+            .expect("insert_flake should succeed");
+
+        let system = System {
+            id: Uuid::new_v4(),
+            hostname: hostname.clone(),
+            environment_id: None,
+            is_active: true,
+            public_key,
+            flake_id: Some(flake.id),
+            derivation: String::new(),
+            system_configuration_name: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            desired_target: None,
+            deployment_policy: "manual".to_string(),
+        };
+
+        insert_system(&pool, &system)
+            .await
+            .expect("insert_system should succeed");
+
+        let mut state_with_commit = SystemStateBuilder::new().build();
+        state_with_commit.hostname = hostname.clone();
+        state_with_commit.generation = Some(101);
+        state_with_commit.store_path = Some(format!("/nix/store/{suffix}-gen101-system"));
+        insert_system_state(&pool, &state_with_commit, true)
+            .await
+            .expect("insert_system_state with store_path should succeed");
+
+        let mut state_without_commit = SystemStateBuilder::new().build();
+        state_without_commit.hostname = hostname.clone();
+        state_without_commit.generation = Some(100);
+        state_without_commit.store_path = None;
+        insert_system_state(&pool, &state_without_commit, true)
+            .await
+            .expect("insert_system_state without store_path should succeed");
+
+        insert_commit_with_metadata(
+            &pool,
+            &commit_hash,
+            &repo_url,
+            Utc::now(),
+            Some("TASK-294 test commit"),
+            Some("test"),
+        )
+        .await
+        .expect("insert_commit_with_metadata should succeed");
+
+        let commit = get_commit_by_hash(&pool, &commit_hash)
+            .await
+            .expect("get_commit_by_hash should succeed");
+
+        let derivation = insert_derivation(&pool, Some(&commit), &hostname, "nixos")
+            .await
+            .expect("insert_derivation should succeed");
+
+        sqlx::query("UPDATE derivations SET store_path = $1 WHERE id = $2")
+            .bind(state_with_commit.store_path.as_deref())
+            .bind(derivation.id)
+            .execute(&pool)
+            .await
+            .expect("updating derivation store_path should succeed");
+
+        let generations = fetch_system_generations(&pool, system.id)
+            .await
+            .expect("fetch_system_generations should succeed");
+
+        let gen_101 = generations
+            .iter()
+            .find(|g| g.generation == 101)
+            .expect("generation 101 should exist");
+        assert_eq!(gen_101.commit_hash.as_deref(), Some(commit_hash.as_str()));
+
+        let gen_100 = generations
+            .iter()
+            .find(|g| g.generation == 100)
+            .expect("generation 100 should exist");
+        assert!(gen_100.store_path.is_none());
+        assert!(gen_100.commit_hash.is_none());
+    }
 
     #[test]
     fn test_try_deserialize_current_version() {
