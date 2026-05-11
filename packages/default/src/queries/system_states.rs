@@ -177,6 +177,7 @@ pub async fn fetch_system_generations(
 
 #[cfg(test)]
 mod tests {
+    use super::{fetch_system_generations, insert_system_state};
 
     use crate::handlers::agent_request::deserialize_system_state_versioned;
     use crate::models::public_key::PublicKey;
@@ -273,7 +274,7 @@ mod tests {
             .expect("insert_derivation should succeed");
 
         sqlx::query("UPDATE derivations SET store_path = $1 WHERE id = $2")
-            .bind(state_with_commit.store_path.as_deref())
+            .bind(state_with_commit.store_path.clone())
             .bind(derivation.id)
             .execute(&pool)
             .await
