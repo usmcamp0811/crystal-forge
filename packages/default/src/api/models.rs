@@ -829,6 +829,12 @@ pub struct SystemRollbackRequest {
     pub target_commit: String,
 }
 
+/// Request payload for rolling a system back to a specific deployed store path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemRollbackGenerationRequest {
+    pub store_path: String,
+}
+
 /// Request payload for deploying a system with a specific commit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeploySystemRequest {
@@ -850,6 +856,35 @@ pub struct CommitInfo {
     pub message: String,
     pub author: String,
     pub timestamp: String,
+}
+
+/// Response containing available generations for rollback.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemGenerationsResponse {
+    pub generations: Vec<SystemGeneration>,
+    pub current_generation: Option<i32>,
+}
+
+/// Information about a NixOS generation available for rollback.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemGeneration {
+    pub generation: i32,
+    pub store_path: Option<String>,
+    pub commit_hash: Option<String>,
+    pub timestamp: DateTime<Utc>,
+    pub is_current: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifyGenerationClosureRequest {
+    pub store_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifyGenerationClosureResponse {
+    pub available: bool,
+    pub message: String,
+    pub last_seen_at: Option<DateTime<Utc>>,
 }
 
 /// A single system state transition for timeline/history views.

@@ -19,16 +19,19 @@ use crate::api::client::{
     ApiClientError, fetch_cve_scan_status, fetch_hardening_scan_status,
     fetch_system_cve_scan_eligibility, fetch_system_cves, fetch_system_hardening,
     fetch_system_hardening_justifications, fetch_system_hardening_scan_eligibility,
-    request_system_rollback, request_system_sync, save_system_hardening_justification,
+    request_system_generation_rollback, request_system_rollback, request_system_sync,
+    save_system_hardening_justification,
     trigger_system_cve_scan, trigger_system_hardening_scan,
+    verify_generation_closure as verify_generation_closure_request,
 };
 use crate::api::models::{
     BuildStatus, CommitInfo, CveScanEligibilityResponse, CveSeverity, CveSummary,
     DeploymentLogEntry, DeploymentStatus, HardeningJustificationResponse,
     HardeningScanEligibilityResponse, HardeningServiceResultResponse, HealthStatus, LogLevel,
     PipelineStage, SaveHardeningJustificationRequest, SystemAgentEvent, SystemCommitHistory,
-    SystemDetail, SystemHardwareInfo, SystemHistoryEntry, SystemNetworkInfo, SystemRollbackRequest,
-    SystemSecurityInfo, SystemVulnerability,
+    SystemDetail, SystemGeneration, SystemHardwareInfo, SystemHistoryEntry, SystemNetworkInfo,
+    SystemRollbackGenerationRequest, SystemRollbackRequest, SystemSecurityInfo, SystemVulnerability,
+    VerifyGenerationClosureRequest,
 };
 use crate::components::cve::CvesTab;
 use crate::components::diff::DiffViewer;
@@ -43,7 +46,8 @@ use crate::routes::Route;
 use crate::state::{app_state::AppState, auth};
 use crate::systems::adapter::{fallback_system_detail, load_system_detail_with_fallback};
 use crate::systems::adapter::{
-    fetch_system_commits_via_api, load_system_agent_events_with_fallback,
+    deploy_system_via_api, fetch_system_commits_via_api,
+    load_system_agent_events_with_fallback, load_system_generations_with_fallback,
     load_system_history_with_fallback, update_system_via_api,
 };
 use crate::theme;
@@ -230,6 +234,19 @@ pub fn SystemDetailView(id: String) -> Element {
         }
     });
 
+    let id_for_generations = id.clone();
+    let generations_resource = use_resource(move || {
+        let id = id_for_generations.clone();
+        async move {
+            let Ok(system_id) = Uuid::parse_str(&id) else {
+                return None;
+            };
+
+            let result = load_system_generations_with_fallback(system_id).await;
+            Some(result)
+        }
+    });
+
     let id_for_hardening = id.clone();
     let mut hardening_results_resource = use_resource(move || {
         let id = id_for_hardening.clone();
@@ -331,6 +348,16 @@ pub fn SystemDetailView(id: String) -> Element {
         .find(|commit| commit.is_current)
         .cloned()
         .or_else(|| deploy_commit_history.first().cloned());
+    let generations_result = generations_resource
+        .read_unchecked()
+        .clone()
+        .flatten()
+        .unwrap_or_else(|| crate::systems::adapter::SystemGenerationsLoadResult {
+            generations: vec![],
+            current_generation: None,
+            notice: None,
+            redirect_to_login: false,
+        });
     let vulnerabilities = match &*vulnerabilities_resource.read_unchecked() {
         Some(value) => value.clone(),
         None => mock_vulnerabilities(),
@@ -990,10 +1017,58 @@ pub fn SystemDetailView(id: String) -> Element {
                         DeployTab {
                             system: system.clone(),
                             commits: deploy_commit_history.clone(),
+                            generations: generations_result.generations.clone(),
+                            current_generation: generations_result.current_generation,
                             allow_mutations: can_mutate,
-                            on_deploy_commit: move |commit| {
-                                rollback_target.set(Some(commit));
-                                show_rollback_dialog.set(true);
+                            on_deploy_commit: {
+                                let system_id = system.id;
+                                let hostname = system.hostname.clone();
+                                let toast_message = toast_message.clone();
+                                move |commit_sha: String| {
+                                    let hostname = hostname.clone();
+                                    let toast_message = toast_message.clone();
+                                    spawn(async move {
+                                        let message = match deploy_system_via_api(system_id, commit_sha.clone()).await {
+                                            Ok(response) if !response.trim().is_empty() => response,
+                                            Ok(_) => format!(
+                                                "Requested deployment of {} to {}",
+                                                hostname,
+                                                commit_sha.chars().take(7).collect::<String>()
+                                            ),
+                                            Err(error) => format!("Deploy request failed for {}: {}", hostname, error),
+                                        };
+                                        let success = !message.to_ascii_lowercase().contains("failed");
+                                        let _ = dispatch_sync_notification(message, success, toast_message).await;
+                                    });
+                                }
+                            },
+                            on_deploy_generation: {
+                                let system_id = system.id;
+                                let hostname = system.hostname.clone();
+                                let toast_message = toast_message.clone();
+                                move |store_path: String| {
+                                    let hostname = hostname.clone();
+                                    let toast_message = toast_message.clone();
+                                    spawn(async move {
+                                        let message = match request_system_generation_rollback(
+                                            &system_id,
+                                            &SystemRollbackGenerationRequest {
+                                                store_path: store_path.clone(),
+                                            },
+                                        )
+                                        .await
+                                        {
+                                            Ok(response) if !response.message.trim().is_empty() => response.message,
+                                            Ok(_) => format!("Requested generation rollback for {}", hostname),
+                                            Err(error) => format!(
+                                                "Generation rollback request failed for {}: {}",
+                                                hostname, error
+                                            ),
+                                        };
+                                        let success = !message.to_ascii_lowercase().contains("failed");
+                                        let _ = dispatch_sync_notification(message, success, toast_message).await;
+                                    });
+                                }
                             }
                         }
                     },
@@ -1506,8 +1581,11 @@ fn OverviewTab(
 fn DeployTab(
     system: SystemDetail,
     commits: Vec<SystemCommitHistory>,
+    generations: Vec<SystemGeneration>,
+    current_generation: Option<i32>,
     allow_mutations: bool,
-    on_deploy_commit: EventHandler<SystemCommitHistory>,
+    on_deploy_commit: EventHandler<String>,
+    on_deploy_generation: EventHandler<String>,
 ) -> Element {
     let flake_name = system
         .flake
@@ -1522,8 +1600,18 @@ fn DeployTab(
         .or_else(|| commits.first().map(|c| c.hash.clone()))
         .unwrap_or_default();
 
+    let default_generation = generations
+        .iter()
+        .find(|g| !g.is_current)
+        .or_else(|| generations.get(1))
+        .or_else(|| generations.first())
+        .map(|g| g.generation);
+
+    let mut mode = use_signal(|| "commit".to_string());
     let mut selected_commit = use_signal(|| default_commit);
+    let mut selected_generation: Signal<Option<i32>> = use_signal(|| default_generation);
     let mut show_diff = use_signal(|| false);
+    let mut verify_notice = use_signal(|| None::<String>);
 
     let displayed_commits = {
         use std::collections::HashSet;
@@ -1536,11 +1624,16 @@ fn DeployTab(
             .collect::<Vec<_>>()
     };
 
-    let selected = displayed_commits
+    let selected_commit_data = displayed_commits
         .iter()
         .find(|c| c.hash == *selected_commit.read())
         .cloned()
         .or_else(|| displayed_commits.first().cloned());
+
+    let selected_generation_data = selected_generation
+        .read()
+        .and_then(|g| generations.iter().find(|x| x.generation == g).cloned())
+        .or_else(|| default_generation.and_then(|g| generations.iter().find(|x| x.generation == g).cloned()));
 
     // Pre-compute values for the plan panel (outside rsx! to avoid borrow issues)
     let from_commit = system
@@ -1556,86 +1649,184 @@ fn DeployTab(
         div {
             class: "sd-grid sd-grid-deploy",
 
-            // ── Left panel: commit selector ────────────────────────────────
+            // ── Left panel: commit and generation selector ────────────────────────────────
             section {
                 class: "card sd-card",
                 div {
                     class: "sd-card-head",
-                    h2 { "Select commit" }
-                }
-
-                // Flake dropdown
-                div {
-                    class: "sd-deploy-picker single",
+                    style: "flex-direction: column; align-items: stretch; gap: 12px;",
                     div {
-                        class: "sd-field",
-                        label { "Flake" }
-                        select {
-                            class: "input filter-select focus-ring",
-                            option { value: "{flake_name}", "{flake_name}" }
+                        style: "display: flex; align-items: center; justify-content: space-between; gap: 12px;",
+                        h2 { "Select target" }
+                        span { class: "sd-card-meta mono", "{flake_name}" }
+                    }
+                    div {
+                        class: "seg",
+                        style: "align-self: flex-start;",
+                        button {
+                            class: if mode() == "commit" { "active" } else { "" },
+                            onclick: move |_| {
+                                mode.set("commit".to_string());
+                                show_diff.set(false);
+                                verify_notice.set(None);
+                            },
+                            svg {
+                                class: "w-3 h-3",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                view_box: "0 0 24 24",
+                                path { d: "M7 7h10M7 12h10M7 17h10M4 7h.01M4 12h.01M4 17h.01" }
+                            }
+                            " Commit"
+                        }
+                        button {
+                            class: if mode() == "generation" { "active" } else { "" },
+                            onclick: move |_| {
+                                mode.set("generation".to_string());
+                                show_diff.set(false);
+                                verify_notice.set(None);
+                            },
+                            svg {
+                                class: "w-3 h-3",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                view_box: "0 0 24 24",
+                                path { d: "M3 12a9 9 0 1018 0 9 9 0 10-18 0m9-5v5l3 3" }
+                            }
+                            " Generation"
                         }
                     }
                 }
 
-                // Commit list (scrollable, same as design)
-                div {
-                    class: "sd-commit-list",
-                    if displayed_commits.is_empty() {
-                        div {
-                            style: "padding: 16px; color: var(--cf-text-muted); font-size: 13px;",
-                            "No commits available for this system."
+                if mode() == "commit" {
+                    div {
+                        class: "sd-commit-list",
+                        if displayed_commits.is_empty() {
+                            div {
+                                style: "padding: 16px; color: var(--cf-text-muted); font-size: 13px;",
+                                "No commits available."
+                            }
+                        }
+                        for commit in displayed_commits.iter().cloned() {
+                            {
+                                let is_selected = selected_commit() == commit.hash;
+                                let item_class = if is_selected {
+                                    "sd-commit-item selected focus-ring"
+                                } else {
+                                    "sd-commit-item focus-ring"
+                                };
+                                let commit_hash_for_key = commit.hash.clone();
+                                let commit_hash_for_select = commit.hash.clone();
+                                let commit_hash_for_title = commit.hash.clone();
+                                let short_hash = commit.hash.chars().take(7).collect::<String>();
+                                let commit_message = commit.message.clone();
+                                let commit_author = commit.author.clone();
+                                let when_text = {
+                                    let now = chrono::Utc::now();
+                                    let d = now.signed_duration_since(commit.committed_at);
+                                    if d.num_minutes() < 1 {
+                                        "just now".to_string()
+                                    } else if d.num_hours() < 1 {
+                                        format!("{}m ago", d.num_minutes())
+                                    } else if d.num_days() < 1 {
+                                        format!("{}h ago", d.num_hours())
+                                    } else {
+                                        format!("{}d ago", d.num_days())
+                                    }
+                                };
+                                rsx! {
+                                    button {
+                                        key: "{commit_hash_for_key}",
+                                        class: "{item_class}",
+                                        onclick: move |_| {
+                                            selected_commit.set(commit_hash_for_select.clone());
+                                            verify_notice.set(None);
+                                        },
+                                        span {
+                                            class: "mono sd-commit-sha",
+                                            title: "{commit_hash_for_title}",
+                                            "{short_hash}"
+                                        }
+                                        span {
+                                            class: "sd-commit-msg",
+                                            title: "{commit_message}",
+                                            "{commit_message}"
+                                        }
+                                        span {
+                                            class: "sd-commit-meta mono",
+                                            title: "{commit_author}",
+                                            "{commit_author}"
+                                        }
+                                        span { class: "sd-commit-meta", "{when_text}" }
+                                        if commit.is_current {
+                                            span { class: "chip chip-info", "deployed" }
+                                        } else {
+                                            span { class: "chip chip-healthy", "cached" }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
-                    for commit in displayed_commits.iter().cloned() {
-                        {
-                            let is_selected = selected_commit() == commit.hash;
-                            let item_class = if is_selected {
-                                "sd-commit-item selected focus-ring"
-                            } else {
-                                "sd-commit-item focus-ring"
-                            };
-                            let commit_hash_for_key = commit.hash.clone();
-                            let commit_hash_for_select = commit.hash.clone();
-                            let commit_hash_for_title = commit.hash.clone();
-                            let short_hash = commit.hash.chars().take(7).collect::<String>();
-                            let commit_message = commit.message.clone();
-                            let commit_author = commit.author.clone();
-                            let when_text = {
-                                let now = chrono::Utc::now();
-                                let d = now.signed_duration_since(commit.committed_at);
-                                if d.num_minutes() < 1 {
-                                    "just now".to_string()
-                                } else if d.num_hours() < 1 {
-                                    format!("{}m ago", d.num_minutes())
-                                } else if d.num_days() < 1 {
-                                    format!("{}h ago", d.num_hours())
+                } else {
+                    div {
+                        class: "sd-commit-list",
+                        if generations.is_empty() {
+                            div {
+                                style: "padding: 16px; color: var(--cf-text-muted); font-size: 13px;",
+                                "No historical generations available."
+                            }
+                        }
+                        for generation in generations.iter().cloned() {
+                            {
+                                let is_selected = *selected_generation.read() == Some(generation.generation);
+                                let item_class = if is_selected {
+                                    "sd-commit-item selected focus-ring"
                                 } else {
-                                    format!("{}d ago", d.num_days())
-                                }
-                            };
-                            rsx! {
-                                button {
-                                    key: "{commit_hash_for_key}",
-                                    class: "{item_class}",
-                                    onclick: move |_| selected_commit.set(commit_hash_for_select.clone()),
-                                    span {
-                                        class: "mono sd-commit-sha",
-                                        title: "{commit_hash_for_title}",
-                                        "{short_hash}"
+                                    "sd-commit-item focus-ring"
+                                };
+                                let gen_num = generation.generation;
+                                let gen_label = format!("#{}", gen_num);
+                                let commit_short = generation
+                                    .commit_hash
+                                    .as_ref()
+                                    .map(|c| c.chars().take(7).collect::<String>());
+                                let when_text = {
+                                    let now = chrono::Utc::now();
+                                    let d = now.signed_duration_since(generation.timestamp);
+                                    if d.num_minutes() < 1 {
+                                        "just now".to_string()
+                                    } else if d.num_hours() < 1 {
+                                        format!("{}m ago", d.num_minutes())
+                                    } else if d.num_days() < 1 {
+                                        format!("{}h ago", d.num_hours())
+                                    } else {
+                                        format!("{}d ago", d.num_days())
                                     }
-                                    span {
-                                        class: "sd-commit-msg",
-                                        title: "{commit_message}",
-                                        "{commit_message}"
-                                    }
-                                    span {
-                                        class: "sd-commit-meta mono",
-                                        title: "{commit_author}",
-                                        "{commit_author}"
-                                    }
-                                    span { class: "sd-commit-meta", "{when_text}" }
-                                    if commit.is_current {
-                                        span { class: "chip chip-info", "current" }
+                                };
+                                rsx! {
+                                    button {
+                                        key: "gen-{gen_num}",
+                                        class: "{item_class}",
+                                        onclick: move |_| {
+                                            selected_generation.set(Some(gen_num));
+                                            verify_notice.set(None);
+                                        },
+                                        span { class: "mono sd-commit-sha sd-generation-number", "{gen_label}" }
+                                        span { class: "sd-commit-msg", "generation rollback" }
+                                        if let Some(short) = commit_short {
+                                            span { class: "sd-commit-meta mono", "{short}" }
+                                        } else {
+                                            span { class: "sd-commit-meta mono", "unknown / not in CF" }
+                                        }
+                                        span { class: "sd-commit-meta", "{when_text}" }
+                                        if generation.is_current {
+                                            span { class: "chip chip-healthy", "active" }
+                                        } else {
+                                            span { class: "chip chip-unknown", "rollback" }
+                                        }
                                     }
                                 }
                             }
@@ -1649,9 +1840,10 @@ fn DeployTab(
                 class: "card sd-card sd-deploy-panel",
                 div {
                     class: "sd-card-head",
-                    h2 { "Deployment plan" }
+                    h2 { if mode() == "generation" { "Rollback plan" } else { "Deployment plan" } }
                     button {
                         class: "btn btn-ghost xs focus-ring",
+                        disabled: mode() == "generation",
                         onclick: move |_| show_diff.set(!show_diff()),
                         // file icon
                         svg {
@@ -1662,12 +1854,167 @@ fn DeployTab(
                             view_box: "0 0 24 24",
                             path { d: "M9 12h6m-6 4h6M7 8h10M5 6h14a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2z" }
                         }
-                        if show_diff() { "Hide diff" } else { "Show diff" }
+                        if mode() == "generation" {
+                            "Diff unavailable"
+                        } else if show_diff() {
+                            "Hide diff"
+                        } else {
+                            "Show diff"
+                        }
                     }
                 }
 
-                if let Some(commit) = selected {
-                    {
+                {
+                    // Determine what to deploy (generation or commit)
+                    if mode() == "generation" {
+                        if let Some(generation_data) = selected_generation_data {
+                        let can_rollback = generation_data.store_path.is_some();
+                        let gen_num = generation_data.generation;
+                        let store_path_full = generation_data.store_path.clone().unwrap_or_default();
+                        let deploy_label = if allow_mutations {
+                            format!("Switch to gen #{}", gen_num)
+                        } else {
+                            "Deploy (Operator/Admin required)".to_string()
+                        };
+                        let policy_for_callout = policy_name.clone();
+                        let current_gen_display = current_generation.map(|g| format!("gen #{}", g)).unwrap_or_else(|| "—".to_string());
+                        let store_path_for_deploy = generation_data.store_path.clone().unwrap_or_default();
+                        let verify_store_path = store_path_for_deploy.clone();
+                        let commit_full = generation_data
+                            .commit_hash
+                            .clone()
+                            .unwrap_or_else(|| "unknown".to_string());
+                        let commit_display = if commit_full == "unknown" {
+                            commit_full.clone()
+                        } else {
+                            commit_full.chars().take(7).collect::<String>()
+                        };
+
+                        rsx! {
+                            dl {
+                                class: "kv-grid",
+                                dt { "Target" }
+                                dd { class: "mono", "{system.hostname}" }
+
+                                dt { "From" }
+                                dd { class: "mono", "{from_short} · {current_gen_display}" }
+
+                                dt { "To" }
+                                dd { class: "mono", "gen #{gen_num}" }
+
+                                dt { "Store Path" }
+                                dd {
+                                    class: "mono",
+                                    title: "{store_path_full}",
+                                    if store_path_full.is_empty() { "unavailable" } else { "{store_path_full}" }
+                                }
+
+                                dt { "Commit" }
+                                dd { class: "mono", title: "{commit_full}", "{commit_display}" }
+
+                                dt { "Strategy" }
+                                dd { "rollback" }
+
+                                dt { "Policy" }
+                                dd { class: "mono", "{policy_name}" }
+                            }
+
+                            div {
+                                class: "sd-callout sd-callout-info",
+                                svg {
+                                    class: "w-3 h-3",
+                                    style: "color: #60a5fa; flex-shrink: 0; margin-top: 1px;",
+                                    fill: "none",
+                                    stroke: "currentColor",
+                                    stroke_width: "2",
+                                    view_box: "0 0 24 24",
+                                    path { d: "M5 13l4 4L19 7" }
+                                }
+                                div {
+                                    "Policy check "
+                                    strong { class: "mono", "{policy_for_callout}" }
+                                    " will run before rollback. No agent disconnect expected."
+                                }
+                            }
+
+                            div {
+                                class: "sd-deploy-actions",
+                                button {
+                                    class: "btn btn-ghost focus-ring",
+                                    onclick: move |_| {
+                                        if verify_store_path.is_empty() {
+                                            verify_notice.set(Some(
+                                                "This generation has no recorded store path, so closure verification cannot run."
+                                                    .to_string(),
+                                            ));
+                                            return;
+                                        }
+
+                                        verify_notice.set(Some("Checking closure availability…".to_string()));
+
+                                        let mut verify_notice = verify_notice;
+                                        let system_id = system.id;
+                                        let store_path = verify_store_path.clone();
+                                        spawn(async move {
+                                            let request = VerifyGenerationClosureRequest { store_path };
+                                            let message = match verify_generation_closure_request(
+                                                &system_id,
+                                                &request,
+                                            )
+                                            .await
+                                            {
+                                                Ok(response) => response.message,
+                                                Err(error) => format!(
+                                                    "Failed to verify closure: {}",
+                                                    error
+                                                ),
+                                            };
+                                            verify_notice.set(Some(message));
+                                        });
+                                    },
+                                    "Verify closure"
+                                }
+                                button {
+                                    class: "btn btn-primary focus-ring",
+                                    disabled: !allow_mutations || !can_rollback,
+                                    onclick: move |_| on_deploy_generation.call(store_path_for_deploy.clone()),
+                                    svg {
+                                        class: "w-3.5 h-3.5",
+                                        fill: "none",
+                                        stroke: "currentColor",
+                                        stroke_width: "2",
+                                        view_box: "0 0 24 24",
+                                        path { d: "M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" }
+                                    }
+                                    "{deploy_label}"
+                                }
+                            }
+
+                            if let Some(note) = verify_notice() {
+                                div {
+                                    class: "sd-callout sd-callout-info",
+                                    svg {
+                                        class: "w-3 h-3",
+                                        style: "color: #60a5fa; flex-shrink: 0; margin-top: 1px;",
+                                        fill: "none",
+                                        stroke: "currentColor",
+                                        stroke_width: "2",
+                                        view_box: "0 0 24 24",
+                                        path { d: "M13 16h-1v-4h-1m1-4h.01M12 22a10 10 0 100-20 10 10 0 000 20z" }
+                                    }
+                                    div { "{note}" }
+                                }
+                            }
+                        }
+                        } else {
+                            rsx! {
+                                div {
+                                    style: "padding: 24px; color: var(--cf-text-muted); font-size: 13px; text-align: center;",
+                                    "Select a generation to see the rollback plan."
+                                }
+                            }
+                        }
+                    } else if let Some(commit) = selected_commit_data {
                         let to_short = commit.hash.chars().take(7).collect::<String>();
                         let diff_text = commit.diff_summary.clone().unwrap_or_else(|| {
                             "--- a/nixos/modules/services/nginx.nix\n+++ b/nixos/modules/services/nginx.nix\n@@ -14,7 +14,7 @@\n  services.nginx = {\n    enable = true;\n-   recommendedTlsSettings = false;\n+   recommendedTlsSettings = true;".to_string()
@@ -1678,16 +2025,17 @@ fn DeployTab(
                             "Deploy (Operator/Admin required)".to_string()
                         };
                         let policy_for_callout = policy_name.clone();
+                        let current_gen_display = current_generation.map(|g| format!("gen #{}", g)).unwrap_or_else(|| "—".to_string());
+                        let commit_sha_for_deploy = commit.hash.clone();
 
                         rsx! {
-                            // Plan key/value grid — matches design exactly
                             dl {
                                 class: "kv-grid",
                                 dt { "Target" }
                                 dd { class: "mono", "{system.hostname}" }
 
                                 dt { "From" }
-                                dd { class: "mono", "{from_short} · gen #—" }
+                                dd { class: "mono", "{from_short} · {current_gen_display}" }
 
                                 dt { "To" }
                                 dd { class: "mono", "{to_short}" }
@@ -1699,7 +2047,6 @@ fn DeployTab(
                                 dd { class: "mono", "{policy_name}" }
                             }
 
-                            // Diff panel (toggled)
                             if show_diff() {
                                 pre {
                                     class: "sd-diff",
@@ -1707,10 +2054,8 @@ fn DeployTab(
                                 }
                             }
 
-                            // Callout — exact text from design
                             div {
                                 class: "sd-callout sd-callout-info",
-                                // check icon
                                 svg {
                                     class: "w-3 h-3",
                                     style: "color: #60a5fa; flex-shrink: 0; margin-top: 1px;",
@@ -1727,19 +2072,16 @@ fn DeployTab(
                                 }
                             }
 
-                            // Actions row: Dry-run build (ghost) + Deploy {sha} (primary)
                             div {
                                 class: "sd-deploy-actions",
                                 button {
                                     class: "btn btn-ghost focus-ring",
-                                    // No wiring yet — placeholder matching design
                                     "Dry-run build"
                                 }
                                 button {
                                     class: "btn btn-primary focus-ring",
                                     disabled: !allow_mutations,
-                                    onclick: move |_| on_deploy_commit.call(commit.clone()),
-                                    // deploy icon
+                                    onclick: move |_| on_deploy_commit.call(commit_sha_for_deploy.clone()),
                                     svg {
                                         class: "w-3.5 h-3.5",
                                         fill: "none",
@@ -1752,11 +2094,13 @@ fn DeployTab(
                                 }
                             }
                         }
-                    }
-                } else {
-                    div {
-                        style: "padding: 24px; color: var(--cf-text-muted); font-size: 13px; text-align: center;",
-                        "Select a commit on the left to see the deployment plan."
+                    } else {
+                        rsx! {
+                            div {
+                                style: "padding: 24px; color: var(--cf-text-muted); font-size: 13px; text-align: center;",
+                                "Select a commit or generation to see the deployment plan."
+                            }
+                        }
                     }
                 }
             }

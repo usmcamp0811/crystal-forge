@@ -343,6 +343,13 @@ pub async fn fetch_system_commits(
     fetch_json(&url).await
 }
 
+pub async fn fetch_system_generations(
+    id: &uuid::Uuid,
+) -> Result<crate::api::models::SystemGenerationsResponse, ApiClientError> {
+    let url = format!("{}/systems/{}/generations", base_url(), id);
+    fetch_json(&url).await
+}
+
 pub async fn fetch_system_history(
     id: &uuid::Uuid,
 ) -> Result<Vec<crate::api::models::SystemHistoryEntry>, ApiClientError> {
@@ -554,6 +561,22 @@ pub async fn request_system_rollback(
     request: &SystemRollbackRequest,
 ) -> Result<SystemMutationResponse, ApiClientError> {
     let url = format!("{}/systems/{}/rollback", base_url(), id);
+    send_json_with_csrf("POST", &url, Some(request)).await
+}
+
+pub async fn request_system_generation_rollback(
+    id: &uuid::Uuid,
+    request: &SystemRollbackGenerationRequest,
+) -> Result<SystemMutationResponse, ApiClientError> {
+    let url = format!("{}/systems/{}/rollback-generation", base_url(), id);
+    send_json_with_csrf("POST", &url, Some(request)).await
+}
+
+pub async fn verify_generation_closure(
+    id: &uuid::Uuid,
+    request: &VerifyGenerationClosureRequest,
+) -> Result<VerifyGenerationClosureResponse, ApiClientError> {
+    let url = format!("{}/systems/{}/verify-generation-closure", base_url(), id);
     send_json_with_csrf("POST", &url, Some(request)).await
 }
 

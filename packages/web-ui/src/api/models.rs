@@ -913,6 +913,11 @@ pub struct SystemRollbackRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemRollbackGenerationRequest {
+    pub store_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeploySystemRequest {
     pub commit_sha: String,
 }
@@ -930,6 +935,33 @@ pub struct CommitInfo {
     pub message: String,
     pub author: String,
     pub timestamp: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemGenerationsResponse {
+    pub generations: Vec<SystemGeneration>,
+    pub current_generation: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemGeneration {
+    pub generation: i32,
+    pub store_path: Option<String>,
+    pub commit_hash: Option<String>,
+    pub timestamp: DateTime<Utc>,
+    pub is_current: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VerifyGenerationClosureRequest {
+    pub store_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VerifyGenerationClosureResponse {
+    pub available: bool,
+    pub message: String,
+    pub last_seen_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

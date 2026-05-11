@@ -1582,6 +1582,30 @@ html, body {
   padding: 4px;
 }
 
+.sd-commit-list {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(130, 105, 155, 0.75) rgba(15, 23, 42, 0.35);
+}
+
+.sd-commit-list::-webkit-scrollbar {
+  width: 10px;
+}
+
+.sd-commit-list::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.35);
+  border-radius: 999px;
+}
+
+.sd-commit-list::-webkit-scrollbar-thumb {
+  background: rgba(130, 105, 155, 0.75);
+  border-radius: 999px;
+  border: 2px solid rgba(15, 23, 42, 0.35);
+}
+
+.sd-commit-list::-webkit-scrollbar-thumb:hover {
+  background: rgba(130, 105, 155, 0.9);
+}
+
 .sd-commit-item {
   display: grid;
   grid-template-columns: 90px 1fr auto auto auto;
@@ -1610,6 +1634,10 @@ html, body {
 .sd-commit-sha {
   color: var(--cf-text-primary);
   font-weight: 600;
+}
+
+.sd-generation-number {
+  color: var(--cf-brand-purple);
 }
 
 .sd-commit-msg {
