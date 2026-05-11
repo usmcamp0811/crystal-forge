@@ -913,6 +913,11 @@ pub struct SystemRollbackRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemRollbackGenerationRequest {
+    pub store_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeploySystemRequest {
     pub commit_sha: String,
 }

@@ -241,6 +241,10 @@ async fn main() -> anyhow::Result<()> {
             post(systems::rollback_system),
         )
         .route(
+            "/api/v1/systems/:id/rollback-generation",
+            post(systems::rollback_system_generation),
+        )
+        .route(
             "/api/v1/systems/:id/public-key",
             put(systems::update_system_public_key),
         )

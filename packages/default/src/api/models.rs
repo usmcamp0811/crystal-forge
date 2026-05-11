@@ -829,6 +829,12 @@ pub struct SystemRollbackRequest {
     pub target_commit: String,
 }
 
+/// Request payload for rolling a system back to a specific deployed store path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemRollbackGenerationRequest {
+    pub store_path: String,
+}
+
 /// Request payload for deploying a system with a specific commit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeploySystemRequest {

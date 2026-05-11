@@ -15,7 +15,7 @@ use crate::api::models::{
     DeploymentStatus, PipelineStage, SaveSystemCveJustificationRequest, SortOrder,
     SystemAgentEvent, SystemCommitsResponse, SystemDetail, SystemGeneration,
     SystemGenerationsResponse, SystemHardwareInfo, SystemHistoryEntry, SystemMutationResponse,
-    SystemNetworkInfo, SystemRollbackRequest, SystemSecurityInfo, SystemSummary,
+    SystemNetworkInfo, SystemRollbackGenerationRequest, SystemRollbackRequest, SystemSecurityInfo, SystemSummary,
     SystemVulnerability, SystemsListParams, UpdateSystemPublicKeyRequest, UpdateSystemRequest,
     VerifyGenerationClosureRequest, VerifyGenerationClosureResponse,
 };
@@ -950,6 +950,75 @@ pub async fn rollback_system(
         Json(SystemMutationResponse {
             status: "accepted".to_string(),
             message: format!("Rollback requested for {}", row.hostname),
+        }),
+    )
+        .into_response()
+}
+
+pub async fn rollback_system_generation(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(system_id): Path<Uuid>,
+    Json(payload): Json<SystemRollbackGenerationRequest>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+
+    if !caller_role.can_mutate_systems() {
+        return forbidden_mutation();
+    }
+
+    let store_path = payload.store_path.trim();
+    if store_path.is_empty() {
+        return bad_request("store_path is required");
+    }
+
+    let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+
+    let row = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+
+    if !caller_role.can_access_system_environment(row.environment_id, &environment_memberships) {
+        return not_found();
+    }
+
+    if update_system_desired_target(&pool, system_id, store_path)
+        .await
+        .is_err()
+    {
+        return internal_error("Failed to request generation rollback");
+    }
+
+    if record_system_mutation_audit(
+        &pool,
+        user_id,
+        AuditAction::SystemRollbackRequested,
+        format!("{} ({})", row.hostname, row.id),
+        extract_request_origin(&headers),
+        serde_json::json!({ "operation": "rollback_generation", "store_path": store_path }),
+    )
+    .await
+    .is_err()
+    {
+        return internal_error("Failed to write audit event");
+    }
+
+    (
+        StatusCode::ACCEPTED,
+        Json(SystemMutationResponse {
+            status: "accepted".to_string(),
+            message: format!("Generation rollback requested for {}", row.hostname),
         }),
     )
         .into_response()
@@ -2079,6 +2148,26 @@ mod tests {
             Path(Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid")),
             Json(SystemRollbackRequest {
                 target_commit: "abc123".to_string(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn rollback_system_generation_requires_authenticated_role() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+
+        let response = rollback_system_generation(
+            State(pool),
+            HeaderMap::new(),
+            Path(Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid")),
+            Json(SystemRollbackGenerationRequest {
+                store_path: "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-system".to_string(),
             }),
         )
         .await

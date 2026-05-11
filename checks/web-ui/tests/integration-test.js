@@ -4068,6 +4068,73 @@ const steps = [
     },
   },
   {
+    name: "12j-system-detail-deploy-generation-list",
+    description: "Deploy tab generation selector uses single-line rows and no store-path hash text",
+    action: async (page) => {
+      await routeSystemsWarningData(page);
+
+      await page.route("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/generations", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            current_generation: 74,
+            generations: [
+              {
+                generation: 74,
+                store_path: "/nix/store/11111111111111111111111111111111-system",
+                commit_hash: "1111111111111111111111111111111111111111",
+                timestamp: "2026-04-07T08:10:00Z",
+                is_current: true,
+              },
+              {
+                generation: 73,
+                store_path: "/nix/store/22222222222222222222222222222222-system",
+                commit_hash: "2222222222222222222222222222222222222222",
+                timestamp: "2026-04-06T22:00:00Z",
+                is_current: false,
+              },
+            ],
+          }),
+        });
+      });
+
+      await page.goto(`${baseUrl}/systems/00000000-0000-0000-0000-0000000000a1`, {
+        timeout: LOAD_TIMEOUT,
+      });
+      await page.waitForTimeout(1600);
+
+      await page.getByRole("button", { name: "Deploy" }).first().click();
+      await page.waitForTimeout(600);
+
+      await assertVisible(
+        page.getByRole("button", { name: "Generation" }).first(),
+        "Expected generation mode selector in deploy tab",
+      );
+      await page.getByRole("button", { name: "Generation" }).first().click();
+      await page.waitForTimeout(600);
+
+      const firstGenerationRow = page.locator(".sd-commit-list .sd-commit-item").first();
+      await assertVisible(firstGenerationRow, "Expected at least one generation row in deploy selector");
+
+      const firstGenerationRowText = (await firstGenerationRow.innerText()).trim();
+      if (firstGenerationRowText.includes("/nix/store/")) {
+        throw new Error("Expected generation selector row to omit store-path text");
+      }
+
+      if (firstGenerationRowText.includes("-system")) {
+        throw new Error("Expected generation selector row to omit store-path hash suffix");
+      }
+
+      if (!/\b[0-9a-f]{7}\b/i.test(firstGenerationRowText)) {
+        throw new Error("Expected generation selector row to show a short commit hash chip");
+      }
+
+      await page.unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/generations");
+      await unrouteSystemsWarningData(page);
+    },
+  },
+  {
     name: "27-hardening-fleet",
     description: "Systemd hardening fleet dashboard route and summary cards",
     action: async (page) => {
@@ -4338,6 +4405,7 @@ const CI_FAST_STEP_NAMES = new Set([
   "12g-system-detail-history-logs-edit",
   "12h-system-detail-cves-grouped-justification",
   "12i-system-detail-generation-metric",
+  "12j-system-detail-deploy-generation-list",
   "12d-systems-api-error-no-mock-fallback",
   "12g-systems-warning-clears-after-link",
   "13d-flakes-stress-dataset",

@@ -564,6 +564,14 @@ pub async fn request_system_rollback(
     send_json_with_csrf("POST", &url, Some(request)).await
 }
 
+pub async fn request_system_generation_rollback(
+    id: &uuid::Uuid,
+    request: &SystemRollbackGenerationRequest,
+) -> Result<SystemMutationResponse, ApiClientError> {
+    let url = format!("{}/systems/{}/rollback-generation", base_url(), id);
+    send_json_with_csrf("POST", &url, Some(request)).await
+}
+
 pub async fn verify_generation_closure(
     id: &uuid::Uuid,
     request: &VerifyGenerationClosureRequest,

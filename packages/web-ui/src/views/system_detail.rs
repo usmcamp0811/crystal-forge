@@ -19,7 +19,8 @@ use crate::api::client::{
     ApiClientError, fetch_cve_scan_status, fetch_hardening_scan_status,
     fetch_system_cve_scan_eligibility, fetch_system_cves, fetch_system_hardening,
     fetch_system_hardening_justifications, fetch_system_hardening_scan_eligibility,
-    request_system_rollback, request_system_sync, save_system_hardening_justification,
+    request_system_generation_rollback, request_system_rollback, request_system_sync,
+    save_system_hardening_justification,
     trigger_system_cve_scan, trigger_system_hardening_scan,
     verify_generation_closure as verify_generation_closure_request,
 };
@@ -29,7 +30,7 @@ use crate::api::models::{
     HardeningScanEligibilityResponse, HardeningServiceResultResponse, HealthStatus, LogLevel,
     PipelineStage, SaveHardeningJustificationRequest, SystemAgentEvent, SystemCommitHistory,
     SystemDetail, SystemGeneration, SystemHardwareInfo, SystemHistoryEntry, SystemNetworkInfo,
-    SystemRollbackRequest, SystemSecurityInfo, SystemVulnerability,
+    SystemRollbackGenerationRequest, SystemRollbackRequest, SystemSecurityInfo, SystemVulnerability,
     VerifyGenerationClosureRequest,
 };
 use crate::components::cve::CvesTab;
@@ -1040,6 +1041,34 @@ pub fn SystemDetailView(id: String) -> Element {
                                         let _ = dispatch_sync_notification(message, success, toast_message).await;
                                     });
                                 }
+                            },
+                            on_deploy_generation: {
+                                let system_id = system.id;
+                                let hostname = system.hostname.clone();
+                                let toast_message = toast_message.clone();
+                                move |store_path: String| {
+                                    let hostname = hostname.clone();
+                                    let toast_message = toast_message.clone();
+                                    spawn(async move {
+                                        let message = match request_system_generation_rollback(
+                                            &system_id,
+                                            &SystemRollbackGenerationRequest {
+                                                store_path: store_path.clone(),
+                                            },
+                                        )
+                                        .await
+                                        {
+                                            Ok(response) if !response.message.trim().is_empty() => response.message,
+                                            Ok(_) => format!("Requested generation rollback for {}", hostname),
+                                            Err(error) => format!(
+                                                "Generation rollback request failed for {}: {}",
+                                                hostname, error
+                                            ),
+                                        };
+                                        let success = !message.to_ascii_lowercase().contains("failed");
+                                        let _ = dispatch_sync_notification(message, success, toast_message).await;
+                                    });
+                                }
                             }
                         }
                     },
@@ -1556,6 +1585,7 @@ fn DeployTab(
     current_generation: Option<i32>,
     allow_mutations: bool,
     on_deploy_commit: EventHandler<String>,
+    on_deploy_generation: EventHandler<String>,
 ) -> Element {
     let flake_name = system
         .flake
@@ -1948,7 +1978,7 @@ fn DeployTab(
                                 button {
                                     class: "btn btn-primary focus-ring",
                                     disabled: !allow_mutations || !can_rollback,
-                                    onclick: move |_| on_deploy_commit.call(store_path_for_deploy.clone()),
+                                    onclick: move |_| on_deploy_generation.call(store_path_for_deploy.clone()),
                                     svg {
                                         class: "w-3.5 h-3.5",
                                         fill: "none",
