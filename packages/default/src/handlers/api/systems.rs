@@ -17,6 +17,7 @@ use crate::api::models::{
     SystemGenerationsResponse, SystemHardwareInfo, SystemHistoryEntry, SystemMutationResponse,
     SystemNetworkInfo, SystemRollbackRequest, SystemSecurityInfo, SystemSummary,
     SystemVulnerability, SystemsListParams, UpdateSystemPublicKeyRequest, UpdateSystemRequest,
+    VerifyGenerationClosureRequest, VerifyGenerationClosureResponse,
 };
 use crate::auth::models::Role;
 use crate::handlers::api::rbac::{
@@ -24,7 +25,9 @@ use crate::handlers::api::rbac::{
 };
 use crate::models::auth_identity::AuthRole;
 use crate::queries::cve_scans::{get_scan_by_id, resolve_system_cve_scan_target};
-use crate::queries::system_states::fetch_system_generations;
+use crate::queries::system_states::{
+    fetch_system_generations, find_generation_store_path_last_seen,
+};
 use crate::queries::systems::{
     SystemAccessRow, SystemDetailRow, SystemListRow, commit_belongs_to_system_flake,
     deactivate_system, find_system_access_row, get_system_detail_by_id,
@@ -1656,6 +1659,65 @@ pub async fn get_system_generations(
     let response = SystemGenerationsResponse {
         generations,
         current_generation,
+    };
+
+    (StatusCode::OK, Json(response)).into_response()
+}
+
+pub async fn verify_generation_closure(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(system_id): Path<Uuid>,
+    Json(payload): Json<VerifyGenerationClosureRequest>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+
+    let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+
+    let row = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+
+    if !caller_role.can_access_system_environment(row.environment_id, &environment_memberships) {
+        return not_found();
+    }
+
+    let store_path = payload.store_path.trim();
+    if store_path.is_empty() {
+        return bad_request("store_path is required");
+    }
+
+    let last_seen_at = match find_generation_store_path_last_seen(&pool, system_id, store_path).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to verify generation closure"),
+    };
+
+    let response = if let Some(last_seen_at) = last_seen_at {
+        VerifyGenerationClosureResponse {
+            available: true,
+            message: format!(
+                "Closure is available. Store path was reported by agent at {}.",
+                last_seen_at.to_rfc3339()
+            ),
+            last_seen_at: Some(last_seen_at),
+        }
+    } else {
+        VerifyGenerationClosureResponse {
+            available: false,
+            message: "Closure not yet reported by agent for this system/store path.".to_string(),
+            last_seen_at: None,
+        }
     };
 
     (StatusCode::OK, Json(response)).into_response()

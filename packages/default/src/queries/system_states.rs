@@ -175,6 +175,33 @@ pub async fn fetch_system_generations(
     Ok(rows)
 }
 
+pub async fn find_generation_store_path_last_seen(
+    pool: &PgPool,
+    system_id: Uuid,
+    store_path: &str,
+) -> Result<Option<DateTime<Utc>>> {
+    let trimmed = store_path.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    let row = sqlx::query_scalar::<_, Option<DateTime<Utc>>>(
+        r#"
+        SELECT MAX(ss.timestamp)
+        FROM system_states ss
+        JOIN systems s ON s.hostname = ss.hostname
+        WHERE s.id = $1
+          AND ss.store_path = $2
+        "#,
+    )
+    .bind(system_id)
+    .bind(trimmed)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(row)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{fetch_system_generations, insert_system_state};

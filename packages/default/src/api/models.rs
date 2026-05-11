@@ -869,6 +869,18 @@ pub struct SystemGeneration {
     pub is_current: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifyGenerationClosureRequest {
+    pub store_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifyGenerationClosureResponse {
+    pub available: bool,
+    pub message: String,
+    pub last_seen_at: Option<DateTime<Utc>>,
+}
+
 /// A single system state transition for timeline/history views.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemHistoryEntry {

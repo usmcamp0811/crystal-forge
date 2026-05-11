@@ -948,6 +948,18 @@ pub struct SystemGeneration {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VerifyGenerationClosureRequest {
+    pub store_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VerifyGenerationClosureResponse {
+    pub available: bool,
+    pub message: String,
+    pub last_seen_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SystemHistoryEntry {
     pub timestamp: DateTime<Utc>,
     pub store_path: Option<String>,

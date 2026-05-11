@@ -21,6 +21,7 @@ use crate::api::client::{
     fetch_system_hardening_justifications, fetch_system_hardening_scan_eligibility,
     request_system_rollback, request_system_sync, save_system_hardening_justification,
     trigger_system_cve_scan, trigger_system_hardening_scan,
+    verify_generation_closure as verify_generation_closure_request,
 };
 use crate::api::models::{
     BuildStatus, CommitInfo, CveScanEligibilityResponse, CveSeverity, CveSummary,
@@ -29,6 +30,7 @@ use crate::api::models::{
     PipelineStage, SaveHardeningJustificationRequest, SystemAgentEvent, SystemCommitHistory,
     SystemDetail, SystemGeneration, SystemHardwareInfo, SystemHistoryEntry, SystemNetworkInfo,
     SystemRollbackRequest, SystemSecurityInfo, SystemVulnerability,
+    VerifyGenerationClosureRequest,
 };
 use crate::components::cve::CvesTab;
 use crate::components::diff::DiffViewer;
@@ -1869,10 +1871,15 @@ fn DeployTab(
                         let current_gen_display = current_generation.map(|g| format!("gen #{}", g)).unwrap_or_else(|| "—".to_string());
                         let store_path_for_deploy = generation_data.store_path.clone().unwrap_or_default();
                         let verify_store_path = store_path_for_deploy.clone();
-                        let commit_display = generation_data
+                        let commit_full = generation_data
                             .commit_hash
                             .clone()
                             .unwrap_or_else(|| "unknown".to_string());
+                        let commit_display = if commit_full == "unknown" {
+                            commit_full.clone()
+                        } else {
+                            commit_full.chars().take(7).collect::<String>()
+                        };
 
                         rsx! {
                             dl {
@@ -1894,7 +1901,7 @@ fn DeployTab(
                                 }
 
                                 dt { "Commit" }
-                                dd { class: "mono", "{commit_display}" }
+                                dd { class: "mono", title: "{commit_full}", "{commit_display}" }
 
                                 dt { "Strategy" }
                                 dd { "rollback" }
@@ -1926,15 +1933,35 @@ fn DeployTab(
                                 button {
                                     class: "btn btn-ghost focus-ring",
                                     onclick: move |_| {
-                                        let notice = if verify_store_path.is_empty() {
-                                            "This generation has no recorded store path, so closure verification cannot run.".to_string()
-                                        } else {
-                                            format!(
-                                                "Verification requested. Closure availability will be confirmed after the next agent heartbeat for {}.",
-                                                system.hostname
+                                        if verify_store_path.is_empty() {
+                                            verify_notice.set(Some(
+                                                "This generation has no recorded store path, so closure verification cannot run."
+                                                    .to_string(),
+                                            ));
+                                            return;
+                                        }
+
+                                        verify_notice.set(Some("Checking closure availability…".to_string()));
+
+                                        let mut verify_notice = verify_notice;
+                                        let system_id = system.id;
+                                        let store_path = verify_store_path.clone();
+                                        spawn(async move {
+                                            let request = VerifyGenerationClosureRequest { store_path };
+                                            let message = match verify_generation_closure_request(
+                                                &system_id,
+                                                &request,
                                             )
-                                        };
-                                        verify_notice.set(Some(notice));
+                                            .await
+                                            {
+                                                Ok(response) => response.message,
+                                                Err(error) => format!(
+                                                    "Failed to verify closure: {}",
+                                                    error
+                                                ),
+                                            };
+                                            verify_notice.set(Some(message));
+                                        });
                                     },
                                     "Verify closure"
                                 }

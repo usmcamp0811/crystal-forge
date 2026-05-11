@@ -564,6 +564,14 @@ pub async fn request_system_rollback(
     send_json_with_csrf("POST", &url, Some(request)).await
 }
 
+pub async fn verify_generation_closure(
+    id: &uuid::Uuid,
+    request: &VerifyGenerationClosureRequest,
+) -> Result<VerifyGenerationClosureResponse, ApiClientError> {
+    let url = format!("{}/systems/{}/verify-generation-closure", base_url(), id);
+    send_json_with_csrf("POST", &url, Some(request)).await
+}
+
 /// Fetch the list of environments visible to the authenticated user.
 pub async fn fetch_environments() -> Result<Vec<EnvironmentSummary>, ApiClientError> {
     let url = format!("{}/environments", base_url());

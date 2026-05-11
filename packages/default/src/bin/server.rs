@@ -258,6 +258,10 @@ async fn main() -> anyhow::Result<()> {
             get(systems::get_system_generations),
         )
         .route(
+            "/api/v1/systems/:id/verify-generation-closure",
+            post(systems::verify_generation_closure),
+        )
+        .route(
             "/api/v1/systems/:id/history",
             get(systems::get_system_history),
         )
