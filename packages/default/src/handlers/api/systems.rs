@@ -1921,8 +1921,17 @@ async fn record_system_mutation_audit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::session::{SESSION_COOKIE_NAME, hash_token};
+    use crate::models::auth_identity::AuthRole;
+    use crate::models::public_key::PublicKey;
+    use crate::models::systems::System;
+    use crate::queries::auth_identity::{create_user_session, sync_user_role};
+    use crate::queries::systems::insert_system;
+    use crate::queries::users::insert_user;
     use axum::extract::State;
+    use axum::http::header;
     use chrono::Utc;
+    use ed25519_dalek::SigningKey;
     use sqlx::postgres::PgPoolOptions;
 
     #[test]
@@ -2174,6 +2183,97 @@ mod tests {
         .into_response();
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    async fn test_pool_from_env() -> PgPool {
+        let db_url = std::env::var("DATABASE_URL")
+            .expect("DATABASE_URL must be set for rollback generation DB tests");
+
+        PgPool::connect(&db_url)
+            .await
+            .expect("failed to connect to DATABASE_URL")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn rollback_system_generation_updates_desired_target_to_store_path() {
+        let pool = test_pool_from_env().await;
+
+        let suffix = Uuid::new_v4().simple().to_string();
+        let hostname = format!("task294-rollback-gen-{suffix}");
+        let store_path = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-system".to_string();
+
+        let user = insert_user(&pool, &format!("{suffix}@example.com"), Some("Task 294 Tester"))
+            .await
+            .expect("insert_user should succeed");
+        sync_user_role(&pool, user.id, AuthRole::Admin)
+            .await
+            .expect("sync_user_role should succeed");
+
+        let session_token = format!("session-{suffix}");
+        let session_token_hash = hash_token(&session_token);
+        create_user_session(
+            &pool,
+            user.id,
+            session_token_hash,
+            Utc::now() + chrono::Duration::hours(1),
+            Some("test-agent".to_string()),
+            Some("127.0.0.1".to_string()),
+        )
+        .await
+        .expect("create_user_session should succeed");
+
+        let signing_key = SigningKey::from_bytes(&[9u8; 32]);
+        let public_key = PublicKey::from_verifying_key(signing_key.verifying_key());
+        let system = System {
+            id: Uuid::new_v4(),
+            hostname: hostname.clone(),
+            environment_id: None,
+            is_active: true,
+            public_key,
+            flake_id: None,
+            derivation: String::new(),
+            system_configuration_name: Some(hostname.clone()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            desired_target: None,
+            deployment_policy: "manual".to_string(),
+        };
+
+        insert_system(&pool, &system)
+            .await
+            .expect("insert_system should succeed");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!("{}={}", SESSION_COOKIE_NAME, session_token)
+                .parse()
+                .expect("cookie header should parse"),
+        );
+
+        let response = rollback_system_generation(
+            State(pool.clone()),
+            headers,
+            Path(system.id),
+            Json(SystemRollbackGenerationRequest {
+                store_path: store_path.clone(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        let desired_target = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT desired_target FROM systems WHERE id = $1",
+        )
+        .bind(system.id)
+        .fetch_one(&pool)
+        .await
+        .expect("query desired_target should succeed");
+
+        assert_eq!(desired_target.as_deref(), Some(store_path.as_str()));
     }
 
     #[tokio::test]
