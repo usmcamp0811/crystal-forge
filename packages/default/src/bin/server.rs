@@ -241,6 +241,10 @@ async fn main() -> anyhow::Result<()> {
             post(systems::rollback_system),
         )
         .route(
+            "/api/v1/systems/:id/rollback-generation",
+            post(systems::rollback_system_generation),
+        )
+        .route(
             "/api/v1/systems/:id/public-key",
             put(systems::update_system_public_key),
         )
@@ -252,6 +256,14 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/systems/:id/commits",
             get(systems::get_system_commits),
+        )
+        .route(
+            "/api/v1/systems/:id/generations",
+            get(systems::get_system_generations),
+        )
+        .route(
+            "/api/v1/systems/:id/verify-generation-closure",
+            post(systems::verify_generation_closure),
         )
         .route(
             "/api/v1/systems/:id/history",
