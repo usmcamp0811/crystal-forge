@@ -1763,19 +1763,6 @@ fn DeployTab(
                                     .commit_hash
                                     .as_ref()
                                     .map(|c| c.chars().take(7).collect::<String>());
-                                let store_leaf = generation
-                                    .store_path
-                                    .as_deref()
-                                    .unwrap_or("")
-                                    .split('/')
-                                    .last()
-                                    .unwrap_or("")
-                                    .to_string();
-                                let msg_text = if store_leaf.is_empty() {
-                                    "store path unavailable".to_string()
-                                } else {
-                                    store_leaf
-                                };
                                 let when_text = {
                                     let now = chrono::Utc::now();
                                     let d = now.signed_duration_since(generation.timestamp);
@@ -1798,7 +1785,7 @@ fn DeployTab(
                                             verify_notice.set(None);
                                         },
                                         span { class: "mono sd-commit-sha", "{gen_label}" }
-                                        span { class: "sd-commit-msg", title: "{generation.store_path.clone().unwrap_or_default()}", "{msg_text}" }
+                                        span { class: "sd-commit-msg", "generation rollback" }
                                         if let Some(short) = commit_short {
                                             span { class: "chip chip-info", "{short}" }
                                         } else {
@@ -1855,13 +1842,6 @@ fn DeployTab(
                         let can_rollback = generation_data.store_path.is_some();
                         let gen_num = generation_data.generation;
                         let store_path_full = generation_data.store_path.clone().unwrap_or_default();
-                        let store_path_short = store_path_full
-                            .split('/')
-                            .last()
-                            .unwrap_or("")
-                            .chars()
-                            .take(7)
-                            .collect::<String>();
                         let deploy_label = if allow_mutations {
                             format!("Switch to gen #{}", gen_num)
                         } else {
