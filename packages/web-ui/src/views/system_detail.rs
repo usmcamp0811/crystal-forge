@@ -1579,6 +1579,7 @@ fn DeployTab(
     let mut selected_commit = use_signal(|| default_commit);
     let mut selected_generation: Signal<Option<i32>> = use_signal(|| default_generation);
     let mut show_diff = use_signal(|| false);
+    let mut verify_notice = use_signal(|| None::<String>);
 
     let displayed_commits = {
         use std::collections::HashSet;
@@ -1635,6 +1636,7 @@ fn DeployTab(
                             onclick: move |_| {
                                 mode.set("commit".to_string());
                                 show_diff.set(false);
+                                verify_notice.set(None);
                             },
                             svg {
                                 class: "w-3 h-3",
@@ -1651,6 +1653,7 @@ fn DeployTab(
                             onclick: move |_| {
                                 mode.set("generation".to_string());
                                 show_diff.set(false);
+                                verify_notice.set(None);
                             },
                             svg {
                                 class: "w-3 h-3",
@@ -1705,7 +1708,10 @@ fn DeployTab(
                                     button {
                                         key: "{commit_hash_for_key}",
                                         class: "{item_class}",
-                                        onclick: move |_| selected_commit.set(commit_hash_for_select.clone()),
+                                        onclick: move |_| {
+                                            selected_commit.set(commit_hash_for_select.clone());
+                                            verify_notice.set(None);
+                                        },
                                         span {
                                             class: "mono sd-commit-sha",
                                             title: "{commit_hash_for_title}",
@@ -1785,7 +1791,10 @@ fn DeployTab(
                                     button {
                                         key: "gen-{gen_num}",
                                         class: "{item_class}",
-                                        onclick: move |_| selected_generation.set(Some(gen_num)),
+                                        onclick: move |_| {
+                                            selected_generation.set(Some(gen_num));
+                                            verify_notice.set(None);
+                                        },
                                         span { class: "mono sd-commit-sha", "{gen_label}" }
                                         span { class: "sd-commit-msg", title: "{generation.store_path.clone().unwrap_or_default()}", "{msg_text}" }
                                         if let Some(short) = commit_short {
@@ -1793,7 +1802,7 @@ fn DeployTab(
                                         } else {
                                             span { class: "chip chip-unknown", "unknown / not in CF" }
                                         }
-                                        span { class: "sd-commit-meta mono", "store" }
+                                        span { class: "sd-commit-meta mono", "" }
                                         span { class: "sd-commit-meta", "{when_text}" }
                                         if generation.is_current {
                                             span { class: "chip chip-healthy", "active" }
@@ -1816,6 +1825,7 @@ fn DeployTab(
                     h2 { if mode() == "generation" { "Rollback plan" } else { "Deployment plan" } }
                     button {
                         class: "btn btn-ghost xs focus-ring",
+                        disabled: mode() == "generation",
                         onclick: move |_| show_diff.set(!show_diff()),
                         // file icon
                         svg {
@@ -1826,7 +1836,13 @@ fn DeployTab(
                             view_box: "0 0 24 24",
                             path { d: "M9 12h6m-6 4h6M7 8h10M5 6h14a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2z" }
                         }
-                        if show_diff() { "Hide diff" } else { "Show diff" }
+                        if mode() == "generation" {
+                            "Diff unavailable"
+                        } else if show_diff() {
+                            "Hide diff"
+                        } else {
+                            "Show diff"
+                        }
                     }
                 }
 
@@ -1852,6 +1868,7 @@ fn DeployTab(
                         let policy_for_callout = policy_name.clone();
                         let current_gen_display = current_generation.map(|g| format!("gen #{}", g)).unwrap_or_else(|| "—".to_string());
                         let store_path_for_deploy = generation_data.store_path.clone().unwrap_or_default();
+                        let verify_store_path = store_path_for_deploy.clone();
                         let commit_display = generation_data
                             .commit_hash
                             .clone()
@@ -1873,7 +1890,7 @@ fn DeployTab(
                                 dd {
                                     class: "mono",
                                     title: "{store_path_full}",
-                                    if store_path_full.is_empty() { "unavailable" } else { "{store_path_short}" }
+                                    if store_path_full.is_empty() { "unavailable" } else { "{store_path_full}" }
                                 }
 
                                 dt { "Commit" }
@@ -1908,6 +1925,17 @@ fn DeployTab(
                                 class: "sd-deploy-actions",
                                 button {
                                     class: "btn btn-ghost focus-ring",
+                                    onclick: move |_| {
+                                        let notice = if verify_store_path.is_empty() {
+                                            "This generation has no recorded store path, so closure verification cannot run.".to_string()
+                                        } else {
+                                            format!(
+                                                "Verification requested. Closure availability will be confirmed after the next agent heartbeat for {}.",
+                                                system.hostname
+                                            )
+                                        };
+                                        verify_notice.set(Some(notice));
+                                    },
                                     "Verify closure"
                                 }
                                 button {
@@ -1923,6 +1951,22 @@ fn DeployTab(
                                         path { d: "M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" }
                                     }
                                     "{deploy_label}"
+                                }
+                            }
+
+                            if let Some(note) = verify_notice() {
+                                div {
+                                    class: "sd-callout sd-callout-info",
+                                    svg {
+                                        class: "w-3 h-3",
+                                        style: "color: #60a5fa; flex-shrink: 0; margin-top: 1px;",
+                                        fill: "none",
+                                        stroke: "currentColor",
+                                        stroke_width: "2",
+                                        view_box: "0 0 24 24",
+                                        path { d: "M13 16h-1v-4h-1m1-4h.01M12 22a10 10 0 100-20 10 10 0 000 20z" }
+                                    }
+                                    div { "{note}" }
                                 }
                             }
                         }
