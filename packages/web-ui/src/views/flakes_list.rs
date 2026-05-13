@@ -4190,6 +4190,7 @@ mod tests {
 fn FlakesListViewNew() -> Element {
     let mut view_mode = use_signal(|| "table");
     let mut search_query = use_signal(String::new);
+    let mut selected_flake = use_signal(|| None::<MockFlakeItem>);
     
     // Mock data for testing
     let flake_count = 3;
@@ -4319,10 +4320,20 @@ fn FlakesListViewNew() -> Element {
             {
                 let mock_flakes = mock_flakes_data();
                 let mode: &str = &view_mode.read();
+                let selected_id = selected_flake.read().as_ref().map(|f| f.id);
+                
                 if mode == "table" {
-                    rsx! { FlakeTableNew { flakes: mock_flakes, selected_id: None } }
+                    rsx! { FlakeTableNew { flakes: mock_flakes, selected_id, on_select: move |f| selected_flake.set(Some(f)) } }
                 } else {
-                    rsx! { FlakeCardsNew { flakes: mock_flakes, selected_id: None } }
+                    rsx! { FlakeCardsNew { flakes: mock_flakes, selected_id, on_select: move |f| selected_flake.set(Some(f)) } }
+                }
+            }
+            
+            // Side tray (if flake selected)
+            if let Some(flake) = selected_flake.read().clone() {
+                FlakeTrayNew {
+                    flake,
+                    on_close: move |_| selected_flake.set(None)
                 }
             }
         }
@@ -4412,7 +4423,7 @@ fn mock_flakes_data() -> Vec<MockFlakeItem> {
 
 #[allow(dead_code)]
 #[component]
-fn FlakeTableNew(flakes: Vec<MockFlakeItem>, selected_id: Option<i32>) -> Element {
+fn FlakeTableNew(flakes: Vec<MockFlakeItem>, selected_id: Option<i32>, on_select: EventHandler<MockFlakeItem>) -> Element {
     rsx! {
         // JSX: <div className="card" style={{ overflow:"hidden" }}>
         div { class: "card", style: "overflow: hidden;",
@@ -4440,7 +4451,7 @@ fn FlakeTableNew(flakes: Vec<MockFlakeItem>, selected_id: Option<i32>) -> Elemen
                                     key: "{flake.id}",
                                     class: "{row_class}",
                                     style: "cursor: pointer;",
-                                    // onclick handler would go here in full implementation
+                                    onclick: move |_| on_select.call(flake.clone()),
                                     
                                     // Flake name and description
                                     td {
@@ -4570,7 +4581,7 @@ fn FlakeSyncChipNew(status: String, error_msg: Option<String>) -> Element {
 
 #[allow(dead_code)]
 #[component]
-fn FlakeCardsNew(flakes: Vec<MockFlakeItem>, selected_id: Option<i32>) -> Element {
+fn FlakeCardsNew(flakes: Vec<MockFlakeItem>, selected_id: Option<i32>, on_select: EventHandler<MockFlakeItem>) -> Element {
     rsx! {
         // JSX: <div className="cards-grid">
         div { class: "cards-grid",
@@ -4595,7 +4606,9 @@ fn FlakeCardsNew(flakes: Vec<MockFlakeItem>, selected_id: Option<i32>) -> Elemen
                             key: "{flake.id}",
                             class: "sys-card",
                             style: "{border_style}",
-                            // onclick handler would go here
+                            onclick: move |_| {
+                                on_select.call(flake.clone());
+                            },
                             
                             // JSX: <div className="status-rail" style={{ "--status-color": statusColor }}/>
                             div { 
@@ -4739,6 +4752,105 @@ fn EnvBadgeNew(env: String) -> Element {
     
     rsx! {
         span { class: "chip {chip_class}", "{env}" }
+    }
+}
+
+
+// ============================================================================
+// Phase 3: FlakeTray - Side panel with backdrop and header
+// Matching JSX lines 114-134 (header structure)
+// ============================================================================
+
+#[allow(dead_code)]
+#[component]
+fn FlakeTrayNew(flake: MockFlakeItem, on_close: EventHandler<()>) -> Element {
+    rsx! {
+        // JSX: <div className="fl-tray-backdrop" onClick={onClose}/>
+        div {
+            class: "fl-tray-backdrop",
+            onclick: move |_| on_close.call(())
+        }
+        
+        // JSX: <aside className="fl-tray" role="dialog" aria-label={...}>
+        aside {
+            class: "fl-tray",
+            role: "dialog",
+            "aria-label": "{flake.name} commits",
+            
+            // Tray header - JSX lines 118-134
+            header { class: "fl-tray-head",
+                div { style: "display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1;",
+                    // Git icon
+                    svg {
+                        width: "18",
+                        height: "18",
+                        view_box: "0 0 24 24",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        stroke_linecap: "round",
+                        stroke_linejoin: "round",
+                        style: "color: var(--cf-brand-purple); flex-shrink: 0;",
+                        path { d: "M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4M9 18c-4.51 2-5-2-7-2" }
+                    }
+                    div { style: "min-width: 0;",
+                        div { style: "display: flex; align-items: center; gap: 8px;",
+                            span { style: "font-weight: 700; font-size: 15px;", "{flake.name}" }
+                            span { class: "chip chip-unknown", style: "font-size: 10px;", "{flake.branch}" }
+                            FlakeSyncChipNew { status: flake.status.clone(), error_msg: flake.error_msg.clone() }
+                        }
+                        div {
+                            class: "mono",
+                            style: "font-size: 11px; color: var(--cf-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
+                            "{flake.url}"
+                        }
+                    }
+                }
+                div { style: "display: flex; gap: 6px; align-items: center;",
+                    button { 
+                        class: "btn btn-ghost focus-ring xs",
+                        // Inline sync icon (11px)
+                        svg {
+                            width: "11",
+                            height: "11",
+                            view_box: "0 0 24 24",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            style: "display: inline-block; vertical-align: middle; margin-right: 6px;",
+                            path { d: "M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" }
+                        }
+                        " Sync"
+                    }
+                    button {
+                        class: "btn-icon focus-ring",
+                        onclick: move |_| on_close.call(()),
+                        "aria-label": "Close",
+                        // Inline X icon (16px)
+                        svg {
+                            width: "16",
+                            height: "16",
+                            view_box: "0 0 24 24",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            path { d: "M18 6 6 18M6 6l12 12" }
+                        }
+                    }
+                }
+            }
+            
+            // Body: Two-pane layout (placeholder for now)
+            div { class: "fl-tray-body",
+                div { style: "padding: 24px;",
+                    "Commit timeline and detail will be implemented in next phase"
+                }
+            }
+        }
     }
 }
 
