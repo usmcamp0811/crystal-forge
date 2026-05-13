@@ -4315,11 +4315,430 @@ fn FlakesListViewNew() -> Element {
                 span { class: "filter-count", "{flake_count} flakes" }
             }
             
-            // Placeholder for table/cards views
-            div {
-                style: "padding: 24px; border: 1px solid #ccc; border-radius: 8px;",
-                "View mode: {view_mode.read()}"
+            // Table or Cards view based on mode
+            {
+                let mock_flakes = mock_flakes_data();
+                let mode: &str = &view_mode.read();
+                if mode == "table" {
+                    rsx! { FlakeTableNew { flakes: mock_flakes, selected_id: None } }
+                } else {
+                    rsx! { FlakeCardsNew { flakes: mock_flakes, selected_id: None } }
+                }
             }
         }
     }
 }
+
+// ============================================================================
+// Phase 2: Mock Data Structures for Table/Cards
+// ============================================================================
+
+#[derive(Clone, Debug, PartialEq)]
+#[allow(dead_code)]
+struct MockFlakeItem {
+    id: i32,
+    name: String,
+    description: String,
+    status: String,
+    url: String,
+    branch: String,
+    system_count: i32,
+    latest_commit: String,
+    latest_message: String,
+    latest_author: String,
+    last_sync_at: String,
+    environment: String,
+    error_msg: Option<String>,
+    total_commits: i32,
+}
+
+#[allow(dead_code)]
+fn mock_flakes_data() -> Vec<MockFlakeItem> {
+    vec![
+        MockFlakeItem {
+            id: 1,
+            name: "infrastructure".to_string(),
+            description: "Core infrastructure configs".to_string(),
+            status: "synced".to_string(),
+            url: "git@gitlab.com:org/infra.git".to_string(),
+            branch: "main".to_string(),
+            system_count: 12,
+            latest_commit: "a3f4b2c".to_string(),
+            latest_message: "feat: Add monitoring dashboards".to_string(),
+            latest_author: "jdoe".to_string(),
+            last_sync_at: "2m ago".to_string(),
+            environment: "production".to_string(),
+            error_msg: None,
+            total_commits: 156,
+        },
+        MockFlakeItem {
+            id: 2,
+            name: "applications".to_string(),
+            description: "Application deployments".to_string(),
+            status: "syncing".to_string(),
+            url: "git@gitlab.com:org/apps.git".to_string(),
+            branch: "develop".to_string(),
+            system_count: 8,
+            latest_commit: "b8d1e9a".to_string(),
+            latest_message: "fix: Update container versions".to_string(),
+            latest_author: "asmith".to_string(),
+            last_sync_at: "5m ago".to_string(),
+            environment: "staging".to_string(),
+            error_msg: None,
+            total_commits: 89,
+        },
+        MockFlakeItem {
+            id: 3,
+            name: "edge-nodes".to_string(),
+            description: "Edge computing nodes".to_string(),
+            status: "error".to_string(),
+            url: "git@gitlab.com:org/edge.git".to_string(),
+            branch: "main".to_string(),
+            system_count: 24,
+            latest_commit: "c2f7d4e".to_string(),
+            latest_message: "refactor: Optimize network config".to_string(),
+            latest_author: "mlee".to_string(),
+            last_sync_at: "1h ago".to_string(),
+            environment: "edge".to_string(),
+            error_msg: Some("Failed to fetch: connection timeout".to_string()),
+            total_commits: 234,
+        },
+    ]
+}
+
+// ============================================================================
+// Phase 2: FlakeTable Component - Matching JSX lines 451-495
+// ============================================================================
+
+#[allow(dead_code)]
+#[component]
+fn FlakeTableNew(flakes: Vec<MockFlakeItem>, selected_id: Option<i32>) -> Element {
+    rsx! {
+        // JSX: <div className="card" style={{ overflow:"hidden" }}>
+        div { class: "card", style: "overflow: hidden;",
+            table { class: "sys-table",
+                thead {
+                    tr {
+                        th { "Flake" }
+                        th { "Status" }
+                        th { "Branch" }
+                        th { "Systems" }
+                        th { "Latest commit" }
+                        th { "Author" }
+                        th { "Synced" }
+                        th { style: "text-align: right;", " " }
+                    }
+                }
+                tbody {
+                    for flake in flakes {
+                        {
+                            let is_selected = selected_id == Some(flake.id);
+                            let row_class = if is_selected { "selected" } else { "" };
+                            
+                            rsx! {
+                                tr {
+                                    key: "{flake.id}",
+                                    class: "{row_class}",
+                                    style: "cursor: pointer;",
+                                    // onclick handler would go here in full implementation
+                                    
+                                    // Flake name and description
+                                    td {
+                                        div { style: "font-weight: 600; font-size: 13px;", "{flake.name}" }
+                                        div { style: "font-size: 11px; color: var(--cf-text-muted);", "{flake.description}" }
+                                    }
+                                    
+                                    // Status chip
+                                    td {
+                                        FlakeSyncChipNew { status: flake.status.clone(), error_msg: flake.error_msg.clone() }
+                                    }
+                                    
+                                    // Branch
+                                    td {
+                                        span { class: "chip chip-unknown", "{flake.branch}" }
+                                    }
+                                    
+                                    // Systems count
+                                    td { style: "font-size: 13px;", "{flake.system_count}" }
+                                    
+                                    // Latest commit
+                                    td {
+                                        span { 
+                                            class: "mono", 
+                                            style: "font-size: 12px; font-weight: 600;", 
+                                            "{flake.latest_commit}" 
+                                        }
+                                        div { 
+                                            style: "font-size: 11px; color: var(--cf-text-muted); max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
+                                            "{flake.latest_message}"
+                                        }
+                                    }
+                                    
+                                    // Author
+                                    td { 
+                                        class: "mono",
+                                        style: "font-size: 12px; color: var(--cf-text-secondary);",
+                                        "{flake.latest_author}"
+                                    }
+                                    
+                                    // Last synced
+                                    td { style: "font-size: 12px; color: var(--cf-text-muted);", "{flake.last_sync_at}" }
+                                    
+                                    // Actions
+                                    td {
+                                        div { class: "row-actions",
+                                            button { 
+                                                class: "btn-icon focus-ring",
+                                                title: "Sync",
+                                                // JSX: onClick={e=>e.stopPropagation()}
+                                                onclick: move |evt| evt.stop_propagation(),
+                                                // Inline sync icon
+                                                svg {
+                                                    width: "14",
+                                                    height: "14",
+                                                    view_box: "0 0 24 24",
+                                                    fill: "none",
+                                                    stroke: "currentColor",
+                                                    stroke_width: "2",
+                                                    stroke_linecap: "round",
+                                                    stroke_linejoin: "round",
+                                                    path { d: "M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" }
+                                                }
+                                            }
+                                            button { 
+                                                class: "btn-icon focus-ring",
+                                                title: "More",
+                                                onclick: move |evt| evt.stop_propagation(),
+                                                // Inline more icon (3 dots)
+                                                svg {
+                                                    width: "14",
+                                                    height: "14",
+                                                    view_box: "0 0 24 24",
+                                                    fill: "none",
+                                                    stroke: "currentColor",
+                                                    stroke_width: "2",
+                                                    stroke_linecap: "round",
+                                                    stroke_linejoin: "round",
+                                                    circle { cx: "12", cy: "12", r: "1" }
+                                                    circle { cx: "12", cy: "5", r: "1" }
+                                                    circle { cx: "12", cy: "19", r: "1" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Helper component for status chip
+#[allow(dead_code)]
+#[component]
+fn FlakeSyncChipNew(status: String, error_msg: Option<String>) -> Element {
+    // JSX: const cfg = { synced:["chip-healthy","#34d399","synced"], ... }
+    let (chip_class, color, label) = match status.as_str() {
+        "synced" => ("chip-healthy", "#34d399", "synced"),
+        "syncing" => ("chip-info", "#60a5fa", "syncing"),
+        "error" => ("chip-critical", "#f87171", "error"),
+        _ => ("chip-unknown", "#6b7280", status.as_str()),
+    };
+    
+    let title = error_msg.as_deref().unwrap_or("");
+    
+    rsx! {
+        span { 
+            class: "chip {chip_class}",
+            title: "{title}",
+            span { 
+                class: "chip-dot",
+                style: "background: {color};"
+            }
+            "{label}"
+        }
+    }
+}
+
+
+// ============================================================================
+// Phase 2: FlakeCards Component - Matching JSX lines 498-540
+// ============================================================================
+
+#[allow(dead_code)]
+#[component]
+fn FlakeCardsNew(flakes: Vec<MockFlakeItem>, selected_id: Option<i32>) -> Element {
+    rsx! {
+        // JSX: <div className="cards-grid">
+        div { class: "cards-grid",
+            for flake in flakes {
+                {
+                    let is_selected = selected_id == Some(flake.id);
+                    // JSX: const statusColor = { synced:"#34d399", ... }
+                    let status_color = match flake.status.as_str() {
+                        "synced" => "#34d399",
+                        "syncing" => "#60a5fa",
+                        "error" => "#f87171",
+                        _ => "#6b7280",
+                    };
+                    let border_style = if is_selected {
+                        "border-color: var(--cf-brand-purple);"
+                    } else {
+                        ""
+                    };
+                    
+                    rsx! {
+                        div {
+                            key: "{flake.id}",
+                            class: "sys-card",
+                            style: "{border_style}",
+                            // onclick handler would go here
+                            
+                            // JSX: <div className="status-rail" style={{ "--status-color": statusColor }}/>
+                            div { 
+                                class: "status-rail",
+                                style: "--status-color: {status_color};"
+                            }
+                            
+                            // Card header
+                            div { class: "sys-card-head",
+                                div { class: "sys-title",
+                                    div { class: "sys-hostname",
+                                        // Inline git icon
+                                        svg {
+                                            width: "13",
+                                            height: "13",
+                                            view_box: "0 0 24 24",
+                                            fill: "none",
+                                            stroke: "currentColor",
+                                            stroke_width: "2",
+                                            stroke_linecap: "round",
+                                            stroke_linejoin: "round",
+                                            style: "display: inline-block; vertical-align: middle; margin-right: 4px;",
+                                            path { d: "M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4M9 18c-4.51 2-5-2-7-2" }
+                                        }
+                                        " {flake.name}"
+                                    }
+                                    div { class: "sys-fqdn", "{flake.url}" }
+                                }
+                                EnvBadgeNew { env: flake.environment.clone() }
+                            }
+                            
+                            // Description
+                            div { 
+                                style: "font-size: 12px; color: var(--cf-text-secondary);",
+                                "{flake.description}"
+                            }
+                            
+                            // Card body - key-value grid
+                            div { class: "sys-card-body",
+                                div {
+                                    div { class: "sys-kv-key", "Branch" }
+                                    div { class: "sys-kv-val", "{flake.branch}" }
+                                }
+                                div {
+                                    div { class: "sys-kv-key", "Systems" }
+                                    div { 
+                                        class: "sys-kv-val",
+                                        style: "font-family: inherit;",
+                                        "{flake.system_count}"
+                                    }
+                                }
+                                div {
+                                    div { class: "sys-kv-key", "Commit" }
+                                    div { class: "sys-kv-val", "{flake.latest_commit}" }
+                                }
+                                div {
+                                    div { class: "sys-kv-key", "Synced" }
+                                    div { 
+                                        class: "sys-kv-val",
+                                        style: "font-family: inherit;",
+                                        "{flake.last_sync_at}"
+                                    }
+                                }
+                            }
+                            
+                            // Error callout (if error)
+                            if let Some(error_msg) = &flake.error_msg {
+                                div {
+                                    class: "sd-callout sd-callout-danger",
+                                    style: "padding: 8px 10px;",
+                                    // Inline warn icon
+                                    svg {
+                                        width: "12",
+                                        height: "12",
+                                        view_box: "0 0 24 24",
+                                        fill: "none",
+                                        stroke: "currentColor",
+                                        stroke_width: "2",
+                                        stroke_linecap: "round",
+                                        stroke_linejoin: "round",
+                                        style: "display: inline-block; vertical-align: middle; margin-right: 6px;",
+                                        path { d: "m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" }
+                                        path { d: "M12 9v4" }
+                                        path { d: "M12 17h.01" }
+                                    }
+                                    div { style: "font-size: 11px;", "{error_msg}" }
+                                }
+                            }
+                            
+                            // Card footer
+                            div { class: "sys-card-foot",
+                                div { class: "chips-row",
+                                    FlakeSyncChipNew { 
+                                        status: flake.status.clone(),
+                                        error_msg: flake.error_msg.clone()
+                                    }
+                                    span { 
+                                        class: "chip chip-unknown",
+                                        "{flake.total_commits} commits"
+                                    }
+                                }
+                                button {
+                                    class: "btn btn-subtle focus-ring",
+                                    style: "padding: 4px 10px; font-size: 12px;",
+                                    onclick: move |evt| evt.stop_propagation(),
+                                    // Inline sync icon
+                                    svg {
+                                        width: "12",
+                                        height: "12",
+                                        view_box: "0 0 24 24",
+                                        fill: "none",
+                                        stroke: "currentColor",
+                                        stroke_width: "2",
+                                        stroke_linecap: "round",
+                                        stroke_linejoin: "round",
+                                        style: "display: inline-block; vertical-align: middle; margin-right: 6px;",
+                                        path { d: "M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" }
+                                    }
+                                    " Sync"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Helper component for environment badge
+#[allow(dead_code)]
+#[component]
+fn EnvBadgeNew(env: String) -> Element {
+    let chip_class = match env.as_str() {
+        "production" => "chip-critical",
+        "staging" => "chip-warning",
+        "dev" => "chip-info",
+        "edge" => "chip-info",
+        _ => "chip-unknown",
+    };
+    
+    rsx! {
+        span { class: "chip {chip_class}", "{env}" }
+    }
+}
+
