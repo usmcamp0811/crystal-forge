@@ -1,10 +1,10 @@
 ---
 id: TASK-294
 title: Fix Deploy tab commit deployment and add generation rollback selector
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-05-10 13:23'
-updated_date: '2026-05-11 12:48'
+updated_date: '2026-05-13 02:48'
 labels:
   - bug
   - feature
@@ -191,4 +191,8 @@ All implementation complete and verified:
 - sqlx metadata restored from dev worktree
 
 Waiting for manual testing and merge approval.
+
+Branch merged into dev at commit 95b25185
+
+Worktree cleanup pending
 <!-- SECTION:NOTES:END -->
