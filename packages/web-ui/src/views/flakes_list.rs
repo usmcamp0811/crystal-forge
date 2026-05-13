@@ -4179,3 +4179,147 @@ mod tests {
         );
     }
 }
+
+// ============================================================================
+// NEW IMPLEMENTATION - Phase 1: PageHeader + FilterBar
+// Matching FlakesView.jsx lines 24-52 EXACTLY
+// ============================================================================
+
+// Temporary new component for testing - will replace FlakesListView once complete
+#[allow(dead_code)]
+fn FlakesListViewNew() -> Element {
+    let mut view_mode = use_signal(|| "table");
+    let mut search_query = use_signal(String::new);
+    
+    // Mock data for testing
+    let flake_count = 3;
+    let total_systems = 42;
+    let synced_count = 2;
+    
+    rsx! {
+        // JSX: <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+        div { style: "display: flex; flex-direction: column; gap: 16px;",
+            
+            // Page head - JSX lines 24-39
+            div { class: "page-head",
+                div {
+                    h1 { class: "page-title", "Flakes" }
+                    p { class: "page-subtitle",
+                        "{flake_count} tracked · {total_systems} systems · {synced_count} synced"
+                    }
+                }
+                div { style: "display: flex; gap: 8px;",
+                    button { 
+                        class: "btn btn-ghost focus-ring",
+                        // Inline sync icon SVG
+                        svg {
+                            width: "14",
+                            height: "14",
+                            view_box: "0 0 24 24",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            style: "display: inline-block; vertical-align: middle; margin-right: 6px;",
+                            path { d: "M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" }
+                        }
+                        " Sync all"
+                    }
+                    button { 
+                        class: "btn btn-primary focus-ring",
+                        // Inline plus icon SVG
+                        svg {
+                            width: "14",
+                            height: "14",
+                            view_box: "0 0 24 24",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            style: "display: inline-block; vertical-align: middle; margin-right: 6px;",
+                            path { d: "M5 12h14M12 5v14" }
+                        }
+                        " Add flake"
+                    }
+                }
+            }
+            
+            // Filter bar - JSX lines 42-52
+            div { class: "filterbar",
+                div { class: "filter-search",
+                    // Inline search icon SVG
+                    svg {
+                        width: "16",
+                        height: "16",
+                        view_box: "0 0 24 24",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        stroke_linecap: "round",
+                        stroke_linejoin: "round",
+                        circle { cx: "11", cy: "11", r: "8" }
+                        path { d: "m21 21-4.3-4.3" }
+                    }
+                    input {
+                        class: "input focus-ring",
+                        placeholder: "Search flakes…",
+                        value: "{search_query}",
+                        oninput: move |evt| search_query.set(evt.value())
+                    }
+                }
+                div { class: "seg",
+                    button {
+                        class: if *view_mode.read() == "table" { "active" } else { "" },
+                        onclick: move |_| view_mode.set("table"),
+                        // Inline rows icon SVG
+                        svg {
+                            width: "12",
+                            height: "12",
+                            view_box: "0 0 24 24",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            style: "display: inline-block; vertical-align: middle; margin-right: 6px;",
+                            line { x1: "3", x2: "21", y1: "6", y2: "6" }
+                            line { x1: "3", x2: "21", y1: "12", y2: "12" }
+                            line { x1: "3", x2: "21", y1: "18", y2: "18" }
+                        }
+                        " Table"
+                    }
+                    button {
+                        class: if *view_mode.read() == "cards" { "active" } else { "" },
+                        onclick: move |_| view_mode.set("cards"),
+                        // Inline grid icon SVG  
+                        svg {
+                            width: "12",
+                            height: "12",
+                            view_box: "0 0 24 24",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            style: "display: inline-block; vertical-align: middle; margin-right: 6px;",
+                            rect { width: "7", height: "7", x: "3", y: "3", rx: "1" }
+                            rect { width: "7", height: "7", x: "14", y: "3", rx: "1" }
+                            rect { width: "7", height: "7", x: "14", y: "14", rx: "1" }
+                            rect { width: "7", height: "7", x: "3", y: "14", rx: "1" }
+                        }
+                        " Cards"
+                    }
+                }
+                span { class: "filter-count", "{flake_count} flakes" }
+            }
+            
+            // Placeholder for table/cards views
+            div {
+                style: "padding: 24px; border: 1px solid #ccc; border-radius: 8px;",
+                "View mode: {view_mode.read()}"
+            }
+        }
+    }
+}
