@@ -1,9 +1,10 @@
 ---
 id: TASK-297
 title: Rebuild Flakes View to Match JSX Design Mockup Exactly
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-05-13 02:56'
+updated_date: '2026-05-13 02:57'
 labels:
   - ui
   - web-ui
@@ -280,3 +281,151 @@ This task requires rebuilding the entire flakes view from scratch:
 - [ ] #26 Loading states while fetching data
 - [ ] #27 Visual appearance is pixel-perfect match to FlakesView.jsx
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+## CRITICAL WARNING FOR IMPLEMENTING AGENT
+
+The UI/UX design in `/home/mcamp/code/crystal-forge/CrystalForgelatest/components/FlakesView.jsx` is FINAL and MANDATORY.
+
+DO NOT:
+- Deviate from the design
+- 'Improve' the design
+- Use different CSS classes
+- Modify spacing/colors/layout
+- Make subjective design choices
+
+DO:
+- Study the design file thoroughly before writing any code
+- Extract and replicate the exact CSS classes and structure
+- Match every visual detail pixel-by-pixel
+- Test against the design file to ensure perfect match
+
+## Verification Plan
+
+**Tier 1: Fast Local Confidence (Primary)**
+
+```bash
+# 1. Start dev environment
+nix develop
+db-only up
+server-only up
+
+# 2. Test main view
+# - Navigate to /flakes
+# - Verify page header with stats subtitle
+# - Verify filter bar with search, toggle, count
+# - Test table/cards view toggle
+# - Verify layout matches design
+
+# 3. Test side tray
+# - Click a flake to open tray
+# - Verify tray slides in from right
+# - Verify backdrop appears
+# - Test ESC key closes tray
+# - Test click backdrop closes tray
+# - Verify tray header matches design
+
+# 4. Test commit timeline
+# - Verify commits grouped by time buckets
+# - Test search/filter functionality
+# - Verify timeline rail with dots/stems
+# - Test commit selection
+# - Verify active state highlighting
+
+# 5. Test commit detail
+# - Verify commit header displays correctly
+# - Verify pipeline strip shows eval→build→rollout
+# - Verify files changed grid
+# - Test file card click opens diff modal
+
+# 6. Test diff modal
+# - Verify modal opens on file card click
+# - Verify diff display with line numbers
+# - Verify syntax highlighting
+# - Test ESC key closes modal
+# - Test close button
+
+# 7. Visual verification
+# - Side-by-side browser comparison with design
+# - Check all spacing, colors, typography
+# - Verify all hover/focus/active states
+# - Check responsive behavior
+
+# 8. Run targeted tests
+cargo test flakes
+nix build .#checks.x86_64-linux.web-ui
+```
+
+**Tier 2: Full Integration (if making backend changes)**
+- Only needed if API endpoints are modified
+- Test with real data from database
+- Verify performance under load
+
+**Do NOT run nix flake check** unless:
+- Backend API changes are required
+- Database queries are modified
+- New dependencies are added
+
+## Architecture Constraints
+
+**Frontend (Dioxus):**
+- Component composition and reusability
+- DTOs mirror server models
+- State isolated from presentation
+- No business logic in UI components
+- Follow existing component patterns
+
+**Files to Modify:**
+- `packages/web-ui/src/views/flakes_list.rs` - Complete rewrite
+- `packages/web-ui/src/components/flake_tray.rs` - New component
+- `packages/web-ui/src/components/pipeline_status.rs` - New component
+- `packages/web-ui/src/components/diff_modal.rs` - New component
+- `packages/web-ui/src/api/models.rs` - Add new data models if needed
+
+**Backend (Only if Required):**
+- Add commit file changes endpoint if not exists
+- Add diff content endpoint if not exists
+- Use existing query patterns
+- No unwrap in production paths
+
+## Impact Areas
+
+**High Impact:**
+- Flakes view completely redesigned
+- New side tray interaction pattern
+- New diff viewer modal
+
+**Medium Impact:**
+- May need new API endpoints for file changes/diffs
+- State management for tray/modal visibility
+
+**Low Impact:**
+- No database schema changes
+- No git sync implementation changes
+
+## Risk Level
+
+**High** - Complete UI rewrite of critical user-facing view
+
+## Dependencies
+
+- Design file: `/home/mcamp/code/crystal-forge/CrystalForgelatest/components/FlakesView.jsx`
+- CSS file: `/home/mcamp/code/crystal-forge/CrystalForgelatest/styles.css`
+- Icon component must support all required icons (sync, plus, search, git, user, file, x, rows, grid)
+
+## Success Metrics
+
+**Must pass before marking Done:**
+1. Visual side-by-side comparison matches design pixel-perfect
+2. All interactions work (tray open/close, modal open/close, view toggle)
+3. ESC key closes tray and modals
+4. Backdrop click closes tray
+5. Timeline rail renders correctly with dots and stems
+6. Pipeline visualization displays correctly
+7. File diff modal shows diffs with syntax highlighting
+8. web-ui checks pass
+9. No console errors
+10. No performance regressions (load within 5s)
+<!-- SECTION:NOTES:END -->
