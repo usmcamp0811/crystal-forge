@@ -4,7 +4,7 @@ title: Rebuild Flakes View to Match JSX Design Mockup Exactly
 status: In Progress
 assignee: []
 created_date: '2026-05-13 02:56'
-updated_date: '2026-05-13 03:00'
+updated_date: '2026-05-13 03:30'
 labels:
   - ui
   - web-ui
@@ -434,4 +434,22 @@ LOCK: assistant on gray in ~/code/crystal-forge/TASK-297-rebuild-flakes-view
 Started: 2026-05-13 03:00 UTC
 
 Phase 1: Creating dedicated worktree and studying design file
+
+## Implementation Learning Log - Session 1
+
+Dioxus Component Patterns:
+
+1. Icons are inlined as SVG - no Icon component with string name prop
+
+2. Styles use inline style attribute with string values
+
+3. Components use rsx! macro with HTML-like syntax
+
+4. State uses use_signal hooks
+
+5. Reference: builds.rs shows proper page-head structure
+
+Approach: Start minimal PageHeader + FilterBar matching JSX exactly
+
+Verify compilation after each component
 <!-- SECTION:NOTES:END -->
