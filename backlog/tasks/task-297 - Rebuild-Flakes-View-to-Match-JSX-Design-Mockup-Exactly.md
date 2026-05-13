@@ -4,7 +4,7 @@ title: Rebuild Flakes View to Match JSX Design Mockup Exactly
 status: In Progress
 assignee: []
 created_date: '2026-05-13 02:56'
-updated_date: '2026-05-13 03:32'
+updated_date: '2026-05-13 03:42'
 labels:
   - ui
   - web-ui
@@ -476,4 +476,28 @@ Key learnings:
 - SVG icons inlined with exact paths from design
 
 - gap values use 'px' suffix in style strings
+
+## Phase 2 Complete - FlakeTable and FlakeCards
+
+SUCCESS: Code compiles and pushed to remote
+
+- Implemented FlakeTable with 8 columns matching JSX exactly
+
+- Implemented FlakeCards with grid layout and status-rail
+
+- Created mock data structures for testing
+
+- All helper components: FlakeSyncChip, EnvBadge
+
+- Inline SVG icons for git, sync, warn, more
+
+Key learnings:
+
+- Component functions need #[component] attribute
+
+- Structs used in props need PartialEq derive
+
+- Avoid .as_str() on Signal reads, use &str deref
+
+- Mock data helps test UI without API calls
 <!-- SECTION:NOTES:END -->
