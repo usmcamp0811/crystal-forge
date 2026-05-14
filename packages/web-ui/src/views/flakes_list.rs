@@ -322,7 +322,7 @@ pub fn FlakesListView() -> Element {
     let environment_filter = use_signal(Vec::<String>::new);
     let commit_filter = use_signal(Vec::<CommitFilter>::new);
     let size_filter = use_signal(Vec::<SizeBucket>::new);
-    let mut flakes = use_signal(mock_flakes);
+    let mut flakes = use_signal(Vec::<FlakeListItem>::new);
     let loading_flakes = use_signal(|| true);
     let server_notice = use_signal(|| None::<String>);
     let mut flake_timelines = use_signal(Vec::<FlakeTimeline>::new);
@@ -395,9 +395,7 @@ pub fn FlakesListView() -> Element {
                         server_notice.set(None);
                     }
                     Err(error) => {
-                        server_notice.set(Some(format!(
-                            "Flake API unavailable, using local sample data: {error}"
-                        )));
+                        server_notice.set(Some(format!("Flake API unavailable: {error}")));
                     }
                 }
                 loading_flakes.set(false);
@@ -4229,11 +4227,8 @@ mod tests {
 //    - Update commit timeline when new commits arrive
 //    - Refresh flake list on sync completion
 //
-// The UI structure is complete and matches the JSX design pixel-perfectly.
-// All components compile and render correctly with mock data.
-//
 /// FlakesListViewNew - Pixel-perfect rebuild matching JSX design mockup.
-/// Uses mock data initially. See inline documentation for API integration guide.
+/// Uses live API data for flakes, timelines, and commit diffs.
 #[component]
 pub fn FlakesListViewNew() -> Element {
     let mut view_mode = use_signal(|| "table");
@@ -4621,19 +4616,25 @@ struct MockFlakeItem {
 }
 
 fn map_registry_flake_to_view(item: &FlakeRegistryItem) -> MockFlakeItem {
+    let build_scope_label = if item.build_scope.trim().is_empty() {
+        "default"
+    } else {
+        item.build_scope.trim()
+    };
+
     MockFlakeItem {
         id: item.id,
         name: item.name.clone(),
-        description: "Flake repository".to_string(),
+        description: format!("Build scope: {build_scope_label}"),
         status: "synced".to_string(),
         url: item.repo_url.clone(),
         branch: item.branch.clone(),
         system_count: item.system_count as i32,
-        latest_commit: "-".to_string(),
-        latest_message: "No commit metadata loaded".to_string(),
-        latest_author: "-".to_string(),
-        last_sync_at: "-".to_string(),
-        environment: "unknown".to_string(),
+        latest_commit: "—".to_string(),
+        latest_message: "No commits yet".to_string(),
+        latest_author: "—".to_string(),
+        last_sync_at: "Not synced yet".to_string(),
+        environment: build_scope_label.to_string(),
         error_msg: None,
         total_commits: 0,
     }
@@ -4683,6 +4684,8 @@ fn map_timeline_commits_to_view(commits: &[crate::api::models::FlakeCommit]) -> 
                 del: 0,
                 eval_status: c.evaluation_status.clone(),
                 build_status: build_status_token(c.build_status),
+                rollout_on: c.system_count as i32,
+                rollout_total: c.systems.len() as i32,
             }
         })
         .collect()
@@ -4797,6 +4800,8 @@ struct MockCommitItem {
     del: i32,
     eval_status: Option<String>,
     build_status: Option<String>,
+    rollout_on: i32,
+    rollout_total: i32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -4829,6 +4834,8 @@ fn mock_commits_for_flake(flake_id: i32) -> Vec<MockCommitItem> {
                 del: 4,
                 eval_status: Some("complete".to_string()),
                 build_status: Some("cache-pushed".to_string()),
+                rollout_on: 8,
+                rollout_total: 12,
             },
             MockCommitItem {
                 sha: "f1d9022".to_string(),
@@ -4841,6 +4848,8 @@ fn mock_commits_for_flake(flake_id: i32) -> Vec<MockCommitItem> {
                 del: 8,
                 eval_status: Some("complete".to_string()),
                 build_status: Some("building".to_string()),
+                rollout_on: 7,
+                rollout_total: 12,
             },
             MockCommitItem {
                 sha: "8c4b311".to_string(),
@@ -4853,6 +4862,8 @@ fn mock_commits_for_flake(flake_id: i32) -> Vec<MockCommitItem> {
                 del: 0,
                 eval_status: Some("complete".to_string()),
                 build_status: Some("complete".to_string()),
+                rollout_on: 6,
+                rollout_total: 12,
             },
             MockCommitItem {
                 sha: "77aef00".to_string(),
@@ -4865,6 +4876,8 @@ fn mock_commits_for_flake(flake_id: i32) -> Vec<MockCommitItem> {
                 del: 2,
                 eval_status: Some("failed".to_string()),
                 build_status: None,
+                rollout_on: 6,
+                rollout_total: 12,
             },
             MockCommitItem {
                 sha: "3c12889".to_string(),
@@ -4877,6 +4890,8 @@ fn mock_commits_for_flake(flake_id: i32) -> Vec<MockCommitItem> {
                 del: 0,
                 eval_status: Some("pending".to_string()),
                 build_status: None,
+                rollout_on: 5,
+                rollout_total: 12,
             },
             MockCommitItem {
                 sha: "a22fc08".to_string(),
@@ -4889,6 +4904,8 @@ fn mock_commits_for_flake(flake_id: i32) -> Vec<MockCommitItem> {
                 del: 3,
                 eval_status: Some("complete".to_string()),
                 build_status: Some("complete".to_string()),
+                rollout_on: 4,
+                rollout_total: 12,
             },
         ],
         _ => vec![
@@ -4903,6 +4920,8 @@ fn mock_commits_for_flake(flake_id: i32) -> Vec<MockCommitItem> {
                 del: 0,
                 eval_status: Some("complete".to_string()),
                 build_status: Some("complete".to_string()),
+                rollout_on: 1,
+                rollout_total: 1,
             },
         ],
     }
@@ -5853,14 +5872,13 @@ fn CommitDetailNew(
         Some(Ok(diff)) if !diff.trim().is_empty() => map_diff_to_file_cards(diff),
         _ => Vec::new(),
     };
+    let total_additions: i32 = files.iter().map(|f| f.add).sum();
+    let total_deletions: i32 = files.iter().map(|f| f.del).sum();
+    let total_files_changed = files.len() as i32;
     let pipeline = MockPipelineStatus {
         eval: commit.eval_status.clone(),
         build: commit.build_status.clone(),
     };
-    
-    // Mock rollout data
-    let rollout_on = 8;
-    let rollout_total = 12;
     
     rsx! {
         // Commit header - JSX lines 196-217
@@ -5898,9 +5916,9 @@ fn CommitDetailNew(
                     span { class: "mono", "{commit.author}" }
                 }
                 span { "{commit.at}" }
-                span { style: "color: #34d399;", "+{commit.add}" }
-                span { style: "color: #f87171;", "-{commit.del}" }
-                span { "{commit.files} files" }
+                span { style: "color: #34d399;", "+{total_additions}" }
+                span { style: "color: #f87171;", "-{total_deletions}" }
+                span { "{total_files_changed} files" }
             }
             
             // Pipeline strip - JSX lines 209-216
@@ -5909,7 +5927,7 @@ fn CommitDetailNew(
                 PipelineArrowNew {}
                 PipelinePillNew { stage: "build", val: pipeline.build.clone() }
                 PipelineArrowNew {}
-                RolloutPillNew { on: rollout_on, total: rollout_total, failed: 0 }
+                RolloutPillNew { on: commit.rollout_on, total: commit.rollout_total.max(commit.rollout_on), failed: 0 }
             }
         }
         
@@ -5919,9 +5937,9 @@ fn CommitDetailNew(
             div { class: "fl-tray-section-h",
                 span { "{files.len()} files changed · click to view diff" }
                 span { style: "color: var(--cf-text-muted); font-weight: 400; font-size: 10px;",
-                    span { style: "color: #34d399;", "+{commit.add}" }
+                    span { style: "color: #34d399;", "+{total_additions}" }
                     " / "
-                    span { style: "color: #f87171;", "-{commit.del}" }
+                    span { style: "color: #f87171;", "-{total_deletions}" }
                 }
             }
             
