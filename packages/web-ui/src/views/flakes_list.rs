@@ -4669,7 +4669,7 @@ fn build_status_token(status: Option<ApiBuildStatus>) -> Option<String> {
 }
 
 fn map_timeline_commits_to_view(commits: &[crate::api::models::FlakeCommit]) -> Vec<MockCommitItem> {
-    commits
+    let mut mapped = commits
         .iter()
         .map(|c| {
             let short = c.hash.chars().take(7).collect::<String>();
@@ -4679,6 +4679,7 @@ fn map_timeline_commits_to_view(commits: &[crate::api::models::FlakeCommit]) -> 
                 msg: c.message.clone(),
                 author: c.author.clone(),
                 at: relative_time_label(c.committed_at),
+                committed_at: c.committed_at,
                 files: c.system_paths.len() as i32,
                 add: 0,
                 del: 0,
@@ -4688,7 +4689,10 @@ fn map_timeline_commits_to_view(commits: &[crate::api::models::FlakeCommit]) -> 
                 rollout_total: c.systems.len() as i32,
             }
         })
-        .collect()
+        .collect::<Vec<_>>();
+
+    mapped.sort_by(|a, b| b.committed_at.cmp(&a.committed_at));
+    mapped
 }
 
 fn map_diff_to_file_cards(diff: &str) -> Vec<MockFileItem> {
@@ -4795,6 +4799,7 @@ struct MockCommitItem {
     msg: String,
     author: String,
     at: String,
+    committed_at: DateTime<Utc>,
     files: i32,
     add: i32,
     del: i32,
@@ -4829,6 +4834,7 @@ fn mock_commits_for_flake(flake_id: i32) -> Vec<MockCommitItem> {
                 msg: "stig: enforce audit rules for sudo".to_string(),
                 author: "mreyes".to_string(),
                 at: "2h ago".to_string(),
+                committed_at: Utc::now() - Duration::hours(2),
                 files: 3,
                 add: 28,
                 del: 4,
@@ -4843,6 +4849,7 @@ fn mock_commits_for_flake(flake_id: i32) -> Vec<MockCommitItem> {
                 msg: "cve: patch openssl to 3.3.2".to_string(),
                 author: "ops-bot".to_string(),
                 at: "1d ago".to_string(),
+                committed_at: Utc::now() - Duration::days(1),
                 files: 2,
                 add: 12,
                 del: 8,
@@ -4857,6 +4864,7 @@ fn mock_commits_for_flake(flake_id: i32) -> Vec<MockCommitItem> {
                 msg: "atlas-02: add prometheus node exporter".to_string(),
                 author: "dchen".to_string(),
                 at: "2d ago".to_string(),
+                committed_at: Utc::now() - Duration::days(2),
                 files: 1,
                 add: 14,
                 del: 0,
@@ -4871,6 +4879,7 @@ fn mock_commits_for_flake(flake_id: i32) -> Vec<MockCommitItem> {
                 msg: "bump nixpkgs to 24.11.20260401".to_string(),
                 author: "ops-bot".to_string(),
                 at: "3d ago".to_string(),
+                committed_at: Utc::now() - Duration::days(3),
                 files: 1,
                 add: 2,
                 del: 2,
@@ -4885,6 +4894,7 @@ fn mock_commits_for_flake(flake_id: i32) -> Vec<MockCommitItem> {
                 msg: "orion-db: add pgbackup systemd timer".to_string(),
                 author: "jpark".to_string(),
                 at: "5d ago".to_string(),
+                committed_at: Utc::now() - Duration::days(5),
                 files: 2,
                 add: 31,
                 del: 0,
@@ -4899,6 +4909,7 @@ fn mock_commits_for_flake(flake_id: i32) -> Vec<MockCommitItem> {
                 msg: "harden sshd: disable password auth".to_string(),
                 author: "mreyes".to_string(),
                 at: "1w ago".to_string(),
+                committed_at: Utc::now() - Duration::weeks(1),
                 files: 1,
                 add: 6,
                 del: 3,
@@ -4915,6 +4926,7 @@ fn mock_commits_for_flake(flake_id: i32) -> Vec<MockCommitItem> {
                 msg: "Initial commit".to_string(),
                 author: "dev".to_string(),
                 at: "1d ago".to_string(),
+                committed_at: Utc::now() - Duration::days(1),
                 files: 1,
                 add: 10,
                 del: 0,
@@ -5605,13 +5617,12 @@ fn CommitsListNew(
     let mut this_week = Vec::new();
     let mut earlier = Vec::new();
     
+    let now = Utc::now();
     for commit in &commits {
-        let time_lower = commit.at.to_lowercase();
-        if time_lower.contains("h ago") || time_lower.contains("now") || time_lower.contains("m ago") {
+        let age = now.signed_duration_since(commit.committed_at);
+        if age < Duration::days(1) {
             today.push(commit.clone());
-        } else if time_lower.starts_with("1d") || time_lower.starts_with("2d") || 
-                  time_lower.starts_with("3d") || time_lower.starts_with("4d") || 
-                  time_lower.starts_with("5d") || time_lower.starts_with("6d") {
+        } else if age < Duration::days(7) {
             this_week.push(commit.clone());
         } else {
             earlier.push(commit.clone());
