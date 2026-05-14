@@ -4280,7 +4280,17 @@ pub fn FlakesListViewNew() -> Element {
         let _nonce = *reload_nonce.read();
         async move {
             if let Some(id) = flake_id {
-                fetch_flake_timelines_for_ids(&[id]).await
+                match fetch_flake_timelines_for_ids(&[id]).await {
+                    Ok(items) => {
+                        let has_selected = items.iter().any(|timeline| timeline.flake_id == id);
+                        if has_selected {
+                            Ok(items)
+                        } else {
+                            fetch_flake_timelines().await
+                        }
+                    }
+                    Err(_) => fetch_flake_timelines().await,
+                }
             } else {
                 Ok(Vec::new())
             }
@@ -5567,13 +5577,34 @@ fn CommitsListNew(
     selected_commit: Option<MockCommitItem>,
     on_select: EventHandler<MockCommitItem>
 ) -> Element {
+    const INITIAL_VISIBLE_COMMITS: usize = 100;
+    const LOAD_MORE_STEP: usize = 100;
+
+    let mut visible_limit = use_signal(|| INITIAL_VISIBLE_COMMITS);
+    {
+        let total = commits.len();
+        let mut visible_limit = visible_limit.clone();
+        use_effect(move || {
+            let current = *visible_limit.read();
+            if current > total {
+                visible_limit.set(total);
+            }
+        });
+    }
+
+    let visible_commits: Vec<MockCommitItem> = commits
+        .iter()
+        .take((*visible_limit.read()).min(commits.len()))
+        .cloned()
+        .collect();
+
     // Group commits by time bucket (Today, This week, Earlier)
     let mut today = Vec::new();
     let mut this_week = Vec::new();
     let mut earlier = Vec::new();
     
     let now = Utc::now();
-    for commit in &commits {
+    for commit in &visible_commits {
         let age = now.signed_duration_since(commit.committed_at);
         if age < Duration::days(1) {
             today.push(commit.clone());
@@ -5622,6 +5653,17 @@ fn CommitsListNew(
         if commits.is_empty() {
             div { class: "empty", style: "margin: 24px;",
                 "No commits match this filter."
+            }
+        } else if visible_commits.len() < commits.len() {
+            div { style: "padding: 10px 16px 18px;",
+                button {
+                    class: "btn btn-ghost focus-ring xs",
+                    onclick: move |_| {
+                        let next = *visible_limit.read() + LOAD_MORE_STEP;
+                        visible_limit.set(next.min(commits.len()));
+                    },
+                    "Load more commits ({visible_commits.len()}/{commits.len()})"
+                }
             }
         }
     }
