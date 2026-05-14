@@ -4239,15 +4239,63 @@ pub fn FlakesListViewNew() -> Element {
     let mut view_mode = use_signal(|| "table");
     let mut search_query = use_signal(String::new);
     let mut selected_flake = use_signal(|| None::<MockFlakeItem>);
+    let mut action_notice = use_signal(|| None::<String>);
+    let mut reload_nonce = use_signal(|| 0u64);
 
-    let flakes_resource = use_resource(|| async move { fetch_flakes().await });
+    let flakes_resource = use_resource(move || {
+        let _nonce = *reload_nonce.read();
+        async move { fetch_flakes().await }
+    });
+    let timelines_resource = use_resource(move || {
+        let _nonce = *reload_nonce.read();
+        async move { fetch_flake_timelines().await }
+    });
 
     let (raw_flakes, load_error, loading) = match flakes_resource.read().as_ref() {
         Some(Ok(items)) => (items.clone(), None, false),
         Some(Err(err)) => (Vec::new(), Some(err.to_string()), false),
         None => (Vec::new(), None, true),
     };
-    let all_flakes: Vec<MockFlakeItem> = raw_flakes.iter().map(map_registry_flake_to_view).collect();
+    let (timeline_items, timelines_loading, timelines_error) = match timelines_resource.read().as_ref() {
+        Some(Ok(items)) => (items.clone(), false, None),
+        Some(Err(err)) => (Vec::new(), false, Some(err.to_string())),
+        None => (Vec::new(), true, None),
+    };
+
+    let mut commit_map: HashMap<i32, Vec<MockCommitItem>> = HashMap::new();
+    for timeline in &timeline_items {
+        commit_map.insert(
+            timeline.flake_id,
+            map_timeline_commits_to_view(&timeline.commits),
+        );
+    }
+
+    let all_flakes: Vec<MockFlakeItem> = raw_flakes
+        .iter()
+        .map(|item| {
+            let mut mapped = map_registry_flake_to_view(item);
+            if let Some(commits) = commit_map.get(&item.id) {
+                if let Some(latest) = commits.first() {
+                    mapped.latest_commit = latest.sha.clone();
+                    mapped.latest_message = latest.msg.clone();
+                    mapped.latest_author = latest.author.clone();
+                    mapped.last_sync_at = latest.at.clone();
+                    mapped.total_commits = commits.len() as i32;
+                    mapped.status = if latest.eval_status.as_deref() == Some("failed")
+                        || latest.build_status.as_deref() == Some("failed")
+                    {
+                        "error".to_string()
+                    } else if matches!(latest.build_status.as_deref(), Some("building") | Some("pending"))
+                    {
+                        "syncing".to_string()
+                    } else {
+                        "synced".to_string()
+                    };
+                }
+            }
+            mapped
+        })
+        .collect();
 
     let q = search_query.read().to_lowercase();
     let filtered_flakes: Vec<MockFlakeItem> = if q.trim().is_empty() {
@@ -4270,6 +4318,32 @@ pub fn FlakesListViewNew() -> Element {
         .iter()
         .filter(|f| f.status == "synced")
         .count();
+    let selected_flake_value = selected_flake.read().clone();
+    let selected_flake_id_for_timeline = selected_flake_value.as_ref().map(|f| f.id);
+    let selected_timeline_resource = use_resource(move || {
+        let flake_id = selected_flake_id_for_timeline;
+        async move {
+            if let Some(id) = flake_id {
+                fetch_flake_timelines_for_ids(&[id]).await
+            } else {
+                Ok(Vec::new())
+            }
+        }
+    });
+
+    {
+        let all_flakes = all_flakes.clone();
+        let mut selected_flake = selected_flake.clone();
+        use_effect(move || {
+            let current = selected_flake.read().clone();
+            if let Some(active) = current {
+                let still_exists = all_flakes.iter().any(|flake| flake.id == active.id);
+                if !still_exists {
+                    selected_flake.set(None);
+                }
+            }
+        });
+    }
     
     rsx! {
         // JSX: <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
@@ -4286,6 +4360,20 @@ pub fn FlakesListViewNew() -> Element {
                 div { style: "display: flex; gap: 8px;",
                     button { 
                         class: "btn btn-ghost focus-ring",
+                        onclick: move |_| {
+                            let mut reload_nonce = reload_nonce.clone();
+                            spawn(async move {
+                                let result = request_sync_all_flakes().await;
+                                match result {
+                                    Ok(_) => {
+                                        action_notice.set(Some("Sync requested for all flakes".to_string()));
+                                        let next = *reload_nonce.read() + 1;
+                                        reload_nonce.set(next);
+                                    }
+                                    Err(err) => action_notice.set(Some(format!("Sync all failed: {err}"))),
+                                }
+                            });
+                        },
                         // Inline sync icon SVG
                         svg {
                             width: "14",
@@ -4389,6 +4477,10 @@ pub fn FlakesListViewNew() -> Element {
                 }
                 span { class: "filter-count", "{flake_count} flakes" }
             }
+
+            if let Some(msg) = action_notice.read().as_ref() {
+                div { class: "card", style: "padding: 10px 14px; color: var(--cf-text-secondary);", "{msg}" }
+            }
             
             if loading {
                 div { class: "card", style: "padding: 18px; color: var(--cf-text-secondary);",
@@ -4409,18 +4501,96 @@ pub fn FlakesListViewNew() -> Element {
                     let selected_id = selected_flake.read().as_ref().map(|f| f.id);
                     
                     if mode == "table" {
-                        rsx! { FlakeTableNew { flakes: filtered_flakes.clone(), selected_id, on_select: move |f| selected_flake.set(Some(f)) } }
+                        rsx! { FlakeTableNew { flakes: filtered_flakes.clone(), selected_id, on_select: move |f| selected_flake.set(Some(f)), on_sync: move |flake_id| {
+                            let mut reload_nonce = reload_nonce.clone();
+                            spawn(async move {
+                                let result = request_sync_flake(flake_id).await;
+                                match result {
+                                    Ok(_) => {
+                                        action_notice.set(Some("Sync requested".to_string()));
+                                        let next = *reload_nonce.read() + 1;
+                                        reload_nonce.set(next);
+                                    }
+                                    Err(err) => action_notice.set(Some(format!("Sync failed: {err}"))),
+                                }
+                            });
+                        } } }
                     } else {
-                        rsx! { FlakeCardsNew { flakes: filtered_flakes.clone(), selected_id, on_select: move |f| selected_flake.set(Some(f)) } }
+                        rsx! { FlakeCardsNew { flakes: filtered_flakes.clone(), selected_id, on_select: move |f| selected_flake.set(Some(f)), on_sync: move |flake_id| {
+                            let mut reload_nonce = reload_nonce.clone();
+                            spawn(async move {
+                                let result = request_sync_flake(flake_id).await;
+                                match result {
+                                    Ok(_) => {
+                                        action_notice.set(Some("Sync requested".to_string()));
+                                        let next = *reload_nonce.read() + 1;
+                                        reload_nonce.set(next);
+                                    }
+                                    Err(err) => action_notice.set(Some(format!("Sync failed: {err}"))),
+                                }
+                            });
+                        } } }
                     }
                 }
             }
             
             // Side tray (if flake selected)
-            if let Some(flake) = selected_flake.read().clone() {
-                FlakeTrayNew {
-                    flake,
-                    on_close: move |_| selected_flake.set(None)
+            if let Some(flake) = selected_flake_value {
+                {
+                    let selected_direct_commits = match selected_timeline_resource.read().as_ref() {
+                        Some(Ok(items)) => items
+                            .iter()
+                            .find(|timeline| timeline.flake_id == flake.id)
+                            .map(|timeline| map_timeline_commits_to_view(&timeline.commits))
+                            .unwrap_or_default(),
+                        _ => Vec::new(),
+                    };
+                    let selected_direct_loading =
+                        matches!(selected_timeline_resource.read().as_ref(), None);
+                    let selected_direct_error = match selected_timeline_resource.read().as_ref() {
+                        Some(Err(err)) => Some(err.to_string()),
+                        _ => None,
+                    };
+                    let fallback_commits = commit_map.get(&flake.id).cloned().unwrap_or_default();
+                    let tray_commits = if !selected_direct_commits.is_empty() {
+                        selected_direct_commits
+                    } else {
+                        fallback_commits
+                    };
+                    let tray_commits_loading =
+                        selected_direct_loading || (timelines_loading && tray_commits.is_empty());
+                    let tray_commits_error = if tray_commits.is_empty() {
+                        selected_direct_error.or_else(|| timelines_error.clone())
+                    } else {
+                        None
+                    };
+
+                    rsx! {
+                        FlakeTrayNew {
+                            commits: tray_commits,
+                            commits_loading: tray_commits_loading,
+                            commits_error: tray_commits_error,
+                            flake,
+                            on_sync: move |flake_id| {
+                                let mut reload_nonce = reload_nonce.clone();
+                                spawn(async move {
+                                    let result = request_sync_flake(flake_id).await;
+                                    match result {
+                                        Ok(_) => {
+                                            action_notice.set(Some("Sync requested".to_string()));
+                                            let next = *reload_nonce.read() + 1;
+                                            reload_nonce.set(next);
+                                        }
+                                        Err(err) => {
+                                            action_notice
+                                                .set(Some(format!("Sync failed: {err}")))
+                                        }
+                                    }
+                                });
+                            },
+                            on_close: move |_| selected_flake.set(None)
+                        }
+                    }
                 }
             }
         }
@@ -4467,6 +4637,93 @@ fn map_registry_flake_to_view(item: &FlakeRegistryItem) -> MockFlakeItem {
         error_msg: None,
         total_commits: 0,
     }
+}
+
+fn relative_time_label(ts: DateTime<Utc>) -> String {
+    let now = Utc::now();
+    let delta = now.signed_duration_since(ts);
+    if delta < Duration::minutes(1) {
+        "now".to_string()
+    } else if delta < Duration::hours(1) {
+        format!("{}m ago", delta.num_minutes())
+    } else if delta < Duration::days(1) {
+        format!("{}h ago", delta.num_hours())
+    } else if delta < Duration::days(7) {
+        format!("{}d ago", delta.num_days())
+    } else {
+        format!("{}w ago", (delta.num_days() / 7).max(1))
+    }
+}
+
+fn build_status_token(status: Option<ApiBuildStatus>) -> Option<String> {
+    status.map(|s| match s {
+        ApiBuildStatus::Idle => "pending".to_string(),
+        ApiBuildStatus::Queued => "pending".to_string(),
+        ApiBuildStatus::Building => "building".to_string(),
+        ApiBuildStatus::Cancelling => "building".to_string(),
+        ApiBuildStatus::Complete => "complete".to_string(),
+        ApiBuildStatus::Failed => "failed".to_string(),
+        ApiBuildStatus::Cancelled => "failed".to_string(),
+    })
+}
+
+fn map_timeline_commits_to_view(commits: &[crate::api::models::FlakeCommit]) -> Vec<MockCommitItem> {
+    commits
+        .iter()
+        .map(|c| {
+            let short = c.hash.chars().take(7).collect::<String>();
+            MockCommitItem {
+                sha: short,
+                full_hash: c.hash.clone(),
+                msg: c.message.clone(),
+                author: c.author.clone(),
+                at: relative_time_label(c.committed_at),
+                files: c.system_paths.len() as i32,
+                add: 0,
+                del: 0,
+                eval_status: c.evaluation_status.clone(),
+                build_status: build_status_token(c.build_status),
+            }
+        })
+        .collect()
+}
+
+fn map_diff_to_file_cards(diff: &str) -> Vec<MockFileItem> {
+    parse_unified_diff(diff)
+        .into_iter()
+        .map(|file| {
+            let (add, del) = diff_file_stats(&file);
+            MockFileItem {
+                name: diff_file_label(&file),
+                add: add as i32,
+                del: del as i32,
+            }
+        })
+        .collect()
+}
+
+fn extract_diff_block_for_file_label(diff: &str, target_label: &str) -> Option<String> {
+    let mut current_block: Vec<String> = Vec::new();
+
+    for line in diff.lines() {
+        if line.starts_with("diff --git ") && !current_block.is_empty() {
+            let parsed = parse_diff_file_block(&current_block);
+            if diff_file_label(&parsed) == target_label {
+                return Some(current_block.join("\n"));
+            }
+            current_block.clear();
+        }
+        current_block.push(line.to_string());
+    }
+
+    if !current_block.is_empty() {
+        let parsed = parse_diff_file_block(&current_block);
+        if diff_file_label(&parsed) == target_label {
+            return Some(current_block.join("\n"));
+        }
+    }
+
+    None
 }
 
 #[allow(dead_code)]
@@ -4531,12 +4788,15 @@ fn mock_flakes_data() -> Vec<MockFlakeItem> {
 #[allow(dead_code)]
 struct MockCommitItem {
     sha: String,
+    full_hash: String,
     msg: String,
     author: String,
     at: String,
     files: i32,
     add: i32,
     del: i32,
+    eval_status: Option<String>,
+    build_status: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -4560,68 +4820,89 @@ fn mock_commits_for_flake(flake_id: i32) -> Vec<MockCommitItem> {
         1 => vec![
             MockCommitItem {
                 sha: "a3f8c12".to_string(),
+                full_hash: "a3f8c12".to_string(),
                 msg: "stig: enforce audit rules for sudo".to_string(),
                 author: "mreyes".to_string(),
                 at: "2h ago".to_string(),
                 files: 3,
                 add: 28,
                 del: 4,
+                eval_status: Some("complete".to_string()),
+                build_status: Some("cache-pushed".to_string()),
             },
             MockCommitItem {
                 sha: "f1d9022".to_string(),
+                full_hash: "f1d9022".to_string(),
                 msg: "cve: patch openssl to 3.3.2".to_string(),
                 author: "ops-bot".to_string(),
                 at: "1d ago".to_string(),
                 files: 2,
                 add: 12,
                 del: 8,
+                eval_status: Some("complete".to_string()),
+                build_status: Some("building".to_string()),
             },
             MockCommitItem {
                 sha: "8c4b311".to_string(),
+                full_hash: "8c4b311".to_string(),
                 msg: "atlas-02: add prometheus node exporter".to_string(),
                 author: "dchen".to_string(),
                 at: "2d ago".to_string(),
                 files: 1,
                 add: 14,
                 del: 0,
+                eval_status: Some("complete".to_string()),
+                build_status: Some("complete".to_string()),
             },
             MockCommitItem {
                 sha: "77aef00".to_string(),
+                full_hash: "77aef00".to_string(),
                 msg: "bump nixpkgs to 24.11.20260401".to_string(),
                 author: "ops-bot".to_string(),
                 at: "3d ago".to_string(),
                 files: 1,
                 add: 2,
                 del: 2,
+                eval_status: Some("failed".to_string()),
+                build_status: None,
             },
             MockCommitItem {
                 sha: "3c12889".to_string(),
+                full_hash: "3c12889".to_string(),
                 msg: "orion-db: add pgbackup systemd timer".to_string(),
                 author: "jpark".to_string(),
                 at: "5d ago".to_string(),
                 files: 2,
                 add: 31,
                 del: 0,
+                eval_status: Some("pending".to_string()),
+                build_status: None,
             },
             MockCommitItem {
                 sha: "a22fc08".to_string(),
+                full_hash: "a22fc08".to_string(),
                 msg: "harden sshd: disable password auth".to_string(),
                 author: "mreyes".to_string(),
                 at: "1w ago".to_string(),
                 files: 1,
                 add: 6,
                 del: 3,
+                eval_status: Some("complete".to_string()),
+                build_status: Some("complete".to_string()),
             },
         ],
         _ => vec![
             MockCommitItem {
                 sha: "abc1234".to_string(),
+                full_hash: "abc1234".to_string(),
                 msg: "Initial commit".to_string(),
                 author: "dev".to_string(),
                 at: "1d ago".to_string(),
                 files: 1,
                 add: 10,
                 del: 0,
+                eval_status: Some("complete".to_string()),
+                build_status: Some("complete".to_string()),
             },
         ],
     }
@@ -4720,7 +5001,12 @@ fn mock_files_for_commit(sha: &str) -> Vec<MockFileItem> {
 
 #[allow(dead_code)]
 #[component]
-fn FlakeTableNew(flakes: Vec<MockFlakeItem>, selected_id: Option<i32>, on_select: EventHandler<MockFlakeItem>) -> Element {
+fn FlakeTableNew(
+    flakes: Vec<MockFlakeItem>,
+    selected_id: Option<i32>,
+    on_select: EventHandler<MockFlakeItem>,
+    on_sync: EventHandler<i32>,
+) -> Element {
     rsx! {
         // JSX: <div className="card" style={{ overflow:"hidden" }}>
         div { class: "card", style: "overflow: hidden;",
@@ -4742,13 +5028,15 @@ fn FlakeTableNew(flakes: Vec<MockFlakeItem>, selected_id: Option<i32>, on_select
                         {
                             let is_selected = selected_id == Some(flake.id);
                             let row_class = if is_selected { "selected" } else { "" };
+                            let flake_for_select = flake.clone();
+                            let flake_id_for_sync = flake.id;
                             
                             rsx! {
                                 tr {
                                     key: "{flake.id}",
                                     class: "{row_class}",
                                     style: "cursor: pointer;",
-                                    onclick: move |_| on_select.call(flake.clone()),
+                                    onclick: move |_| on_select.call(flake_for_select.clone()),
                                     
                                     // Flake name and description
                                     td {
@@ -4795,11 +5083,13 @@ fn FlakeTableNew(flakes: Vec<MockFlakeItem>, selected_id: Option<i32>, on_select
                                     // Actions
                                     td {
                                         div { class: "row-actions",
-                                            button { 
+                                            button {
                                                 class: "btn-icon focus-ring",
                                                 title: "Sync",
-                                                // JSX: onClick={e=>e.stopPropagation()}
-                                                onclick: move |evt| evt.stop_propagation(),
+                                                onclick: move |evt| {
+                                                    evt.stop_propagation();
+                                                    on_sync.call(flake_id_for_sync);
+                                                },
                                                 // Inline sync icon
                                                 svg {
                                                     width: "14",
@@ -4878,13 +5168,20 @@ fn FlakeSyncChipNew(status: String, error_msg: Option<String>) -> Element {
 
 #[allow(dead_code)]
 #[component]
-fn FlakeCardsNew(flakes: Vec<MockFlakeItem>, selected_id: Option<i32>, on_select: EventHandler<MockFlakeItem>) -> Element {
+fn FlakeCardsNew(
+    flakes: Vec<MockFlakeItem>,
+    selected_id: Option<i32>,
+    on_select: EventHandler<MockFlakeItem>,
+    on_sync: EventHandler<i32>,
+) -> Element {
     rsx! {
         // JSX: <div className="cards-grid">
         div { class: "cards-grid",
             for flake in flakes {
                 {
                     let is_selected = selected_id == Some(flake.id);
+                    let flake_for_select = flake.clone();
+                    let flake_id_for_sync = flake.id;
                     // JSX: const statusColor = { synced:"#34d399", ... }
                     let status_color = match flake.status.as_str() {
                         "synced" => "#34d399",
@@ -4904,7 +5201,7 @@ fn FlakeCardsNew(flakes: Vec<MockFlakeItem>, selected_id: Option<i32>, on_select
                             class: "sys-card",
                             style: "{border_style}",
                             onclick: move |_| {
-                                on_select.call(flake.clone());
+                                on_select.call(flake_for_select.clone());
                             },
                             
                             // JSX: <div className="status-rail" style={{ "--status-color": statusColor }}/>
@@ -5010,7 +5307,10 @@ fn FlakeCardsNew(flakes: Vec<MockFlakeItem>, selected_id: Option<i32>, on_select
                                 button {
                                     class: "btn btn-subtle focus-ring",
                                     style: "padding: 4px 10px; font-size: 12px;",
-                                    onclick: move |evt| evt.stop_propagation(),
+                                    onclick: move |evt| {
+                                        evt.stop_propagation();
+                                        on_sync.call(flake_id_for_sync);
+                                    },
                                     // Inline sync icon
                                     svg {
                                         width: "12",
@@ -5060,11 +5360,44 @@ fn EnvBadgeNew(env: String) -> Element {
 
 #[allow(dead_code)]
 #[component]
-fn FlakeTrayNew(flake: MockFlakeItem, on_close: EventHandler<()>) -> Element {
-    let commits = mock_commits_for_flake(flake.id);
+fn FlakeTrayNew(
+    flake: MockFlakeItem,
+    commits: Vec<MockCommitItem>,
+    commits_loading: bool,
+    commits_error: Option<String>,
+    on_sync: EventHandler<i32>,
+    on_close: EventHandler<()>,
+) -> Element {
     let mut selected_commit = use_signal(|| commits.first().cloned());
     let mut commit_query = use_signal(String::new);
     let mut selected_file = use_signal(|| None::<MockFileItem>);
+    let query = commit_query.read().trim().to_lowercase();
+    let filtered_commits = if query.is_empty() {
+        commits.clone()
+    } else {
+        commits
+            .iter()
+            .filter(|commit| {
+                commit.sha.to_lowercase().contains(&query)
+                    || commit.msg.to_lowercase().contains(&query)
+                    || commit.author.to_lowercase().contains(&query)
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let selected_hash = selected_commit
+        .read()
+        .as_ref()
+        .map(|commit| commit.full_hash.clone());
+    let active_selected_commit = selected_hash
+        .as_ref()
+        .and_then(|hash| {
+            filtered_commits
+                .iter()
+                .find(|commit| &commit.full_hash == hash)
+                .cloned()
+        })
+        .or_else(|| filtered_commits.first().cloned());
     
     rsx! {
         // JSX: <div className="fl-tray-backdrop" onClick={onClose}/>
@@ -5078,6 +5411,13 @@ fn FlakeTrayNew(flake: MockFlakeItem, on_close: EventHandler<()>) -> Element {
             class: "fl-tray",
             role: "dialog",
             "aria-label": "{flake.name} commits",
+            tabindex: "0",
+            onkeydown: move |evt| {
+                if evt.key() == Key::Escape {
+                    evt.prevent_default();
+                    on_close.call(());
+                }
+            },
             
             // Tray header - JSX lines 118-134
             header { class: "fl-tray-head",
@@ -5111,6 +5451,7 @@ fn FlakeTrayNew(flake: MockFlakeItem, on_close: EventHandler<()>) -> Element {
                 div { style: "display: flex; gap: 6px; align-items: center;",
                     button { 
                         class: "btn btn-ghost focus-ring xs",
+                        onclick: move |_| on_sync.call(flake.id),
                         // Inline sync icon (11px)
                         svg {
                             width: "11",
@@ -5175,23 +5516,33 @@ fn FlakeTrayNew(flake: MockFlakeItem, on_close: EventHandler<()>) -> Element {
                         }
                         span { 
                             style: "font-size: 10px; color: var(--cf-text-muted);",
-                            "{commits.len()}/{commits.len()}"
+                            "{filtered_commits.len()}/{commits.len()}"
                         }
                     }
                     
                     // Commit items grouped by time bucket - JSX lines 151-185
-                    CommitsListNew {
-                        commits,
-                        selected_commit: selected_commit.read().clone(),
-                        on_select: move |commit| selected_commit.set(Some(commit))
+                    if commits_loading {
+                        div { class: "empty", style: "margin: 12px;", "Loading commits…" }
+                    } else if let Some(err) = commits_error {
+                        div { class: "empty", style: "margin: 12px;", "Unable to load commits: {err}" }
+                    } else {
+                        CommitsListNew {
+                            commits: filtered_commits,
+                            selected_commit: active_selected_commit.clone(),
+                            on_select: move |commit| {
+                                selected_file.set(None);
+                                selected_commit.set(Some(commit));
+                            }
+                        }
                     }
                 }
                 
                 // Right pane: Commit detail - JSX lines 192-260
                 section { class: "fl-tray-detail",
-                    if let Some(commit) = selected_commit.read().as_ref() {
+                    if let Some(commit) = active_selected_commit {
                         CommitDetailNew { 
-                            commit: commit.clone(),
+                            flake_id: flake.id,
+                            commit,
                             on_file_select: move |file| selected_file.set(Some(file))
                         }
                     } else {
@@ -5200,6 +5551,18 @@ fn FlakeTrayNew(flake: MockFlakeItem, on_close: EventHandler<()>) -> Element {
                         }
                     }
                 }
+            }
+        }
+
+        if let (Some(file), Some(commit)) = (
+            selected_file.read().clone(),
+            selected_commit.read().clone(),
+        ) {
+            DiffModalNew {
+                file,
+                commit,
+                flake: flake.clone(),
+                on_close: move |_| selected_file.set(None),
             }
         }
     }
@@ -5273,7 +5636,7 @@ fn CommitsListNew(
         // Empty state
         if commits.is_empty() {
             div { class: "empty", style: "margin: 24px;",
-                "No commits match."
+                "No commits match this filter."
             }
         }
     }
@@ -5304,7 +5667,10 @@ fn CommitBucketNew(
                 {
                     let is_selected = selected_commit.as_ref().map_or(false, |sel| sel.sha == commit.sha);
                     let is_last_in_bucket = i == total_commits - 1;
-                    let pipeline_status = mock_pipeline_status_for_index(i);
+                    let pipeline_status = MockPipelineStatus {
+                        eval: commit.eval_status.clone(),
+                        build: commit.build_status.clone(),
+                    };
                     
                     rsx! {
                         CommitItemNew {
@@ -5460,10 +5826,37 @@ fn PipelineDotNew(kind: &'static str, val: String) -> Element {
 
 #[allow(dead_code)]
 #[component]
-fn CommitDetailNew(commit: MockCommitItem, on_file_select: EventHandler<MockFileItem>) -> Element {
-    let files = mock_files_for_commit(&commit.sha);
-    let pipeline_idx = commit.sha.chars().next().unwrap_or('0') as usize;
-    let pipeline = mock_pipeline_status_for_index(pipeline_idx);
+fn CommitDetailNew(
+    flake_id: i32,
+    commit: MockCommitItem,
+    on_file_select: EventHandler<MockFileItem>,
+) -> Element {
+    let diff_resource = use_resource({
+        let commit_hash = commit.full_hash.clone();
+        move || {
+            let request_hash = commit_hash.clone();
+            async move {
+                fetch_commit_diff(flake_id, &request_hash)
+                    .await
+                    .map(|r| r.diff)
+                    .map_err(|err| err.to_string())
+            }
+        }
+    });
+
+    let files_loading = matches!(diff_resource.read().as_ref(), None);
+    let files_error = match diff_resource.read().as_ref() {
+        Some(Err(err)) => Some(err.clone()),
+        _ => None,
+    };
+    let files = match diff_resource.read().as_ref() {
+        Some(Ok(diff)) if !diff.trim().is_empty() => map_diff_to_file_cards(diff),
+        _ => Vec::new(),
+    };
+    let pipeline = MockPipelineStatus {
+        eval: commit.eval_status.clone(),
+        build: commit.build_status.clone(),
+    };
     
     // Mock rollout data
     let rollout_on = 8;
@@ -5534,8 +5927,16 @@ fn CommitDetailNew(commit: MockCommitItem, on_file_select: EventHandler<MockFile
             
             // Files grid - JSX lines 228-254
             div { class: "fl-files-grid",
-                for file in files {
-                    FileCardNew { file: file.clone(), on_select: on_file_select }
+                if files_loading {
+                    div { class: "empty", "Loading file changes…" }
+                } else if let Some(err) = files_error {
+                    div { class: "empty", "Unable to load file changes: {err}" }
+                } else if files.is_empty() {
+                    div { class: "empty", "No file changes in this commit." }
+                } else {
+                    for file in files {
+                        FileCardNew { file: file.clone(), on_select: on_file_select }
+                    }
                 }
             }
         }
@@ -5722,7 +6123,33 @@ fn DiffModalNew(
     flake: MockFlakeItem,
     on_close: EventHandler<()>
 ) -> Element {
-    let diff_text = mock_diff_for_file(&file.name);
+    let diff_resource = use_resource({
+        let flake_id = flake.id;
+        let commit_hash = commit.full_hash.clone();
+        move || {
+            let request_hash = commit_hash.clone();
+            async move {
+                fetch_commit_diff(flake_id, &request_hash)
+                    .await
+                    .map(|r| r.diff)
+                    .map_err(|err| err.to_string())
+            }
+        }
+    });
+
+    let diff_loading = matches!(diff_resource.read().as_ref(), None);
+    let diff_error = match diff_resource.read().as_ref() {
+        Some(Err(err)) => Some(err.clone()),
+        _ => None,
+    };
+
+    let full_diff_text = match diff_resource.read().as_ref() {
+        Some(Ok(diff)) => diff.clone(),
+        _ => String::new(),
+    };
+
+    let diff_text = extract_diff_block_for_file_label(&full_diff_text, &file.name)
+        .unwrap_or_else(|| full_diff_text.clone());
     let lines: Vec<&str> = diff_text.split('\n').collect();
     
     // Parse diff into annotated lines
@@ -5798,6 +6225,13 @@ fn DiffModalNew(
             class: "modal-backdrop",
             onclick: move |_| on_close.call(()),
             style: "z-index: 90;",
+            tabindex: "0",
+            onkeydown: move |evt| {
+                if evt.key() == Key::Escape {
+                    evt.prevent_default();
+                    on_close.call(());
+                }
+            },
             
             // Modal content - JSX line 332
             div {
@@ -5924,30 +6358,38 @@ fn DiffModalNew(
                 
                 // Diff body - JSX lines 369-389
                 div { class: "diff-modal-body",
-                    table {
-                        class: if *wrap.read() { "diff-table wrap" } else { "diff-table" },
-                        tbody {
-                            for (i, row) in annotated.iter().enumerate() {
-                                {
-                                    if row.line_type == "meta" {
-                                        rsx! { "" }
-                                    } else if row.line_type == "hunk" {
-                                        rsx! {
-                                            tr { 
-                                                key: "{i}",
-                                                class: "diff-hunk",
-                                                td { colspan: 3, "{row.text}" }
+                    if diff_loading {
+                        div { class: "empty", style: "padding: 16px;", "Loading diff…" }
+                    } else if let Some(err) = diff_error {
+                        div { class: "empty", style: "padding: 16px;", "Unable to load diff: {err}" }
+                    } else if diff_text.trim().is_empty() {
+                        div { class: "empty", style: "padding: 16px;", "No diff available for this file." }
+                    } else {
+                        table {
+                            class: if *wrap.read() { "diff-table wrap" } else { "diff-table" },
+                            tbody {
+                                for (i, row) in annotated.iter().enumerate() {
+                                    {
+                                        if row.line_type == "meta" {
+                                            rsx! { "" }
+                                        } else if row.line_type == "hunk" {
+                                            rsx! {
+                                                tr { 
+                                                    key: "{i}",
+                                                    class: "diff-hunk",
+                                                    td { colspan: 3, "{row.text}" }
+                                                }
                                             }
-                                        }
-                                    } else {
-                                        let row_class = format!("diff-row diff-{}", row.line_type);
-                                        rsx! {
-                                            tr { 
-                                                key: "{i}",
-                                                class: "{row_class}",
-                                                td { class: "diff-gutter mono", "{row.old_no.map(|n| n.to_string()).unwrap_or_default()}" }
-                                                td { class: "diff-gutter mono", "{row.new_no.map(|n| n.to_string()).unwrap_or_default()}" }
-                                                td { class: "diff-code mono", "{row.text}" }
+                                        } else {
+                                            let row_class = format!("diff-row diff-{}", row.line_type);
+                                            rsx! {
+                                                tr { 
+                                                    key: "{i}",
+                                                    class: "{row_class}",
+                                                    td { class: "diff-gutter mono", "{row.old_no.map(|n| n.to_string()).unwrap_or_default()}" }
+                                                    td { class: "diff-gutter mono", "{row.new_no.map(|n| n.to_string()).unwrap_or_default()}" }
+                                                    td { class: "diff-code mono", "{row.text}" }
+                                                }
                                             }
                                         }
                                     }
