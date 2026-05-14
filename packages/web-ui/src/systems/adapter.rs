@@ -373,9 +373,7 @@ pub async fn load_system_agent_events_with_fallback(
     }
 }
 
-pub async fn load_system_generations_with_fallback(
-    system_id: Uuid,
-) -> SystemGenerationsLoadResult {
+pub async fn load_system_generations_with_fallback(system_id: Uuid) -> SystemGenerationsLoadResult {
     match fetch_system_generations(&system_id).await {
         Ok(response) => SystemGenerationsLoadResult {
             generations: response.generations,

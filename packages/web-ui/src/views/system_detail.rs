@@ -20,8 +20,7 @@ use crate::api::client::{
     fetch_system_cve_scan_eligibility, fetch_system_cves, fetch_system_hardening,
     fetch_system_hardening_justifications, fetch_system_hardening_scan_eligibility,
     request_system_generation_rollback, request_system_rollback, request_system_sync,
-    save_system_hardening_justification,
-    trigger_system_cve_scan, trigger_system_hardening_scan,
+    save_system_hardening_justification, trigger_system_cve_scan, trigger_system_hardening_scan,
     verify_generation_closure as verify_generation_closure_request,
 };
 use crate::api::models::{
@@ -30,8 +29,8 @@ use crate::api::models::{
     HardeningScanEligibilityResponse, HardeningServiceResultResponse, HealthStatus, LogLevel,
     PipelineStage, SaveHardeningJustificationRequest, SystemAgentEvent, SystemCommitHistory,
     SystemDetail, SystemGeneration, SystemHardwareInfo, SystemHistoryEntry, SystemNetworkInfo,
-    SystemRollbackGenerationRequest, SystemRollbackRequest, SystemSecurityInfo, SystemVulnerability,
-    VerifyGenerationClosureRequest,
+    SystemRollbackGenerationRequest, SystemRollbackRequest, SystemSecurityInfo,
+    SystemVulnerability, VerifyGenerationClosureRequest,
 };
 use crate::components::cve::CvesTab;
 use crate::components::diff::DiffViewer;
@@ -44,12 +43,12 @@ use crate::components::system::{
 };
 use crate::routes::Route;
 use crate::state::{app_state::AppState, auth};
-use crate::systems::adapter::{fallback_system_detail, load_system_detail_with_fallback};
 use crate::systems::adapter::{
-    deploy_system_via_api, fetch_system_commits_via_api,
-    load_system_agent_events_with_fallback, load_system_generations_with_fallback,
-    load_system_history_with_fallback, update_system_via_api,
+    deploy_system_via_api, fetch_system_commits_via_api, load_system_agent_events_with_fallback,
+    load_system_generations_with_fallback, load_system_history_with_fallback,
+    update_system_via_api,
 };
+use crate::systems::adapter::{fallback_system_detail, load_system_detail_with_fallback};
 use crate::theme;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_futures::JsFuture;
@@ -1345,11 +1344,12 @@ fn OverviewTab(
         .generation
         .map(|generation| format!("#{generation}"))
         .unwrap_or_else(|| "#—".to_string());
-    let generation_mismatch_note = if matches!(system.generation_matches_current_store_path, Some(false)) {
-        " (profile/current mismatch)"
-    } else {
-        ""
-    };
+    let generation_mismatch_note =
+        if matches!(system.generation_matches_current_store_path, Some(false)) {
+            " (profile/current mismatch)"
+        } else {
+            ""
+        };
     let commit_message_text = current_commit
         .as_ref()
         .map(|commit| commit.message.clone())
@@ -1633,7 +1633,9 @@ fn DeployTab(
     let selected_generation_data = selected_generation
         .read()
         .and_then(|g| generations.iter().find(|x| x.generation == g).cloned())
-        .or_else(|| default_generation.and_then(|g| generations.iter().find(|x| x.generation == g).cloned()));
+        .or_else(|| {
+            default_generation.and_then(|g| generations.iter().find(|x| x.generation == g).cloned())
+        });
 
     // Pre-compute values for the plan panel (outside rsx! to avoid borrow issues)
     let from_commit = system
