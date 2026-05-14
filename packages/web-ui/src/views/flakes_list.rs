@@ -1596,9 +1596,11 @@ fn FlakeHistoryExplorer(
                                                                             "build: {build_badge_label(&build_status)}"
                                                                         }
                                                                     }
-                                                                }
-                                                            }
-                                                        }
+        }
+    }
+}
+
+
                                                     }
                                                 }
                                             }
@@ -4418,6 +4420,113 @@ fn mock_flakes_data() -> Vec<MockFlakeItem> {
 }
 
 // ============================================================================
+// Mock commit data structures for FlakeTray
+// ============================================================================
+
+#[derive(Clone, Debug, PartialEq)]
+#[allow(dead_code)]
+struct MockCommitItem {
+    sha: String,
+    msg: String,
+    author: String,
+    at: String,
+    files: i32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[allow(dead_code)]
+struct MockPipelineStatus {
+    eval: Option<String>,
+    build: Option<String>,
+}
+
+#[allow(dead_code)]
+fn mock_commits_for_flake(flake_id: i32) -> Vec<MockCommitItem> {
+    match flake_id {
+        1 => vec![
+            MockCommitItem {
+                sha: "a3f8c12".to_string(),
+                msg: "stig: enforce audit rules for sudo".to_string(),
+                author: "mreyes".to_string(),
+                at: "2h ago".to_string(),
+                files: 3,
+            },
+            MockCommitItem {
+                sha: "f1d9022".to_string(),
+                msg: "cve: patch openssl to 3.3.2".to_string(),
+                author: "ops-bot".to_string(),
+                at: "1d ago".to_string(),
+                files: 2,
+            },
+            MockCommitItem {
+                sha: "8c4b311".to_string(),
+                msg: "atlas-02: add prometheus node exporter".to_string(),
+                author: "dchen".to_string(),
+                at: "2d ago".to_string(),
+                files: 1,
+            },
+            MockCommitItem {
+                sha: "77aef00".to_string(),
+                msg: "bump nixpkgs to 24.11.20260401".to_string(),
+                author: "ops-bot".to_string(),
+                at: "3d ago".to_string(),
+                files: 1,
+            },
+            MockCommitItem {
+                sha: "3c12889".to_string(),
+                msg: "orion-db: add pgbackup systemd timer".to_string(),
+                author: "jpark".to_string(),
+                at: "5d ago".to_string(),
+                files: 2,
+            },
+            MockCommitItem {
+                sha: "a22fc08".to_string(),
+                msg: "harden sshd: disable password auth".to_string(),
+                author: "mreyes".to_string(),
+                at: "1w ago".to_string(),
+                files: 1,
+            },
+        ],
+        _ => vec![
+            MockCommitItem {
+                sha: "abc1234".to_string(),
+                msg: "Initial commit".to_string(),
+                author: "dev".to_string(),
+                at: "1d ago".to_string(),
+                files: 1,
+            },
+        ],
+    }
+}
+
+#[allow(dead_code)]
+fn mock_pipeline_status_for_index(index: usize) -> MockPipelineStatus {
+    let statuses = vec![
+        MockPipelineStatus {
+            eval: Some("complete".to_string()),
+            build: Some("cache-pushed".to_string()),
+        },
+        MockPipelineStatus {
+            eval: Some("complete".to_string()),
+            build: Some("building".to_string()),
+        },
+        MockPipelineStatus {
+            eval: Some("complete".to_string()),
+            build: Some("complete".to_string()),
+        },
+        MockPipelineStatus {
+            eval: Some("failed".to_string()),
+            build: None,
+        },
+        MockPipelineStatus {
+            eval: Some("pending".to_string()),
+            build: None,
+        },
+    ];
+    statuses[index % statuses.len()].clone()
+}
+
+// ============================================================================
 // Phase 2: FlakeTable Component - Matching JSX lines 451-495
 // ============================================================================
 
@@ -4764,6 +4873,10 @@ fn EnvBadgeNew(env: String) -> Element {
 #[allow(dead_code)]
 #[component]
 fn FlakeTrayNew(flake: MockFlakeItem, on_close: EventHandler<()>) -> Element {
+    let commits = mock_commits_for_flake(flake.id);
+    let mut selected_commit = use_signal(|| commits.first().cloned());
+    let mut commit_query = use_signal(String::new);
+    
     rsx! {
         // JSX: <div className="fl-tray-backdrop" onClick={onClose}/>
         div {
@@ -4844,13 +4957,306 @@ fn FlakeTrayNew(flake: MockFlakeItem, on_close: EventHandler<()>) -> Element {
                 }
             }
             
-            // Body: Two-pane layout (placeholder for now)
+            // Body: Two-pane layout - JSX lines 136-192 (commit list)
             div { class: "fl-tray-body",
-                div { style: "padding: 24px;",
-                    "Commit timeline and detail will be implemented in next phase"
+                // Left pane: Commit list with timeline
+                nav { class: "fl-tray-commits",
+                    // Search bar - JSX lines 140-150
+                    div { class: "fl-tray-commits-search",
+                        // Search icon
+                        svg {
+                            width: "12",
+                            height: "12",
+                            view_box: "0 0 24 24",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            style: "color: var(--cf-text-muted); flex-shrink: 0;",
+                            circle { cx: "11", cy: "11", r: "8" }
+                            path { d: "m21 21-4.3-4.3" }
+                        }
+                        input {
+                            class: "input focus-ring",
+                            placeholder: "Filter commits…",
+                            value: "{commit_query}",
+                            oninput: move |evt| commit_query.set(evt.value().clone()),
+                            style: "background: transparent; border: none; padding: 4px 0; font-size: 12px; flex: 1;"
+                        }
+                        span { 
+                            style: "font-size: 10px; color: var(--cf-text-muted);",
+                            "{commits.len()}/{commits.len()}"
+                        }
+                    }
+                    
+                    // Commit items grouped by time bucket - JSX lines 151-185
+                    CommitsListNew {
+                        commits,
+                        selected_commit: selected_commit.read().clone(),
+                        on_select: move |commit| selected_commit.set(Some(commit))
+                    }
+                }
+                
+                // Right pane: Commit detail (placeholder for Phase 5)
+                section { class: "fl-tray-detail",
+                    div { style: "padding: 24px;",
+                        if let Some(commit) = selected_commit.read().as_ref() {
+                            "Selected: {commit.sha} - {commit.msg}"
+                        } else {
+                            "No commit selected"
+                        }
+                    }
                 }
             }
         }
     }
 }
 
+
+// ============================================================================
+// CommitsList - Time-bucketed commits with timeline rail
+// Matching JSX lines 151-185
+// ============================================================================
+
+#[allow(dead_code)]
+#[component]
+fn CommitsListNew(
+    commits: Vec<MockCommitItem>,
+    selected_commit: Option<MockCommitItem>,
+    on_select: EventHandler<MockCommitItem>
+) -> Element {
+    // Group commits by time bucket (Today, This week, Earlier)
+    let mut today = Vec::new();
+    let mut this_week = Vec::new();
+    let mut earlier = Vec::new();
+    
+    for commit in &commits {
+        let time_lower = commit.at.to_lowercase();
+        if time_lower.contains("h ago") || time_lower.contains("now") || time_lower.contains("min ago") {
+            today.push(commit.clone());
+        } else if time_lower.starts_with("1d") || time_lower.starts_with("2d") || 
+                  time_lower.starts_with("3d") || time_lower.starts_with("4d") || 
+                  time_lower.starts_with("5d") || time_lower.starts_with("6d") {
+            this_week.push(commit.clone());
+        } else {
+            earlier.push(commit.clone());
+        }
+    }
+    
+    rsx! {
+        // Today bucket
+        if !today.is_empty() {
+            CommitBucketNew {
+                bucket_name: "Today",
+                commits: today.clone(),
+                selected_commit: selected_commit.clone(),
+                on_select,
+                is_last_bucket: this_week.is_empty() && earlier.is_empty()
+            }
+        }
+        
+        // This week bucket
+        if !this_week.is_empty() {
+            CommitBucketNew {
+                bucket_name: "This week",
+                commits: this_week.clone(),
+                selected_commit: selected_commit.clone(),
+                on_select,
+                is_last_bucket: earlier.is_empty()
+            }
+        }
+        
+        // Earlier bucket
+        if !earlier.is_empty() {
+            CommitBucketNew {
+                bucket_name: "Earlier",
+                commits: earlier.clone(),
+                selected_commit: selected_commit.clone(),
+                on_select,
+                is_last_bucket: true
+            }
+        }
+        
+        // Empty state
+        if commits.is_empty() {
+            div { class: "empty", style: "margin: 24px;",
+                "No commits match."
+            }
+        }
+    }
+}
+
+// ============================================================================
+// CommitBucket - Single time bucket with commits
+// ============================================================================
+
+#[allow(dead_code)]
+#[component]
+fn CommitBucketNew(
+    bucket_name: &'static str,
+    commits: Vec<MockCommitItem>,
+    selected_commit: Option<MockCommitItem>,
+    on_select: EventHandler<MockCommitItem>,
+    is_last_bucket: bool
+) -> Element {
+    let total_commits = commits.len();
+    
+    rsx! {
+        div {
+            // Bucket header - JSX line 153
+            div { class: "fl-commits-bucket", "{bucket_name}" }
+            
+            // Commit items - JSX lines 154-183
+            for (i, commit) in commits.iter().enumerate() {
+                {
+                    let is_selected = selected_commit.as_ref().map_or(false, |sel| sel.sha == commit.sha);
+                    let is_last_in_bucket = i == total_commits - 1;
+                    let pipeline_status = mock_pipeline_status_for_index(i);
+                    
+                    rsx! {
+                        CommitItemNew {
+                            commit: commit.clone(),
+                            is_selected,
+                            is_last: is_last_in_bucket && is_last_bucket,
+                            pipeline_status,
+                            on_select
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// CommitItem - Single commit with timeline rail and pipeline dots
+// Matching JSX lines 161-182
+// ============================================================================
+
+#[allow(dead_code)]
+#[component]
+fn CommitItemNew(
+    commit: MockCommitItem,
+    is_selected: bool,
+    is_last: bool,
+    pipeline_status: MockPipelineStatus,
+    on_select: EventHandler<MockCommitItem>
+) -> Element {
+    let item_class = if is_selected {
+        "fl-commit-item active"
+    } else {
+        "fl-commit-item"
+    };
+    
+    let sha_color = if is_selected {
+        "var(--cf-brand-purple)"
+    } else {
+        "var(--cf-text-primary)"
+    };
+    
+    let dot_class = if is_selected {
+        "fl-dot sel"
+    } else {
+        "fl-dot"
+    };
+    
+    rsx! {
+        div {
+            class: "{item_class}",
+            onclick: move |_| on_select.call(commit.clone()),
+            
+            // Timeline rail - JSX lines 165-168
+            div { class: "fl-rail",
+                div { class: "{dot_class}" }
+                if !is_last {
+                    div { class: "fl-stem" }
+                }
+            }
+            
+            // Commit content - JSX lines 169-180
+            div { style: "min-width: 0; flex: 1;",
+                // SHA and timestamp - JSX lines 170-173
+                div { style: "display: flex; align-items: baseline; gap: 6px;",
+                    span { 
+                        class: "mono",
+                        style: "font-size: 11px; font-weight: 700; color: {sha_color};",
+                        "{commit.sha}"
+                    }
+                    span { 
+                        style: "font-size: 11px; color: var(--cf-text-muted); margin-left: auto;",
+                        "{commit.at}"
+                    }
+                }
+                
+                // Commit message - JSX line 174
+                div {
+                    class: "truncate",
+                    style: "font-size: 12px; margin-top: 3px; color: var(--cf-text-primary);",
+                    "{commit.msg}"
+                }
+                
+                // Pipeline status and author - JSX lines 175-179
+                div { style: "display: flex; gap: 5px; margin-top: 6px; flex-wrap: wrap;",
+                    if let Some(eval_status) = &pipeline_status.eval {
+                        PipelineDotNew { kind: "eval", val: eval_status.clone() }
+                    }
+                    if let Some(build_status) = &pipeline_status.build {
+                        PipelineDotNew { kind: "build", val: build_status.clone() }
+                    }
+                    span { 
+                        class: "mono",
+                        style: "font-size: 10px; color: var(--cf-text-muted); margin-left: auto;",
+                        "{commit.author}"
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// PipelineDot - Small colored square with E/B label
+// Matching JSX lines 396-414
+// ============================================================================
+
+#[allow(dead_code)]
+#[component]
+fn PipelineDotNew(kind: &'static str, val: String) -> Element {
+    let color = match val.as_str() {
+        "complete" | "cache-pushed" | "up-to-date" => "#34d399",
+        "building" | "pending" | "in_progress" => "#60a5fa",
+        "failed" => "#f87171",
+        "behind" => "#f59e0b",
+        _ => "#6b7280",
+    };
+    
+    let label = match kind {
+        "eval" => "E",
+        "build" => "B",
+        _ => &kind[0..1].to_uppercase(),
+    };
+    
+    let title = format!("{}: {}", kind, val);
+    let background = format!("color-mix(in oklab, {} 15%, transparent)", color);
+    
+    rsx! {
+        span {
+            title: "{title}",
+            style: "
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                width: 14px;
+                height: 14px;
+                border-radius: 4px;
+                font-size: 9px;
+                font-weight: 700;
+                color: {color};
+                background: {background};
+                font-family: var(--font-mono);
+            ",
+            "{label}"
+        }
+    }
+}
