@@ -1594,9 +1594,10 @@ fn FlakeHistoryExplorer(
                                                                                 navigator.push(Route::BuildsView {});
                                                                             },
                                                                             "build: {build_badge_label(&build_status)}"
-                                                                        }
-                                                                    }
+                }
+            }
         }
+        
     }
 }
 
@@ -4551,6 +4552,45 @@ fn mock_pipeline_status_for_index(index: usize) -> MockPipelineStatus {
 }
 
 #[allow(dead_code)]
+fn mock_diff_for_file(file_name: &str) -> String {
+    // Return a realistic unified diff format
+    format!(r#"--- a/{}
++++ b/{}
+@@ -14,8 +14,14 @@
+ {{
+   services.openssh = {{
+     enable = true;
+-    settings.PasswordAuthentication = true;
++    settings.PasswordAuthentication = false;
++    settings.KbdInteractiveAuthentication = false;
++    settings.PermitRootLogin = "no";
++    settings.MaxAuthTries = 3;
++    settings.ClientAliveInterval = 300;
++    settings.ClientAliveCountMax = 0;
+   }};
+ }}
+@@ -42,12 +48,28 @@
+   networking = {{
+     hostName = "atlas-01";
+     domain = "cf.internal";
+-    firewall.allowedTCPPorts = [ 22 80 443 ];
++    firewall = {{
++      allowedTCPPorts = [ 22 80 443 9100 9090 ];
++      allowedUDPPorts = [ 51820 ];
++      logRefusedConnections = true;
++      logRefusedPackets = false;
++      extraCommands = ''
++        iptables -A INPUT -p tcp --dport 22 -m connlimit --connlimit-above 4 -j REJECT
++        iptables -A INPUT -m state --state INVALID -j DROP
++      '';
++    }};
++    nameservers = [ "10.0.0.1" "10.0.0.2" ];
++    defaultGateway = "10.0.0.1";
+   }};
+ }}"#, file_name, file_name)
+}
+
+#[allow(dead_code)]
 fn mock_files_for_commit(sha: &str) -> Vec<MockFileItem> {
     match sha {
         "a3f8c12" => vec![
@@ -4921,6 +4961,7 @@ fn FlakeTrayNew(flake: MockFlakeItem, on_close: EventHandler<()>) -> Element {
     let commits = mock_commits_for_flake(flake.id);
     let mut selected_commit = use_signal(|| commits.first().cloned());
     let mut commit_query = use_signal(String::new);
+    let mut selected_file = use_signal(|| None::<MockFileItem>);
     
     rsx! {
         // JSX: <div className="fl-tray-backdrop" onClick={onClose}/>
@@ -5046,7 +5087,10 @@ fn FlakeTrayNew(flake: MockFlakeItem, on_close: EventHandler<()>) -> Element {
                 // Right pane: Commit detail - JSX lines 192-260
                 section { class: "fl-tray-detail",
                     if let Some(commit) = selected_commit.read().as_ref() {
-                        CommitDetailNew { commit: commit.clone() }
+                        CommitDetailNew { 
+                            commit: commit.clone(),
+                            on_file_select: move |file| selected_file.set(Some(file))
+                        }
                     } else {
                         div { class: "empty", style: "margin: 32px;",
                             "No commits yet for this flake."
@@ -5313,7 +5357,7 @@ fn PipelineDotNew(kind: &'static str, val: String) -> Element {
 
 #[allow(dead_code)]
 #[component]
-fn CommitDetailNew(commit: MockCommitItem) -> Element {
+fn CommitDetailNew(commit: MockCommitItem, on_file_select: EventHandler<MockFileItem>) -> Element {
     let files = mock_files_for_commit(&commit.sha);
     let pipeline_idx = commit.sha.chars().next().unwrap_or('0') as usize;
     let pipeline = mock_pipeline_status_for_index(pipeline_idx);
@@ -5388,7 +5432,7 @@ fn CommitDetailNew(commit: MockCommitItem) -> Element {
             // Files grid - JSX lines 228-254
             div { class: "fl-files-grid",
                 for file in files {
-                    FileCardNew { file }
+                    FileCardNew { file: file.clone(), on_select: on_file_select }
                 }
             }
         }
@@ -5490,7 +5534,8 @@ fn RolloutPillNew(on: i32, total: i32, failed: i32) -> Element {
 
 #[allow(dead_code)]
 #[component]
-fn FileCardNew(file: MockFileItem) -> Element {
+fn FileCardNew(file: MockFileItem, on_select: EventHandler<MockFileItem>) -> Element {
+    let file_for_click = file.clone();
     let total = (file.add + file.del) as f32 + 0.001;
     let add_pct = ((file.add as f32 / total) * 100.0).round() as i32;
     let del_pct = ((file.del as f32 / total) * 100.0).round() as i32;
@@ -5507,7 +5552,7 @@ fn FileCardNew(file: MockFileItem) -> Element {
     rsx! {
         button {
             class: "fl-file-card focus-ring",
-            // onclick would open diff modal in Phase 7
+            onclick: move |_| on_select.call(file_for_click.clone()),
             
             // File header - JSX lines 236-242
             div { class: "fl-file-card-head",
@@ -5546,6 +5591,267 @@ fn FileCardNew(file: MockFileItem) -> Element {
                 div { class: "fl-file-bar",
                     div { style: "width: {add_pct}%; height: 100%; background: #34d399; display: inline-block; vertical-align: top;" }
                     div { style: "width: {del_pct}%; height: 100%; background: #f87171; display: inline-block; vertical-align: top;" }
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// DiffModal - Full-screen diff viewer with hunk navigation
+// Matching JSX lines 270-393
+// ============================================================================
+
+#[derive(Clone, Debug, PartialEq)]
+struct DiffLine {
+    line_type: String,  // "hunk", "meta", "add", "del", "ctx"
+    text: String,
+    old_no: Option<i32>,
+    new_no: Option<i32>,
+    hunk_idx: i32,
+}
+
+#[allow(dead_code)]
+#[component]
+fn DiffModalNew(
+    file: MockFileItem,
+    commit: MockCommitItem,
+    flake: MockFlakeItem,
+    on_close: EventHandler<()>
+) -> Element {
+    let diff_text = mock_diff_for_file(&file.name);
+    let lines: Vec<&str> = diff_text.split('\n').collect();
+    
+    // Parse diff into annotated lines
+    let mut annotated = Vec::new();
+    let mut old_no = 0;
+    let mut new_no = 0;
+    let mut hunk_idx = -1;
+    
+    for line in lines {
+        if line.starts_with("@@") {
+            // Hunk header
+            hunk_idx += 1;
+            annotated.push(DiffLine {
+                line_type: "hunk".to_string(),
+                text: line.to_string(),
+                old_no: None,
+                new_no: None,
+                hunk_idx,
+            });
+        } else if line.starts_with("+++") || line.starts_with("---") {
+            // Metadata line
+            annotated.push(DiffLine {
+                line_type: "meta".to_string(),
+                text: line.to_string(),
+                old_no: None,
+                new_no: None,
+                hunk_idx,
+            });
+        } else if line.starts_with("+") {
+            // Addition
+            new_no += 1;
+            annotated.push(DiffLine {
+                line_type: "add".to_string(),
+                text: line.to_string(),
+                old_no: None,
+                new_no: Some(new_no),
+                hunk_idx,
+            });
+        } else if line.starts_with("-") {
+            // Deletion
+            old_no += 1;
+            annotated.push(DiffLine {
+                line_type: "del".to_string(),
+                text: line.to_string(),
+                old_no: Some(old_no),
+                new_no: None,
+                hunk_idx,
+            });
+        } else {
+            // Context line
+            old_no += 1;
+            new_no += 1;
+            annotated.push(DiffLine {
+                line_type: "ctx".to_string(),
+                text: line.to_string(),
+                old_no: Some(old_no),
+                new_no: Some(new_no),
+                hunk_idx,
+            });
+        }
+    }
+    
+    let hunks: Vec<_> = annotated.iter().filter(|r| r.line_type == "hunk").collect();
+    let total_add = annotated.iter().filter(|r| r.line_type == "add").count();
+    let total_del = annotated.iter().filter(|r| r.line_type == "del").count();
+    let total_lines = annotated.iter().filter(|r| r.line_type != "meta").count();
+    
+    let mut wrap = use_signal(|| false);
+    
+    rsx! {
+        // Backdrop - JSX line 331
+        div {
+            class: "modal-backdrop",
+            onclick: move |_| on_close.call(()),
+            style: "z-index: 90;",
+            
+            // Modal content - JSX line 332
+            div {
+                class: "diff-modal",
+                onclick: move |evt| evt.stop_propagation(),
+                
+                // Header - JSX lines 333-368
+                header { class: "diff-modal-head",
+                    div { style: "min-width: 0; flex: 1;",
+                        // Breadcrumb - JSX lines 335-340
+                        div { style: "display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--cf-text-muted);",
+                            // Git icon
+                            svg {
+                                width: "11",
+                                height: "11",
+                                view_box: "0 0 24 24",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                stroke_linecap: "round",
+                                stroke_linejoin: "round",
+                                path { d: "M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4M9 18c-4.51 2-5-2-7-2" }
+                            }
+                            span { class: "mono", "{flake.name}" }
+                            span { "·" }
+                            span { class: "mono", "{commit.sha}" }
+                            span { 
+                                style: "overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
+                                "{commit.msg}"
+                            }
+                        }
+                        
+                        // File info - JSX lines 342-348
+                        div { style: "display: flex; align-items: center; gap: 10px; margin-top: 4px; flex-wrap: wrap;",
+                            // File icon
+                            svg {
+                                width: "13",
+                                height: "13",
+                                view_box: "0 0 24 24",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                stroke_linecap: "round",
+                                stroke_linejoin: "round",
+                                style: "opacity: 0.6;",
+                                path { d: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" }
+                                polyline { points: "14 2 14 8 20 8" }
+                            }
+                            span { class: "mono", style: "font-size: 13px; font-weight: 600;", "{file.name}" }
+                            span { class: "chip chip-healthy", style: "font-size: 10px;", "+{total_add}" }
+                            span { class: "chip chip-critical", style: "font-size: 10px;", "-{total_del}" }
+                            span { 
+                                style: "font-size: 11px; color: var(--cf-text-muted);",
+                                "· {hunks.len()} hunk"
+                                if hunks.len() != 1 { "s" }
+                                " · {total_lines} lines"
+                            }
+                        }
+                    }
+                    
+                    // Action buttons - JSX lines 350-367
+                    div { style: "display: flex; gap: 6px; align-items: center;",
+                        // Wrap toggle button - JSX lines 362-364
+                        button {
+                            class: if *wrap.read() { "btn-icon focus-ring active" } else { "btn-icon focus-ring" },
+                            title: if *wrap.read() { "Disable line wrap" } else { "Wrap long lines" },
+                            onclick: move |_| {
+                                let current = *wrap.read();
+                                wrap.set(!current);
+                            },
+                            // Rows icon
+                            svg {
+                                width: "14",
+                                height: "14",
+                                view_box: "0 0 24 24",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                stroke_linecap: "round",
+                                stroke_linejoin: "round",
+                                rect { x: "3", y: "3", width: "18", height: "18", rx: "2", ry: "2" }
+                                line { x1: "3", y1: "9", x2: "21", y2: "9" }
+                                line { x1: "3", y1: "15", x2: "21", y2: "15" }
+                            }
+                        }
+                        // Copy path button - JSX line 365
+                        button {
+                            class: "btn-icon focus-ring",
+                            title: "Copy path",
+                            // Link icon
+                            svg {
+                                width: "14",
+                                height: "14",
+                                view_box: "0 0 24 24",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                stroke_linecap: "round",
+                                stroke_linejoin: "round",
+                                path { d: "M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" }
+                                path { d: "M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" }
+                            }
+                        }
+                        // Close button - JSX line 366
+                        button {
+                            class: "btn-icon focus-ring",
+                            title: "Close (Esc)",
+                            onclick: move |_| on_close.call(()),
+                            // X icon
+                            svg {
+                                width: "16",
+                                height: "16",
+                                view_box: "0 0 24 24",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                stroke_linecap: "round",
+                                stroke_linejoin: "round",
+                                path { d: "M18 6 6 18M6 6l12 12" }
+                            }
+                        }
+                    }
+                }
+                
+                // Diff body - JSX lines 369-389
+                div { class: "diff-modal-body",
+                    table {
+                        class: if *wrap.read() { "diff-table wrap" } else { "diff-table" },
+                        tbody {
+                            for (i, row) in annotated.iter().enumerate() {
+                                {
+                                    if row.line_type == "meta" {
+                                        rsx! { "" }
+                                    } else if row.line_type == "hunk" {
+                                        rsx! {
+                                            tr { 
+                                                key: "{i}",
+                                                class: "diff-hunk",
+                                                td { colspan: 3, "{row.text}" }
+                                            }
+                                        }
+                                    } else {
+                                        let row_class = format!("diff-row diff-{}", row.line_type);
+                                        rsx! {
+                                            tr { 
+                                                key: "{i}",
+                                                class: "{row_class}",
+                                                td { class: "diff-gutter mono", "{row.old_no.map(|n| n.to_string()).unwrap_or_default()}" }
+                                                td { class: "diff-gutter mono", "{row.new_no.map(|n| n.to_string()).unwrap_or_default()}" }
+                                                td { class: "diff-code mono", "{row.text}" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
