@@ -4431,6 +4431,8 @@ struct MockCommitItem {
     author: String,
     at: String,
     files: i32,
+    add: i32,
+    del: i32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -4438,6 +4440,14 @@ struct MockCommitItem {
 struct MockPipelineStatus {
     eval: Option<String>,
     build: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[allow(dead_code)]
+struct MockFileItem {
+    name: String,
+    add: i32,
+    del: i32,
 }
 
 #[allow(dead_code)]
@@ -4450,6 +4460,8 @@ fn mock_commits_for_flake(flake_id: i32) -> Vec<MockCommitItem> {
                 author: "mreyes".to_string(),
                 at: "2h ago".to_string(),
                 files: 3,
+                add: 28,
+                del: 4,
             },
             MockCommitItem {
                 sha: "f1d9022".to_string(),
@@ -4457,6 +4469,8 @@ fn mock_commits_for_flake(flake_id: i32) -> Vec<MockCommitItem> {
                 author: "ops-bot".to_string(),
                 at: "1d ago".to_string(),
                 files: 2,
+                add: 12,
+                del: 8,
             },
             MockCommitItem {
                 sha: "8c4b311".to_string(),
@@ -4464,6 +4478,8 @@ fn mock_commits_for_flake(flake_id: i32) -> Vec<MockCommitItem> {
                 author: "dchen".to_string(),
                 at: "2d ago".to_string(),
                 files: 1,
+                add: 14,
+                del: 0,
             },
             MockCommitItem {
                 sha: "77aef00".to_string(),
@@ -4471,6 +4487,8 @@ fn mock_commits_for_flake(flake_id: i32) -> Vec<MockCommitItem> {
                 author: "ops-bot".to_string(),
                 at: "3d ago".to_string(),
                 files: 1,
+                add: 2,
+                del: 2,
             },
             MockCommitItem {
                 sha: "3c12889".to_string(),
@@ -4478,6 +4496,8 @@ fn mock_commits_for_flake(flake_id: i32) -> Vec<MockCommitItem> {
                 author: "jpark".to_string(),
                 at: "5d ago".to_string(),
                 files: 2,
+                add: 31,
+                del: 0,
             },
             MockCommitItem {
                 sha: "a22fc08".to_string(),
@@ -4485,6 +4505,8 @@ fn mock_commits_for_flake(flake_id: i32) -> Vec<MockCommitItem> {
                 author: "mreyes".to_string(),
                 at: "1w ago".to_string(),
                 files: 1,
+                add: 6,
+                del: 3,
             },
         ],
         _ => vec![
@@ -4494,6 +4516,8 @@ fn mock_commits_for_flake(flake_id: i32) -> Vec<MockCommitItem> {
                 author: "dev".to_string(),
                 at: "1d ago".to_string(),
                 files: 1,
+                add: 10,
+                del: 0,
             },
         ],
     }
@@ -4524,6 +4548,27 @@ fn mock_pipeline_status_for_index(index: usize) -> MockPipelineStatus {
         },
     ];
     statuses[index % statuses.len()].clone()
+}
+
+#[allow(dead_code)]
+fn mock_files_for_commit(sha: &str) -> Vec<MockFileItem> {
+    match sha {
+        "a3f8c12" => vec![
+            MockFileItem { name: "modules/security/auditd.nix".to_string(), add: 18, del: 2 },
+            MockFileItem { name: "modules/security/sudo.nix".to_string(), add: 8, del: 1 },
+            MockFileItem { name: "hosts/atlas-01/configuration.nix".to_string(), add: 2, del: 1 },
+        ],
+        "f1d9022" => vec![
+            MockFileItem { name: "pkgs/openssl/default.nix".to_string(), add: 10, del: 6 },
+            MockFileItem { name: "flake.lock".to_string(), add: 2, del: 2 },
+        ],
+        "8c4b311" => vec![
+            MockFileItem { name: "hosts/atlas-02/monitoring.nix".to_string(), add: 14, del: 0 },
+        ],
+        _ => vec![
+            MockFileItem { name: "README.md".to_string(), add: 5, del: 0 },
+        ],
+    }
 }
 
 // ============================================================================
@@ -4998,13 +5043,13 @@ fn FlakeTrayNew(flake: MockFlakeItem, on_close: EventHandler<()>) -> Element {
                     }
                 }
                 
-                // Right pane: Commit detail (placeholder for Phase 5)
+                // Right pane: Commit detail - JSX lines 192-260
                 section { class: "fl-tray-detail",
-                    div { style: "padding: 24px;",
-                        if let Some(commit) = selected_commit.read().as_ref() {
-                            "Selected: {commit.sha} - {commit.msg}"
-                        } else {
-                            "No commit selected"
+                    if let Some(commit) = selected_commit.read().as_ref() {
+                        CommitDetailNew { commit: commit.clone() }
+                    } else {
+                        div { class: "empty", style: "margin: 32px;",
+                            "No commits yet for this flake."
                         }
                     }
                 }
@@ -5257,6 +5302,252 @@ fn PipelineDotNew(kind: &'static str, val: String) -> Element {
                 font-family: var(--font-mono);
             ",
             "{label}"
+        }
+    }
+}
+
+// ============================================================================
+// CommitDetail - Right pane showing commit metadata and file changes
+// Matching JSX lines 193-259
+// ============================================================================
+
+#[allow(dead_code)]
+#[component]
+fn CommitDetailNew(commit: MockCommitItem) -> Element {
+    let files = mock_files_for_commit(&commit.sha);
+    let pipeline_idx = commit.sha.chars().next().unwrap_or('0') as usize;
+    let pipeline = mock_pipeline_status_for_index(pipeline_idx);
+    
+    // Mock rollout data
+    let rollout_on = 8;
+    let rollout_total = 12;
+    
+    rsx! {
+        // Commit header - JSX lines 196-217
+        div { class: "fl-tray-commit-h",
+            // SHA and message - JSX lines 197-200
+            div { style: "display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;",
+                span { 
+                    class: "mono",
+                    style: "font-size: 14px; font-weight: 700; color: var(--cf-brand-purple);",
+                    "{commit.sha}"
+                }
+                span { 
+                    style: "font-size: 14px; font-weight: 600;",
+                    "{commit.msg}"
+                }
+            }
+            
+            // Metadata row - JSX lines 201-207
+            div { style: "display: flex; gap: 12px; margin-top: 6px; font-size: 11px; color: var(--cf-text-muted); flex-wrap: wrap;",
+                span {
+                    // User icon (inline)
+                    svg {
+                        width: "11",
+                        height: "11",
+                        view_box: "0 0 24 24",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        stroke_linecap: "round",
+                        stroke_linejoin: "round",
+                        style: "display: inline-block; vertical-align: middle; margin-right: 4px;",
+                        path { d: "M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2" }
+                        circle { cx: "12", cy: "7", r: "4" }
+                    }
+                    span { class: "mono", "{commit.author}" }
+                }
+                span { "{commit.at}" }
+                span { style: "color: #34d399;", "+{commit.add}" }
+                span { style: "color: #f87171;", "-{commit.del}" }
+                span { "{commit.files} files" }
+            }
+            
+            // Pipeline strip - JSX lines 209-216
+            div { class: "fl-pipeline",
+                PipelinePillNew { stage: "eval", val: pipeline.eval.clone() }
+                PipelineArrowNew {}
+                PipelinePillNew { stage: "build", val: pipeline.build.clone() }
+                PipelineArrowNew {}
+                RolloutPillNew { on: rollout_on, total: rollout_total, failed: 0 }
+            }
+        }
+        
+        // Files changed section - JSX lines 219-255
+        div { class: "fl-files-section",
+            // Section header - JSX lines 221-227
+            div { class: "fl-tray-section-h",
+                span { "{files.len()} files changed · click to view diff" }
+                span { style: "color: var(--cf-text-muted); font-weight: 400; font-size: 10px;",
+                    span { style: "color: #34d399;", "+{commit.add}" }
+                    " / "
+                    span { style: "color: #f87171;", "-{commit.del}" }
+                }
+            }
+            
+            // Files grid - JSX lines 228-254
+            div { class: "fl-files-grid",
+                for file in files {
+                    FileCardNew { file }
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// PipelinePill - Larger chip for eval/build status
+// Matching JSX lines 417-424
+// ============================================================================
+
+#[allow(dead_code)]
+#[component]
+fn PipelinePillNew(stage: &'static str, val: Option<String>) -> Element {
+    let Some(val_str) = val else {
+        return rsx! { span { class: "chip chip-unknown", style: "font-weight: 600;", "N/A" } };
+    };
+    
+    let (chip_class, label) = match (stage, val_str.as_str()) {
+        ("eval", "complete") => ("chip-healthy", "Eval ✓"),
+        ("eval", "pending") => ("chip-info", "Eval…"),
+        ("eval", "failed") => ("chip-critical", "Eval ✗"),
+        ("build", "cache-pushed") => ("chip-healthy", "Cached"),
+        ("build", "complete") => ("chip-healthy", "Built"),
+        ("build", "building") => ("chip-info", "Building"),
+        ("build", "failed") => ("chip-critical", "Build ✗"),
+        ("build", "pending") => ("chip-unknown", "Queued"),
+        _ => ("chip-unknown", val_str.as_str()),
+    };
+    
+    rsx! {
+        span { class: "chip {chip_class}", style: "font-weight: 600;", "{label}" }
+    }
+}
+
+// ============================================================================
+// PipelineArrow - Simple arrow separator
+// Matching JSX line 427
+// ============================================================================
+
+#[allow(dead_code)]
+#[component]
+fn PipelineArrowNew() -> Element {
+    rsx! {
+        span { style: "color: var(--cf-text-muted); font-size: 11px;", "→" }
+    }
+}
+
+// ============================================================================
+// RolloutPill - Rollout status with progress bar
+// Matching JSX lines 431-442
+// ============================================================================
+
+#[allow(dead_code)]
+#[component]
+fn RolloutPillNew(on: i32, total: i32, failed: i32) -> Element {
+    let pct = if total > 0 { (on as f32) / (total as f32) } else { 0.0 };
+    let chip_class = if failed > 0 {
+        "chip-critical"
+    } else if pct == 1.0 {
+        "chip-healthy"
+    } else if pct == 0.0 {
+        "chip-unknown"
+    } else {
+        "chip-warning"
+    };
+    
+    rsx! {
+        span { 
+            class: "chip {chip_class}",
+            style: "display: inline-flex; align-items: center; gap: 6px; font-weight: 600;",
+            // Server icon
+            svg {
+                width: "10",
+                height: "10",
+                view_box: "0 0 24 24",
+                fill: "none",
+                stroke: "currentColor",
+                stroke_width: "2",
+                stroke_linecap: "round",
+                stroke_linejoin: "round",
+                rect { x: "2", y: "2", width: "20", height: "8", rx: "2", ry: "2" }
+                rect { x: "2", y: "14", width: "20", height: "8", rx: "2", ry: "2" }
+                line { x1: "6", y1: "6", x2: "6.01", y2: "6" }
+                line { x1: "6", y1: "18", x2: "6.01", y2: "18" }
+            }
+            "Rollout {on}/{total}"
+            div { style: "width: 32px; height: 3px; background: rgba(255,255,255,0.2); border-radius: 99px; overflow: hidden;",
+                div { style: "width: {pct * 100.0}%; height: 100%; background: currentColor;" }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// FileCard - Single file change card with add/del stats
+// Matching JSX lines 232-252
+// ============================================================================
+
+#[allow(dead_code)]
+#[component]
+fn FileCardNew(file: MockFileItem) -> Element {
+    let total = (file.add + file.del) as f32 + 0.001;
+    let add_pct = ((file.add as f32 / total) * 100.0).round() as i32;
+    let del_pct = ((file.del as f32 / total) * 100.0).round() as i32;
+    
+    // Split path into filename and directory
+    let parts: Vec<&str> = file.name.split('/').collect();
+    let filename = parts.last().unwrap_or(&"");
+    let directory = if parts.len() > 1 {
+        parts[..parts.len()-1].join("/")
+    } else {
+        ".".to_string()
+    };
+    
+    rsx! {
+        button {
+            class: "fl-file-card focus-ring",
+            // onclick would open diff modal in Phase 7
+            
+            // File header - JSX lines 236-242
+            div { class: "fl-file-card-head",
+                // File icon
+                svg {
+                    width: "13",
+                    height: "13",
+                    view_box: "0 0 24 24",
+                    fill: "none",
+                    stroke: "currentColor",
+                    stroke_width: "2",
+                    stroke_linecap: "round",
+                    stroke_linejoin: "round",
+                    style: "opacity: 0.55; flex-shrink: 0;",
+                    path { d: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" }
+                    polyline { points: "14 2 14 8 20 8" }
+                }
+                div { style: "min-width: 0; flex: 1;",
+                    div { 
+                        class: "fl-file-name truncate",
+                        title: "{file.name}",
+                        "{filename}"
+                    }
+                    div { 
+                        class: "fl-file-path truncate",
+                        title: "{file.name}",
+                        "{directory}"
+                    }
+                }
+            }
+            
+            // File stats - JSX lines 243-250
+            div { class: "fl-file-stats",
+                span { class: "mono", style: "font-size: 11px; color: #34d399;", "+{file.add}" }
+                span { class: "mono", style: "font-size: 11px; color: #f87171;", "-{file.del}" }
+                div { class: "fl-file-bar",
+                    div { style: "width: {add_pct}%; height: 100%; background: #34d399; display: inline-block; vertical-align: top;" }
+                    div { style: "width: {del_pct}%; height: 100%; background: #f87171; display: inline-block; vertical-align: top;" }
+                }
+            }
         }
     }
 }
