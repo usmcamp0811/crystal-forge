@@ -4202,12 +4202,12 @@ mod tests {
 //    - Handle loading/error states with appropriate UI
 //    - Map system_count from i64 to i32 for display
 //
-// 2. Replace mock_commits_for_flake() with FlakeTimeline API
+// 2. Replace static commit samples with FlakeTimeline API data
 //    - Use fetch_flake_timelines_for_ids([flake.id])
 //    - Map FlakeCommit to commit list structure
 //    - Extract hash (first 7 chars), message, author, committed_at
 //
-// 3. Replace mock_files_for_commit() with fetch_commit_diff()
+// 3. Replace static file samples with fetch_commit_diff()
 //    - Call fetch_commit_diff(flake_id, commit_hash)
 //    - Parse unified diff to extract file list with add/del stats
 //    - Use existing diff parsing logic in DiffModalNew
@@ -5566,7 +5566,7 @@ fn FlakeTrayNew(
                         }
                     } else {
                         div { class: "empty", style: "margin: 32px;",
-                            "No commits yet for this flake."
+                            "No commits found for this flake."
                         }
                     }
                 }
@@ -5607,7 +5607,7 @@ fn CommitsListNew(
     
     for commit in &commits {
         let time_lower = commit.at.to_lowercase();
-        if time_lower.contains("h ago") || time_lower.contains("now") || time_lower.contains("min ago") {
+        if time_lower.contains("h ago") || time_lower.contains("now") || time_lower.contains("m ago") {
             today.push(commit.clone());
         } else if time_lower.starts_with("1d") || time_lower.starts_with("2d") || 
                   time_lower.starts_with("3d") || time_lower.starts_with("4d") || 
