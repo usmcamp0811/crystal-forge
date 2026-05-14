@@ -4240,15 +4240,13 @@ pub fn FlakesListViewNew() -> Element {
     let mut search_query = use_signal(String::new);
     let mut selected_flake = use_signal(|| None::<MockFlakeItem>);
 
-    let flakes_resource = use_resource(|| async move {
-        fetch_flakes().await.unwrap_or_default()
-    });
+    let flakes_resource = use_resource(|| async move { fetch_flakes().await });
 
-    let raw_flakes = flakes_resource
-        .read()
-        .as_ref()
-        .cloned()
-        .unwrap_or_default();
+    let (raw_flakes, load_error, loading) = match flakes_resource.read().as_ref() {
+        Some(Ok(items)) => (items.clone(), None, false),
+        Some(Err(err)) => (Vec::new(), Some(err.to_string()), false),
+        None => (Vec::new(), None, true),
+    };
     let all_flakes: Vec<MockFlakeItem> = raw_flakes.iter().map(map_registry_flake_to_view).collect();
 
     let q = search_query.read().to_lowercase();
@@ -4392,15 +4390,29 @@ pub fn FlakesListViewNew() -> Element {
                 span { class: "filter-count", "{flake_count} flakes" }
             }
             
-            // Table or Cards view based on mode
-            {
-                let mode: &str = &view_mode.read();
-                let selected_id = selected_flake.read().as_ref().map(|f| f.id);
-                
-                if mode == "table" {
-                    rsx! { FlakeTableNew { flakes: filtered_flakes.clone(), selected_id, on_select: move |f| selected_flake.set(Some(f)) } }
-                } else {
-                    rsx! { FlakeCardsNew { flakes: filtered_flakes.clone(), selected_id, on_select: move |f| selected_flake.set(Some(f)) } }
+            if loading {
+                div { class: "card", style: "padding: 18px; color: var(--cf-text-secondary);",
+                    "Loading flakes..."
+                }
+            } else if let Some(error) = load_error {
+                div { class: "card", style: "padding: 18px; border-color: rgba(248,113,113,0.35);",
+                    div { class: "sd-callout sd-callout-danger",
+                        div { style: "font-size: 12px;",
+                            "Failed to load flakes: {error}"
+                        }
+                    }
+                }
+            } else {
+                // Table or Cards view based on mode
+                {
+                    let mode: &str = &view_mode.read();
+                    let selected_id = selected_flake.read().as_ref().map(|f| f.id);
+                    
+                    if mode == "table" {
+                        rsx! { FlakeTableNew { flakes: filtered_flakes.clone(), selected_id, on_select: move |f| selected_flake.set(Some(f)) } }
+                    } else {
+                        rsx! { FlakeCardsNew { flakes: filtered_flakes.clone(), selected_id, on_select: move |f| selected_flake.set(Some(f)) } }
+                    }
                 }
             }
             
@@ -5058,14 +5070,12 @@ fn FlakeTrayNew(flake: MockFlakeItem, on_close: EventHandler<()>) -> Element {
         // JSX: <div className="fl-tray-backdrop" onClick={onClose}/>
         div {
             class: "fl-tray-backdrop",
-            style: "position: fixed; inset: 0; z-index: 80; background: rgba(2, 8, 23, 0.72);",
             onclick: move |_| on_close.call(())
         }
         
         // JSX: <aside className="fl-tray" role="dialog" aria-label={...}>
         aside {
             class: "fl-tray",
-            style: "position: fixed; top: 0; right: 0; height: 100vh; width: min(920px, 92vw); z-index: 81; display: flex; flex-direction: column;",
             role: "dialog",
             "aria-label": "{flake.name} commits",
             
