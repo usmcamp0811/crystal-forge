@@ -5364,9 +5364,14 @@ fn FlakeTrayNew(
     on_sync: EventHandler<i32>,
     on_close: EventHandler<()>,
 ) -> Element {
+    const INITIAL_VISIBLE_COMMITS: usize = 100;
+    const LOAD_MORE_STEP: usize = 100;
+
     let mut selected_commit = use_signal(|| commits.first().cloned());
     let mut commit_query = use_signal(String::new);
     let mut selected_file = use_signal(|| None::<MockFileItem>);
+    let mut visible_limit = use_signal(|| INITIAL_VISIBLE_COMMITS);
+    let commits_scroll_id = format!("fl-tray-commits-{}", flake.id);
     let query = commit_query.read().trim().to_lowercase();
     let filtered_commits = if query.is_empty() {
         commits.clone()
@@ -5381,6 +5386,48 @@ fn FlakeTrayNew(
             .cloned()
             .collect::<Vec<_>>()
     };
+    let visible_commits: Vec<MockCommitItem> = filtered_commits
+        .iter()
+        .take((*visible_limit.read()).min(filtered_commits.len()))
+        .cloned()
+        .collect();
+    let has_more_commits = visible_commits.len() < filtered_commits.len();
+    {
+        let commits_scroll_id = commits_scroll_id.clone();
+        let mut visible_limit = visible_limit.clone();
+        let total_commits = filtered_commits.len();
+        use_effect(move || {
+            let Some(window) = window() else {
+                return;
+            };
+            let Some(document) = window.document() else {
+                return;
+            };
+            let commits_scroll_id_for_handler = commits_scroll_id.clone();
+
+            let handler = Closure::<dyn FnMut()>::new(move || {
+                if *visible_limit.read() >= total_commits {
+                    return;
+                }
+                let Some(element) = document.get_element_by_id(&commits_scroll_id_for_handler) else {
+                    return;
+                };
+                let scroll_top = element.scroll_top();
+                let client_height = element.client_height();
+                let scroll_height = element.scroll_height();
+                if scroll_top + client_height + 96 >= scroll_height {
+                    let next = *visible_limit.read() + LOAD_MORE_STEP;
+                    visible_limit.set(next.min(total_commits));
+                }
+            });
+
+            let _ = window.set_interval_with_callback_and_timeout_and_arguments_0(
+                handler.as_ref().unchecked_ref(),
+                180,
+            );
+            handler.forget();
+        });
+    }
     let selected_hash = selected_commit
         .read()
         .as_ref()
@@ -5486,7 +5533,9 @@ fn FlakeTrayNew(
             // Body: Two-pane layout - JSX lines 136-192 (commit list)
             div { class: "fl-tray-body",
                 // Left pane: Commit list with timeline
-                nav { class: "fl-tray-commits",
+                nav {
+                    class: "fl-tray-commits",
+                    id: "{commits_scroll_id}",
                     // Search bar - JSX lines 140-150
                     div { class: "fl-tray-commits-search",
                         // Search icon
@@ -5507,7 +5556,10 @@ fn FlakeTrayNew(
                             class: "input focus-ring",
                             placeholder: "Filter commits…",
                             value: "{commit_query}",
-                            oninput: move |evt| commit_query.set(evt.value().clone()),
+                            oninput: move |evt| {
+                                commit_query.set(evt.value().clone());
+                                visible_limit.set(INITIAL_VISIBLE_COMMITS);
+                            },
                             style: "background: transparent; border: none; padding: 4px 0; font-size: 12px; flex: 1;"
                         }
                         span { 
@@ -5523,7 +5575,7 @@ fn FlakeTrayNew(
                         div { class: "empty", style: "margin: 12px;", "Unable to load commits: {err}" }
                     } else {
                         CommitsListNew {
-                            commits: filtered_commits,
+                            commits: visible_commits,
                             selected_commit: active_selected_commit.clone(),
                             on_select: move |commit| {
                                 selected_file.set(None);
@@ -5577,34 +5629,13 @@ fn CommitsListNew(
     selected_commit: Option<MockCommitItem>,
     on_select: EventHandler<MockCommitItem>
 ) -> Element {
-    const INITIAL_VISIBLE_COMMITS: usize = 100;
-    const LOAD_MORE_STEP: usize = 100;
-
-    let mut visible_limit = use_signal(|| INITIAL_VISIBLE_COMMITS);
-    {
-        let total = commits.len();
-        let mut visible_limit = visible_limit.clone();
-        use_effect(move || {
-            let current = *visible_limit.read();
-            if current > total {
-                visible_limit.set(total);
-            }
-        });
-    }
-
-    let visible_commits: Vec<MockCommitItem> = commits
-        .iter()
-        .take((*visible_limit.read()).min(commits.len()))
-        .cloned()
-        .collect();
-
     // Group commits by time bucket (Today, This week, Earlier)
     let mut today = Vec::new();
     let mut this_week = Vec::new();
     let mut earlier = Vec::new();
     
     let now = Utc::now();
-    for commit in &visible_commits {
+    for commit in &commits {
         let age = now.signed_duration_since(commit.committed_at);
         if age < Duration::days(1) {
             today.push(commit.clone());
@@ -5653,17 +5684,6 @@ fn CommitsListNew(
         if commits.is_empty() {
             div { class: "empty", style: "margin: 24px;",
                 "No commits match this filter."
-            }
-        } else if visible_commits.len() < commits.len() {
-            div { style: "padding: 10px 16px 18px;",
-                button {
-                    class: "btn btn-ghost focus-ring xs",
-                    onclick: move |_| {
-                        let next = *visible_limit.read() + LOAD_MORE_STEP;
-                        visible_limit.set(next.min(commits.len()));
-                    },
-                    "Load more commits ({visible_commits.len()}/{commits.len()})"
-                }
             }
         }
     }
