@@ -4239,11 +4239,39 @@ pub fn FlakesListViewNew() -> Element {
     let mut view_mode = use_signal(|| "table");
     let mut search_query = use_signal(String::new);
     let mut selected_flake = use_signal(|| None::<MockFlakeItem>);
-    
-    // Mock data for testing
-    let flake_count = 3;
-    let total_systems = 42;
-    let synced_count = 2;
+
+    let flakes_resource = use_resource(|| async move {
+        fetch_flakes().await.unwrap_or_default()
+    });
+
+    let raw_flakes = flakes_resource
+        .read()
+        .as_ref()
+        .cloned()
+        .unwrap_or_default();
+    let all_flakes: Vec<MockFlakeItem> = raw_flakes.iter().map(map_registry_flake_to_view).collect();
+
+    let q = search_query.read().to_lowercase();
+    let filtered_flakes: Vec<MockFlakeItem> = if q.trim().is_empty() {
+        all_flakes.clone()
+    } else {
+        all_flakes
+            .iter()
+            .filter(|flake| {
+                flake.name.to_lowercase().contains(&q)
+                    || flake.url.to_lowercase().contains(&q)
+                    || flake.branch.to_lowercase().contains(&q)
+            })
+            .cloned()
+            .collect()
+    };
+
+    let flake_count = filtered_flakes.len();
+    let total_systems: i32 = filtered_flakes.iter().map(|f| f.system_count).sum();
+    let synced_count = filtered_flakes
+        .iter()
+        .filter(|f| f.status == "synced")
+        .count();
     
     rsx! {
         // JSX: <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
@@ -4366,14 +4394,13 @@ pub fn FlakesListViewNew() -> Element {
             
             // Table or Cards view based on mode
             {
-                let mock_flakes = mock_flakes_data();
                 let mode: &str = &view_mode.read();
                 let selected_id = selected_flake.read().as_ref().map(|f| f.id);
                 
                 if mode == "table" {
-                    rsx! { FlakeTableNew { flakes: mock_flakes, selected_id, on_select: move |f| selected_flake.set(Some(f)) } }
+                    rsx! { FlakeTableNew { flakes: filtered_flakes.clone(), selected_id, on_select: move |f| selected_flake.set(Some(f)) } }
                 } else {
-                    rsx! { FlakeCardsNew { flakes: mock_flakes, selected_id, on_select: move |f| selected_flake.set(Some(f)) } }
+                    rsx! { FlakeCardsNew { flakes: filtered_flakes.clone(), selected_id, on_select: move |f| selected_flake.set(Some(f)) } }
                 }
             }
             
@@ -4409,6 +4436,25 @@ struct MockFlakeItem {
     environment: String,
     error_msg: Option<String>,
     total_commits: i32,
+}
+
+fn map_registry_flake_to_view(item: &FlakeRegistryItem) -> MockFlakeItem {
+    MockFlakeItem {
+        id: item.id,
+        name: item.name.clone(),
+        description: "Flake repository".to_string(),
+        status: "synced".to_string(),
+        url: item.repo_url.clone(),
+        branch: item.branch.clone(),
+        system_count: item.system_count as i32,
+        latest_commit: "-".to_string(),
+        latest_message: "No commit metadata loaded".to_string(),
+        latest_author: "-".to_string(),
+        last_sync_at: "-".to_string(),
+        environment: "unknown".to_string(),
+        error_msg: None,
+        total_commits: 0,
+    }
 }
 
 #[allow(dead_code)]
@@ -5012,12 +5058,14 @@ fn FlakeTrayNew(flake: MockFlakeItem, on_close: EventHandler<()>) -> Element {
         // JSX: <div className="fl-tray-backdrop" onClick={onClose}/>
         div {
             class: "fl-tray-backdrop",
+            style: "position: fixed; inset: 0; z-index: 80; background: rgba(2, 8, 23, 0.72);",
             onclick: move |_| on_close.call(())
         }
         
         // JSX: <aside className="fl-tray" role="dialog" aria-label={...}>
         aside {
             class: "fl-tray",
+            style: "position: fixed; top: 0; right: 0; height: 100vh; width: min(920px, 92vw); z-index: 81; display: flex; flex-direction: column;",
             role: "dialog",
             "aria-label": "{flake.name} commits",
             
