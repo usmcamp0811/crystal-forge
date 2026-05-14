@@ -4232,8 +4232,10 @@ mod tests {
 // The UI structure is complete and matches the JSX design pixel-perfectly.
 // All components compile and render correctly with mock data.
 //
-#[allow(dead_code)]
-fn FlakesListViewNew() -> Element {
+/// FlakesListViewNew - Pixel-perfect rebuild matching JSX design mockup.
+/// Uses mock data initially. See inline documentation for API integration guide.
+#[component]
+pub fn FlakesListViewNew() -> Element {
     let mut view_mode = use_signal(|| "table");
     let mut search_query = use_signal(String::new);
     let mut selected_flake = use_signal(|| None::<MockFlakeItem>);
