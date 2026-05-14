@@ -4241,55 +4241,15 @@ pub fn FlakesListViewNew() -> Element {
         let _nonce = *reload_nonce.read();
         async move { fetch_flakes().await }
     });
-    let timelines_resource = use_resource(move || {
-        let _nonce = *reload_nonce.read();
-        async move { fetch_flake_timelines().await }
-    });
 
     let (raw_flakes, load_error, loading) = match flakes_resource.read().as_ref() {
         Some(Ok(items)) => (items.clone(), None, false),
         Some(Err(err)) => (Vec::new(), Some(err.to_string()), false),
         None => (Vec::new(), None, true),
     };
-    let (timeline_items, timelines_loading, timelines_error) = match timelines_resource.read().as_ref() {
-        Some(Ok(items)) => (items.clone(), false, None),
-        Some(Err(err)) => (Vec::new(), false, Some(err.to_string())),
-        None => (Vec::new(), true, None),
-    };
-
-    let mut commit_map: HashMap<i32, Vec<MockCommitItem>> = HashMap::new();
-    for timeline in &timeline_items {
-        commit_map.insert(
-            timeline.flake_id,
-            map_timeline_commits_to_view(&timeline.commits),
-        );
-    }
-
     let all_flakes: Vec<MockFlakeItem> = raw_flakes
         .iter()
-        .map(|item| {
-            let mut mapped = map_registry_flake_to_view(item);
-            if let Some(commits) = commit_map.get(&item.id) {
-                if let Some(latest) = commits.first() {
-                    mapped.latest_commit = latest.sha.clone();
-                    mapped.latest_message = latest.msg.clone();
-                    mapped.latest_author = latest.author.clone();
-                    mapped.last_sync_at = latest.at.clone();
-                    mapped.total_commits = commits.len() as i32;
-                    mapped.status = if latest.eval_status.as_deref() == Some("failed")
-                        || latest.build_status.as_deref() == Some("failed")
-                    {
-                        "error".to_string()
-                    } else if matches!(latest.build_status.as_deref(), Some("building") | Some("pending"))
-                    {
-                        "syncing".to_string()
-                    } else {
-                        "synced".to_string()
-                    };
-                }
-            }
-            mapped
-        })
+        .map(map_registry_flake_to_view)
         .collect();
 
     let q = search_query.read().to_lowercase();
@@ -4317,6 +4277,7 @@ pub fn FlakesListViewNew() -> Element {
     let selected_flake_id_for_timeline = selected_flake_value.as_ref().map(|f| f.id);
     let selected_timeline_resource = use_resource(move || {
         let flake_id = selected_flake_id_for_timeline;
+        let _nonce = *reload_nonce.read();
         async move {
             if let Some(id) = flake_id {
                 fetch_flake_timelines_for_ids(&[id]).await
@@ -4546,16 +4507,10 @@ pub fn FlakesListViewNew() -> Element {
                         Some(Err(err)) => Some(err.to_string()),
                         _ => None,
                     };
-                    let fallback_commits = commit_map.get(&flake.id).cloned().unwrap_or_default();
-                    let tray_commits = if !selected_direct_commits.is_empty() {
-                        selected_direct_commits
-                    } else {
-                        fallback_commits
-                    };
-                    let tray_commits_loading =
-                        selected_direct_loading || (timelines_loading && tray_commits.is_empty());
+                    let tray_commits = selected_direct_commits;
+                    let tray_commits_loading = selected_direct_loading;
                     let tray_commits_error = if tray_commits.is_empty() {
-                        selected_direct_error.or_else(|| timelines_error.clone())
+                        selected_direct_error
                     } else {
                         None
                     };
