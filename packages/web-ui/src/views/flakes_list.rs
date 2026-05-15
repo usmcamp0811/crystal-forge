@@ -2451,24 +2451,28 @@ fn EditFlakeDialog(
 
     rsx! {
         div {
-            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
+            class: "modal-backdrop",
+            style: "z-index: 90;",
             onclick: move |_| on_cancel.call(()),
             div {
-                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6 cf-modal-panel-44",
+                class: "modal",
+                style: "width: min(620px, 96vw); max-height: 92vh;",
                 onclick: |evt| evt.stop_propagation(),
-                h3 {
-                    class: "text-lg font-semibold text-white mb-2",
-                    "Edit Flake"
+                div { class: "modal-head",
+                    h2 {
+                        "Edit {draft.name}"
+                    }
+                    p {
+                        "Update flake registration. URL changes will trigger a re-clone."
+                    }
                 }
-                p {
-                    class: "text-sm {theme::text::SECONDARY} mb-4",
-                    "Update flake name and repository URL."
-                }
+
                 div {
-                    class: "space-y-4",
+                    class: "modal-body",
+                    style: "overflow-y: auto;",
                     label {
-                        class: "space-y-2 block",
-                        span { class: "text-xs uppercase tracking-wide text-gray-500", "Flake Name" }
+                        class: "field",
+                        span { class: "text-xs uppercase tracking-wide {theme::text::SECONDARY}", "Flake Name" }
                         input {
                             class: "w-full rounded-lg px-3 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
                             value: "{draft.name}",
@@ -2480,8 +2484,8 @@ fn EditFlakeDialog(
                         }
                     }
                     label {
-                        class: "space-y-2 block",
-                        span { class: "text-xs uppercase tracking-wide text-gray-500", "Repository URL" }
+                        class: "field",
+                        span { class: "text-xs uppercase tracking-wide {theme::text::SECONDARY}", "Repository URL" }
                         input {
                             class: "w-full rounded-lg px-3 py-2 text-sm font-mono {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
                             value: "{draft.repo_url}",
@@ -2493,8 +2497,8 @@ fn EditFlakeDialog(
                         }
                     }
                     label {
-                        class: "space-y-2 block",
-                        span { class: "text-xs uppercase tracking-wide text-gray-500", "Branch (optional)" }
+                        class: "field",
+                        span { class: "text-xs uppercase tracking-wide {theme::text::SECONDARY}", "Branch (optional)" }
                         input {
                             class: "w-full rounded-lg px-3 py-2 text-sm font-mono {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
                             value: "{draft.branch}",
@@ -2507,8 +2511,8 @@ fn EditFlakeDialog(
                         }
                     }
                     label {
-                        class: "space-y-2 block",
-                        span { class: "text-xs uppercase tracking-wide text-gray-500", "Build Scope" }
+                        class: "field",
+                        span { class: "text-xs uppercase tracking-wide {theme::text::SECONDARY}", "Build Scope" }
                         select {
                             class: "w-full rounded-lg px-3 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
                             value: "{draft.build_scope}",
@@ -2520,8 +2524,7 @@ fn EditFlakeDialog(
                             option { value: "cf_systems_only", "Only Crystal Forge systems" }
                             option { value: "all_configs", "All nixosConfigurations in flake" }
                         }
-                        p {
-                            class: "text-xs {theme::text::SECONDARY}",
+                        p { class: "help",
                             "Use all configurations when you want Crystal Forge to evaluate every exported system, even if it is not registered yet."
                         }
                     }
@@ -2547,17 +2550,18 @@ fn EditFlakeDialog(
                         p { class: "text-sm text-red-300", "{message}" }
                     }
                 }
+
                 div {
-                    class: "flex gap-3 mt-6",
+                    class: "modal-foot",
                     button {
-                        class: "flex-1 px-4 py-2 rounded-lg font-medium text-sm transition-colors bg-gray-700 hover:bg-gray-600 text-white",
+                        class: "btn btn-ghost focus-ring",
                         onclick: move |_| on_cancel.call(()),
                         "Cancel"
                     }
                     button {
-                        class: "flex-1 px-4 py-2 rounded-lg font-medium text-sm text-white {theme::interactive::PRIMARY_BTN}",
+                        class: "btn btn-primary focus-ring",
                         onclick: move |_| on_submit.call(()),
-                        "Save Changes"
+                        "Save changes"
                     }
                 }
             }
