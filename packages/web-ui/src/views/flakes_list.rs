@@ -4129,13 +4129,23 @@ fn extract_history_rewrite_conflict(
 ) -> Option<(i32, String)> {
     let flake_id = selected_flake_id?;
     match error {
-        ApiClientError::Status { code, body }
-            if *code == 409
-                && (body.to_ascii_lowercase().contains("history rewrite")
-                    || body
-                        .to_ascii_lowercase()
-                        .contains("history_rewrite_detected")) =>
+        ApiClientError::Status { code, body } =>
         {
+            let body_lower = body.to_ascii_lowercase();
+            let rewrite_marker = body_lower.contains("history rewrite")
+                || body_lower.contains("history_rewrite_detected");
+            let sync_failure_marker = body_lower.contains("failed to sync")
+                || body_lower.contains("failed to fetch diff for commit")
+                || body_lower.contains("force push")
+                || body_lower.contains("non-fast-forward");
+
+            let looks_like_rewrite_conflict = (*code == 409 && rewrite_marker)
+                || (*code == 500 && (rewrite_marker || sync_failure_marker));
+
+            if !looks_like_rewrite_conflict {
+                return None;
+            }
+
             #[cfg(target_arch = "wasm32")]
             console::warn_1(
                 &format!(
