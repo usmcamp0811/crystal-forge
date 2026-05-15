@@ -2446,7 +2446,6 @@ fn EditFlakeDialog(
     let draft_for_name = draft.clone();
     let draft_for_repo = draft.clone();
     let draft_for_branch = draft.clone();
-    let draft_for_build_scope = draft.clone();
     let draft_for_credentials = draft.clone();
     let mut environment = use_signal(|| "production".to_string());
     let mut description = use_signal(String::new);
@@ -2486,7 +2485,7 @@ fn EditFlakeDialog(
 
                 div {
                     class: "modal-body",
-                    style: "overflow-y: auto;",
+                    style: "overflow-y: auto; scrollbar-width: thin;",
                     label {
                         class: "field",
                         span { "Name" }
@@ -2553,24 +2552,6 @@ fn EditFlakeDialog(
                             value: "{description}",
                             placeholder: "Short description shown in the registry",
                             oninput: move |evt| description.set(evt.value()),
-                        }
-                    }
-
-                    div { class: "field",
-                        label { "Build scope" }
-                        select {
-                            class: "input focus-ring",
-                            value: "{draft.build_scope}",
-                            onchange: move |evt| {
-                                let mut next = draft_for_build_scope.clone();
-                                next.build_scope = evt.value();
-                                on_change.call(next);
-                            },
-                            option { value: "cf_systems_only", "Crystal Forge systems" }
-                            option { value: "all_configs", "All nixosConfigurations" }
-                        }
-                        p { class: "help",
-                            "Use all configurations when you want Crystal Forge to evaluate every exported system, even if it is not registered yet."
                         }
                     }
 
@@ -2734,24 +2715,37 @@ fn FlakeCredentialFields(
                 }
             }
 
-            if credential_type == "pat" || credential_type == "username_password" {
+            if credential_type == "pat" {
+                div { style: "display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: center;",
+                    span { style: "font-size: 13px; color: var(--cf-text-secondary);", "Token Username (optional)" }
+                    input {
+                        class: "input focus-ring",
+                        value: "{credential_username}",
+                        placeholder: "oauth2",
+                        oninput: move |evt| on_change.call(("credential_username".to_string(), evt.value())),
+                    }
+                }
+            }
+
+            if credential_type == "username_password" {
                 div { style: "display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: end;",
-                    div {
+                    label {
                         class: "field",
-                        label { "Saved HTTPS token" }
-                        select {
+                        span { "Username" }
+                        input {
                             class: "input focus-ring",
-                            option { "gitlab-ops (read_repository)" }
+                            value: "{credential_username}",
+                            oninput: move |evt| on_change.call(("credential_username".to_string(), evt.value())),
                         }
                     }
                     label {
                         class: "field",
-                        span { "Token Username (optional)" }
+                        span { "Password" }
                         input {
                             class: "input focus-ring",
-                            value: "{credential_username}",
-                            placeholder: "oauth2",
-                            oninput: move |evt| on_change.call(("credential_username".to_string(), evt.value())),
+                            r#type: "password",
+                            value: "{credential_secret}",
+                            oninput: move |evt| on_change.call(("credential_secret".to_string(), evt.value())),
                         }
                     }
                 }
@@ -2764,18 +2758,7 @@ fn FlakeCredentialFields(
                 }
             }
 
-            if credential_type == "username_password" {
-                label {
-                    class: "field",
-                    span { "Password" }
-                    input {
-                        class: "input focus-ring",
-                        r#type: "password",
-                        value: "{credential_secret}",
-                        oninput: move |evt| on_change.call(("credential_secret".to_string(), evt.value())),
-                    }
-                }
-            }
+            
         }
     }
 }
