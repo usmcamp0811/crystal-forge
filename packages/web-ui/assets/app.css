@@ -1049,6 +1049,11 @@ html, body {
   font-family: var(--font-mono);
 }
 
+/* Global scrollbar styling (subtle) */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--cf-card-border); border-radius: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+
 /* Sidebar navigation */
 .app {
   display: grid;
@@ -3066,7 +3071,18 @@ html[data-theme="light"] .sd-nix {
   background: var(--cf-page-bg);
   flex: 1;
   scroll-behavior: smooth;
+  /* Firefox scrollbar styling */
+  scrollbar-width: thin;
+  scrollbar-color: var(--cf-card-border) transparent;
 }
+.diff-modal-body::-webkit-scrollbar { width: 12px; height: 12px; }
+.diff-modal-body::-webkit-scrollbar-track { background: var(--cf-page-bg); }
+.diff-modal-body::-webkit-scrollbar-thumb {
+  background: var(--cf-card-border);
+  border-radius: 6px;
+  border: 3px solid var(--cf-page-bg);
+}
+.diff-modal-body::-webkit-scrollbar-thumb:hover { background: var(--cf-text-muted); }
 
 .diff-table {
   border-collapse: collapse;

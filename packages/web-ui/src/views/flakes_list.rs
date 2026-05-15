@@ -20,14 +20,14 @@ use web_sys::{Node, window};
 
 use crate::api::client::{
     ApiClientError, accept_flake_history_rewrite, create_flake, delete_flake,
-    delete_flake_credentials, fetch_commit_diff, fetch_cve_scan_status, fetch_flake_credentials,
-    fetch_flake_timeline_for_tray, fetch_flake_timelines, fetch_flake_timelines_for_ids,
-    fetch_flakes, put_flake_credentials, request_sync_all_flakes, request_sync_flake,
-    trigger_flake_config_cve_scan, update_flake,
+    delete_flake_credentials, fetch_commit_diff, fetch_cve_scan_status, fetch_environments,
+    fetch_flake_credentials, fetch_flake_timeline_for_tray, fetch_flake_timelines,
+    fetch_flake_timelines_for_ids, fetch_flakes, put_flake_credentials, request_sync_all_flakes,
+    request_sync_flake, trigger_flake_config_cve_scan, update_flake,
 };
 use crate::api::models::{
     BuildStatus as ApiBuildStatus, CreateFlakeCredentialRequest, CreateFlakeRequest,
-    FlakeCommitSystemPath, FlakeRegistryItem, FlakeTimeline, UpdateFlakeRequest,
+    EnvironmentSummary, FlakeCommitSystemPath, FlakeRegistryItem, FlakeTimeline, UpdateFlakeRequest,
 };
 use crate::components::layout::Card;
 use crate::components::notifications::{AlertBanner, AlertSeverity};
@@ -354,6 +354,13 @@ pub fn FlakesListView() -> Element {
 
     let current_flakes = flakes.read().clone();
     let environments = unique_environments(&current_flakes);
+    
+    // Fetch environments from database for edit dialog
+    let db_environments_resource = use_resource(|| async { fetch_environments().await });
+    let db_environments: Vec<EnvironmentSummary> = match db_environments_resource.read().as_ref() {
+        Some(Ok(envs)) => envs.clone(),
+        _ => Vec::new(),
+    };
 
     let filtered_flakes: Vec<FlakeListItem> = current_flakes
         .into_iter()
@@ -811,6 +818,7 @@ pub fn FlakesListView() -> Element {
                 EditFlakeDialog {
                     draft: editing,
                     error: edit_error,
+                    environments: db_environments.clone(),
                     on_cancel: move |_| {
                         editing_flake.set(None);
                         edit_error.set(None);
@@ -2444,6 +2452,7 @@ fn HistoryRewriteDialog(
 fn EditFlakeDialog(
     draft: EditFlakeDraft,
     error: Signal<Option<String>>,
+    environments: Vec<EnvironmentSummary>,
     on_change: EventHandler<EditFlakeDraft>,
     on_submit: EventHandler<()>,
     on_cancel: EventHandler<()>,
@@ -2452,7 +2461,9 @@ fn EditFlakeDialog(
     let draft_for_repo = draft.clone();
     let draft_for_branch = draft.clone();
     let draft_for_credentials = draft.clone();
-    let mut environment = use_signal(|| "production".to_string());
+    // Default to first environment or "production" if none available
+    let default_env = environments.first().map(|e| e.name.clone()).unwrap_or_else(|| "production".to_string());
+    let mut environment = use_signal(move || default_env.clone());
     let mut description = use_signal(String::new);
     let mut auto_sync = use_signal(|| true);
     let mut sync_interval = use_signal(|| "5m".to_string());
@@ -2541,11 +2552,16 @@ fn EditFlakeDialog(
                                 class: "input focus-ring",
                                 value: "{environment}",
                                 onchange: move |evt| environment.set(evt.value()),
-                                option { value: "production", "production" }
-                                option { value: "staging", "staging" }
-                                option { value: "dev", "dev" }
-                                option { value: "edge", "edge" }
-                                option { value: "lab", "lab" }
+                                if environments.is_empty() {
+                                    option { value: "production", "production" }
+                                } else {
+                                    for env in &environments {
+                                        option { 
+                                            value: "{env.name}",
+                                            "{env.name}"
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -4428,6 +4444,12 @@ pub fn FlakesListViewNew() -> Element {
         let _nonce = *reload_nonce.read();
         async move { fetch_flake_timelines().await }
     });
+    // Fetch environments for the edit dialog dropdown
+    let environments_resource = use_resource(|| async { fetch_environments().await });
+    let db_environments: Vec<EnvironmentSummary> = match environments_resource.read().as_ref() {
+        Some(Ok(envs)) => envs.clone(),
+        _ => Vec::new(),
+    };
 
     let (raw_flakes, load_error, loading) = match flakes_resource.read().as_ref() {
         Some(Ok(items)) => (items.clone(), None, false),
@@ -4933,6 +4955,7 @@ pub fn FlakesListViewNew() -> Element {
                 EditFlakeDialog {
                     draft: editing,
                     error: edit_error,
+                    environments: db_environments.clone(),
                     on_cancel: move |_| {
                         editing_flake.set(None);
                         edit_error.set(None);
@@ -5094,6 +5117,41 @@ fn map_diff_to_file_cards(diff: &str) -> Vec<MockFileItem> {
             }
         })
         .collect()
+}
+
+/// Construct a URL to view a file at a specific commit on the git remote.
+/// Supports GitLab, GitHub, and generic git URLs.
+fn construct_git_file_url(repo_url: &str, commit_hash: &str, file_path: &str) -> String {
+    // Normalize the repo URL (remove .git suffix, convert SSH to HTTPS)
+    let normalized = repo_url
+        .trim()
+        .trim_end_matches('/')
+        .trim_end_matches(".git");
+    
+    // Convert SSH URLs to HTTPS
+    let https_url = if normalized.starts_with("git@") {
+        // git@gitlab.com:owner/repo -> https://gitlab.com/owner/repo
+        normalized
+            .replacen("git@", "https://", 1)
+            .replacen(':', "/", 1)
+    } else {
+        normalized.to_string()
+    };
+    
+    // Determine the URL pattern based on the host
+    if https_url.contains("gitlab.com") || https_url.contains("gitlab.") {
+        // GitLab: https://gitlab.com/owner/repo/-/blob/{commit}/{path}
+        format!("{}/-/blob/{}/{}", https_url, commit_hash, file_path)
+    } else if https_url.contains("github.com") {
+        // GitHub: https://github.com/owner/repo/blob/{commit}/{path}
+        format!("{}/blob/{}/{}", https_url, commit_hash, file_path)
+    } else if https_url.contains("bitbucket.org") {
+        // Bitbucket: https://bitbucket.org/owner/repo/src/{commit}/{path}
+        format!("{}/src/{}/{}", https_url, commit_hash, file_path)
+    } else {
+        // Generic fallback - try GitLab-style URL
+        format!("{}/-/blob/{}/{}", https_url, commit_hash, file_path)
+    }
 }
 
 fn extract_diff_block_for_file_label(diff: &str, target_label: &str) -> Option<String> {
@@ -5652,9 +5710,9 @@ fn FlakeCardsNew(
                                 EnvBadgeNew { env: flake.environment.clone() }
                             }
                             
-                            // Description
+                            // Description (limit to 2 lines)
                             div { 
-                                style: "font-size: 12px; color: var(--cf-text-secondary);",
+                                style: "font-size: 12px; color: var(--cf-text-secondary); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;",
                                 "{flake.description}"
                             }
                             
@@ -6836,12 +6894,17 @@ fn DiffModalNew(
                             }
                         }
                         // Copy path button - JSX line 365
+                        // Constructs a URL to the file on the git remote
                         button {
                             class: "btn-icon focus-ring",
                             title: "Copy path",
                             onclick: {
-                                let path_to_copy = file.name.clone();
+                                let file_path = file.name.clone();
+                                let commit_hash = commit.full_hash.clone();
+                                let repo_url = flake.url.clone();
                                 move |_| {
+                                    // Construct the URL to the file on the git remote
+                                    let url_to_copy = construct_git_file_url(&repo_url, &commit_hash, &file_path);
                                     #[cfg(target_arch = "wasm32")]
                                     {
                                         use wasm_bindgen::JsCast;
@@ -6851,7 +6914,7 @@ fn DiffModalNew(
                                                 if let Ok(clipboard) = Reflect::get(&navigator, &JsValue::from_str("clipboard")) {
                                                     if let Ok(write_text) = Reflect::get(&clipboard, &JsValue::from_str("writeText")) {
                                                         if let Ok(function) = write_text.dyn_into::<Function>() {
-                                                            let _ = function.call1(&clipboard, &JsValue::from_str(&path_to_copy));
+                                                            let _ = function.call1(&clipboard, &JsValue::from_str(&url_to_copy));
                                                         }
                                                     }
                                                 }
