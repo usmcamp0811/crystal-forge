@@ -2448,6 +2448,10 @@ fn EditFlakeDialog(
     let draft_for_branch = draft.clone();
     let draft_for_build_scope = draft.clone();
     let draft_for_credentials = draft.clone();
+    let mut environment = use_signal(|| "production".to_string());
+    let mut description = use_signal(String::new);
+    let mut auto_sync = use_signal(|| true);
+    let mut sync_interval = use_signal(|| "5m".to_string());
 
     rsx! {
         div {
@@ -2460,6 +2464,19 @@ fn EditFlakeDialog(
                 onclick: |evt| evt.stop_propagation(),
                 div { class: "modal-head",
                     h2 {
+                        svg {
+                            width: "14",
+                            height: "14",
+                            view_box: "0 0 24 24",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            style: "margin-right: 6px; vertical-align: text-bottom;",
+                            circle { cx: "12", cy: "12", r: "3" }
+                            path { d: "M19.4 15a1.7 1.7 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.82-.33 1.7 1.7 0 0 0-1 1.52V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.52 1.7 1.7 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .33-1.82 1.7 1.7 0 0 0-1.52-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.52-1 1.7 1.7 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.82.33h.09a1.7 1.7 0 0 0 1-1.52V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.52 1.7 1.7 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.33 1.82v.09a1.7 1.7 0 0 0 1.52 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.52 1z" }
+                        }
                         "Edit {draft.name}"
                     }
                     p {
@@ -2472,10 +2489,11 @@ fn EditFlakeDialog(
                     style: "overflow-y: auto;",
                     label {
                         class: "field",
-                        span { class: "text-xs uppercase tracking-wide {theme::text::SECONDARY}", "Flake Name" }
+                        span { "Name" }
                         input {
-                            class: "w-full rounded-lg px-3 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
+                            class: "input focus-ring",
                             value: "{draft.name}",
+                            placeholder: "e.g. infrastructure",
                             oninput: move |evt| {
                                 let mut next = draft_for_name.clone();
                                 next.name = evt.value();
@@ -2485,10 +2503,12 @@ fn EditFlakeDialog(
                     }
                     label {
                         class: "field",
-                        span { class: "text-xs uppercase tracking-wide {theme::text::SECONDARY}", "Repository URL" }
+                        span { "Repository URL" }
                         input {
-                            class: "w-full rounded-lg px-3 py-2 text-sm font-mono {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
+                            class: "input focus-ring mono",
                             value: "{draft.repo_url}",
+                            placeholder: "git+ssh://git@gitlab.example.com/…",
+                            style: "font-size: 12px;",
                             oninput: move |evt| {
                                 let mut next = draft_for_repo.clone();
                                 next.repo_url = evt.value();
@@ -2496,38 +2516,64 @@ fn EditFlakeDialog(
                             }
                         }
                     }
-                    label {
-                        class: "field",
-                        span { class: "text-xs uppercase tracking-wide {theme::text::SECONDARY}", "Branch (optional)" }
-                        input {
-                            class: "w-full rounded-lg px-3 py-2 text-sm font-mono {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
-                            value: "{draft.branch}",
-                            placeholder: "main",
-                            oninput: move |evt| {
-                                let mut next = draft_for_branch.clone();
-                                next.branch = evt.value();
-                                on_change.call(next);
+                    div { style: "display: grid; grid-template-columns: 1fr 1fr; gap: 14px;",
+                        label {
+                            class: "field",
+                            span { "Branch" }
+                            input {
+                                class: "input focus-ring",
+                                value: "{draft.branch}",
+                                oninput: move |evt| {
+                                    let mut next = draft_for_branch.clone();
+                                    next.branch = evt.value();
+                                    on_change.call(next);
+                                }
+                            }
+                        }
+                        label {
+                            class: "field",
+                            span { "Environment" }
+                            select {
+                                class: "input focus-ring",
+                                value: "{environment}",
+                                onchange: move |evt| environment.set(evt.value()),
+                                option { value: "production", "production" }
+                                option { value: "staging", "staging" }
+                                option { value: "dev", "dev" }
+                                option { value: "edge", "edge" }
+                                option { value: "lab", "lab" }
                             }
                         }
                     }
-                    label {
-                        class: "field",
-                        span { class: "text-xs uppercase tracking-wide {theme::text::SECONDARY}", "Build Scope" }
+
+                    div { class: "field",
+                        label { "Description" }
+                        input {
+                            class: "input focus-ring",
+                            value: "{description}",
+                            placeholder: "Short description shown in the registry",
+                            oninput: move |evt| description.set(evt.value()),
+                        }
+                    }
+
+                    div { class: "field",
+                        label { "Build scope" }
                         select {
-                            class: "w-full rounded-lg px-3 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
+                            class: "input focus-ring",
                             value: "{draft.build_scope}",
                             onchange: move |evt| {
                                 let mut next = draft_for_build_scope.clone();
                                 next.build_scope = evt.value();
                                 on_change.call(next);
                             },
-                            option { value: "cf_systems_only", "Only Crystal Forge systems" }
-                            option { value: "all_configs", "All nixosConfigurations in flake" }
+                            option { value: "cf_systems_only", "Crystal Forge systems" }
+                            option { value: "all_configs", "All nixosConfigurations" }
                         }
                         p { class: "help",
                             "Use all configurations when you want Crystal Forge to evaluate every exported system, even if it is not registered yet."
                         }
                     }
+
                     FlakeCredentialFields {
                         credential_type: draft.credential_type.clone(),
                         credential_username: draft.credential_username.clone(),
@@ -2544,6 +2590,57 @@ fn EditFlakeDialog(
                                 _ => {}
                             }
                             on_change.call(next);
+                        }
+                    }
+
+                    div { style: "display: grid; grid-template-columns: 1fr 1fr; gap: 14px;",
+                        label {
+                            style: "display: flex; gap: 8px; align-items: center; font-size: 13px; cursor: pointer;",
+                            input {
+                                r#type: "checkbox",
+                                checked: *auto_sync.read(),
+                                onchange: move |evt| auto_sync.set(evt.checked()),
+                                style: "accent-color: var(--cf-brand-purple);",
+                            }
+                            span { "Auto-sync" }
+                        }
+                        div { class: "field",
+                            label { "Sync interval" }
+                            select {
+                                class: "input focus-ring",
+                                value: "{sync_interval}",
+                                onchange: move |evt| sync_interval.set(evt.value()),
+                                disabled: !*auto_sync.read(),
+                                option { value: "1m", "Every 1 min" }
+                                option { value: "5m", "Every 5 min" }
+                                option { value: "15m", "Every 15 min" }
+                                option { value: "1h", "Every hour" }
+                            }
+                        }
+                    }
+
+                    div { style: "margin-top: 10px; padding-top: 14px; border-top: 1px solid var(--cf-divider);",
+                        div {
+                            style: "font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--cf-text-muted); margin-bottom: 8px;",
+                            "Danger zone"
+                        }
+                        button {
+                            class: "btn btn-ghost focus-ring",
+                            style: "color: #f87171; border-color: rgba(248,113,113,0.3);",
+                            onclick: move |_| {},
+                            svg {
+                                width: "12",
+                                height: "12",
+                                view_box: "0 0 24 24",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                stroke_linecap: "round",
+                                stroke_linejoin: "round",
+                                style: "margin-right: 6px; vertical-align: text-bottom;",
+                                path { d: "M18 6 6 18M6 6l12 12" }
+                            }
+                            "Remove flake from registry"
                         }
                     }
                     if let Some(message) = error.read().clone() {
@@ -2580,31 +2677,35 @@ fn FlakeCredentialFields(
 ) -> Element {
     rsx! {
         div {
-            class: "rounded-lg border border-gray-700/80 bg-gray-950/40 p-4 space-y-3",
-            h4 { class: "text-sm font-semibold text-white", "Credentials" }
+            style: "margin-top: 8px; padding: 14px; border: 1px solid var(--cf-divider); border-radius: 10px; background: color-mix(in oklab, var(--cf-page-bg) 50%, var(--cf-card-bg));",
+            h4 { class: "text-sm font-semibold", "Repository credentials" }
             p {
                 class: "text-xs {theme::text::SECONDARY}",
                 "Configure repository access for private flakes. PAT, SSH key, and username/password are supported."
             }
-            label {
-                class: "space-y-2 block",
-                span { class: "text-xs uppercase tracking-wide text-gray-500", "Authentication Type" }
-                select {
-                    class: "w-full rounded-lg px-3 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
-                    value: "{credential_type}",
-                    onchange: move |evt| on_change.call(("credential_type".to_string(), evt.value())),
-                    option { value: "none", "No credentials" }
-                    option { value: "pat", "Personal access token" }
-                    option { value: "ssh_key", "SSH private key" }
-                    option { value: "username_password", "Username and password" }
+            div { class: "seg", style: "margin-bottom: 12px;",
+                button {
+                    class: if credential_type == "none" { "active" } else { "" },
+                    onclick: move |_| on_change.call(("credential_type".to_string(), "none".to_string())),
+                    "None (public)"
+                }
+                button {
+                    class: if credential_type == "ssh_key" { "active" } else { "" },
+                    onclick: move |_| on_change.call(("credential_type".to_string(), "ssh_key".to_string())),
+                    "SSH key"
+                }
+                button {
+                    class: if credential_type == "pat" || credential_type == "username_password" { "active" } else { "" },
+                    onclick: move |_| on_change.call(("credential_type".to_string(), "pat".to_string())),
+                    "HTTPS token"
                 }
             }
             if credential_type == "username_password" || credential_type == "pat" {
                 label {
-                    class: "space-y-2 block",
-                    span { class: "text-xs uppercase tracking-wide text-gray-500", if credential_type == "pat" { "Token Username (optional)" } else { "Username" } }
+                    class: "field",
+                    span { if credential_type == "pat" { "Token Username (optional)" } else { "Username" } }
                     input {
-                        class: "w-full rounded-lg px-3 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
+                        class: "input focus-ring",
                         value: "{credential_username}",
                         placeholder: if credential_type == "pat" { "oauth2 or git" } else { "username" },
                         oninput: move |evt| on_change.call(("credential_username".to_string(), evt.value())),
@@ -2613,10 +2714,10 @@ fn FlakeCredentialFields(
             }
             if credential_type == "ssh_key" {
                 label {
-                    class: "space-y-2 block",
-                    span { class: "text-xs uppercase tracking-wide text-gray-500", "SSH Username (optional)" }
+                    class: "field",
+                    span { "SSH Username (optional)" }
                     input {
-                        class: "w-full rounded-lg px-3 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
+                        class: "input focus-ring",
                         value: "{credential_ssh_username}",
                         placeholder: "git",
                         oninput: move |evt| on_change.call(("credential_ssh_username".to_string(), evt.value())),
@@ -2625,10 +2726,11 @@ fn FlakeCredentialFields(
             }
             if credential_type != "none" {
                 label {
-                    class: "space-y-2 block",
-                    span { class: "text-xs uppercase tracking-wide text-gray-500", if credential_type == "ssh_key" { "Private Key" } else if credential_type == "pat" { "Token Secret" } else { "Password" } }
+                    class: "field",
+                    span { if credential_type == "ssh_key" { "Private Key" } else if credential_type == "pat" { "Token Secret" } else { "Password" } }
                     textarea {
-                        class: "w-full min-h-[110px] rounded-lg px-3 py-2 text-sm font-mono {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
+                        class: "input focus-ring mono",
+                        style: "min-height: 110px;",
                         value: "{credential_secret}",
                         placeholder: if has_existing_secret { "Leave blank to keep existing secret" } else { "Paste secret value" },
                         oninput: move |evt| on_change.call(("credential_secret".to_string(), evt.value())),
