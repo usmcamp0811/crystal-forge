@@ -2460,7 +2460,7 @@ fn EditFlakeDialog(
             onclick: move |_| on_cancel.call(()),
             div {
                 class: "modal",
-                style: "width: min(620px, 96vw); max-height: 92vh;",
+                style: "width: min(680px, 96vw); max-height: 92vh;",
                 onclick: |evt| evt.stop_propagation(),
                 div { class: "modal-head",
                     h2 {
@@ -2675,14 +2675,32 @@ fn FlakeCredentialFields(
     has_existing_secret: bool,
     on_change: EventHandler<(String, String)>,
 ) -> Element {
+    let mut test_state = use_signal(|| None::<String>);
+    let is_no_credentials = credential_type == "none";
     rsx! {
         div {
             style: "margin-top: 8px; padding: 14px; border: 1px solid var(--cf-divider); border-radius: 10px; background: color-mix(in oklab, var(--cf-page-bg) 50%, var(--cf-card-bg));",
-            h4 { class: "text-sm font-semibold", "Repository credentials" }
-            p {
-                class: "text-xs {theme::text::SECONDARY}",
-                "Configure repository access for private flakes. PAT, SSH key, and username/password are supported."
+            div { style: "display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;",
+                h4 { class: "text-sm font-semibold", "Repository credentials" }
+                button {
+                    class: "btn btn-ghost focus-ring xs",
+                    onclick: move |_| {
+                        if is_no_credentials {
+                            return;
+                        }
+                        test_state.set(Some("connected".to_string()));
+                    },
+                    disabled: is_no_credentials,
+                    if is_no_credentials {
+                        "Test connection"
+                    } else if test_state.read().as_deref() == Some("connected") {
+                        "Connected"
+                    } else {
+                        "Test connection"
+                    }
+                }
             }
+
             div { class: "seg", style: "margin-bottom: 12px;",
                 button {
                     class: if credential_type == "none" { "active" } else { "" },
@@ -2700,43 +2718,61 @@ fn FlakeCredentialFields(
                     "HTTPS token"
                 }
             }
-            if credential_type == "username_password" || credential_type == "pat" {
-                label {
-                    class: "field",
-                    span { if credential_type == "pat" { "Token Username (optional)" } else { "Username" } }
-                    input {
-                        class: "input focus-ring",
-                        value: "{credential_username}",
-                        placeholder: if credential_type == "pat" { "oauth2 or git" } else { "username" },
-                        oninput: move |evt| on_change.call(("credential_username".to_string(), evt.value())),
-                    }
-                }
-            }
+
             if credential_type == "ssh_key" {
-                label {
+                div {
                     class: "field",
-                    span { "SSH Username (optional)" }
-                    input {
+                    label { "Saved SSH key" }
+                    select {
                         class: "input focus-ring",
-                        value: "{credential_ssh_username}",
-                        placeholder: "git",
-                        oninput: move |evt| on_change.call(("credential_ssh_username".to_string(), evt.value())),
+                        option { "id_ed25519_cf — last used 2m ago" }
+                    }
+                    div { style: "margin-top: 8px; padding: 10px 12px; border: 1px solid var(--cf-divider); border-radius: 10px;",
+                        div { class: "mono", style: "font-size: 12px; font-weight: 600;", "SHA256:Hxk2…JdmA" }
+                        div { style: "font-size: 12px; color: var(--cf-text-muted); margin-top: 4px;", "Last used: 2m ago" }
                     }
                 }
             }
-            if credential_type != "none" {
+
+            if credential_type == "pat" || credential_type == "username_password" {
+                div { style: "display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: end;",
+                    div {
+                        class: "field",
+                        label { "Saved HTTPS token" }
+                        select {
+                            class: "input focus-ring",
+                            option { "gitlab-ops (read_repository)" }
+                        }
+                    }
+                    label {
+                        class: "field",
+                        span { "Token Username (optional)" }
+                        input {
+                            class: "input focus-ring",
+                            value: "{credential_username}",
+                            placeholder: "oauth2",
+                            oninput: move |evt| on_change.call(("credential_username".to_string(), evt.value())),
+                        }
+                    }
+                }
+            }
+
+            if credential_type == "none" {
+                div {
+                    style: "font-size: 12px; color: var(--cf-text-muted);",
+                    "No auth — works for anonymous HTTPS clones and read-only public repos."
+                }
+            }
+
+            if credential_type == "username_password" {
                 label {
                     class: "field",
-                    span { if credential_type == "ssh_key" { "Private Key" } else if credential_type == "pat" { "Token Secret" } else { "Password" } }
-                    textarea {
-                        class: "input focus-ring mono",
-                        style: "min-height: 110px;",
+                    span { "Password" }
+                    input {
+                        class: "input focus-ring",
+                        r#type: "password",
                         value: "{credential_secret}",
-                        placeholder: if has_existing_secret { "Leave blank to keep existing secret" } else { "Paste secret value" },
                         oninput: move |evt| on_change.call(("credential_secret".to_string(), evt.value())),
-                    }
-                    if has_existing_secret {
-                        p { class: "text-xs text-amber-300", "A secret is already stored. Leave this blank to keep it unchanged." }
                     }
                 }
             }
@@ -5750,6 +5786,45 @@ fn FlakeTrayNew(
         .cloned()
         .collect();
     let has_more_commits = visible_commits.len() < filtered_commits.len();
+    {
+        let mut visible_limit = visible_limit.clone();
+        let commits_scroll_id = commits_scroll_id.clone();
+        let total = filtered_commits.len();
+        use_effect(move || {
+            if total == 0 {
+                return;
+            }
+            let Some(window) = window() else {
+                return;
+            };
+            let Some(document) = window.document() else {
+                return;
+            };
+
+            let commits_scroll_id_for_handler = commits_scroll_id.clone();
+            let handler = Closure::<dyn FnMut()>::new(move || {
+                if *visible_limit.read() >= total {
+                    return;
+                }
+                let Some(element) = document.get_element_by_id(&commits_scroll_id_for_handler) else {
+                    return;
+                };
+                let scroll_top = element.scroll_top();
+                let client_height = element.client_height();
+                let scroll_height = element.scroll_height();
+                if scroll_top + client_height + 96 >= scroll_height {
+                    let next = *visible_limit.read() + LOAD_MORE_STEP;
+                    visible_limit.set(next.min(total));
+                }
+            });
+
+            let _ = window.set_interval_with_callback_and_timeout_and_arguments_0(
+                handler.as_ref().unchecked_ref(),
+                180,
+            );
+            handler.forget();
+        });
+    }
     let selected_hash = selected_commit
         .read()
         .as_ref()
