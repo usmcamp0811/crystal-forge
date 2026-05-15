@@ -328,6 +328,8 @@ pub fn FlakesListView() -> Element {
     let mut flake_timelines = use_signal(Vec::<FlakeTimeline>::new);
     let mut show_add_form = use_signal(|| false);
     let mut add_error = use_signal(|| None::<String>);
+    let mut editing_flake = use_signal(|| None::<EditFlakeDraft>);
+    let mut edit_error = use_signal(|| None::<String>);
     let mut draft = use_signal(|| NewFlakeDraft {
         name: String::new(),
         repo_url: String::new(),
@@ -339,8 +341,6 @@ pub fn FlakesListView() -> Element {
         credential_ssh_username: String::new(),
     });
     let mut pending_remove = use_signal(|| None::<FlakeListItem>);
-    let mut editing_flake = use_signal(|| None::<EditFlakeDraft>);
-    let mut edit_error = use_signal(|| None::<String>);
     let mut refreshing_flake = use_signal(|| None::<i32>);
     let mut selected_history_flake = use_signal(|| None::<i32>);
     let mut selected_history_commit = use_signal(|| None::<String>);
@@ -4238,6 +4238,8 @@ pub fn FlakesListViewNew() -> Element {
     let mut reload_nonce = use_signal(|| 0u64);
     let mut show_add_form = use_signal(|| false);
     let mut add_error = use_signal(|| None::<String>);
+    let mut editing_flake = use_signal(|| None::<EditFlakeDraft>);
+    let mut edit_error = use_signal(|| None::<String>);
     let mut draft = use_signal(|| NewFlakeDraft {
         name: String::new(),
         repo_url: String::new(),
@@ -4659,11 +4661,45 @@ pub fn FlakesListViewNew() -> Element {
                             commits_loading: tray_commits_loading,
                             commits_error: tray_commits_error,
                             flake,
-                            on_edit: move |f: MockFlakeItem| {
-                                action_notice.set(Some(format!(
-                                    "Edit requested for {} (UI parity wiring in progress)",
-                                    f.name
-                                )));
+                            on_edit: move |flake_id| {
+                                if let Some(current) = all_flakes.iter().find(|item| item.id == flake_id) {
+                                    editing_flake.set(Some(EditFlakeDraft {
+                                        id: current.id,
+                                        name: current.name.clone(),
+                                        repo_url: current.url.clone(),
+                                        branch: current.branch.clone(),
+                                        build_scope: "cf_systems_only".to_string(),
+                                        credential_type: "none".to_string(),
+                                        credential_username: String::new(),
+                                        credential_secret: String::new(),
+                                        credential_ssh_username: String::new(),
+                                        has_existing_secret: false,
+                                    }));
+                                    edit_error.set(None);
+
+                                    let mut editing_flake = editing_flake.clone();
+                                    let mut edit_error = edit_error.clone();
+                                    spawn(async move {
+                                        match fetch_flake_credentials(flake_id).await {
+                                            Ok(credentials) => {
+                                                let current_draft = editing_flake.read().clone();
+                                                if let Some(mut draft) = current_draft {
+                                                    draft.credential_type = credentials.auth_type;
+                                                    draft.credential_username =
+                                                        credentials.username.unwrap_or_default();
+                                                    draft.credential_ssh_username =
+                                                        credentials.ssh_username.unwrap_or_default();
+                                                    draft.has_existing_secret = credentials.has_secret;
+                                                    editing_flake.set(Some(draft));
+                                                }
+                                            }
+                                            Err(error) => {
+                                                edit_error
+                                                    .set(Some(format!("Failed to load credentials: {error}")));
+                                            }
+                                        }
+                                    });
+                                }
                             },
                             on_sync: move |flake_id| {
                                 let mut reload_nonce = reload_nonce.clone();
@@ -4716,6 +4752,53 @@ pub fn FlakesListViewNew() -> Element {
                                 }
                                 Err(err) => action_notice
                                     .set(Some(format!("Failed to accept rewrite: {err}"))),
+                            }
+                        });
+                    }
+                }
+            }
+
+            if let Some(editing) = editing_flake.read().clone() {
+                EditFlakeDialog {
+                    draft: editing,
+                    error: edit_error,
+                    on_cancel: move |_| {
+                        editing_flake.set(None);
+                        edit_error.set(None);
+                    },
+                    on_change: move |next| editing_flake.set(Some(next)),
+                    on_submit: move |_| {
+                        let Some(next) = editing_flake.read().clone() else {
+                            return;
+                        };
+
+                        let mut editing_flake = editing_flake.clone();
+                        let mut edit_error = edit_error.clone();
+                        let mut action_notice = action_notice.clone();
+                        let mut reload_nonce = reload_nonce.clone();
+                        spawn(async move {
+                            let request = UpdateFlakeRequest {
+                                name: next.name.trim().to_string(),
+                                repo_url: next.repo_url.trim().to_string(),
+                                branch: normalize_optional_branch(&next.branch),
+                                build_scope: Some(next.build_scope.clone()),
+                            };
+
+                            match update_flake(next.id, &request).await {
+                                Ok(updated) => {
+                                    if let Err(error) = save_flake_credentials(updated.id, &next).await {
+                                        edit_error.set(Some(error));
+                                        return;
+                                    }
+                                    editing_flake.set(None);
+                                    edit_error.set(None);
+                                    action_notice.set(Some("Flake updated".to_string()));
+                                    let next_reload = *reload_nonce.read() + 1;
+                                    reload_nonce.set(next_reload);
+                                }
+                                Err(error) => {
+                                    edit_error.set(Some(error.to_string()));
+                                }
                             }
                         });
                     }
@@ -5529,7 +5612,7 @@ fn FlakeTrayNew(
     commits: Vec<MockCommitItem>,
     commits_loading: bool,
     commits_error: Option<String>,
-    on_edit: EventHandler<MockFlakeItem>,
+    on_edit: EventHandler<i32>,
     on_sync: EventHandler<i32>,
     on_close: EventHandler<()>,
 ) -> Element {
@@ -5561,42 +5644,6 @@ fn FlakeTrayNew(
         .cloned()
         .collect();
     let has_more_commits = visible_commits.len() < filtered_commits.len();
-    {
-        let commits_scroll_id = commits_scroll_id.clone();
-        let mut visible_limit = visible_limit.clone();
-        let total_commits = filtered_commits.len();
-        use_effect(move || {
-            let Some(window) = window() else {
-                return;
-            };
-            let Some(document) = window.document() else {
-                return;
-            };
-            let commits_scroll_id_for_handler = commits_scroll_id.clone();
-
-            let handler = Closure::<dyn FnMut()>::new(move || {
-                if *visible_limit.read() >= total_commits {
-                    return;
-                }
-                let Some(element) = document.get_element_by_id(&commits_scroll_id_for_handler) else {
-                    return;
-                };
-                let scroll_top = element.scroll_top();
-                let client_height = element.client_height();
-                let scroll_height = element.scroll_height();
-                if scroll_top + client_height + 96 >= scroll_height {
-                    let next = *visible_limit.read() + LOAD_MORE_STEP;
-                    visible_limit.set(next.min(total_commits));
-                }
-            });
-
-            let _ = window.set_interval_with_callback_and_timeout_and_arguments_0(
-                handler.as_ref().unchecked_ref(),
-                180,
-            );
-            handler.forget();
-        });
-    }
     let selected_hash = selected_commit
         .read()
         .as_ref()
@@ -5681,7 +5728,7 @@ fn FlakeTrayNew(
                     }
                     button {
                         class: "btn btn-ghost focus-ring xs",
-                        onclick: move |_| on_edit.call(flake.clone()),
+                        onclick: move |_| on_edit.call(flake.id),
                         svg {
                             width: "11",
                             height: "11",
@@ -5723,6 +5770,27 @@ fn FlakeTrayNew(
                 nav {
                     class: "fl-tray-commits",
                     id: "{commits_scroll_id}",
+                    onscroll: move |_| {
+                        if !has_more_commits {
+                            return;
+                        }
+                        let Some(window) = window() else {
+                            return;
+                        };
+                        let Some(document) = window.document() else {
+                            return;
+                        };
+                        let Some(element) = document.get_element_by_id(&commits_scroll_id) else {
+                            return;
+                        };
+                        let scroll_top = element.scroll_top();
+                        let client_height = element.client_height();
+                        let scroll_height = element.scroll_height();
+                        if scroll_top + client_height + 96 >= scroll_height {
+                            let next = *visible_limit.read() + LOAD_MORE_STEP;
+                            visible_limit.set(next.min(filtered_commits.len()));
+                        }
+                    },
                     // Search bar - JSX lines 140-150
                     div { class: "fl-tray-commits-search",
                         // Search icon
@@ -5767,6 +5835,13 @@ fn FlakeTrayNew(
                             on_select: move |commit| {
                                 selected_file.set(None);
                                 selected_commit.set(Some(commit));
+                            }
+                        }
+                        if has_more_commits {
+                            div {
+                                class: "empty",
+                                style: "margin: 12px; font-size: 11px;",
+                                "Scroll to load more commits…"
                             }
                         }
                     }
