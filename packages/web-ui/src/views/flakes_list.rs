@@ -7,6 +7,8 @@ use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
 #[cfg(target_arch = "wasm32")]
 use js_sys::Object;
+#[cfg(target_arch = "wasm32")]
+use js_sys::{Function, Reflect};
 use uuid::Uuid;
 use wasm_bindgen::JsCast;
 #[cfg(target_arch = "wasm32")]
@@ -19,8 +21,9 @@ use web_sys::{Node, window};
 use crate::api::client::{
     ApiClientError, accept_flake_history_rewrite, create_flake, delete_flake,
     delete_flake_credentials, fetch_commit_diff, fetch_cve_scan_status, fetch_flake_credentials,
-    fetch_flake_timelines, fetch_flake_timelines_for_ids, fetch_flakes, put_flake_credentials,
-    request_sync_all_flakes, request_sync_flake, trigger_flake_config_cve_scan, update_flake,
+    fetch_flake_timeline_for_tray, fetch_flake_timelines, fetch_flake_timelines_for_ids,
+    fetch_flakes, put_flake_credentials, request_sync_all_flakes, request_sync_flake,
+    trigger_flake_config_cve_scan, update_flake,
 };
 use crate::api::models::{
     BuildStatus as ApiBuildStatus, CreateFlakeCredentialRequest, CreateFlakeRequest,
@@ -2039,6 +2042,7 @@ fn AddFlakeForm(
     rsx! {
         div {
             class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
+            style: "z-index: 3300;",
             onclick: move |_| on_cancel.call(()),
             div {
                 class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6 cf-modal-panel-44",
@@ -2398,7 +2402,8 @@ fn HistoryRewriteDialog(
 ) -> Element {
     rsx! {
         div {
-            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
+            class: "fixed inset-0 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
+            style: "z-index: 3400;",
             div {
                 class: "relative {theme::surface::CARD_BG} rounded-xl border {theme::surface::CARD_BORDER} shadow-2xl p-6 cf-modal-panel-34 max-w-2xl w-full",
                 h3 {
@@ -4490,17 +4495,20 @@ pub fn FlakesListViewNew() -> Element {
         .count();
     let selected_flake_value = selected_flake.read().clone();
     let selected_flake_for_timeline = selected_flake.clone();
+    // Use extended commit limit (200) for the tray view
     let selected_timeline_resource = use_resource(move || {
         let flake_id = selected_flake_for_timeline.read().as_ref().map(|f| f.id);
         let _nonce = *reload_nonce.read();
         async move {
             if let Some(id) = flake_id {
-                match fetch_flake_timelines_for_ids(&[id]).await {
+                // Use the tray-specific fetch with higher commit limit
+                match fetch_flake_timeline_for_tray(id).await {
                     Ok(items) => {
                         let has_selected = items.iter().any(|timeline| timeline.flake_id == id);
                         if has_selected {
                             Ok(items)
                         } else {
+                            // Fallback: use standard timelines fetch
                             fetch_flake_timelines().await
                         }
                     }
@@ -6831,6 +6839,27 @@ fn DiffModalNew(
                         button {
                             class: "btn-icon focus-ring",
                             title: "Copy path",
+                            onclick: {
+                                let path_to_copy = file.name.clone();
+                                move |_| {
+                                    #[cfg(target_arch = "wasm32")]
+                                    {
+                                        use wasm_bindgen::JsCast;
+                                        if let Some(win) = window() {
+                                            let win_ref: &JsValue = win.as_ref();
+                                            if let Ok(navigator) = Reflect::get(win_ref, &JsValue::from_str("navigator")) {
+                                                if let Ok(clipboard) = Reflect::get(&navigator, &JsValue::from_str("clipboard")) {
+                                                    if let Ok(write_text) = Reflect::get(&clipboard, &JsValue::from_str("writeText")) {
+                                                        if let Ok(function) = write_text.dyn_into::<Function>() {
+                                                            let _ = function.call1(&clipboard, &JsValue::from_str(&path_to_copy));
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            },
                             // Link icon
                             svg {
                                 width: "14",

@@ -808,6 +808,14 @@ pub async fn fetch_flake_timelines_for_ids(
     fetch_json(&url).await
 }
 
+/// Fetch flake timeline for a single flake with extended commit limit (for tray view).
+pub async fn fetch_flake_timeline_for_tray(
+    flake_id: i32,
+) -> Result<Vec<FlakeTimeline>, ApiClientError> {
+    let url = format!("{}/flakes/timelines?ids={}&limit=200", base_url(), flake_id);
+    fetch_json(&url).await
+}
+
 /// Fetch flake timelines for dashboard (CF system deployment counts).
 pub async fn fetch_dashboard_flake_timelines() -> Result<Vec<FlakeTimeline>, ApiClientError> {
     let url = format!("{}/flakes/timelines?view=dashboard", base_url());

@@ -112,11 +112,17 @@ pub async fn get_flake_timelines(
         _ => None,
     };
 
-    // Fetch up to 10 most recent commits per flake
+    // Parse optional limit parameter (default 10, max 500 for tray view)
+    let max_commits: i64 = params
+        .get("limit")
+        .and_then(|v| v.parse::<i64>().ok())
+        .map(|v| v.clamp(1, 500))
+        .unwrap_or(10);
+
     let fetch_result = if use_dashboard_view {
-        fetch_dashboard_flake_timelines(&pool, 10, flake_ids.as_deref()).await
+        fetch_dashboard_flake_timelines(&pool, max_commits, flake_ids.as_deref()).await
     } else {
-        fetch_flake_timelines(&pool, 10, flake_ids.as_deref()).await
+        fetch_flake_timelines(&pool, max_commits, flake_ids.as_deref()).await
     };
 
     match fetch_result {
