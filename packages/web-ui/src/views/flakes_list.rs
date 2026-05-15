@@ -4236,10 +4236,27 @@ pub fn FlakesListViewNew() -> Element {
     let mut selected_flake = use_signal(|| None::<MockFlakeItem>);
     let mut action_notice = use_signal(|| None::<String>);
     let mut reload_nonce = use_signal(|| 0u64);
+    let mut show_add_form = use_signal(|| false);
+    let mut add_error = use_signal(|| None::<String>);
+    let mut draft = use_signal(|| NewFlakeDraft {
+        name: String::new(),
+        repo_url: String::new(),
+        branch: String::new(),
+        build_scope: "cf_systems_only".to_string(),
+        credential_type: "none".to_string(),
+        credential_username: String::new(),
+        credential_secret: String::new(),
+        credential_ssh_username: String::new(),
+    });
+    let mut rewrite_prompt = use_signal(|| None::<(i32, String, String)>);
 
     let flakes_resource = use_resource(move || {
         let _nonce = *reload_nonce.read();
         async move { fetch_flakes().await }
+    });
+    let timelines_resource = use_resource(move || {
+        let _nonce = *reload_nonce.read();
+        async move { fetch_flake_timelines().await }
     });
 
     let (raw_flakes, load_error, loading) = match flakes_resource.read().as_ref() {
@@ -4247,9 +4264,41 @@ pub fn FlakesListViewNew() -> Element {
         Some(Err(err)) => (Vec::new(), Some(err.to_string()), false),
         None => (Vec::new(), None, true),
     };
+    let timeline_items = match timelines_resource.read().as_ref() {
+        Some(Ok(items)) => items.clone(),
+        _ => Vec::new(),
+    };
+    let mut commit_map: HashMap<i32, Vec<MockCommitItem>> = HashMap::new();
+    for timeline in &timeline_items {
+        commit_map.insert(
+            timeline.flake_id,
+            map_timeline_commits_to_view(&timeline.commits),
+        );
+    }
     let all_flakes: Vec<MockFlakeItem> = raw_flakes
         .iter()
-        .map(map_registry_flake_to_view)
+        .map(|item| {
+            let mut mapped = map_registry_flake_to_view(item);
+            if let Some(commits) = commit_map.get(&item.id) {
+                if let Some(latest) = commits.first() {
+                    mapped.latest_commit = latest.sha.clone();
+                    mapped.latest_message = latest.msg.clone();
+                    mapped.latest_author = latest.author.clone();
+                    mapped.last_sync_at = latest.at.clone();
+                    mapped.total_commits = commits.len() as i32;
+                    mapped.status = if latest.eval_status.as_deref() == Some("failed")
+                        || latest.build_status.as_deref() == Some("failed")
+                    {
+                        "error".to_string()
+                    } else if matches!(latest.build_status.as_deref(), Some("building") | Some("pending")) {
+                        "syncing".to_string()
+                    } else {
+                        "synced".to_string()
+                    };
+                }
+            }
+            mapped
+        })
         .collect();
 
     let q = search_query.read().to_lowercase();
@@ -4357,6 +4406,10 @@ pub fn FlakesListViewNew() -> Element {
                     }
                     button { 
                         class: "btn btn-primary focus-ring",
+                        onclick: move |_| {
+                            show_add_form.set(true);
+                            add_error.set(None);
+                        },
                         // Inline plus icon SVG
                         svg {
                             width: "14",
@@ -4447,6 +4500,62 @@ pub fn FlakesListViewNew() -> Element {
             if let Some(msg) = action_notice.read().as_ref() {
                 div { class: "card", style: "padding: 10px 14px; color: var(--cf-text-secondary);", "{msg}" }
             }
+
+            if *show_add_form.read() {
+                AddFlakeForm {
+                    draft: draft,
+                    error: add_error,
+                    show_onboarding_callouts: false,
+                    on_cancel: move |_| {
+                        show_add_form.set(false);
+                        add_error.set(None);
+                    },
+                    on_submit: move |_| {
+                        let next = draft.read().clone();
+                        if let Err(err) = validate_new_flake(&next, &[]) {
+                            add_error.set(Some(err));
+                            return;
+                        }
+
+                        let mut draft = draft.clone();
+                        let mut add_error = add_error.clone();
+                        let mut show_add_form = show_add_form.clone();
+                        let mut reload_nonce = reload_nonce.clone();
+                        spawn(async move {
+                            let request = CreateFlakeRequest {
+                                name: next.name.trim().to_string(),
+                                repo_url: next.repo_url.trim().to_string(),
+                                branch: normalize_optional_branch(&next.branch),
+                                build_scope: Some(next.build_scope.clone()),
+                            };
+
+                            match create_flake(&request).await {
+                                Ok(created) => {
+                                    if let Err(error) = save_flake_credentials(created.id, &next).await {
+                                        add_error.set(Some(error));
+                                        return;
+                                    }
+                                    draft.set(NewFlakeDraft {
+                                        name: String::new(),
+                                        repo_url: String::new(),
+                                        branch: String::new(),
+                                        build_scope: "cf_systems_only".to_string(),
+                                        credential_type: "none".to_string(),
+                                        credential_username: String::new(),
+                                        credential_secret: String::new(),
+                                        credential_ssh_username: String::new(),
+                                    });
+                                    add_error.set(None);
+                                    show_add_form.set(false);
+                                    let next_nonce = *reload_nonce.read() + 1;
+                                    reload_nonce.set(next_nonce);
+                                }
+                                Err(error) => add_error.set(Some(error.to_string())),
+                            }
+                        });
+                    },
+                }
+            }
             
             if loading {
                 div { class: "card", style: "padding: 18px; color: var(--cf-text-secondary);",
@@ -4477,7 +4586,16 @@ pub fn FlakesListViewNew() -> Element {
                                         let next = *reload_nonce.read() + 1;
                                         reload_nonce.set(next);
                                     }
-                                    Err(err) => action_notice.set(Some(format!("Sync failed: {err}"))),
+                                    Err(err) => {
+                                        if let Some((id, detail)) =
+                                            extract_history_rewrite_conflict(&err, Some(flake_id))
+                                        {
+                                            rewrite_prompt.set(Some((id, format!("flake #{id}"), detail)));
+                                            action_notice.set(Some("Sync blocked: git history rewrite detected. Review and accept rewrite to continue.".to_string()));
+                                        } else {
+                                            action_notice.set(Some(format!("Sync failed: {err}")));
+                                        }
+                                    }
                                 }
                             });
                         } } }
@@ -4492,7 +4610,16 @@ pub fn FlakesListViewNew() -> Element {
                                         let next = *reload_nonce.read() + 1;
                                         reload_nonce.set(next);
                                     }
-                                    Err(err) => action_notice.set(Some(format!("Sync failed: {err}"))),
+                                    Err(err) => {
+                                        if let Some((id, detail)) =
+                                            extract_history_rewrite_conflict(&err, Some(flake_id))
+                                        {
+                                            rewrite_prompt.set(Some((id, format!("flake #{id}"), detail)));
+                                            action_notice.set(Some("Sync blocked: git history rewrite detected. Review and accept rewrite to continue.".to_string()));
+                                        } else {
+                                            action_notice.set(Some(format!("Sync failed: {err}")));
+                                        }
+                                    }
                                 }
                             });
                         } } }
@@ -4542,14 +4669,48 @@ pub fn FlakesListViewNew() -> Element {
                                             reload_nonce.set(next);
                                         }
                                         Err(err) => {
-                                            action_notice
-                                                .set(Some(format!("Sync failed: {err}")))
+                                            if let Some((id, detail)) =
+                                                extract_history_rewrite_conflict(&err, Some(flake_id))
+                                            {
+                                                rewrite_prompt.set(Some((id, format!("flake #{id}"), detail)));
+                                                action_notice.set(Some("Sync blocked: git history rewrite detected. Review and accept rewrite to continue.".to_string()));
+                                            } else {
+                                                action_notice
+                                                    .set(Some(format!("Sync failed: {err}")))
+                                            }
                                         }
                                     }
                                 });
                             },
                             on_close: move |_| selected_flake.set(None)
                         }
+                    }
+                }
+            }
+
+            if let Some((flake_id, flake_name, detail)) = rewrite_prompt.read().clone() {
+                HistoryRewriteDialog {
+                    flake_name,
+                    detail,
+                    on_cancel: move |_| rewrite_prompt.set(None),
+                    on_accept: move |_| {
+                        let mut rewrite_prompt = rewrite_prompt.clone();
+                        let mut action_notice = action_notice.clone();
+                        let mut reload_nonce = reload_nonce.clone();
+                        spawn(async move {
+                            match accept_flake_history_rewrite(flake_id).await {
+                                Ok(_) => {
+                                    rewrite_prompt.set(None);
+                                    action_notice.set(Some(
+                                        "History rewrite accepted. Retry sync to continue.".to_string(),
+                                    ));
+                                    let next = *reload_nonce.read() + 1;
+                                    reload_nonce.set(next);
+                                }
+                                Err(err) => action_notice
+                                    .set(Some(format!("Failed to accept rewrite: {err}"))),
+                            }
+                        });
                     }
                 }
             }
