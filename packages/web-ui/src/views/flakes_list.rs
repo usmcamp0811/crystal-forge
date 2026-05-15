@@ -2459,7 +2459,7 @@ fn EditFlakeDialog(
             onclick: move |_| on_cancel.call(()),
             div {
                 class: "modal",
-                style: "width: min(680px, 96vw); max-height: 92vh;",
+                style: "width: min(620px, 96vw); max-height: 92vh;",
                 onclick: |evt| evt.stop_propagation(),
                 div { class: "modal-head",
                     h2 {
@@ -2485,7 +2485,7 @@ fn EditFlakeDialog(
 
                 div {
                     class: "modal-body",
-                    style: "overflow-y: auto; scrollbar-width: thin;",
+                    style: "overflow-y: auto;",
                     label {
                         class: "field",
                         span { "Name" }
@@ -2662,7 +2662,24 @@ fn FlakeCredentialFields(
         div {
             style: "margin-top: 8px; padding: 14px; border: 1px solid var(--cf-divider); border-radius: 10px; background: color-mix(in oklab, var(--cf-page-bg) 50%, var(--cf-card-bg));",
             div { style: "display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;",
-                h4 { class: "text-sm font-semibold", "Repository credentials" }
+                div { style: "font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 6px;",
+                    svg {
+                        width: "13",
+                        height: "13",
+                        view_box: "0 0 24 24",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        stroke_linecap: "round",
+                        stroke_linejoin: "round",
+                        path { d: "M21 2H3a1 1 0 0 0-1 1v4a1 1 0 0 0 1 1h18a1 1 0 0 0 1-1V3a1 1 0 0 0-1-1Z" }
+                        path { d: "M10 16H3a1 1 0 0 0-1 1v4a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1v-4a1 1 0 0 0-1-1Z" }
+                        path { d: "M21 16h-3" }
+                        path { d: "M16 20h6" }
+                        path { d: "M19 16v4" }
+                    }
+                    "Repository credentials"
+                }
                 button {
                     class: "btn btn-ghost focus-ring xs",
                     onclick: move |_| {
@@ -2675,6 +2692,17 @@ fn FlakeCredentialFields(
                     if is_no_credentials {
                         "Test connection"
                     } else if test_state.read().as_deref() == Some("connected") {
+                        svg {
+                            width: "11",
+                            height: "11",
+                            view_box: "0 0 24 24",
+                            fill: "none",
+                            stroke: "#34d399",
+                            stroke_width: "2",
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            path { d: "M20 6 9 17l-5-5" }
+                        }
                         "Connected"
                     } else {
                         "Test connection"
