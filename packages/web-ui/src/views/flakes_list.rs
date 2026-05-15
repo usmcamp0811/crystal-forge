@@ -2455,7 +2455,7 @@ fn EditFlakeDialog(
     rsx! {
         div {
             class: "modal-backdrop",
-            style: "z-index: 90;",
+            style: "z-index: 3200;",
             onclick: move |_| on_cancel.call(()),
             div {
                 class: "modal",
@@ -6051,7 +6051,7 @@ fn FlakeTrayNew(
                 
                 // Right pane: Commit detail - JSX lines 192-260
                 section { class: "fl-tray-detail",
-                    if let Some(commit) = active_selected_commit {
+                    if let Some(commit) = active_selected_commit.clone() {
                         CommitDetailNew { 
                             flake_id: flake.id,
                             commit,
@@ -6068,7 +6068,7 @@ fn FlakeTrayNew(
 
         if let (Some(file), Some(commit)) = (
             selected_file.read().clone(),
-            selected_commit.read().clone(),
+            active_selected_commit.clone(),
         ) {
             DiffModalNew {
                 file,
