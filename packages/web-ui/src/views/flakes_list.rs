@@ -4311,6 +4311,7 @@ pub fn FlakesListViewNew() -> Element {
                 flake.name.to_lowercase().contains(&q)
                     || flake.url.to_lowercase().contains(&q)
                     || flake.branch.to_lowercase().contains(&q)
+                    || flake.description.to_lowercase().contains(&q)
             })
             .cloned()
             .collect()
@@ -4658,6 +4659,12 @@ pub fn FlakesListViewNew() -> Element {
                             commits_loading: tray_commits_loading,
                             commits_error: tray_commits_error,
                             flake,
+                            on_edit: move |f: MockFlakeItem| {
+                                action_notice.set(Some(format!(
+                                    "Edit requested for {} (UI parity wiring in progress)",
+                                    f.name
+                                )));
+                            },
                             on_sync: move |flake_id| {
                                 let mut reload_nonce = reload_nonce.clone();
                                 spawn(async move {
@@ -5522,6 +5529,7 @@ fn FlakeTrayNew(
     commits: Vec<MockCommitItem>,
     commits_loading: bool,
     commits_error: Option<String>,
+    on_edit: EventHandler<MockFlakeItem>,
     on_sync: EventHandler<i32>,
     on_close: EventHandler<()>,
 ) -> Element {
@@ -5670,6 +5678,24 @@ fn FlakeTrayNew(
                             path { d: "M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" }
                         }
                         " Sync"
+                    }
+                    button {
+                        class: "btn btn-ghost focus-ring xs",
+                        onclick: move |_| on_edit.call(flake.clone()),
+                        svg {
+                            width: "11",
+                            height: "11",
+                            view_box: "0 0 24 24",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            style: "display: inline-block; vertical-align: middle; margin-right: 6px;",
+                            circle { cx: "12", cy: "12", r: "3" }
+                            path { d: "M19.4 15a1.7 1.7 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.82-.33 1.7 1.7 0 0 0-1 1.52V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.52 1.7 1.7 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .33-1.82 1.7 1.7 0 0 0-1.52-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.52-1 1.7 1.7 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.82.33h.09a1.7 1.7 0 0 0 1-1.52V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.52 1.7 1.7 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.33 1.82v.09a1.7 1.7 0 0 0 1.52 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.52 1z" }
+                        }
+                        " Edit"
                     }
                     button {
                         class: "btn-icon focus-ring",
@@ -5844,7 +5870,7 @@ fn CommitsListNew(
         // Empty state
         if commits.is_empty() {
             div { class: "empty", style: "margin: 24px;",
-                "No commits match this filter."
+                "No commits match."
             }
         }
     }
