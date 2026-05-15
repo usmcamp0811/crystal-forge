@@ -4005,6 +4005,20 @@ fn parse_diff_file_block(lines: &[String]) -> ParsedDiffFile {
         }
     }
 
+    // If --- and +++ were not found, try to parse from "diff --git a/path b/path" header
+    if old_path.is_empty() && new_path.is_empty() {
+        if let Some(first_line) = lines.first() {
+            if let Some(rest) = first_line.strip_prefix("diff --git ") {
+                // Format: "a/path b/path" or "a/path b/other_path"
+                let parts: Vec<&str> = rest.splitn(2, " b/").collect();
+                if parts.len() == 2 {
+                    old_path = parts[0].trim_start_matches("a/").to_string();
+                    new_path = parts[1].to_string();
+                }
+            }
+        }
+    }
+
     if old_path.is_empty() && new_path.is_empty() {
         old_path = "(unknown)".to_string();
         new_path = "(unknown)".to_string();
