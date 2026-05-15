@@ -1,10 +1,10 @@
 ---
 id: TASK-297
 title: Rebuild Flakes View to Match JSX Design Mockup Exactly
-status: Review
+status: In Progress
 assignee: []
 created_date: '2026-05-13 02:56'
-updated_date: '2026-05-14 02:35'
+updated_date: '2026-05-15 16:41'
 labels:
   - ui
   - web-ui
@@ -18,7 +18,7 @@ references:
   - /home/mcamp/code/crystal-forge/CrystalForgelatest/styles.css
   - packages/web-ui/src/views/flakes_list.rs
 priority: high
-ordinal: 252000
+ordinal: 8595
 ---
 
 ## Description
