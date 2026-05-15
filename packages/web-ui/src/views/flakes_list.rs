@@ -4323,9 +4323,9 @@ pub fn FlakesListViewNew() -> Element {
         .filter(|f| f.status == "synced")
         .count();
     let selected_flake_value = selected_flake.read().clone();
-    let selected_flake_id_for_timeline = selected_flake_value.as_ref().map(|f| f.id);
+    let selected_flake_for_timeline = selected_flake.clone();
     let selected_timeline_resource = use_resource(move || {
-        let flake_id = selected_flake_id_for_timeline;
+        let flake_id = selected_flake_for_timeline.read().as_ref().map(|f| f.id);
         let _nonce = *reload_nonce.read();
         async move {
             if let Some(id) = flake_id {
