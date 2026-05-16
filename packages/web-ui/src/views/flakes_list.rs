@@ -2819,13 +2819,25 @@ fn FlakeCredentialFields(
             }
 
             if credential_type == "pat" {
-                div { style: "display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: center;",
-                    span { style: "font-size: 13px; color: var(--cf-text-secondary);", "Token Username (optional)" }
-                    input {
-                        class: "input focus-ring",
-                        value: "{credential_username}",
-                        placeholder: "oauth2",
-                        oninput: move |evt| on_change.call(("credential_username".to_string(), evt.value())),
+                div { style: "display: grid; gap: 10px;",
+                    div { style: "display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: center;",
+                        span { style: "font-size: 13px; color: var(--cf-text-secondary);", "Token Username (optional)" }
+                        input {
+                            class: "input focus-ring",
+                            value: "{credential_username}",
+                            placeholder: "oauth2",
+                            oninput: move |evt| on_change.call(("credential_username".to_string(), evt.value())),
+                        }
+                    }
+                    div { style: "display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: center;",
+                        span { style: "font-size: 13px; color: var(--cf-text-secondary);", "Access Token" }
+                        input {
+                            class: "input focus-ring",
+                            r#type: "password",
+                            value: "{credential_secret}",
+                            placeholder: if has_existing_secret { "•••••••• (leave blank to keep existing)" } else { "glpat-..." },
+                            oninput: move |evt| on_change.call(("credential_secret".to_string(), evt.value())),
+                        }
                     }
                 }
             }

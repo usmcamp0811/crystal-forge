@@ -567,6 +567,15 @@ fn normalize_author_email(email: &str) -> Option<String> {
     }
 }
 
+fn is_commit_unresolvable_error(error_text: &str) -> bool {
+    let normalized = error_text.to_ascii_lowercase();
+    normalized.contains("could not find commit")
+        || normalized.contains("failed to fetch commit")
+        || normalized.contains("git show failed")
+        || normalized.contains("bad object")
+        || normalized.contains("unknown revision")
+}
+
 /// Get the git diff for a specific commit in a flake.
 ///
 /// **Authorization**: Requires Viewer role or above.
@@ -596,7 +605,8 @@ pub async fn get_commit_diff_handler(
     };
 
     // Fetch the diff from git
-    match get_commit_diff(&flake.repo_url, &flake.branch, &commit_hash).await {
+    let initial_diff = get_commit_diff(&flake.repo_url, &flake.branch, &commit_hash).await;
+    match initial_diff {
         Ok(diff) => (
             StatusCode::OK,
             Json(CommitDiffResponse {
@@ -605,14 +615,92 @@ pub async fn get_commit_diff_handler(
             }),
         )
             .into_response(),
-        Err(e) => {
-            error!("Failed to fetch commit diff for {}: {e:#}", commit_hash);
+        Err(initial_error) => {
+            let initial_error_text = initial_error.to_string();
+
+            if is_commit_unresolvable_error(&initial_error_text) {
+                let creds = FlakeCredentialEnv::load(&pool, flake_id)
+                    .await
+                    .unwrap_or_else(|e| {
+                        warn!(
+                            "Failed to load credentials for flake {} during diff refresh retry: {e:#}",
+                            flake_id
+                        );
+                        None
+                    });
+
+                if let Err(refresh_error) =
+                    crate::flake::eval::refresh_flake_cache_with_creds(
+                        &flake.repo_url,
+                        &flake.branch,
+                        creds.as_ref(),
+                    )
+                    .await
+                {
+                    warn!(
+                        "Failed to refresh flake cache before diff retry for {} (flake_id={}): {refresh_error:#}",
+                        commit_hash,
+                        flake_id
+                    );
+                }
+
+                match get_commit_diff(&flake.repo_url, &flake.branch, &commit_hash).await {
+                    Ok(diff) => {
+                        return (
+                            StatusCode::OK,
+                            Json(CommitDiffResponse {
+                                commit_hash: commit_hash.clone(),
+                                diff,
+                            }),
+                        )
+                            .into_response();
+                    }
+                    Err(retry_error) => {
+                        let retry_error_text = retry_error.to_string();
+                        if is_commit_unresolvable_error(&retry_error_text) {
+                            warn!(
+                                "Commit diff unavailable after refresh/retry for {} (flake_id={}): {retry_error:#}",
+                                commit_hash,
+                                flake_id
+                            );
+                            return (
+                                StatusCode::NOT_FOUND,
+                                Json(ApiError {
+                                    error: "commit_diff_unavailable".to_string(),
+                                    message: format!(
+                                        "Commit {} could not be resolved in the current repository history. It may have been rewritten or removed; refresh and select a newer commit.",
+                                        commit_hash
+                                    ),
+                                    details: Some(serde_json::json!({"error": retry_error_text})),
+                                }),
+                            )
+                                .into_response();
+                        }
+
+                        error!(
+                            "Failed to fetch commit diff for {} after refresh/retry: {retry_error:#}",
+                            commit_hash
+                        );
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(ApiError {
+                                error: "internal_error".to_string(),
+                                message: format!("Failed to fetch diff for commit {}", commit_hash),
+                                details: Some(serde_json::json!({"error": retry_error_text})),
+                            }),
+                        )
+                            .into_response();
+                    }
+                }
+            }
+
+            error!("Failed to fetch commit diff for {}: {initial_error:#}", commit_hash);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ApiError {
                     error: "internal_error".to_string(),
                     message: format!("Failed to fetch diff for commit {}", commit_hash),
-                    details: Some(serde_json::json!({"error": e.to_string()})),
+                    details: Some(serde_json::json!({"error": initial_error_text})),
                 }),
             )
                 .into_response()
