@@ -3010,6 +3010,12 @@ html[data-theme="light"] .sd-nix {
   transform: translateY(-1px);
 }
 
+.fl-file-card.active {
+  background: color-mix(in oklab, var(--cf-brand-purple) 14%, var(--cf-card-bg));
+  border-color: color-mix(in oklab, var(--cf-brand-purple) 52%, var(--cf-card-border));
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--cf-brand-purple) 42%, transparent);
+}
+
 .fl-file-card-head {
   display: flex;
   align-items: flex-start;
