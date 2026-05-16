@@ -23,11 +23,12 @@ use crate::api::client::{
     delete_flake_credentials, fetch_commit_diff, fetch_cve_scan_status, fetch_environments,
     fetch_flake_credentials, fetch_flake_timeline_for_tray, fetch_flake_timelines,
     fetch_flake_timelines_for_ids, fetch_flakes, put_flake_credentials, request_sync_all_flakes,
-    request_sync_flake, trigger_flake_config_cve_scan, update_flake,
+    request_sync_flake, test_flake_credentials, trigger_flake_config_cve_scan, update_flake,
 };
 use crate::api::models::{
     BuildStatus as ApiBuildStatus, CreateFlakeCredentialRequest, CreateFlakeRequest,
-    EnvironmentSummary, FlakeCommitSystemPath, FlakeRegistryItem, FlakeTimeline, UpdateFlakeRequest,
+    EnvironmentSummary, FlakeCommitSystemPath, FlakeRegistryItem, FlakeTimeline,
+    TestFlakeCredentialRequest, UpdateFlakeRequest,
 };
 use crate::components::layout::Card;
 use crate::components::notifications::{AlertBanner, AlertSeverity};
@@ -2174,6 +2175,9 @@ fn AddFlakeForm(
                             }
                         }
                         FlakeCredentialFields {
+                            flake_id: None,
+                            repo_url: draft.read().repo_url.clone(),
+                            branch: draft.read().branch.clone(),
                             credential_type: draft.read().credential_type.clone(),
                             credential_username: draft.read().credential_username.clone(),
                             credential_secret: draft.read().credential_secret.clone(),
@@ -2585,6 +2589,9 @@ fn EditFlakeDialog(
                     }
 
                     FlakeCredentialFields {
+                        flake_id: Some(draft.id),
+                        repo_url: draft.repo_url.clone(),
+                        branch: draft.branch.clone(),
                         credential_type: draft.credential_type.clone(),
                         credential_username: draft.credential_username.clone(),
                         credential_secret: draft.credential_secret.clone(),
@@ -2678,6 +2685,9 @@ fn EditFlakeDialog(
 
 #[component]
 fn FlakeCredentialFields(
+    flake_id: Option<i32>,
+    repo_url: String,
+    branch: String,
     credential_type: String,
     credential_username: String,
     credential_secret: String,
@@ -2687,6 +2697,14 @@ fn FlakeCredentialFields(
 ) -> Element {
     let mut test_state = use_signal(|| None::<String>);
     let is_no_credentials = credential_type == "none";
+    let can_test = !is_no_credentials && flake_id.is_some();
+    let credential_type_for_test = credential_type.clone();
+    let credential_username_for_test = credential_username.clone();
+    let credential_secret_for_test = credential_secret.clone();
+    let credential_ssh_username_for_test = credential_ssh_username.clone();
+    let on_change_none = on_change.clone();
+    let on_change_ssh = on_change.clone();
+    let on_change_pat = on_change.clone();
     rsx! {
         div {
             style: "margin-top: 8px; padding: 14px; border: 1px solid var(--cf-divider); border-radius: 10px; background: color-mix(in oklab, var(--cf-page-bg) 50%, var(--cf-card-bg));",
@@ -2712,41 +2730,81 @@ fn FlakeCredentialFields(
                 button {
                     class: "btn btn-ghost focus-ring xs",
                     onclick: move |_| {
-                        if is_no_credentials {
+                        if !can_test {
                             return;
                         }
-                        test_state.set(Some("unavailable".to_string()));
+                        test_state.set(Some("testing".to_string()));
+                        let Some(flake_id) = flake_id else {
+                            return;
+                        };
+                        let repo_url = repo_url.clone();
+                        let branch = branch.clone();
+                        let auth_type = credential_type_for_test.clone();
+                        let username = credential_username_for_test.clone();
+                        let secret = credential_secret_for_test.clone();
+                        let ssh_username = credential_ssh_username_for_test.clone();
+                        let mut test_state = test_state.clone();
+                        spawn(async move {
+                            let request = TestFlakeCredentialRequest {
+                                repo_url: Some(repo_url),
+                                branch: Some(branch),
+                                auth_type,
+                                username: normalize_optional_value(&username),
+                                secret: normalize_optional_value(&secret),
+                                ssh_username: normalize_optional_value(&ssh_username),
+                                use_stored_secret_if_empty: true,
+                            };
+
+                            match test_flake_credentials(flake_id, &request).await {
+                                Ok(response) => test_state.set(Some(format!("ok:{}", response.message))),
+                                Err(err) => test_state.set(Some(format!("error:{}", err))),
+                            }
+                        });
                     },
-                    disabled: is_no_credentials,
+                    disabled: !can_test || test_state.read().as_deref() == Some("testing"),
                     if is_no_credentials {
                         "Test connection"
+                    } else if flake_id.is_none() {
+                        "Save flake first"
+                    } else if test_state.read().as_deref() == Some("testing") {
+                        "Testing..."
                     } else {
                         "Test connection"
                     }
                 }
             }
 
-            if test_state.read().as_deref() == Some("unavailable") {
+            if let Some(result) = test_state.read().clone() {
                 div {
-                    style: "margin-bottom: 10px; font-size: 11px; color: var(--cf-text-muted);",
-                    "Connection test is not implemented in this view yet. Use Save + Sync to validate credentials."
+                    style: if result.starts_with("ok:") {
+                        "margin-bottom: 10px; font-size: 11px; color: #34d399;"
+                    } else if result.starts_with("error:") {
+                        "margin-bottom: 10px; font-size: 11px; color: #f87171;"
+                    } else {
+                        "margin-bottom: 10px; font-size: 11px; color: var(--cf-text-muted);"
+                    },
+                    if let Some(msg) = result.strip_prefix("ok:") {
+                        "{msg}"
+                    } else if let Some(msg) = result.strip_prefix("error:") {
+                        "{msg}"
+                    }
                 }
             }
 
             div { class: "seg", style: "margin-bottom: 12px;",
                 button {
                     class: if credential_type == "none" { "active" } else { "" },
-                    onclick: move |_| on_change.call(("credential_type".to_string(), "none".to_string())),
+                    onclick: move |_| on_change_none.call(("credential_type".to_string(), "none".to_string())),
                     "None (public)"
                 }
                 button {
                     class: if credential_type == "ssh_key" { "active" } else { "" },
-                    onclick: move |_| on_change.call(("credential_type".to_string(), "ssh_key".to_string())),
+                    onclick: move |_| on_change_ssh.call(("credential_type".to_string(), "ssh_key".to_string())),
                     "SSH key"
                 }
                 button {
                     class: if credential_type == "pat" || credential_type == "username_password" { "active" } else { "" },
-                    onclick: move |_| on_change.call(("credential_type".to_string(), "pat".to_string())),
+                    onclick: move |_| on_change_pat.call(("credential_type".to_string(), "pat".to_string())),
                     "HTTPS token"
                 }
             }

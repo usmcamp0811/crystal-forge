@@ -13,7 +13,8 @@ use tracing::{error, info, warn};
 use crate::api::models::{
     ApiError, CommitDiffResponse, CreateFlakeCredentialRequest, CreateFlakeRequest,
     CveScanTriggerResponse, FlakeCommitSystemPath, FlakeCredentialSummary, FlakeRegistryItem,
-    FlakeTimeline, UpdateFlakeCredentialRequest, UpdateFlakeRequest,
+    FlakeTimeline, TestFlakeCredentialRequest, TestFlakeCredentialResponse,
+    UpdateFlakeCredentialRequest, UpdateFlakeRequest,
 };
 use crate::auth::extractors::{AuthenticatedUser, RequireAdmin, RequireAuth, RequireOperator};
 use crate::config::CrystalForgeConfig;
@@ -1017,6 +1018,104 @@ pub async fn delete_flake_credentials_handler(
             )
                 .into_response()
         }
+    }
+}
+
+pub async fn test_flake_credentials(
+    RequireOperator(_user): RequireOperator,
+    State(pool): State<PgPool>,
+    Path(flake_id): Path<i32>,
+    Json(payload): Json<TestFlakeCredentialRequest>,
+) -> impl IntoResponse {
+    let flake = match get_flake_by_id(&pool, flake_id).await {
+        Ok(flake) => flake,
+        Err(_) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiError {
+                    error: "not_found".to_string(),
+                    message: "Flake not found".to_string(),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let repo_url = payload
+        .repo_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&flake.repo_url)
+        .to_string();
+    let branch = payload
+        .branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&flake.branch)
+        .to_string();
+
+    let mut secret = payload.secret.clone();
+    if payload.use_stored_secret_if_empty
+        && secret.as_deref().is_none_or(|value| value.trim().is_empty())
+    {
+        if let Ok(Some(existing)) = get_flake_credential(&pool, flake_id).await {
+            secret = existing.secret_encrypted;
+        }
+    }
+
+    let creds = match FlakeCredentialEnv::from_inline(
+        flake_id,
+        &repo_url,
+        payload.auth_type,
+        payload.username,
+        secret,
+        payload.ssh_username,
+    ) {
+        Ok(creds) => creds,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiError {
+                    error: "validation_error".to_string(),
+                    message: err.to_string(),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    match branch_exists_with_creds(&repo_url, &branch, creds.as_ref()).await {
+        Ok(true) => (
+            StatusCode::OK,
+            Json(TestFlakeCredentialResponse {
+                ok: true,
+                message: format!("Connected to {repo_url} on branch {branch}."),
+                branch,
+            }),
+        )
+            .into_response(),
+        Ok(false) => (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "branch_not_found".to_string(),
+                message: format!("Connected, but branch '{branch}' was not found on remote."),
+                details: Some(serde_json::json!({ "repo_url": repo_url })),
+            }),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "connection_test_failed".to_string(),
+                message: format!("Credential test failed: {err}"),
+                details: Some(serde_json::json!({ "repo_url": repo_url, "branch": branch })),
+            }),
+        )
+            .into_response(),
     }
 }
 

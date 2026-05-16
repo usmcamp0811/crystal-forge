@@ -756,6 +756,15 @@ pub async fn delete_flake_credentials(id: i32) -> Result<(), ApiClientError> {
     send_empty_with_csrf::<()>("DELETE", &url, None).await
 }
 
+/// Test flake credentials against remote repository access.
+pub async fn test_flake_credentials(
+    id: i32,
+    request: &TestFlakeCredentialRequest,
+) -> Result<TestFlakeCredentialResponse, ApiClientError> {
+    let url = format!("{}/flakes/{id}/credentials/test", base_url());
+    send_json_with_csrf("POST", &url, Some(request)).await
+}
+
 /// Remove a flake by id.
 pub async fn delete_flake(id: i32, hard: bool, cascade: bool) -> Result<(), ApiClientError> {
     let mut url = format!("{}/flakes/{id}", base_url());
