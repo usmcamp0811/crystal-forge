@@ -2764,6 +2764,15 @@ fn FlakeCredentialFields(
                         div { class: "mono", style: "font-size: 12px; font-weight: 600;", "SHA256:Hxk2…JdmA" }
                         div { style: "font-size: 12px; color: var(--cf-text-muted); margin-top: 4px;", "Last used: 2m ago" }
                     }
+                    div { style: "display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: center; margin-top: 10px;",
+                        span { style: "font-size: 13px; color: var(--cf-text-secondary);", "SSH username" }
+                        input {
+                            class: "input focus-ring",
+                            value: "{credential_ssh_username}",
+                            placeholder: "git",
+                            oninput: move |evt| on_change.call(("credential_ssh_username".to_string(), evt.value())),
+                        }
+                    }
                 }
             }
 
@@ -4903,6 +4912,7 @@ pub fn FlakesListViewNew() -> Element {
                             commits: tray_commits,
                             commits_loading: tray_commits_loading,
                             commits_error: tray_commits_error,
+                            notice: action_notice.read().clone(),
                             is_admin: is_admin_user,
                             flake,
                             on_edit: move |flake_id| {
@@ -5968,6 +5978,7 @@ fn FlakeTrayNew(
     commits: Vec<MockCommitItem>,
     commits_loading: bool,
     commits_error: Option<String>,
+    notice: Option<String>,
     is_admin: bool,
     on_edit: EventHandler<i32>,
     on_sync: EventHandler<i32>,
@@ -6160,6 +6171,13 @@ fn FlakeTrayNew(
                             path { d: "M18 6 6 18M6 6l12 12" }
                         }
                     }
+                }
+            }
+
+            if let Some(msg) = notice {
+                div {
+                    style: "margin: 0 12px 10px; padding: 8px 10px; border: 1px solid var(--cf-divider); border-radius: 8px; font-size: 12px; color: var(--cf-text-secondary); background: color-mix(in oklab, var(--cf-page-bg) 35%, var(--cf-card-bg));",
+                    "{msg}"
                 }
             }
             
