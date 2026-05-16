@@ -253,6 +253,7 @@ struct EditFlakeDraft {
     name: String,
     repo_url: String,
     branch: String,
+    environment: String,
     build_scope: String,
     credential_type: String,
     credential_username: String,
@@ -2460,10 +2461,8 @@ fn EditFlakeDialog(
     let draft_for_name = draft.clone();
     let draft_for_repo = draft.clone();
     let draft_for_branch = draft.clone();
+    let draft_for_environment = draft.clone();
     let draft_for_credentials = draft.clone();
-    // Default to first environment or "production" if none available
-    let default_env = environments.first().map(|e| e.name.clone()).unwrap_or_else(|| "production".to_string());
-    let mut environment = use_signal(move || default_env.clone());
     let mut description = use_signal(String::new);
     let mut auto_sync = use_signal(|| true);
     let mut sync_interval = use_signal(|| "5m".to_string());
@@ -2550,10 +2549,14 @@ fn EditFlakeDialog(
                             span { "Environment" }
                             select {
                                 class: "input focus-ring",
-                                value: "{environment}",
-                                onchange: move |evt| environment.set(evt.value()),
+                                value: "{draft.environment}",
+                                onchange: move |evt| {
+                                    let mut next = draft_for_environment.clone();
+                                    next.environment = evt.value();
+                                    on_change.call(next);
+                                },
                                 if environments.is_empty() {
-                                    option { value: "production", "production" }
+                                    option { value: "{draft.environment}", "{draft.environment}" }
                                 } else {
                                     for env in &environments {
                                         option { 
@@ -2844,6 +2847,11 @@ fn start_edit_flake(
             name: flake.name,
             repo_url: flake.repo_url,
             branch: flake.branch,
+            environment: flake
+                .environments
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "production".to_string()),
             build_scope: flake.build_scope,
             credential_type: "none".to_string(),
             credential_username: String::new(),
@@ -2858,7 +2866,7 @@ fn start_edit_flake(
                 Ok(summary) => {
                     let current_value = editing_flake.read().clone();
                     if let Some(mut current) = current_value {
-                        current.credential_type = summary.auth_type;
+                        current.credential_type = normalize_credential_type(&summary.auth_type);
                         current.credential_username = summary.username.unwrap_or_default();
                         current.credential_ssh_username = summary.ssh_username.unwrap_or_default();
                         current.has_existing_secret = summary.has_secret;
@@ -2955,6 +2963,16 @@ fn normalize_optional_value(value: &str) -> Option<String> {
         None
     } else {
         Some(trimmed.to_string())
+    }
+}
+
+fn normalize_credential_type(value: &str) -> String {
+    match value.trim().to_lowercase().as_str() {
+        "none" => "none".to_string(),
+        "ssh" | "ssh-key" | "ssh_key" => "ssh_key".to_string(),
+        "pat" | "token" | "https_token" => "pat".to_string(),
+        "username_password" => "username_password".to_string(),
+        _ => "none".to_string(),
     }
 }
 
@@ -4889,18 +4907,19 @@ pub fn FlakesListViewNew() -> Element {
                             flake,
                             on_edit: move |flake_id| {
                                 if let Some(current) = all_flakes.iter().find(|item| item.id == flake_id) {
-                                    editing_flake.set(Some(EditFlakeDraft {
+                                    let base_draft = EditFlakeDraft {
                                         id: current.id,
                                         name: current.name.clone(),
                                         repo_url: current.url.clone(),
                                         branch: current.branch.clone(),
+                                        environment: current.environment.clone(),
                                         build_scope: "cf_systems_only".to_string(),
                                         credential_type: "none".to_string(),
                                         credential_username: String::new(),
                                         credential_secret: String::new(),
                                         credential_ssh_username: String::new(),
                                         has_existing_secret: false,
-                                    }));
+                                    };
                                     edit_error.set(None);
 
                                     let mut editing_flake = editing_flake.clone();
@@ -4908,18 +4927,18 @@ pub fn FlakesListViewNew() -> Element {
                                     spawn(async move {
                                         match fetch_flake_credentials(flake_id).await {
                                             Ok(credentials) => {
-                                                let current_draft = editing_flake.read().clone();
-                                                if let Some(mut draft) = current_draft {
-                                                    draft.credential_type = credentials.auth_type;
-                                                    draft.credential_username =
-                                                        credentials.username.unwrap_or_default();
-                                                    draft.credential_ssh_username =
-                                                        credentials.ssh_username.unwrap_or_default();
-                                                    draft.has_existing_secret = credentials.has_secret;
-                                                    editing_flake.set(Some(draft));
-                                                }
+                                                let mut draft = base_draft.clone();
+                                                draft.credential_type =
+                                                    normalize_credential_type(&credentials.auth_type);
+                                                draft.credential_username =
+                                                    credentials.username.unwrap_or_default();
+                                                draft.credential_ssh_username =
+                                                    credentials.ssh_username.unwrap_or_default();
+                                                draft.has_existing_secret = credentials.has_secret;
+                                                editing_flake.set(Some(draft));
                                             }
                                             Err(error) => {
+                                                editing_flake.set(Some(base_draft));
                                                 edit_error
                                                     .set(Some(format!("Failed to load credentials: {error}")));
                                             }
@@ -4950,6 +4969,10 @@ pub fn FlakesListViewNew() -> Element {
                                         }
                                     }
                                 });
+                            },
+                            on_history_rewrite_conflict: move |(flake_id, detail)| {
+                                rewrite_prompt.set(Some((flake_id, format!("flake #{flake_id}"), detail)));
+                                action_notice.set(Some("Sync blocked: git history rewrite detected. Review and accept rewrite to continue.".to_string()));
                             },
                             on_close: move |_| selected_flake.set(None)
                         }
@@ -5139,8 +5162,9 @@ fn map_timeline_commits_to_view(commits: &[crate::api::models::FlakeCommit]) -> 
 }
 
 fn map_diff_to_file_cards(diff: &str) -> Vec<MockFileItem> {
-    parse_unified_diff(diff)
+    let parsed_cards = parse_unified_diff(diff)
         .into_iter()
+        .filter(|file| file.old_path != "(unknown)" || file.new_path != "(unknown)")
         .map(|file| {
             let (add, del) = diff_file_stats(&file);
             MockFileItem {
@@ -5149,7 +5173,70 @@ fn map_diff_to_file_cards(diff: &str) -> Vec<MockFileItem> {
                 del: del as i32,
             }
         })
-        .collect()
+        .collect::<Vec<_>>();
+
+    if parsed_cards.len() > 1 {
+        return parsed_cards;
+    }
+
+    let mut fallback_cards = Vec::new();
+    let mut current_old: Option<String> = None;
+    let mut current_new: Option<String> = None;
+    let mut add = 0i32;
+    let mut del = 0i32;
+
+    for line in diff.lines() {
+        if let Some(path) = line.strip_prefix("--- ") {
+            if let (Some(old_path), Some(new_path)) = (current_old.take(), current_new.take()) {
+                let parsed = ParsedDiffFile {
+                    old_path: old_path.trim_start_matches("a/").to_string(),
+                    new_path: new_path.trim_start_matches("b/").to_string(),
+                    language: "text",
+                    lines: Vec::new(),
+                };
+                fallback_cards.push(MockFileItem {
+                    name: diff_file_label(&parsed),
+                    add,
+                    del,
+                });
+                add = 0;
+                del = 0;
+            }
+            current_old = Some(path.trim().to_string());
+            continue;
+        }
+
+        if let Some(path) = line.strip_prefix("+++ ") {
+            current_new = Some(path.trim().to_string());
+            continue;
+        }
+
+        if line.starts_with('+') && !line.starts_with("+++") {
+            add += 1;
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            del += 1;
+        }
+    }
+
+    if let (Some(old_path), Some(new_path)) = (current_old.take(), current_new.take()) {
+        let parsed = ParsedDiffFile {
+            old_path: old_path.trim_start_matches("a/").to_string(),
+            new_path: new_path.trim_start_matches("b/").to_string(),
+            language: "text",
+            lines: Vec::new(),
+        };
+        fallback_cards.push(MockFileItem {
+            name: diff_file_label(&parsed),
+            add,
+            del,
+        });
+    }
+
+    if fallback_cards.len() > parsed_cards.len() {
+        fallback_cards
+    } else {
+        parsed_cards
+    }
 }
 
 /// Construct a URL to view a file at a specific commit on the git remote.
@@ -5884,6 +5971,7 @@ fn FlakeTrayNew(
     is_admin: bool,
     on_edit: EventHandler<i32>,
     on_sync: EventHandler<i32>,
+    on_history_rewrite_conflict: EventHandler<(i32, String)>,
     on_close: EventHandler<()>,
 ) -> Element {
     const INITIAL_VISIBLE_COMMITS: usize = 100;
@@ -6159,8 +6247,10 @@ fn FlakeTrayNew(
                 section { class: "fl-tray-detail",
                     if let Some(commit) = active_selected_commit.clone() {
                         CommitDetailNew { 
+                            key: "{commit.full_hash}",
                             flake_id: flake.id,
                             commit,
+                            on_history_rewrite_conflict: on_history_rewrite_conflict,
                         }
                     } else {
                         div { class: "empty", style: "margin: 32px;",
@@ -6434,8 +6524,10 @@ fn PipelineDotNew(kind: &'static str, val: String) -> Element {
 fn CommitDetailNew(
     flake_id: i32,
     commit: MockCommitItem,
+    on_history_rewrite_conflict: EventHandler<(i32, String)>,
 ) -> Element {
     let mut selected_file_label = use_signal(String::new);
+    let mut rewrite_prompted = use_signal(|| false);
     let diff_resource = use_resource({
         let commit_hash = commit.full_hash.clone();
         move || {
@@ -6444,7 +6536,7 @@ fn CommitDetailNew(
                 fetch_commit_diff(flake_id, &request_hash)
                     .await
                     .map(|r| r.diff)
-                    .map_err(|err| err.to_string())
+                    .map_err(|err| err)
             }
         }
     });
@@ -6463,17 +6555,29 @@ fn CommitDetailNew(
         _ => Vec::new(),
     };
     let selected_file_name = if files.iter().any(|f| f.name == *selected_file_label.read()) {
-        selected_file_label.read().clone()
+        Some(selected_file_label.read().clone())
     } else {
-        files.first().map(|f| f.name.clone()).unwrap_or_default()
+        None
     };
     let selected_file = files
         .iter()
-        .find(|f| f.name == selected_file_name)
+        .find(|f| selected_file_name.as_ref().is_some_and(|name| &f.name == name))
         .cloned();
     let total_additions: i32 = files.iter().map(|f| f.add).sum();
     let total_deletions: i32 = files.iter().map(|f| f.del).sum();
     let total_files_changed = files.len() as i32;
+
+    if let Some(error) = files_error.as_ref() {
+        if !*rewrite_prompted.read() {
+            if let Some((conflict_flake_id, detail)) =
+                extract_history_rewrite_conflict(error, Some(flake_id))
+            {
+                rewrite_prompted.set(true);
+                on_history_rewrite_conflict.call((conflict_flake_id, detail));
+            }
+        }
+    }
+
     let pipeline = MockPipelineStatus {
         eval: commit.eval_status.clone(),
         build: commit.build_status.clone(),
@@ -6557,7 +6661,7 @@ fn CommitDetailNew(
                             rsx! {
                                 FileCardNew {
                                     file: file.clone(),
-                                    is_selected: selected_file_name == file.name,
+                                    is_selected: selected_file_name.as_ref().is_some_and(|name| name == &file.name),
                                     on_select: move |picked: MockFileItem| selected_file_label.set(picked.name),
                                 }
                             }
