@@ -4429,6 +4429,10 @@ mod tests {
 /// Uses live API data for flakes, timelines, and commit diffs.
 #[component]
 pub fn FlakesListViewNew() -> Element {
+    // Auth state for gating admin-only mutation controls
+    let app_state = use_context::<Signal<AppState>>();
+    let is_admin_user = auth::is_admin(&app_state.read().auth);
+    
     let mut view_mode = use_signal(|| "table");
     let mut search_query = use_signal(String::new);
     let mut selected_flake = use_signal(|| None::<MockFlakeItem>);
@@ -4506,6 +4510,13 @@ pub fn FlakesListViewNew() -> Element {
             mapped
         })
         .collect();
+    
+    // Convert raw_flakes to FlakeListItem for duplicate validation
+    let existing_flakes_for_validation: Vec<FlakeListItem> = raw_flakes
+        .iter()
+        .cloned()
+        .map(FlakeListItem::from_registry)
+        .collect();
 
     let q = search_query.read().to_lowercase();
     let filtered_flakes: Vec<MockFlakeItem> = if q.trim().is_empty() {
@@ -4582,58 +4593,61 @@ pub fn FlakesListViewNew() -> Element {
                         "{flake_count} tracked · {total_systems} systems · {synced_count} synced"
                     }
                 }
-                div { style: "display: flex; gap: 8px;",
-                    button { 
-                        class: "btn btn-ghost focus-ring",
-                        onclick: move |_| {
-                            let mut reload_nonce = reload_nonce.clone();
-                            spawn(async move {
-                                let result = request_sync_all_flakes().await;
-                                match result {
-                                    Ok(_) => {
-                                        action_notice.set(Some("Sync requested for all flakes".to_string()));
-                                        let next = *reload_nonce.read() + 1;
-                                        reload_nonce.set(next);
+                // Admin-only mutation controls: Sync all, Add flake
+                if is_admin_user {
+                    div { style: "display: flex; gap: 8px;",
+                        button { 
+                            class: "btn btn-ghost focus-ring",
+                            onclick: move |_| {
+                                let mut reload_nonce = reload_nonce.clone();
+                                spawn(async move {
+                                    let result = request_sync_all_flakes().await;
+                                    match result {
+                                        Ok(_) => {
+                                            action_notice.set(Some("Sync requested for all flakes".to_string()));
+                                            let next = *reload_nonce.read() + 1;
+                                            reload_nonce.set(next);
+                                        }
+                                        Err(err) => action_notice.set(Some(format!("Sync all failed: {err}"))),
                                     }
-                                    Err(err) => action_notice.set(Some(format!("Sync all failed: {err}"))),
-                                }
-                            });
-                        },
-                        // Inline sync icon SVG
-                        svg {
-                            width: "14",
-                            height: "14",
-                            view_box: "0 0 24 24",
-                            fill: "none",
-                            stroke: "currentColor",
-                            stroke_width: "2",
-                            stroke_linecap: "round",
-                            stroke_linejoin: "round",
-                            style: "display: inline-block; vertical-align: middle; margin-right: 6px;",
-                            path { d: "M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" }
+                                });
+                            },
+                            // Inline sync icon SVG
+                            svg {
+                                width: "14",
+                                height: "14",
+                                view_box: "0 0 24 24",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                stroke_linecap: "round",
+                                stroke_linejoin: "round",
+                                style: "display: inline-block; vertical-align: middle; margin-right: 6px;",
+                                path { d: "M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" }
+                            }
+                            " Sync all"
                         }
-                        " Sync all"
-                    }
-                    button { 
-                        class: "btn btn-primary focus-ring",
-                        onclick: move |_| {
-                            show_add_form.set(true);
-                            add_error.set(None);
-                        },
-                        // Inline plus icon SVG
-                        svg {
-                            width: "14",
-                            height: "14",
-                            view_box: "0 0 24 24",
-                            fill: "none",
-                            stroke: "currentColor",
-                            stroke_width: "2",
-                            stroke_linecap: "round",
-                            stroke_linejoin: "round",
-                            style: "display: inline-block; vertical-align: middle; margin-right: 6px;",
-                            path { d: "M5 12h14M12 5v14" }
+                        button { 
+                            class: "btn btn-primary focus-ring",
+                            onclick: move |_| {
+                                show_add_form.set(true);
+                                add_error.set(None);
+                            },
+                            // Inline plus icon SVG
+                            svg {
+                                width: "14",
+                                height: "14",
+                                view_box: "0 0 24 24",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                stroke_linecap: "round",
+                                stroke_linejoin: "round",
+                                style: "display: inline-block; vertical-align: middle; margin-right: 6px;",
+                                path { d: "M5 12h14M12 5v14" }
+                            }
+                            " Add flake"
                         }
-                        " Add flake"
                     }
                 }
             }
@@ -4711,7 +4725,8 @@ pub fn FlakesListViewNew() -> Element {
                 div { class: "card", style: "padding: 10px 14px; color: var(--cf-text-secondary);", "{msg}" }
             }
 
-            if *show_add_form.read() {
+            // Add flake form (admin-only, guarded by show_add_form which is only set by admin button)
+            if is_admin_user && *show_add_form.read() {
                 AddFlakeForm {
                     draft: draft,
                     error: add_error,
@@ -4720,49 +4735,52 @@ pub fn FlakesListViewNew() -> Element {
                         show_add_form.set(false);
                         add_error.set(None);
                     },
-                    on_submit: move |_| {
-                        let next = draft.read().clone();
-                        if let Err(err) = validate_new_flake(&next, &[]) {
-                            add_error.set(Some(err));
-                            return;
-                        }
-
-                        let mut draft = draft.clone();
-                        let mut add_error = add_error.clone();
-                        let mut show_add_form = show_add_form.clone();
-                        let mut reload_nonce = reload_nonce.clone();
-                        spawn(async move {
-                            let request = CreateFlakeRequest {
-                                name: next.name.trim().to_string(),
-                                repo_url: next.repo_url.trim().to_string(),
-                                branch: normalize_optional_branch(&next.branch),
-                                build_scope: Some(next.build_scope.clone()),
-                            };
-
-                            match create_flake(&request).await {
-                                Ok(created) => {
-                                    if let Err(error) = save_flake_credentials(created.id, &next).await {
-                                        add_error.set(Some(error));
-                                        return;
-                                    }
-                                    draft.set(NewFlakeDraft {
-                                        name: String::new(),
-                                        repo_url: String::new(),
-                                        branch: String::new(),
-                                        build_scope: "cf_systems_only".to_string(),
-                                        credential_type: "none".to_string(),
-                                        credential_username: String::new(),
-                                        credential_secret: String::new(),
-                                        credential_ssh_username: String::new(),
-                                    });
-                                    add_error.set(None);
-                                    show_add_form.set(false);
-                                    let next_nonce = *reload_nonce.read() + 1;
-                                    reload_nonce.set(next_nonce);
-                                }
-                                Err(error) => add_error.set(Some(error.to_string())),
+                    on_submit: {
+                        let existing_for_validation = existing_flakes_for_validation.clone();
+                        move |_| {
+                            let next = draft.read().clone();
+                            if let Err(err) = validate_new_flake(&next, &existing_for_validation) {
+                                add_error.set(Some(err));
+                                return;
                             }
-                        });
+
+                            let mut draft = draft.clone();
+                            let mut add_error = add_error.clone();
+                            let mut show_add_form = show_add_form.clone();
+                            let mut reload_nonce = reload_nonce.clone();
+                            spawn(async move {
+                                let request = CreateFlakeRequest {
+                                    name: next.name.trim().to_string(),
+                                    repo_url: next.repo_url.trim().to_string(),
+                                    branch: normalize_optional_branch(&next.branch),
+                                    build_scope: Some(next.build_scope.clone()),
+                                };
+
+                                match create_flake(&request).await {
+                                    Ok(created) => {
+                                        if let Err(error) = save_flake_credentials(created.id, &next).await {
+                                            add_error.set(Some(error));
+                                            return;
+                                        }
+                                        draft.set(NewFlakeDraft {
+                                            name: String::new(),
+                                            repo_url: String::new(),
+                                            branch: String::new(),
+                                            build_scope: "cf_systems_only".to_string(),
+                                            credential_type: "none".to_string(),
+                                            credential_username: String::new(),
+                                            credential_secret: String::new(),
+                                            credential_ssh_username: String::new(),
+                                        });
+                                        add_error.set(None);
+                                        show_add_form.set(false);
+                                        let next_nonce = *reload_nonce.read() + 1;
+                                        reload_nonce.set(next_nonce);
+                                    }
+                                    Err(error) => add_error.set(Some(error.to_string())),
+                                }
+                            });
+                        }
                     },
                 }
             }
@@ -4786,7 +4804,7 @@ pub fn FlakesListViewNew() -> Element {
                     let selected_id = selected_flake.read().as_ref().map(|f| f.id);
                     
                     if mode == "table" {
-                        rsx! { FlakeTableNew { flakes: filtered_flakes.clone(), selected_id, on_select: move |f| selected_flake.set(Some(f)), on_sync: move |flake_id| {
+                        rsx! { FlakeTableNew { flakes: filtered_flakes.clone(), selected_id, is_admin: is_admin_user, on_select: move |f| selected_flake.set(Some(f)), on_sync: move |flake_id| {
                             let mut reload_nonce = reload_nonce.clone();
                             spawn(async move {
                                 let result = request_sync_flake(flake_id).await;
@@ -4810,7 +4828,7 @@ pub fn FlakesListViewNew() -> Element {
                             });
                         } } }
                     } else {
-                        rsx! { FlakeCardsNew { flakes: filtered_flakes.clone(), selected_id, on_select: move |f| selected_flake.set(Some(f)), on_sync: move |flake_id| {
+                        rsx! { FlakeCardsNew { flakes: filtered_flakes.clone(), selected_id, is_admin: is_admin_user, on_select: move |f| selected_flake.set(Some(f)), on_sync: move |flake_id| {
                             let mut reload_nonce = reload_nonce.clone();
                             spawn(async move {
                                 let result = request_sync_flake(flake_id).await;
@@ -4867,6 +4885,7 @@ pub fn FlakesListViewNew() -> Element {
                             commits: tray_commits,
                             commits_loading: tray_commits_loading,
                             commits_error: tray_commits_error,
+                            is_admin: is_admin_user,
                             flake,
                             on_edit: move |flake_id| {
                                 if let Some(current) = all_flakes.iter().find(|item| item.id == flake_id) {
@@ -5494,6 +5513,7 @@ fn mock_files_for_commit(sha: &str) -> Vec<MockFileItem> {
 fn FlakeTableNew(
     flakes: Vec<MockFlakeItem>,
     selected_id: Option<i32>,
+    is_admin: bool,
     on_select: EventHandler<MockFlakeItem>,
     on_sync: EventHandler<i32>,
 ) -> Element {
@@ -5570,36 +5590,37 @@ fn FlakeTableNew(
                                     // Last synced
                                     td { style: "font-size: 12px; color: var(--cf-text-muted);", "{flake.last_sync_at}" }
                                     
-                                    // Actions
+                                    // Actions (admin-only)
                                     td {
-                                        div { class: "row-actions",
-                                            button {
-                                                class: "btn-icon focus-ring",
-                                                title: "Sync",
-                                                onclick: move |evt| {
-                                                    evt.stop_propagation();
-                                                    on_sync.call(flake_id_for_sync);
-                                                },
-                                                // Inline sync icon
-                                                svg {
-                                                    width: "14",
-                                                    height: "14",
-                                                    view_box: "0 0 24 24",
-                                                    fill: "none",
-                                                    stroke: "currentColor",
-                                                    stroke_width: "2",
-                                                    stroke_linecap: "round",
-                                                    stroke_linejoin: "round",
-                                                    path { d: "M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" }
+                                        if is_admin {
+                                            div { class: "row-actions",
+                                                button {
+                                                    class: "btn-icon focus-ring",
+                                                    title: "Sync",
+                                                    onclick: move |evt| {
+                                                        evt.stop_propagation();
+                                                        on_sync.call(flake_id_for_sync);
+                                                    },
+                                                    // Inline sync icon
+                                                    svg {
+                                                        width: "14",
+                                                        height: "14",
+                                                        view_box: "0 0 24 24",
+                                                        fill: "none",
+                                                        stroke: "currentColor",
+                                                        stroke_width: "2",
+                                                        stroke_linecap: "round",
+                                                        stroke_linejoin: "round",
+                                                        path { d: "M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" }
+                                                    }
                                                 }
-                                            }
-                                            button { 
-                                                class: "btn-icon focus-ring",
-                                                title: "More",
-                                                onclick: move |evt| evt.stop_propagation(),
-                                                // Inline more icon (3 dots)
-                                                svg {
-                                                    width: "14",
+                                                button { 
+                                                    class: "btn-icon focus-ring",
+                                                    title: "More",
+                                                    onclick: move |evt| evt.stop_propagation(),
+                                                    // Inline more icon (3 dots)
+                                                    svg {
+                                                        width: "14",
                                                     height: "14",
                                                     view_box: "0 0 24 24",
                                                     fill: "none",
@@ -5611,6 +5632,7 @@ fn FlakeTableNew(
                                                     circle { cx: "12", cy: "5", r: "1" }
                                                     circle { cx: "12", cy: "19", r: "1" }
                                                 }
+                                            }
                                             }
                                         }
                                     }
@@ -5661,6 +5683,7 @@ fn FlakeSyncChipNew(status: String, error_msg: Option<String>) -> Element {
 fn FlakeCardsNew(
     flakes: Vec<MockFlakeItem>,
     selected_id: Option<i32>,
+    is_admin: bool,
     on_select: EventHandler<MockFlakeItem>,
     on_sync: EventHandler<i32>,
 ) -> Element {
@@ -5794,27 +5817,30 @@ fn FlakeCardsNew(
                                         "{flake.total_commits} commits"
                                     }
                                 }
-                                button {
-                                    class: "btn btn-subtle focus-ring",
-                                    style: "padding: 4px 10px; font-size: 12px;",
-                                    onclick: move |evt| {
-                                        evt.stop_propagation();
-                                        on_sync.call(flake_id_for_sync);
-                                    },
-                                    // Inline sync icon
-                                    svg {
-                                        width: "12",
-                                        height: "12",
-                                        view_box: "0 0 24 24",
-                                        fill: "none",
-                                        stroke: "currentColor",
-                                        stroke_width: "2",
-                                        stroke_linecap: "round",
-                                        stroke_linejoin: "round",
+                                // Admin-only sync button
+                                if is_admin {
+                                    button {
+                                        class: "btn btn-subtle focus-ring",
+                                        style: "padding: 4px 10px; font-size: 12px;",
+                                        onclick: move |evt| {
+                                            evt.stop_propagation();
+                                            on_sync.call(flake_id_for_sync);
+                                        },
+                                        // Inline sync icon
+                                        svg {
+                                            width: "12",
+                                            height: "12",
+                                            view_box: "0 0 24 24",
+                                            fill: "none",
+                                            stroke: "currentColor",
+                                            stroke_width: "2",
+                                            stroke_linecap: "round",
+                                            stroke_linejoin: "round",
                                         style: "display: inline-block; vertical-align: middle; margin-right: 6px;",
                                         path { d: "M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" }
                                     }
                                     " Sync"
+                                    }
                                 }
                             }
                         }
@@ -5855,6 +5881,7 @@ fn FlakeTrayNew(
     commits: Vec<MockCommitItem>,
     commits_loading: bool,
     commits_error: Option<String>,
+    is_admin: bool,
     on_edit: EventHandler<i32>,
     on_sync: EventHandler<i32>,
     on_close: EventHandler<()>,
@@ -5864,7 +5891,6 @@ fn FlakeTrayNew(
 
     let mut selected_commit = use_signal(|| commits.first().cloned());
     let mut commit_query = use_signal(String::new);
-    let mut selected_file = use_signal(|| None::<MockFileItem>);
     let mut visible_limit = use_signal(|| INITIAL_VISIBLE_COMMITS);
     let commits_scroll_id = format!("fl-tray-commits-{}", flake.id);
     let query = commit_query.read().trim().to_lowercase();
@@ -5990,41 +6016,44 @@ fn FlakeTrayNew(
                     }
                 }
                 div { style: "display: flex; gap: 6px; align-items: center;",
-                    button { 
-                        class: "btn btn-ghost focus-ring xs",
-                        onclick: move |_| on_sync.call(flake.id),
-                        // Inline sync icon (11px)
-                        svg {
-                            width: "11",
-                            height: "11",
-                            view_box: "0 0 24 24",
-                            fill: "none",
-                            stroke: "currentColor",
-                            stroke_width: "2",
-                            stroke_linecap: "round",
-                            stroke_linejoin: "round",
-                            style: "display: inline-block; vertical-align: middle; margin-right: 6px;",
-                            path { d: "M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" }
+                    // Admin-only Sync and Edit buttons
+                    if is_admin {
+                        button { 
+                            class: "btn btn-ghost focus-ring xs",
+                            onclick: move |_| on_sync.call(flake.id),
+                            // Inline sync icon (11px)
+                            svg {
+                                width: "11",
+                                height: "11",
+                                view_box: "0 0 24 24",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                stroke_linecap: "round",
+                                stroke_linejoin: "round",
+                                style: "display: inline-block; vertical-align: middle; margin-right: 6px;",
+                                path { d: "M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" }
+                            }
+                            " Sync"
                         }
-                        " Sync"
-                    }
-                    button {
-                        class: "btn btn-ghost focus-ring xs",
-                        onclick: move |_| on_edit.call(flake.id),
-                        svg {
-                            width: "11",
-                            height: "11",
-                            view_box: "0 0 24 24",
-                            fill: "none",
-                            stroke: "currentColor",
-                            stroke_width: "2",
-                            stroke_linecap: "round",
-                            stroke_linejoin: "round",
-                            style: "display: inline-block; vertical-align: middle; margin-right: 6px;",
-                            circle { cx: "12", cy: "12", r: "3" }
-                            path { d: "M19.4 15a1.7 1.7 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.82-.33 1.7 1.7 0 0 0-1 1.52V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.52 1.7 1.7 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .33-1.82 1.7 1.7 0 0 0-1.52-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.52-1 1.7 1.7 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.82.33h.09a1.7 1.7 0 0 0 1-1.52V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.52 1.7 1.7 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.33 1.82v.09a1.7 1.7 0 0 0 1.52 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.52 1z" }
+                        button {
+                            class: "btn btn-ghost focus-ring xs",
+                            onclick: move |_| on_edit.call(flake.id),
+                            svg {
+                                width: "11",
+                                height: "11",
+                                view_box: "0 0 24 24",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                stroke_linecap: "round",
+                                stroke_linejoin: "round",
+                                style: "display: inline-block; vertical-align: middle; margin-right: 6px;",
+                                circle { cx: "12", cy: "12", r: "3" }
+                                path { d: "M19.4 15a1.7 1.7 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.82-.33 1.7 1.7 0 0 0-1 1.52V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.52 1.7 1.7 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .33-1.82 1.7 1.7 0 0 0-1.52-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.52-1 1.7 1.7 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.82.33h.09a1.7 1.7 0 0 0 1-1.52V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.52 1.7 1.7 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.33 1.82v.09a1.7 1.7 0 0 0 1.52 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.52 1z" }
+                            }
+                            " Edit"
                         }
-                        " Edit"
                     }
                     button {
                         class: "btn-icon focus-ring",
@@ -6114,10 +6143,7 @@ fn FlakeTrayNew(
                         CommitsListNew {
                             commits: visible_commits,
                             selected_commit: active_selected_commit.clone(),
-                            on_select: move |commit| {
-                                selected_file.set(None);
-                                selected_commit.set(Some(commit));
-                            }
+                            on_select: move |commit| selected_commit.set(Some(commit))
                         }
                         if has_more_commits {
                             div {
@@ -6135,7 +6161,6 @@ fn FlakeTrayNew(
                         CommitDetailNew { 
                             flake_id: flake.id,
                             commit,
-                            on_file_select: move |file| selected_file.set(Some(file))
                         }
                     } else {
                         div { class: "empty", style: "margin: 32px;",
@@ -6146,17 +6171,6 @@ fn FlakeTrayNew(
             }
         }
 
-        if let (Some(file), Some(commit)) = (
-            selected_file.read().clone(),
-            active_selected_commit.clone(),
-        ) {
-            DiffModalNew {
-                file,
-                commit,
-                flake: flake.clone(),
-                on_close: move |_| selected_file.set(None),
-            }
-        }
     }
 }
 
@@ -6420,8 +6434,8 @@ fn PipelineDotNew(kind: &'static str, val: String) -> Element {
 fn CommitDetailNew(
     flake_id: i32,
     commit: MockCommitItem,
-    on_file_select: EventHandler<MockFileItem>,
 ) -> Element {
+    let mut selected_file_label = use_signal(String::new);
     let diff_resource = use_resource({
         let commit_hash = commit.full_hash.clone();
         move || {
@@ -6440,10 +6454,23 @@ fn CommitDetailNew(
         Some(Err(err)) => Some(err.clone()),
         _ => None,
     };
+    let full_diff_text = match diff_resource.read().as_ref() {
+        Some(Ok(diff)) => diff.clone(),
+        _ => String::new(),
+    };
     let files = match diff_resource.read().as_ref() {
         Some(Ok(diff)) if !diff.trim().is_empty() => map_diff_to_file_cards(diff),
         _ => Vec::new(),
     };
+    let selected_file_name = if files.iter().any(|f| f.name == *selected_file_label.read()) {
+        selected_file_label.read().clone()
+    } else {
+        files.first().map(|f| f.name.clone()).unwrap_or_default()
+    };
+    let selected_file = files
+        .iter()
+        .find(|f| f.name == selected_file_name)
+        .cloned();
     let total_additions: i32 = files.iter().map(|f| f.add).sum();
     let total_deletions: i32 = files.iter().map(|f| f.del).sum();
     let total_files_changed = files.len() as i32;
@@ -6507,7 +6534,7 @@ fn CommitDetailNew(
         div { class: "fl-files-section",
             // Section header - JSX lines 221-227
             div { class: "fl-tray-section-h",
-                span { "{files.len()} files changed · click to view diff" }
+                span { "{files.len()} files changed · select a file to view diff" }
                 span { style: "color: var(--cf-text-muted); font-weight: 400; font-size: 10px;",
                     span { style: "color: #34d399;", "+{total_additions}" }
                     " / "
@@ -6525,8 +6552,24 @@ fn CommitDetailNew(
                     div { class: "empty", "No file changes in this commit." }
                 } else {
                     for file in files {
-                        FileCardNew { file: file.clone(), on_select: on_file_select }
+                        {
+                            let mut selected_file_label = selected_file_label.clone();
+                            rsx! {
+                                FileCardNew {
+                                    file: file.clone(),
+                                    is_selected: selected_file_name == file.name,
+                                    on_select: move |picked: MockFileItem| selected_file_label.set(picked.name),
+                                }
+                            }
+                        }
                     }
+                }
+            }
+
+            if let Some(file) = selected_file {
+                InlineFileDiffNew {
+                    file,
+                    full_diff_text: full_diff_text.clone(),
                 }
             }
         }
@@ -6628,7 +6671,7 @@ fn RolloutPillNew(on: i32, total: i32, failed: i32) -> Element {
 
 #[allow(dead_code)]
 #[component]
-fn FileCardNew(file: MockFileItem, on_select: EventHandler<MockFileItem>) -> Element {
+fn FileCardNew(file: MockFileItem, is_selected: bool, on_select: EventHandler<MockFileItem>) -> Element {
     let file_for_click = file.clone();
     let total = (file.add + file.del) as f32 + 0.001;
     let add_pct = ((file.add as f32 / total) * 100.0).round() as i32;
@@ -6643,9 +6686,15 @@ fn FileCardNew(file: MockFileItem, on_select: EventHandler<MockFileItem>) -> Ele
         ".".to_string()
     };
     
+    let card_class = if is_selected {
+        "fl-file-card focus-ring active"
+    } else {
+        "fl-file-card focus-ring"
+    };
+
     rsx! {
         button {
-            class: "fl-file-card focus-ring",
+            class: "{card_class}",
             onclick: move |_| on_select.call(file_for_click.clone()),
             
             // File header - JSX lines 236-242
@@ -6686,6 +6735,59 @@ fn FileCardNew(file: MockFileItem, on_select: EventHandler<MockFileItem>) -> Ele
                     div { style: "width: {add_pct}%; height: 100%; background: #34d399; display: inline-block; vertical-align: top;" }
                     div { style: "width: {del_pct}%; height: 100%; background: #f87171; display: inline-block; vertical-align: top;" }
                 }
+            }
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[component]
+fn InlineFileDiffNew(file: MockFileItem, full_diff_text: String) -> Element {
+    let diff_text = extract_diff_block_for_file_label(&full_diff_text, &file.name)
+        .unwrap_or(full_diff_text.clone());
+    if diff_text.trim().is_empty() {
+        return rsx! {
+            div { class: "empty", style: "margin-top: 12px;", "No diff content available for selected file." }
+        };
+    }
+
+    let parsed_files = parse_unified_diff(&diff_text);
+    let parsed_file = parsed_files.first().cloned();
+
+    rsx! {
+        div { style: "margin-top: 12px; border: 1px solid var(--cf-border); border-radius: 10px; overflow: hidden; background: var(--cf-surface-2);",
+            div { style: "padding: 8px 10px; border-bottom: 1px solid var(--cf-border); display: flex; align-items: center; justify-content: space-between; gap: 8px;",
+                span { class: "mono", style: "font-size: 11px; color: var(--cf-text-muted);", "Diff · {file.name}" }
+                span { style: "font-size: 10px; color: #34d399;", "+{file.add}" }
+                span { style: "font-size: 10px; color: #f87171;", "-{file.del}" }
+            }
+
+            if let Some(parsed) = parsed_file {
+                div { style: "max-height: 320px; overflow: auto;",
+                    for line in parsed.lines {
+                        div {
+                            class: "grid {line.class_name}",
+                            style: "grid-template-columns: 3.2rem 3.2rem 1.4rem minmax(0, 1fr);",
+                            div { class: "px-2 py-0.5 text-[10px] text-gray-500 text-right border-r border-gray-800", "{line.old_number.map(|n| n.to_string()).unwrap_or_default()}" }
+                            div { class: "px-2 py-0.5 text-[10px] text-gray-500 text-right border-r border-gray-800", "{line.new_number.map(|n| n.to_string()).unwrap_or_default()}" }
+                            div { class: "px-1 py-0.5 text-[11px] text-gray-400 border-r border-gray-800", "{line.prefix}" }
+                            div {
+                                class: if line.is_hunk_header {
+                                    "px-2 py-0.5 text-[11px] font-mono text-sky-300"
+                                } else {
+                                    "px-2 py-0.5 text-[11px] font-mono text-gray-200 hljs language-{parsed.language}"
+                                },
+                                if line.is_hunk_header {
+                                    "{line.content}"
+                                } else {
+                                    span { dangerous_inner_html: "{highlight_diff_fragment(&parsed.language, &line.content)}" }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                pre { class: "mono", style: "font-size: 11px; padding: 10px; overflow: auto;", "{diff_text}" }
             }
         }
     }

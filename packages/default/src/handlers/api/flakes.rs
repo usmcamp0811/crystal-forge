@@ -43,6 +43,14 @@ use crate::services::cve_scans::{CveScanError, trigger_immediate_cve_scan};
 
 const MAX_HYDRATION_COMMITS_PER_REQUEST: usize = 20;
 
+fn parse_timeline_limit(params: &HashMap<String, String>) -> i64 {
+    params
+        .get("limit")
+        .and_then(|v| v.parse::<i64>().ok())
+        .map(|v| v.clamp(1, 500))
+        .unwrap_or(10)
+}
+
 pub async fn list_flakes(State(pool): State<PgPool>, headers: HeaderMap) -> impl IntoResponse {
     if require_viewer_or_above(&pool, &headers).await.is_none() {
         return forbidden_viewer();
@@ -113,11 +121,7 @@ pub async fn get_flake_timelines(
     };
 
     // Parse optional limit parameter (default 10, max 500 for tray view)
-    let max_commits: i64 = params
-        .get("limit")
-        .and_then(|v| v.parse::<i64>().ok())
-        .map(|v| v.clamp(1, 500))
-        .unwrap_or(10);
+    let max_commits = parse_timeline_limit(&params);
 
     let fetch_result = if use_dashboard_view {
         fetch_dashboard_flake_timelines(&pool, max_commits, flake_ids.as_deref()).await
@@ -2176,6 +2180,30 @@ mod tests {
     // in auth/extractors.rs. These handlers now use RequireOperator and RequireAdmin extractors
     // which enforce authorization before the handler is called, so unit tests at this level
     // cannot test authorization behavior. Integration tests should test the full request path.
+
+    #[test]
+    fn timeline_limit_defaults_to_ten() {
+        let params = HashMap::new();
+        assert_eq!(parse_timeline_limit(&params), 10);
+    }
+
+    #[test]
+    fn timeline_limit_clamps_to_bounds() {
+        let mut low = HashMap::new();
+        low.insert("limit".to_string(), "0".to_string());
+        assert_eq!(parse_timeline_limit(&low), 1);
+
+        let mut high = HashMap::new();
+        high.insert("limit".to_string(), "999".to_string());
+        assert_eq!(parse_timeline_limit(&high), 500);
+    }
+
+    #[test]
+    fn timeline_limit_ignores_invalid_values() {
+        let mut params = HashMap::new();
+        params.insert("limit".to_string(), "not-a-number".to_string());
+        assert_eq!(parse_timeline_limit(&params), 10);
+    }
 
     #[cfg(test)]
     mod delete_tests {
