@@ -254,6 +254,7 @@ struct EditFlakeDraft {
     repo_url: String,
     branch: String,
     environment: String,
+    description: String,
     build_scope: String,
     credential_type: String,
     credential_username: String,
@@ -2461,9 +2462,9 @@ fn EditFlakeDialog(
     let draft_for_name = draft.clone();
     let draft_for_repo = draft.clone();
     let draft_for_branch = draft.clone();
+    let draft_for_description = draft.clone();
     let draft_for_environment = draft.clone();
     let draft_for_credentials = draft.clone();
-    let mut description = use_signal(String::new);
     let mut auto_sync = use_signal(|| true);
     let mut sync_interval = use_signal(|| "5m".to_string());
 
@@ -2573,9 +2574,13 @@ fn EditFlakeDialog(
                         label { "Description" }
                         input {
                             class: "input focus-ring",
-                            value: "{description}",
+                            value: "{draft.description}",
                             placeholder: "Short description shown in the registry",
-                            oninput: move |evt| description.set(evt.value()),
+                            oninput: move |evt| {
+                                let mut next = draft_for_description.clone();
+                                next.description = evt.value();
+                                on_change.call(next);
+                            },
                         }
                     }
 
@@ -2861,6 +2866,7 @@ fn start_edit_flake(
                 .first()
                 .cloned()
                 .unwrap_or_else(|| "production".to_string()),
+            description: String::new(),
             build_scope: flake.build_scope,
             credential_type: "none".to_string(),
             credential_username: String::new(),
@@ -4923,6 +4929,7 @@ pub fn FlakesListViewNew() -> Element {
                                         repo_url: current.url.clone(),
                                         branch: current.branch.clone(),
                                         environment: current.environment.clone(),
+                                        description: current.description.clone(),
                                         build_scope: "cf_systems_only".to_string(),
                                         credential_type: "none".to_string(),
                                         credential_username: String::new(),
