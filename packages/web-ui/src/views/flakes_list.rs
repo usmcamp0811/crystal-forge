@@ -5008,13 +5008,20 @@ pub fn FlakesListViewNew() -> Element {
                         let mut reload_nonce = reload_nonce.clone();
                         spawn(async move {
                             match accept_flake_history_rewrite(flake_id).await {
-                                Ok(_) => {
+                                Ok(response) => {
                                     rewrite_prompt.set(None);
-                                    action_notice.set(Some(
-                                        "History rewrite accepted. Retry sync to continue.".to_string(),
-                                    ));
-                                    let next = *reload_nonce.read() + 1;
-                                    reload_nonce.set(next);
+                                    match request_sync_flake(flake_id).await {
+                                        Ok(_) => {
+                                            action_notice.set(Some(response.message));
+                                            let next = *reload_nonce.read() + 1;
+                                            reload_nonce.set(next);
+                                        }
+                                        Err(err) => {
+                                            action_notice.set(Some(format!(
+                                                "History rewrite accepted, but sync failed: {err}"
+                                            )));
+                                        }
+                                    }
                                 }
                                 Err(err) => action_notice
                                     .set(Some(format!("Failed to accept rewrite: {err}"))),
@@ -6273,6 +6280,7 @@ fn FlakeTrayNew(
                     if let Some(commit) = active_selected_commit.clone() {
                         CommitDetailNew { 
                             key: "{commit.full_hash}",
+                            flake: flake.clone(),
                             flake_id: flake.id,
                             commit,
                             on_history_rewrite_conflict: on_history_rewrite_conflict,
@@ -6547,11 +6555,13 @@ fn PipelineDotNew(kind: &'static str, val: String) -> Element {
 #[allow(dead_code)]
 #[component]
 fn CommitDetailNew(
+    flake: MockFlakeItem,
     flake_id: i32,
     commit: MockCommitItem,
     on_history_rewrite_conflict: EventHandler<(i32, String)>,
 ) -> Element {
     let mut selected_file_label = use_signal(String::new);
+    let mut active_modal_file = use_signal(|| None::<MockFileItem>);
     let mut rewrite_prompted = use_signal(|| false);
     let diff_resource = use_resource({
         let commit_hash = commit.full_hash.clone();
@@ -6571,10 +6581,6 @@ fn CommitDetailNew(
         Some(Err(err)) => Some(err.clone()),
         _ => None,
     };
-    let full_diff_text = match diff_resource.read().as_ref() {
-        Some(Ok(diff)) => diff.clone(),
-        _ => String::new(),
-    };
     let files = match diff_resource.read().as_ref() {
         Some(Ok(diff)) if !diff.trim().is_empty() => map_diff_to_file_cards(diff),
         _ => Vec::new(),
@@ -6584,10 +6590,6 @@ fn CommitDetailNew(
     } else {
         None
     };
-    let selected_file = files
-        .iter()
-        .find(|f| selected_file_name.as_ref().is_some_and(|name| &f.name == name))
-        .cloned();
     let total_additions: i32 = files.iter().map(|f| f.add).sum();
     let total_deletions: i32 = files.iter().map(|f| f.del).sum();
     let total_files_changed = files.len() as i32;
@@ -6683,11 +6685,15 @@ fn CommitDetailNew(
                     for file in files {
                         {
                             let mut selected_file_label = selected_file_label.clone();
+                            let mut active_modal_file = active_modal_file.clone();
                             rsx! {
                                 FileCardNew {
                                     file: file.clone(),
                                     is_selected: selected_file_name.as_ref().is_some_and(|name| name == &file.name),
-                                    on_select: move |picked: MockFileItem| selected_file_label.set(picked.name),
+                                    on_select: move |picked: MockFileItem| {
+                                        selected_file_label.set(picked.name.clone());
+                                        active_modal_file.set(Some(picked));
+                                    },
                                 }
                             }
                         }
@@ -6695,10 +6701,12 @@ fn CommitDetailNew(
                 }
             }
 
-            if let Some(file) = selected_file {
-                InlineFileDiffNew {
+            if let Some(file) = active_modal_file.read().clone() {
+                DiffModalNew {
                     file,
-                    full_diff_text: full_diff_text.clone(),
+                    commit: commit.clone(),
+                    flake: flake.clone(),
+                    on_close: move |_| active_modal_file.set(None),
                 }
             }
         }
