@@ -1480,7 +1480,10 @@ pub async fn accept_flake_history_rewrite(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(ApiError {
                         error: "history_resync_failed".to_string(),
-                        message: "History reset completed but re-sync failed".to_string(),
+                        message: format!(
+                            "History reset completed but re-sync failed: {}",
+                            e
+                        ),
                         details: Some(serde_json::json!({
                             "error": e.to_string(),
                             "deleted_commits": deleted_commits
@@ -1782,7 +1785,7 @@ pub async fn sync_flake_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ApiError {
                     error: "internal_error".to_string(),
-                    message: format!("Failed to sync {} from source", flake.name),
+                    message: format!("Failed to sync {} from source: {}", flake.name, e),
                     details: Some(serde_json::json!({"error": e.to_string()})),
                 }),
             )
