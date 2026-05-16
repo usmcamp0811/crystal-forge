@@ -822,6 +822,18 @@ pub fn FlakesListView() -> Element {
                     draft: editing,
                     error: edit_error,
                     environments: db_environments.clone(),
+                    on_remove: move |flake_id| {
+                        let target = flakes
+                            .read()
+                            .iter()
+                            .find(|item| item.id == flake_id)
+                            .cloned();
+                        if let Some(flake) = target {
+                            pending_remove.set(Some(flake));
+                            editing_flake.set(None);
+                            edit_error.set(None);
+                        }
+                    },
                     on_cancel: move |_| {
                         editing_flake.set(None);
                         edit_error.set(None);
@@ -2461,6 +2473,7 @@ fn EditFlakeDialog(
     environments: Vec<EnvironmentSummary>,
     on_change: EventHandler<EditFlakeDraft>,
     on_submit: EventHandler<()>,
+    on_remove: EventHandler<i32>,
     on_cancel: EventHandler<()>,
 ) -> Element {
     let draft_for_name = draft.clone();
@@ -2469,8 +2482,6 @@ fn EditFlakeDialog(
     let draft_for_description = draft.clone();
     let draft_for_environment = draft.clone();
     let draft_for_credentials = draft.clone();
-    let mut auto_sync = use_signal(|| true);
-    let mut sync_interval = use_signal(|| "5m".to_string());
 
     rsx! {
         div {
@@ -2610,32 +2621,6 @@ fn EditFlakeDialog(
                         }
                     }
 
-                    div { style: "display: grid; grid-template-columns: 1fr 1fr; gap: 14px;",
-                        label {
-                            style: "display: flex; gap: 8px; align-items: center; font-size: 13px; cursor: pointer;",
-                            input {
-                                r#type: "checkbox",
-                                checked: *auto_sync.read(),
-                                onchange: move |evt| auto_sync.set(evt.checked()),
-                                style: "accent-color: var(--cf-brand-purple);",
-                            }
-                            span { "Auto-sync" }
-                        }
-                        div { class: "field",
-                            label { "Sync interval" }
-                            select {
-                                class: "input focus-ring",
-                                value: "{sync_interval}",
-                                onchange: move |evt| sync_interval.set(evt.value()),
-                                disabled: !*auto_sync.read(),
-                                option { value: "1m", "Every 1 min" }
-                                option { value: "5m", "Every 5 min" }
-                                option { value: "15m", "Every 15 min" }
-                                option { value: "1h", "Every hour" }
-                            }
-                        }
-                    }
-
                     div { style: "margin-top: 10px; padding-top: 14px; border-top: 1px solid var(--cf-divider);",
                         div {
                             style: "font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--cf-text-muted); margin-bottom: 8px;",
@@ -2644,7 +2629,7 @@ fn EditFlakeDialog(
                         button {
                             class: "btn btn-ghost focus-ring",
                             style: "color: #f87171; border-color: rgba(248,113,113,0.3);",
-                            onclick: move |_| {},
+                            onclick: move |_| on_remove.call(draft.id),
                             svg {
                                 width: "12",
                                 height: "12",
@@ -4537,6 +4522,7 @@ pub fn FlakesListViewNew() -> Element {
     let mut add_error = use_signal(|| None::<String>);
     let mut editing_flake = use_signal(|| None::<EditFlakeDraft>);
     let mut edit_error = use_signal(|| None::<String>);
+    let mut pending_remove_new = use_signal(|| None::<MockFlakeItem>);
     let mut draft = use_signal(|| NewFlakeDraft {
         name: String::new(),
         repo_url: String::new(),
@@ -4974,6 +4960,7 @@ pub fn FlakesListViewNew() -> Element {
                     } else {
                         None
                     };
+                    let all_flakes_for_edit = all_flakes.clone();
 
                     rsx! {
                         FlakeTrayNew {
@@ -4984,7 +4971,7 @@ pub fn FlakesListViewNew() -> Element {
                             is_admin: is_admin_user,
                             flake,
                             on_edit: move |flake_id| {
-                                if let Some(current) = all_flakes.iter().find(|item| item.id == flake_id) {
+                                if let Some(current) = all_flakes_for_edit.iter().find(|item| item.id == flake_id) {
                                     let base_draft = EditFlakeDraft {
                                         id: current.id,
                                         name: current.name.clone(),
@@ -5093,11 +5080,53 @@ pub fn FlakesListViewNew() -> Element {
                 }
             }
 
+            if let Some(flake) = pending_remove_new.read().clone() {
+                RemoveFlakeDialog {
+                    flake_name: flake.name.clone(),
+                    system_count: flake.system_count.max(0) as usize,
+                    on_cancel: move |_| pending_remove_new.set(None),
+                    on_confirm: move |(hard, cascade)| {
+                        let remove_id = flake.id;
+                        let mut pending_remove_new = pending_remove_new.clone();
+                        let mut action_notice = action_notice.clone();
+                        let mut reload_nonce = reload_nonce.clone();
+                        let mut selected_flake = selected_flake.clone();
+                        spawn(async move {
+                            match delete_flake(remove_id, hard, cascade).await {
+                                Ok(()) => {
+                                    pending_remove_new.set(None);
+                                    if selected_flake.read().as_ref().is_some_and(|item| item.id == remove_id)
+                                    {
+                                        selected_flake.set(None);
+                                    }
+                                    action_notice.set(Some("Flake removed from registry".to_string()));
+                                    let next = *reload_nonce.read() + 1;
+                                    reload_nonce.set(next);
+                                }
+                                Err(error) => {
+                                    action_notice.set(Some(error.to_string()));
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+
             if let Some(editing) = editing_flake.read().clone() {
                 EditFlakeDialog {
                     draft: editing,
                     error: edit_error,
                     environments: db_environments.clone(),
+                    on_remove: {
+                        let all_flakes_for_remove = all_flakes.clone();
+                        move |flake_id| {
+                            if let Some(target) = all_flakes_for_remove.iter().find(|item| item.id == flake_id).cloned() {
+                                pending_remove_new.set(Some(target));
+                                editing_flake.set(None);
+                                edit_error.set(None);
+                            }
+                        }
+                    },
                     on_cancel: move |_| {
                         editing_flake.set(None);
                         edit_error.set(None);
