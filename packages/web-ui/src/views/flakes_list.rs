@@ -2715,27 +2715,21 @@ fn FlakeCredentialFields(
                         if is_no_credentials {
                             return;
                         }
-                        test_state.set(Some("connected".to_string()));
+                        test_state.set(Some("unavailable".to_string()));
                     },
                     disabled: is_no_credentials,
                     if is_no_credentials {
                         "Test connection"
-                    } else if test_state.read().as_deref() == Some("connected") {
-                        svg {
-                            width: "11",
-                            height: "11",
-                            view_box: "0 0 24 24",
-                            fill: "none",
-                            stroke: "#34d399",
-                            stroke_width: "2",
-                            stroke_linecap: "round",
-                            stroke_linejoin: "round",
-                            path { d: "M20 6 9 17l-5-5" }
-                        }
-                        "Connected"
                     } else {
                         "Test connection"
                     }
+                }
+            }
+
+            if test_state.read().as_deref() == Some("unavailable") {
+                div {
+                    style: "margin-bottom: 10px; font-size: 11px; color: var(--cf-text-muted);",
+                    "Connection test is not implemented in this view yet. Use Save + Sync to validate credentials."
                 }
             }
 
@@ -4214,7 +4208,6 @@ fn extract_history_rewrite_conflict(
             let rewrite_marker = body_lower.contains("history rewrite")
                 || body_lower.contains("history_rewrite_detected");
             let sync_failure_marker = body_lower.contains("failed to sync")
-                || body_lower.contains("failed to fetch diff for commit")
                 || body_lower.contains("force push")
                 || body_lower.contains("non-fast-forward");
 
@@ -4236,6 +4229,17 @@ fn extract_history_rewrite_conflict(
             Some((flake_id, body.clone()))
         }
         _ => None,
+    }
+}
+
+fn is_commit_not_found_diff_error(error: &ApiClientError) -> bool {
+    match error {
+        ApiClientError::Status { body, .. } => {
+            let lower = body.to_ascii_lowercase();
+            lower.contains("failed to fetch diff for commit")
+                || lower.contains("could not find commit")
+        }
+        _ => false,
     }
 }
 
@@ -6678,7 +6682,16 @@ fn CommitDetailNew(
                 if files_loading {
                     div { class: "empty", "Loading file changes…" }
                 } else if let Some(err) = files_error {
-                    div { class: "empty", "Unable to load file changes: {err}" }
+                    div {
+                        class: "empty",
+                        "Unable to load file changes: {err}"
+                        if is_commit_not_found_diff_error(&err) {
+                            div {
+                                style: "margin-top: 6px; font-size: 11px; color: var(--cf-text-muted);",
+                                "This commit may have been rewritten. Refresh flakes and select a newer commit."
+                            }
+                        }
+                    }
                 } else if files.is_empty() {
                     div { class: "empty", "No file changes in this commit." }
                 } else {
