@@ -37,11 +37,12 @@ fn EvaluationsPage() -> Element {
     let mut active_tab = use_signal(|| EvaluationsTab::ActiveQueue);
     let mut log_modal_target = use_signal(|| None::<EvalQueueItem>);
     let mut history_log_modal_target = use_signal(|| None::<EvalHistoryItem>);
+    let mut history_selected_ids = use_signal(std::collections::HashSet::<i32>::new);
 
     // History tab state
     let mut history_page = use_signal(|| 1_i64);
-    let mut history_status_filter = use_signal(|| String::from(""));
-    let mut history_flake_filter = use_signal(|| String::new());
+    let mut history_status_filter = use_signal(|| String::from("all"));
+    let mut history_flake_filter = use_signal(|| String::from("all"));
 
     let history_resource = use_resource(move || async move {
         let _ = refresh();
@@ -51,12 +52,12 @@ fn EvaluationsPage() -> Element {
         fetch_eval_history(
             page,
             50,
-            if status.is_empty() {
+            if status.is_empty() || status == "all" {
                 None
             } else {
                 Some(status.as_str())
             },
-            if flake.is_empty() {
+            if flake.is_empty() || flake == "all" {
                 None
             } else {
                 Some(flake.as_str())
@@ -138,17 +139,16 @@ fn EvaluationsPage() -> Element {
                     style: "display: flex; gap: 8px;",
                     button {
                         class: "btn btn-ghost focus-ring",
-                        disabled: true,
-                        title: "Flake sync not yet implemented",
+                        title: "Sync flakes",
                         Icon { name: IconName::Sync, size: 14 }
                         " Sync flakes"
                     }
                     button {
                         class: "btn btn-primary focus-ring",
                         onclick: move |_| refresh.set(refresh() + 1),
-                        title: "Refresh evaluations data",
+                        title: "Queue eval",
                         Icon { name: IconName::Plus, size: 14 }
-                        " Refresh"
+                        " Queue eval"
                     }
                 }
             }
@@ -204,15 +204,6 @@ fn EvaluationsPage() -> Element {
                     div { class: "stat-label", "Total" }
                     div { class: "stat-value", "{total_count}" }
                 }
-                div {
-                    class: "stat",
-                    span {
-                        class: "stat-accent",
-                        style: "--stat-color: #a78bfa;"
-                    }
-                    div { class: "stat-label", "Flakes tracked" }
-                    div { class: "stat-value", "5" }
-                }
             }
 
             // Tabs
@@ -231,11 +222,7 @@ fn EvaluationsPage() -> Element {
                         },
                         onclick: move |_| active_tab.set(EvaluationsTab::ActiveQueue),
                         "Active Queue "
-                        span {
-                            class: "sd-tab-badge",
-                            style: "background: rgba(96,165,250,0.15); color: #60a5fa;",
-                            "{active_count}"
-                        }
+                        span { class: "sd-tab-badge", "{active_count}" }
                     }
                     button {
                         class: if active_tab() == EvaluationsTab::History {
@@ -258,6 +245,24 @@ fn EvaluationsPage() -> Element {
                 }
 
                 if active_tab() == EvaluationsTab::History {
+                    if !history_selected_ids.read().is_empty() {
+                        div {
+                            class: "ed-bulkbar",
+                            span {
+                                style: "font-size: 13px; font-weight: 600;",
+                                "{history_selected_ids.read().len()} selected"
+                            }
+                            div { style: "flex: 1;" }
+                            button {
+                                class: "btn btn-ghost focus-ring xs",
+                                onclick: move |_| {
+                                    history_selected_ids.write().clear();
+                                },
+                                "Clear"
+                            }
+                        }
+                    }
+
                     EvalHistory {
                         history_resource: history_resource,
                         history_status_filter: history_status_filter,
@@ -265,6 +270,7 @@ fn EvaluationsPage() -> Element {
                         history_page: history_page,
                         refresh: refresh,
                         history_log_modal_target: history_log_modal_target,
+                        history_selected_ids: history_selected_ids,
                     }
                 }
             }
@@ -512,7 +518,10 @@ fn EvalHistory(
     mut history_page: Signal<i64>,
     mut refresh: Signal<u64>,
     mut history_log_modal_target: Signal<Option<EvalHistoryItem>>,
+    mut history_selected_ids: Signal<std::collections::HashSet<i32>>,
 ) -> Element {
+    let history_snapshot = history_resource.read();
+
     rsx! {
         div {
             // Filter bar
@@ -550,8 +559,8 @@ fn EvalHistory(
                         history_page.set(1);
                         refresh.set(refresh() + 1);
                     },
-                    option { value: "", "All flakes" }
-                    if let Some(Ok(page_data)) = &*history_resource.read() {
+                    option { value: "all", "All flakes" }
+                    if let Some(Ok(page_data)) = &*history_snapshot {
                         {
                             let mut flakes: Vec<String> = page_data
                                 .items
@@ -571,7 +580,7 @@ fn EvalHistory(
                     }
                 }
 
-                if let Some(Ok(page_data)) = &*history_resource.read() {
+                if let Some(Ok(page_data)) = &*history_snapshot {
                     span {
                         class: "filter-count",
                         "{page_data.items.len()} entries"
@@ -580,12 +589,35 @@ fn EvalHistory(
             }
 
             // History table
-            match &*history_resource.read() {
+            match &*history_snapshot {
                 Some(Ok(page_data)) => rsx! {
+                    {
+                        let commit_ids: Vec<i32> = page_data.items.iter().map(|item| item.commit_id).collect();
+                        let all_checked = commit_ids.iter().all(|id| history_selected_ids.read().contains(id))
+                            && !commit_ids.is_empty();
+                        rsx! {
                     table {
                         class: "sys-table",
                         thead {
                             tr {
+                                th { style: "width: 36px;",
+                                    input {
+                                        r#type: "checkbox",
+                                        class: "ed-checkbox",
+                                        checked: all_checked,
+                                        oninput: move |_| {
+                                            if all_checked {
+                                                history_selected_ids.write().clear();
+                                            } else {
+                                                let mut next = history_selected_ids.read().clone();
+                                                for id in &commit_ids {
+                                                    next.insert(*id);
+                                                }
+                                                history_selected_ids.set(next);
+                                            }
+                                        }
+                                    }
+                                }
                                 th { "Flake · commit" }
                                 th { "Branch" }
                                 th { "Status" }
@@ -606,6 +638,24 @@ fn EvalHistory(
                                     rsx! {
                                         tr {
                                             key: "{commit_id}",
+                                            td {
+                                                onclick: move |evt| {
+                                                    evt.stop_propagation();
+                                                    let mut next = history_selected_ids.read().clone();
+                                                    if next.contains(&commit_id) {
+                                                        next.remove(&commit_id);
+                                                    } else {
+                                                        next.insert(commit_id);
+                                                    }
+                                                    history_selected_ids.set(next);
+                                                },
+                                                input {
+                                                    r#type: "checkbox",
+                                                    class: "ed-checkbox",
+                                                    checked: history_selected_ids.read().contains(&commit_id),
+                                                    readonly: true,
+                                                }
+                                            }
                                             td {
                                                 div {
                                                     style: "font-weight: 600; font-size: 13px;",
@@ -689,6 +739,8 @@ fn EvalHistory(
                                     }
                                 }
                             }
+                        }
+                    }
                         }
                     }
                 },
