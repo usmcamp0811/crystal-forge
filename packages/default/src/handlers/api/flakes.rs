@@ -53,6 +53,34 @@ fn parse_timeline_limit(params: &HashMap<String, String>) -> i64 {
         .unwrap_or(10)
 }
 
+fn apply_remote_commit_order(timeline: &mut FlakeTimeline, remote_hashes: &[String]) {
+    let remote_positions: HashMap<String, usize> = remote_hashes
+        .iter()
+        .enumerate()
+        .map(|(idx, hash)| (hash.clone(), idx))
+        .collect();
+
+    timeline
+        .commits
+        .retain(|commit| remote_positions.contains_key(&commit.hash));
+
+    timeline.commits.sort_by_key(|commit| {
+        remote_positions
+            .get(&commit.hash)
+            .copied()
+            .unwrap_or(usize::MAX)
+    });
+}
+
+fn apply_remote_commit_order_if_available(
+    timeline: &mut FlakeTimeline,
+    remote_hashes: Option<&[String]>,
+) {
+    if let Some(hashes) = remote_hashes {
+        apply_remote_commit_order(timeline, hashes);
+    }
+}
+
 pub async fn list_flakes(State(pool): State<PgPool>, headers: HeaderMap) -> impl IntoResponse {
     if require_viewer_or_above(&pool, &headers).await.is_none() {
         return forbidden_viewer();
@@ -178,29 +206,13 @@ pub async fn get_flake_timelines(
                             flake.repo_url,
                             flake.branch
                         );
-                        // Do not return potentially stale DB-only history when remote truth is unavailable.
-                        // This avoids showing rewritten commits after force-pushes in the tray/timeline UI.
-                        timeline.commits.clear();
+                        // Keep DB-backed timeline when remote ordering is unavailable.
+                        // This preserves cached visibility while avoiding destructive empty states.
                         continue;
                     }
                 };
 
-                let remote_positions: HashMap<String, usize> = remote_hashes
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, hash)| (hash.clone(), idx))
-                    .collect();
-
-                timeline
-                    .commits
-                    .retain(|commit| remote_positions.contains_key(&commit.hash));
-
-                timeline.commits.sort_by_key(|commit| {
-                    remote_positions
-                        .get(&commit.hash)
-                        .copied()
-                        .unwrap_or(usize::MAX)
-                });
+                apply_remote_commit_order_if_available(timeline, Some(&remote_hashes));
             }
 
             let mut remaining_hydration_budget = MAX_HYDRATION_COMMITS_PER_REQUEST;
@@ -1185,7 +1197,7 @@ pub async fn delete_flake_credentials_handler(
 }
 
 pub async fn test_flake_credentials(
-    RequireOperator(_user): RequireOperator,
+    RequireAdmin(_user): RequireAdmin,
     State(pool): State<PgPool>,
     Path(flake_id): Path<i32>,
     Json(payload): Json<TestFlakeCredentialRequest>,
@@ -2308,6 +2320,8 @@ fn looks_like_repo_url(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::models::FlakeCommit;
+    use chrono::Utc;
 
     #[test]
     fn create_payload_requires_name() {
@@ -2450,6 +2464,115 @@ mod tests {
     fn timeline_limit_defaults_to_ten() {
         let params = HashMap::new();
         assert_eq!(parse_timeline_limit(&params), 10);
+    }
+
+    #[test]
+    fn apply_remote_commit_order_if_available_keeps_db_commits_when_remote_unavailable() {
+        let original = vec![
+            FlakeCommit {
+                id: 1,
+                hash: "aaa1111".to_string(),
+                message: "one".to_string(),
+                author: "dev".to_string(),
+                committed_at: Utc::now(),
+                system_count: 0,
+                commits_behind: 0,
+                systems: vec![],
+                system_paths: vec![],
+                build_status: None,
+                evaluation_status: None,
+                evaluation_error_message: None,
+                metadata: None,
+            },
+            FlakeCommit {
+                id: 2,
+                hash: "bbb2222".to_string(),
+                message: "two".to_string(),
+                author: "dev".to_string(),
+                committed_at: Utc::now(),
+                system_count: 0,
+                commits_behind: 0,
+                systems: vec![],
+                system_paths: vec![],
+                build_status: None,
+                evaluation_status: None,
+                evaluation_error_message: None,
+                metadata: None,
+            },
+        ];
+
+        let mut timeline = FlakeTimeline {
+            flake_id: 7,
+            flake_name: "flake-a".to_string(),
+            repo_url: "https://example.invalid/repo".to_string(),
+            commits: original.clone(),
+        };
+
+        apply_remote_commit_order_if_available(&mut timeline, None);
+
+        assert_eq!(timeline.commits, original);
+    }
+
+    #[test]
+    fn apply_remote_commit_order_if_available_filters_and_sorts_by_remote_order() {
+        let mut timeline = FlakeTimeline {
+            flake_id: 7,
+            flake_name: "flake-a".to_string(),
+            repo_url: "https://example.invalid/repo".to_string(),
+            commits: vec![
+                FlakeCommit {
+                    id: 1,
+                    hash: "aaa1111".to_string(),
+                    message: "one".to_string(),
+                    author: "dev".to_string(),
+                    committed_at: Utc::now(),
+                    system_count: 0,
+                    commits_behind: 0,
+                    systems: vec![],
+                    system_paths: vec![],
+                    build_status: None,
+                    evaluation_status: None,
+                    evaluation_error_message: None,
+                    metadata: None,
+                },
+                FlakeCommit {
+                    id: 2,
+                    hash: "bbb2222".to_string(),
+                    message: "two".to_string(),
+                    author: "dev".to_string(),
+                    committed_at: Utc::now(),
+                    system_count: 0,
+                    commits_behind: 0,
+                    systems: vec![],
+                    system_paths: vec![],
+                    build_status: None,
+                    evaluation_status: None,
+                    evaluation_error_message: None,
+                    metadata: None,
+                },
+                FlakeCommit {
+                    id: 3,
+                    hash: "ccc3333".to_string(),
+                    message: "three".to_string(),
+                    author: "dev".to_string(),
+                    committed_at: Utc::now(),
+                    system_count: 0,
+                    commits_behind: 0,
+                    systems: vec![],
+                    system_paths: vec![],
+                    build_status: None,
+                    evaluation_status: None,
+                    evaluation_error_message: None,
+                    metadata: None,
+                },
+            ],
+        };
+
+        let remote_hashes = vec!["ccc3333".to_string(), "aaa1111".to_string()];
+        apply_remote_commit_order_if_available(&mut timeline, Some(&remote_hashes));
+
+        let hashes: Vec<String> = timeline.commits.iter().map(|c| c.hash.clone()).collect();
+        assert_eq!(hashes, vec!["ccc3333".to_string(), "aaa1111".to_string()]);
     }
 
     #[test]
