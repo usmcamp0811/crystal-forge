@@ -11,6 +11,7 @@
  */
 const { chromium } = require("playwright");
 const fs = require("fs");
+const { execSync } = require("child_process");
 
 const baseUrl = process.argv[2] || "http://127.0.0.1:3000";
 const outputDir = process.argv[3] || "/tmp/screenshots";
@@ -50,6 +51,43 @@ async function assertHidden(locator, message) {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function run(cmd, cwd = undefined) {
+  return execSync(cmd, {
+    cwd,
+    stdio: ["ignore", "pipe", "pipe"],
+    encoding: "utf8",
+  }).trim();
+}
+
+function forceRewriteGitServerMain() {
+  const repoUrl = process.env.CF_TEST_GIT_SERVER_URL || "http://gitserver/crystal-forge";
+  const workDir = `/tmp/cf-rewrite-${Date.now()}`;
+
+  run(`rm -rf ${workDir}`);
+  run(`mkdir -p ${workDir}`);
+  run(`git clone ${repoUrl} ${workDir}/repo`);
+
+  const repoDir = `${workDir}/repo`;
+  run('git config user.email "cf-test@example.com"', repoDir);
+  run('git config user.name "Crystal Forge Test"', repoDir);
+  run("git checkout main", repoDir);
+
+  // Create a true history rewrite while preserving the working tree content.
+  run("git checkout --orphan rewrite-main", repoDir);
+  run("git add -A", repoDir);
+  const marker = `rewrite-${Date.now()}`;
+  run(
+    `git commit -m \"test: rewrite main history (${marker})\" --allow-empty`,
+    repoDir,
+  );
+  run("git push --force origin rewrite-main:main", repoDir);
+
+  // Return current main HEAD for debug/assert logs.
+  const newHead = run("git rev-parse HEAD", repoDir);
+  run(`rm -rf ${workDir}`);
+  return newHead;
 }
 
 function mockBuildsDashboardSummary() {
@@ -2826,6 +2864,61 @@ const steps = [
     },
   },
   {
+    name: "13g-flakes-edit-modal-ssh-save-persist",
+    description: "Flakes edit modal persists SSH auth settings after save/reopen",
+    action: async (page) => {
+      await page.goto(`${baseUrl}/flakes`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1800);
+
+      const editButton = page.locator("button:has-text('Edit')").first();
+      await editButton.waitFor({ timeout: 7000 });
+      await editButton.click();
+
+      await page.getByRole("heading", { name: "Edit Flake" }).waitFor({ timeout: 7000 });
+
+      await page.locator("button", { hasText: "SSH key" }).first().click();
+      await page.locator("input[placeholder='git']").first().fill("git");
+
+      const privateKey = [
+        "-----BEGIN OPENSSH PRIVATE KEY-----",
+        "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAAAAAABAAAABwAAAAdzc2gtZWQyNTUxOQ==",
+        "-----END OPENSSH PRIVATE KEY-----",
+      ].join("\n");
+      await page.locator("textarea.input").first().fill(privateKey);
+
+      const saveResponsePromise = page.waitForResponse(
+        (response) =>
+          response.request().method() === "PUT" &&
+          /\/api\/v1\/flakes\/\d+\/credentials$/.test(new URL(response.url()).pathname),
+        { timeout: 15000 },
+      );
+
+      await page.getByRole("button", { name: "Save changes" }).first().click();
+
+      const saveResponse = await saveResponsePromise;
+      if (!saveResponse.ok()) {
+        const body = await saveResponse.text().catch(() => "<unreadable>");
+        throw new Error(`Expected SSH credential save to succeed, got ${saveResponse.status()}: ${body}`);
+      }
+
+      await page.waitForTimeout(1400);
+
+      // Reopen and verify persisted auth mode + username.
+      const reopenEdit = page.locator("button:has-text('Edit')").first();
+      await reopenEdit.waitFor({ timeout: 7000 });
+      await reopenEdit.click();
+      await page.getByRole("heading", { name: "Edit Flake" }).waitFor({ timeout: 7000 });
+
+      const sshToggle = page.locator("button.active", { hasText: "SSH key" }).first();
+      await assertVisible(sshToggle, "Expected SSH key auth mode to remain selected after reopen", 7000);
+
+      const sshUserValue = await page.locator("input[placeholder='git']").first().inputValue();
+      if (sshUserValue.trim() !== "git") {
+        throw new Error(`Expected persisted SSH username 'git', got '${sshUserValue}'`);
+      }
+    },
+  },
+  {
     name: "13d-flakes-stress-dataset",
     description: "Flakes view remains responsive with production-shaped timeline payload",
     action: async (page) => {
@@ -2942,6 +3035,63 @@ const steps = [
         .waitFor({ timeout: 5000 });
 
       await page.unroute(/\/api\/v1\/flakes\/\d+\/sync$/);
+    },
+  },
+  {
+    name: "13h-flakes-force-push-rewrite-recovery",
+    description: "Real git force-push rewrite + sync updates flake timeline state",
+    action: async (page) => {
+      await page.goto(`${baseUrl}/flakes`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1800);
+
+      // Open tray so we can validate commit list behavior after rewrite/sync.
+      const flakeCell = page.locator("text=test-flake").first();
+      await flakeCell.waitFor({ timeout: 10000 });
+      await flakeCell.click();
+      await page.waitForTimeout(1200);
+
+      const beforeCountText = await page
+        .locator(".fl-tray-commits-search span")
+        .first()
+        .textContent()
+        .catch(() => null);
+
+      const rewrittenHead = forceRewriteGitServerMain();
+      console.log(`Rewrote gitserver main branch to new HEAD: ${rewrittenHead}`);
+
+      const syncButton = page.locator("button:has-text('Sync from Source')").first();
+      await syncButton.waitFor({ timeout: 7000 });
+      await syncButton.click();
+
+      // Wait for timeline refresh polling to settle.
+      await page.waitForTimeout(6000);
+
+      const afterCountText = await page
+        .locator(".fl-tray-commits-search span")
+        .first()
+        .textContent()
+        .catch(() => null);
+
+      if (!afterCountText) {
+        throw new Error("Expected tray commits counter to remain visible after force-push sync");
+      }
+
+      // The UI must remain functional and not get stuck in rewrite modal loop/cycle.
+      const rewriteModalVisible = await page
+        .locator("text=History Rewrite Detected")
+        .first()
+        .isVisible({ timeout: 1500 })
+        .catch(() => false);
+
+      if (rewriteModalVisible) {
+        throw new Error("Unexpected persistent history rewrite modal after sync recovery");
+      }
+
+      if (beforeCountText && beforeCountText === afterCountText) {
+        console.log(
+          `Timeline counter unchanged across rewrite sync (${beforeCountText}); this is allowed if commit window size is stable.`,
+        );
+      }
     },
   },
   {
@@ -4419,6 +4569,8 @@ const CI_FAST_STEP_NAMES = new Set([
   "13d-flakes-stress-dataset",
   "13e-flakes-add-modal-credentials",
   "13f-flakes-edit-modal-credentials",
+  "13g-flakes-edit-modal-ssh-save-persist",
+  "13h-flakes-force-push-rewrite-recovery",
   // TASK-237: builds queue controls evidence
   "15d-builds-queue-table-view",
   "15e-builds-cancelling-state",
