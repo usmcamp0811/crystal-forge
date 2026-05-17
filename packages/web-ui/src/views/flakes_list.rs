@@ -6388,6 +6388,7 @@ fn FlakeTrayNew(
                             flake: flake.clone(),
                             flake_id: flake.id,
                             commit,
+                            on_request_timeline_refresh: on_sync,
                             on_history_rewrite_conflict: on_history_rewrite_conflict,
                         }
                     } else {
@@ -6663,11 +6664,13 @@ fn CommitDetailNew(
     flake: MockFlakeItem,
     flake_id: i32,
     commit: MockCommitItem,
+    on_request_timeline_refresh: EventHandler<i32>,
     on_history_rewrite_conflict: EventHandler<(i32, String)>,
 ) -> Element {
     let mut selected_file_label = use_signal(String::new);
     let mut active_modal_file = use_signal(|| None::<MockFileItem>);
     let mut rewrite_prompted = use_signal(|| false);
+    let mut auto_refresh_requested = use_signal(|| false);
     let diff_resource = use_resource({
         let commit_hash = commit.full_hash.clone();
         move || {
@@ -6700,6 +6703,11 @@ fn CommitDetailNew(
     let total_files_changed = files.len() as i32;
 
     if let Some(error) = files_error.as_ref() {
+        if is_commit_not_found_diff_error(error) && !*auto_refresh_requested.read() {
+            auto_refresh_requested.set(true);
+            on_request_timeline_refresh.call(flake_id);
+        }
+
         if !*rewrite_prompted.read() {
             if let Some((conflict_flake_id, detail)) =
                 extract_history_rewrite_conflict(error, Some(flake_id))
