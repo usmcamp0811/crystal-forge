@@ -4,7 +4,7 @@ title: Rebuild Flakes View to Match JSX Design Mockup Exactly
 status: In Progress
 assignee: []
 created_date: '2026-05-13 02:56'
-updated_date: '2026-05-17 03:16'
+updated_date: '2026-05-17 03:41'
 labels:
   - ui
   - web-ui
@@ -286,9 +286,9 @@ This task requires rebuilding the entire flakes view from scratch:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Follow-up fix committed: 016fc8fa - deterministic fallback for unavailable tray commit selection now chooses newest filtered commit (`first()`) and excludes the missing hash, preventing cyclic stale-commit recovery behavior.
+Fix commit f9801cf0 pushed to MR 255: edited credential fields in EditFlakeDialog now merge against a signal-backed latest draft state (prevents field regression during SSH credential edits), and backend timeline handler now clears commits when remote commit-order fetch fails (prevents stale DB-only rewritten history from being returned).
 
-Verification run: `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` completed successfully (warnings only, no errors).
+Verification: `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` passed (warnings only).
 
-Pushed branch update to MR 255: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/255
+Backend compile remains environment-blocked in this workspace by SQLx DB connectivity (`Connection refused (os error 111)`), so full backend compile validation still requires DB-enabled env/devshell services.
 <!-- SECTION:NOTES:END -->
