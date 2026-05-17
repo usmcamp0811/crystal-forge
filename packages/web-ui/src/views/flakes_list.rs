@@ -4293,6 +4293,8 @@ fn is_commit_not_found_diff_error(error: &ApiClientError) -> bool {
             let lower = body.to_ascii_lowercase();
             lower.contains("failed to fetch diff for commit")
                 || lower.contains("could not find commit")
+                || lower.contains("commit_diff_unavailable")
+                || lower.contains("could not be resolved in the current repository history")
         }
         _ => false,
     }
@@ -6781,14 +6783,19 @@ fn CommitDetailNew(
                 if files_loading {
                     div { class: "empty", "Loading file changes…" }
                 } else if let Some(err) = files_error {
-                    div {
-                        class: "empty",
-                        "Unable to load file changes: {err}"
-                        if is_commit_not_found_diff_error(&err) {
+                    if is_commit_not_found_diff_error(&err) {
+                        div {
+                            class: "empty",
+                            "This commit is no longer available after a history rewrite."
                             div {
                                 style: "margin-top: 6px; font-size: 11px; color: var(--cf-text-muted);",
-                                "This commit may have been rewritten. Refresh flakes and select a newer commit."
+                                "Refresh flakes and select a newer commit."
                             }
+                        }
+                    } else {
+                        div {
+                            class: "empty",
+                            "Unable to load file changes: {err}"
                         }
                     }
                 } else if files.is_empty() {
