@@ -6140,6 +6140,7 @@ fn FlakeTrayNew(
     const LOAD_MORE_STEP: usize = 100;
 
     let mut selected_commit = use_signal(|| commits.first().cloned());
+    let mut unavailable_commit_hashes = use_signal(Vec::<String>::new);
     let mut commit_query = use_signal(String::new);
     let mut visible_limit = use_signal(|| INITIAL_VISIBLE_COMMITS);
     let commits_scroll_id = format!("fl-tray-commits-{}", flake.id);
@@ -6206,6 +6207,7 @@ fn FlakeTrayNew(
         .read()
         .as_ref()
         .map(|commit| commit.full_hash.clone());
+    let unavailable = unavailable_commit_hashes.read().clone();
     let active_selected_commit = selected_hash
         .as_ref()
         .and_then(|hash| {
@@ -6214,7 +6216,13 @@ fn FlakeTrayNew(
                 .find(|commit| &commit.full_hash == hash)
                 .cloned()
         })
-        .or_else(|| filtered_commits.first().cloned());
+        .filter(|commit| !unavailable.iter().any(|hash| hash == &commit.full_hash))
+        .or_else(|| {
+            filtered_commits
+                .iter()
+                .find(|commit| !unavailable.iter().any(|hash| hash == &commit.full_hash))
+                .cloned()
+        });
     
     rsx! {
         // JSX: <div className="fl-tray-backdrop" onClick={onClose}/>
@@ -6418,6 +6426,7 @@ fn FlakeTrayNew(
                         {
                             let selected_commit_hash_for_unavailable = commit.full_hash.clone();
                             let filtered_commits_for_unavailable = filtered_commits.clone();
+                            let mut unavailable_commit_hashes = unavailable_commit_hashes.clone();
                             rsx! {
                                 CommitDetailNew {
                                     key: "{commit.full_hash}",
@@ -6425,15 +6434,27 @@ fn FlakeTrayNew(
                                     flake_id: flake.id,
                                     commit,
                                     on_request_timeline_refresh: on_sync,
-                                    on_commit_unavailable: move |missing_hash| {
+                                    on_commit_unavailable: move |missing_hash: String| {
                                         if missing_hash != selected_commit_hash_for_unavailable {
                                             return;
                                         }
 
+                                        unavailable_commit_hashes.with_mut(|hashes: &mut Vec<String>| {
+                                            if !hashes.iter().any(|hash| hash == &missing_hash) {
+                                                hashes.push(missing_hash.clone());
+                                            }
+                                        });
+
                                         let replacement = filtered_commits_for_unavailable
-                                            .first()
-                                            .cloned()
-                                            .filter(|candidate| candidate.full_hash != missing_hash);
+                                            .iter()
+                                            .find(|candidate| {
+                                                candidate.full_hash != missing_hash
+                                                    && !unavailable_commit_hashes
+                                                        .read()
+                                                        .iter()
+                                                        .any(|hash| hash == &candidate.full_hash)
+                                            })
+                                            .cloned();
                                         selected_commit.set(replacement);
                                     },
                                     on_history_rewrite_conflict: on_history_rewrite_conflict,

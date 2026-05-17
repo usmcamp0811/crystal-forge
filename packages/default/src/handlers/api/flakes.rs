@@ -21,7 +21,7 @@ use crate::config::CrystalForgeConfig;
 use crate::flake::commits::sync_commits_for_flake;
 use crate::flake::commits::{
     GitCommitMetadata, branch_exists, branch_exists_with_creds, get_commit_changed_files,
-    get_commit_diff, get_commit_metadata, get_commit_nixos_configurations,
+    get_commit_diff_with_creds, get_commit_metadata, get_commit_nixos_configurations,
     get_recent_branch_commit_hashes_with_creds, infer_default_branch, infer_default_branch_with_creds,
     is_history_rewrite_error,
 };
@@ -670,8 +670,20 @@ pub async fn get_commit_diff_handler(
         }
     };
 
+    let creds = FlakeCredentialEnv::load(&pool, flake_id)
+        .await
+        .unwrap_or_else(|e| {
+            warn!(
+                "Failed to load credentials for flake {} during commit diff request: {e:#}",
+                flake_id
+            );
+            None
+        });
+
     // Fetch the diff from git
-    let initial_diff = get_commit_diff(&flake.repo_url, &flake.branch, &commit_hash).await;
+    let initial_diff =
+        get_commit_diff_with_creds(&flake.repo_url, &flake.branch, &commit_hash, creds.as_ref())
+            .await;
     match initial_diff {
         Ok(diff) => (
             StatusCode::OK,
@@ -685,16 +697,6 @@ pub async fn get_commit_diff_handler(
             let initial_error_text = initial_error.to_string();
 
             if is_commit_unresolvable_error(&initial_error_text) {
-                let creds = FlakeCredentialEnv::load(&pool, flake_id)
-                    .await
-                    .unwrap_or_else(|e| {
-                        warn!(
-                            "Failed to load credentials for flake {} during diff refresh retry: {e:#}",
-                            flake_id
-                        );
-                        None
-                    });
-
                 if let Err(refresh_error) =
                     crate::flake::eval::refresh_flake_cache_with_creds(
                         &flake.repo_url,
@@ -710,7 +712,14 @@ pub async fn get_commit_diff_handler(
                     );
                 }
 
-                match get_commit_diff(&flake.repo_url, &flake.branch, &commit_hash).await {
+                match get_commit_diff_with_creds(
+                    &flake.repo_url,
+                    &flake.branch,
+                    &commit_hash,
+                    creds.as_ref(),
+                )
+                .await
+                {
                     Ok(diff) => {
                         return (
                             StatusCode::OK,

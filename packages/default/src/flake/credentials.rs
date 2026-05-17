@@ -71,6 +71,11 @@ impl FlakeCredentialEnv {
         self.netrc_path.is_some() || self.ssh_key_path.is_some()
     }
 
+    /// Returns true when this credential set uses SSH-key auth.
+    pub fn uses_ssh_key(&self) -> bool {
+        self.ssh_key_path.is_some()
+    }
+
     /// Apply credential environment variables to a `git` command.
     ///
     /// Sets:
