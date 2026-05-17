@@ -4262,7 +4262,7 @@ fn FlakeCardsNew(
                     rsx! {
                         div {
                             key: "{flake.id}",
-                            class: "sys-card",
+                            class: "sys-card compact",
                             style: "{border_style}",
                             onclick: move |_| {
                                 on_select.call(flake_for_select.clone());
