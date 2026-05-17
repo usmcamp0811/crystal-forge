@@ -1140,31 +1140,80 @@ async fn try_get_diff_for_branch(
         .await?;
 
     if !show_output.status.success() {
-        // If the commit isn't in the shallow clone, try to fetch it
+        // If the commit isn't in the shallow clone, try deepening first.
+        // Some providers reject direct hash fetches even for reachable commits.
+        let deepen_output = tokio::process::Command::new("git")
+            .args(&["fetch", "--deepen", "1000", "origin", branch])
+            .current_dir(clone_path)
+            .output()
+            .await?;
+
+        if deepen_output.status.success() {
+            let deepened_retry = tokio::process::Command::new("git")
+                .args(&["show", "--format=", commit_hash])
+                .current_dir(clone_path)
+                .output()
+                .await?;
+
+            if deepened_retry.status.success() {
+                return Ok(String::from_utf8_lossy(&deepened_retry.stdout).to_string());
+            }
+        }
+
+        // Fallback: direct hash fetch for providers that allow it.
         let fetch_output = tokio::process::Command::new("git")
             .args(&["fetch", "origin", commit_hash])
             .current_dir(clone_path)
             .output()
             .await?;
 
-        if !fetch_output.status.success() {
-            let stderr = String::from_utf8_lossy(&show_output.stderr);
-            bail!("Failed to fetch commit {}: {}", commit_hash, stderr);
+        if fetch_output.status.success() {
+            // Retry git show
+            let retry_output = tokio::process::Command::new("git")
+                .args(&["show", "--format=", commit_hash])
+                .current_dir(clone_path)
+                .output()
+                .await?;
+
+            if retry_output.status.success() {
+                return Ok(String::from_utf8_lossy(&retry_output.stdout).to_string());
+            }
         }
 
-        // Retry git show
-        let retry_output = tokio::process::Command::new("git")
-            .args(&["show", "--format=", commit_hash])
+        // Last resort: fully unshallow and retry once.
+        let unshallow_output = tokio::process::Command::new("git")
+            .args(&["fetch", "--unshallow", "origin", branch])
             .current_dir(clone_path)
             .output()
             .await?;
 
-        if !retry_output.status.success() {
-            let stderr = String::from_utf8_lossy(&retry_output.stderr);
+        if unshallow_output.status.success() {
+            let unshallow_retry = tokio::process::Command::new("git")
+                .args(&["show", "--format=", commit_hash])
+                .current_dir(clone_path)
+                .output()
+                .await?;
+
+            if unshallow_retry.status.success() {
+                return Ok(String::from_utf8_lossy(&unshallow_retry.stdout).to_string());
+            }
+
+            let stderr = String::from_utf8_lossy(&unshallow_retry.stderr);
             bail!("git show failed for {}: {}", commit_hash, stderr);
         }
 
-        return Ok(String::from_utf8_lossy(&retry_output.stdout).to_string());
+        let show_stderr = String::from_utf8_lossy(&show_output.stderr);
+        let fetch_stderr = String::from_utf8_lossy(&fetch_output.stderr);
+        let deepen_stderr = String::from_utf8_lossy(&deepen_output.stderr);
+        let unshallow_stderr = String::from_utf8_lossy(&unshallow_output.stderr);
+        bail!(
+            "Failed to resolve commit {} after shallow/deepen/fetch/unshallow retries. show='{}' deepen='{}' fetch='{}' unshallow='{}'",
+            commit_hash,
+            show_stderr.trim(),
+            deepen_stderr.trim(),
+            fetch_stderr.trim(),
+            unshallow_stderr.trim()
+        );
     }
 
     Ok(String::from_utf8_lossy(&show_output.stdout).to_string())
