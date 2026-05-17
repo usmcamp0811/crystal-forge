@@ -178,6 +178,9 @@ pub async fn get_flake_timelines(
                             flake.repo_url,
                             flake.branch
                         );
+                        // Do not return potentially stale DB-only history when remote truth is unavailable.
+                        // This avoids showing rewritten commits after force-pushes in the tray/timeline UI.
+                        timeline.commits.clear();
                         continue;
                     }
                 };

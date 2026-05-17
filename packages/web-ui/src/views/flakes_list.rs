@@ -2481,7 +2481,14 @@ fn EditFlakeDialog(
     let draft_for_branch = draft.clone();
     let draft_for_description = draft.clone();
     let draft_for_environment = draft.clone();
-    let draft_for_credentials = draft.clone();
+    let draft_signal = use_signal(|| draft.clone());
+    {
+        let mut draft_signal = draft_signal.clone();
+        let draft = draft.clone();
+        use_effect(move || {
+            draft_signal.set(draft.clone());
+        });
+    }
 
     rsx! {
         div {
@@ -2609,7 +2616,8 @@ fn EditFlakeDialog(
                         credential_ssh_username: draft.credential_ssh_username.clone(),
                         has_existing_secret: draft.has_existing_secret,
                         on_change: move |(field, value): (String, String)| {
-                            let mut next = draft_for_credentials.clone();
+                            let mut draft_signal = draft_signal.clone();
+                            let mut next = draft_signal.read().clone();
                             match field.as_str() {
                                 "credential_type" => next.credential_type = value,
                                 "credential_username" => next.credential_username = value,
@@ -2617,6 +2625,7 @@ fn EditFlakeDialog(
                                 "credential_ssh_username" => next.credential_ssh_username = value,
                                 _ => {}
                             }
+                            draft_signal.set(next.clone());
                             on_change.call(next);
                         }
                     }
