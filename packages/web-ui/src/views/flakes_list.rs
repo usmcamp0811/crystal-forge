@@ -264,1807 +264,7 @@ struct EditFlakeDraft {
     has_existing_secret: bool,
 }
 
-/// Flakes list with toggles and filters.
-#[component]
-pub fn FlakesListView() -> Element {
-    let app_state = use_context::<Signal<AppState>>();
-    let is_admin_user = auth::is_admin(&app_state.read().auth);
-
-    // Shared config health (admin only) — used for flake eval error banner.
-    let config_health = app_state.read().config_health.clone();
-
-    let stored_view = LocalStorage::get::<String>(VIEW_PREF_KEY).ok();
-    let mut view_mode = use_signal(|| FlakesViewMode::from_storage(stored_view));
-    let query_view = prefers_view_from_query();
-    let open_dropdown = use_signal(|| None::<FilterDropdown>);
-    let container_id = use_memo(|| format!("flakes-filters-{}", Uuid::new_v4()));
-
-    use_effect(move || {
-        if let Some(mode) = query_view {
-            view_mode.set(mode);
-            let _ = LocalStorage::set(VIEW_PREF_KEY, mode.as_storage());
-        }
-    });
-
-    {
-        let mut open_dropdown = open_dropdown.clone();
-        let container_id = container_id.clone();
-        use_effect(move || {
-            let Some(window) = window() else {
-                return;
-            };
-            let Some(document) = window.document() else {
-                return;
-            };
-            let document_for_listener = document.clone();
-            let handler = Closure::<dyn FnMut(_)>::new(move |event: web_sys::Event| {
-                if open_dropdown.read().is_none() {
-                    return;
-                }
-                let target = match event.target() {
-                    Some(target) => target,
-                    None => return,
-                };
-                let node: Node = match target.dyn_into() {
-                    Ok(node) => node,
-                    Err(_) => return,
-                };
-                let container_id = container_id.read();
-                if let Some(container) =
-                    document_for_listener.get_element_by_id(container_id.as_str())
-                {
-                    if !container.contains(Some(&node)) {
-                        open_dropdown.set(None);
-                    }
-                }
-            });
-            let _ = document
-                .add_event_listener_with_callback("mousedown", handler.as_ref().unchecked_ref());
-            handler.forget();
-        });
-    }
-
-    let search = use_signal(String::new);
-    let environment_filter = use_signal(Vec::<String>::new);
-    let commit_filter = use_signal(Vec::<CommitFilter>::new);
-    let size_filter = use_signal(Vec::<SizeBucket>::new);
-    let mut flakes = use_signal(Vec::<FlakeListItem>::new);
-    let loading_flakes = use_signal(|| true);
-    let server_notice = use_signal(|| None::<String>);
-    let mut flake_timelines = use_signal(Vec::<FlakeTimeline>::new);
-    let mut show_add_form = use_signal(|| false);
-    let mut add_error = use_signal(|| None::<String>);
-    let mut editing_flake = use_signal(|| None::<EditFlakeDraft>);
-    let mut edit_error = use_signal(|| None::<String>);
-    let mut draft = use_signal(|| NewFlakeDraft {
-        name: String::new(),
-        repo_url: String::new(),
-        branch: String::new(),
-        build_scope: "cf_systems_only".to_string(),
-        credential_type: "none".to_string(),
-        credential_username: String::new(),
-        credential_secret: String::new(),
-        credential_ssh_username: String::new(),
-    });
-    let mut pending_remove = use_signal(|| None::<FlakeListItem>);
-    let mut refreshing_flake = use_signal(|| None::<i32>);
-    let mut selected_history_flake = use_signal(|| None::<i32>);
-    let mut selected_history_commit = use_signal(|| None::<String>);
-    let mut sync_note = use_signal(|| None::<String>);
-    let mut last_manual_sync = use_signal(|| None::<DateTime<Utc>>);
-    let mut rewrite_prompt = use_signal(|| None::<(i32, String, String)>);
-    let mut cve_scan_status = use_signal(HashMap::<String, String>::new);
-
-    let current_flakes = flakes.read().clone();
-    let environments = unique_environments(&current_flakes);
-    
-    // Fetch environments from database for edit dialog
-    let db_environments_resource = use_resource(|| async { fetch_environments().await });
-    let db_environments: Vec<EnvironmentSummary> = match db_environments_resource.read().as_ref() {
-        Some(Ok(envs)) => envs.clone(),
-        _ => Vec::new(),
-    };
-
-    let filtered_flakes: Vec<FlakeListItem> = current_flakes
-        .into_iter()
-        .filter(|flake| matches_environment(flake, &environment_filter.read()))
-        .filter(|flake| matches_commit_state(flake, &commit_filter.read()))
-        .filter(|flake| matches_size(flake, &size_filter.read()))
-        .filter(|flake| matches_search(flake, &search.read()))
-        .collect();
-    let sync_timestamp =
-        (*last_manual_sync.read()).map(|ts| ts.format("%Y-%m-%d %H:%M:%S UTC").to_string());
-
-    {
-        let filtered_ids: Vec<i32> = filtered_flakes.iter().map(|flake| flake.id).collect();
-        let mut selected_history_flake = selected_history_flake.clone();
-        let mut selected_history_commit = selected_history_commit.clone();
-        use_effect(move || {
-            let current = *selected_history_flake.read();
-            let has_selected = current
-                .map(|id| filtered_ids.iter().any(|value| *value == id))
-                .unwrap_or(false);
-            if !has_selected {
-                selected_history_flake.set(filtered_ids.first().copied());
-                selected_history_commit.set(None);
-            }
-        });
-    }
-
-    {
-        let mut flakes = flakes.clone();
-        let mut loading_flakes = loading_flakes.clone();
-        let mut server_notice = server_notice.clone();
-        use_effect(move || {
-            spawn(async move {
-                match fetch_flakes().await {
-                    Ok(items) => {
-                        flakes.set(
-                            items
-                                .into_iter()
-                                .map(FlakeListItem::from_registry)
-                                .collect(),
-                        );
-                        server_notice.set(None);
-                    }
-                    Err(error) => {
-                        server_notice.set(Some(format!("Flake API unavailable: {error}")));
-                    }
-                }
-                loading_flakes.set(false);
-            });
-        });
-    }
-
-    // Load flake timelines
-    {
-        let mut flake_timelines = flake_timelines.clone();
-        let flakes = flakes.clone();
-        use_effect(move || {
-            let flake_ids: Vec<i32> = flakes.read().iter().map(|flake| flake.id).collect();
-            spawn(async move {
-                if flake_ids.is_empty() {
-                    flake_timelines.set(Vec::new());
-                    return;
-                }
-
-                let initial_ids: Vec<i32> = flake_ids
-                    .iter()
-                    .take(INITIAL_TIMELINE_FLAKES)
-                    .copied()
-                    .collect();
-
-                let mut merged_timelines = Vec::new();
-
-                if !initial_ids.is_empty() {
-                    match fetch_flake_timelines_for_ids(&initial_ids).await {
-                        Ok(timelines) => {
-                            merged_timelines = merge_flake_timeline_batches(
-                                merged_timelines,
-                                timelines,
-                                &flake_ids,
-                            );
-                            flake_timelines.set(merged_timelines.clone());
-                        }
-                        Err(_error) => {
-                            // Fallback to full fetch if subset request fails for any reason.
-                            match fetch_flake_timelines().await {
-                                Ok(timelines) => {
-                                    flake_timelines.set(timelines);
-                                }
-                                Err(_) => {
-                                    flake_timelines.set(Vec::new());
-                                }
-                            }
-                            return;
-                        }
-                    }
-                }
-
-                let remaining_ids: Vec<i32> = flake_ids
-                    .iter()
-                    .skip(INITIAL_TIMELINE_FLAKES)
-                    .copied()
-                    .collect();
-
-                for chunk in remaining_ids.chunks(TIMELINE_BATCH_SIZE) {
-                    match fetch_flake_timelines_for_ids(chunk).await {
-                        Ok(timelines) => {
-                            merged_timelines = merge_flake_timeline_batches(
-                                merged_timelines,
-                                timelines,
-                                &flake_ids,
-                            );
-                            flake_timelines.set(merged_timelines.clone());
-                        }
-                        Err(_) => {
-                            // Keep already-loaded timelines if a later batch fails.
-                        }
-                    }
-                }
-            });
-        });
-    }
-
-    let from_setup = use_signal(came_from_setup);
-    let mut dismiss_add_target_callout = use_signal(|| false);
-
-    rsx! {
-        div {
-            class: "space-y-6",
-            id: "{container_id}",
-
-            if from_setup() {
-                div {
-                    "data-testid": "setup-coach-flakes-callout",
-                    style: "background:rgba(30,58,138,0.22); border:1px solid rgba(96,165,250,0.55); border-radius:8px; padding:12px 16px;",
-                    p { style: "color:#dbeafe; font-size:12px; font-weight:700; margin:0; letter-spacing:0.03em; text-transform:uppercase;", "Setup Tour - Step 2 of 6" }
-                    p { style: "color:#dbeafe; font-size:14px; font-weight:600; margin:4px 0 0 0;", "Register a flake source" }
-                    p { style: "color:#bfdbfe; font-size:13px; margin:4px 0 0 0;", "Use Add Flake to track the repo and branch your systems should deploy." }
-                }
-            }
-
-            header {
-                class: "flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between",
-                div {
-                    h1 { class: "{theme::typography::PAGE_TITLE}", "Flake Registry" }
-                    p { class: "text-sm {theme::text::SECONDARY}", "Track flake repositories and deployment coverage." }
-                }
-                div {
-                    class: "flex items-center gap-3",
-                    button {
-                        class: "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::DANGER_BTN} {theme::interactive::FOCUS_RING}",
-                        onclick: move |_| {
-                            let selected_flake_id = *selected_history_flake.read();
-                            let mut flakes_signal = flakes.clone();
-                            let mut timelines_signal = flake_timelines.clone();
-                            let mut selected_history_commit = selected_history_commit.clone();
-                            let mut last_manual_sync = last_manual_sync.clone();
-                            let mut sync_note = sync_note.clone();
-                            let mut rewrite_prompt = rewrite_prompt.clone();
-                            let flakes_snapshot = flakes.read().clone();
-                            spawn(async move {
-                                let sync_result = if let Some(flake_id) = selected_flake_id {
-                                    request_sync_flake(flake_id).await
-                                } else {
-                                    request_sync_all_flakes().await
-                                };
-
-                                match sync_result {
-                                    Ok(response) => {
-                                        let mut refresh_warning = false;
-                                        match fetch_flakes().await {
-                                            Ok(items) => {
-                                                flakes_signal.set(
-                                                    items
-                                                        .into_iter()
-                                                        .map(FlakeListItem::from_registry)
-                                                        .collect(),
-                                                );
-                                            }
-                                            Err(_) => {
-                                                refresh_warning = true;
-                                            }
-                                        }
-
-                                        match fetch_flake_timelines().await {
-                                            Ok(timelines) => {
-                                                timelines_signal.set(timelines);
-                                                selected_history_commit.set(None);
-                                            }
-                                            Err(_) => {
-                                                refresh_warning = true;
-                                            }
-                                        }
-                                        last_manual_sync.set(Some(Utc::now()));
-                                        let message = if refresh_warning {
-                                            format!(
-                                                "{} UI refresh was partial; reload if data looks stale.",
-                                                response.message
-                                            )
-                                        } else {
-                                            response.message
-                                        };
-                                        sync_note.set(Some(message));
-                                    }
-                                    Err(error) => {
-                                        if let Some((flake_id, detail)) =
-                                            extract_history_rewrite_conflict(&error, selected_flake_id)
-                                        {
-                                            let flake_name = flakes_snapshot
-                                                .iter()
-                                                .find(|f| f.id == flake_id)
-                                                .map(|f| f.name.clone())
-                                                .unwrap_or_else(|| format!("flake #{flake_id}"));
-                                            rewrite_prompt.set(Some((flake_id, flake_name, detail)));
-                                            sync_note.set(Some(
-                                                "Sync blocked: git history rewrite detected. Review and accept rewrite to continue.".to_string(),
-                                            ));
-                                            return;
-                                        }
-
-                                        #[cfg(target_arch = "wasm32")]
-                                        web_sys::console::error_1(
-                                            &format!(
-                                                "[CF] sync request failed for selected_flake_id={:?}: {}",
-                                                selected_flake_id, error
-                                            )
-                                            .into(),
-                                        );
-
-                                        sync_note.set(Some(format!(
-                                            "Sync failed for {}: {}",
-                                            selected_flake_id
-                                                .map(|id| format!("flake #{id}"))
-                                                .unwrap_or_else(|| "all flakes".to_string()),
-                                            error
-                                        )));
-                                        return;
-                                    }
-                                }
-                            });
-                        },
-                        "Sync from Source"
-                    }
-                    div {
-                        class: "relative z-[2101]",
-                        button {
-                            class: if from_setup() && !*show_add_form.read() {
-                                "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN} animate-pulse ring-2 ring-blue-300/70 ring-offset-2 ring-offset-slate-950"
-                            } else {
-                                "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}"
-                            },
-                            onclick: move |_| {
-                                let next = !*show_add_form.read();
-                                show_add_form.set(next);
-                                add_error.set(None);
-                                if next {
-                                    dismiss_add_target_callout.set(true);
-                                }
-                            },
-                            if *show_add_form.read() {
-                                "Close"
-                            } else {
-                                "Add Flake"
-                            }
-                        }
-                        if from_setup() && !*show_add_form.read() && !dismiss_add_target_callout() {
-                            div {
-                                "data-testid": "setup-coach-flakes-target-callout",
-                                style: "position:absolute; z-index:2200; right:0; top:calc(100% + 10px); background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; width:220px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
-                                div {
-                                    style: "position:absolute; top:-6px; right:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
-                                }
-                                p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
-                                p { style: "margin:2px 0 0 0;", "Click Add Flake to register your source repository." }
-                            }
-                        }
-                    }
-                    ViewToggle {
-                        view_mode: *view_mode.read(),
-                        on_change: move |mode| {
-                            view_mode.set(mode);
-                            let _ = LocalStorage::set(VIEW_PREF_KEY, mode.as_storage());
-                        }
-                    }
-                }
-            }
-
-            if let Some(note) = sync_note.read().clone() {
-                p {
-                    class: "text-xs px-3 py-2 rounded-lg border text-blue-100 cf-chip-info",
-                    "{note}"
-                }
-            } else if let Some(sync_ts) = sync_timestamp {
-                p {
-                    class: "text-xs {theme::text::MUTED}",
-                    "Last manual sync {sync_ts}"
-                }
-            }
-
-            if let Some(message) = server_notice.read().clone() {
-                p {
-                    class: "text-xs px-3 py-2 rounded-lg border text-amber-100 cf-chip-warning",
-                    "{message}"
-                }
-            }
-
-            // Admin-only: warn when any flake has eval errors on its latest commit.
-            if is_admin_user {
-                if let Some(ref health) = config_health {
-                    if health.checks.iter().any(|c| c.id == "flake_eval_errors" && !c.passed) {
-                        AlertBanner {
-                            severity: AlertSeverity::Warning,
-                            message: "One or more flakes have evaluation errors on their latest commit. Check flake configuration and commit history.".to_string(),
-                        }
-                    }
-                }
-            }
-
-            if *show_add_form.read() {
-                AddFlakeForm {
-                    draft: draft,
-                    error: add_error,
-                    show_onboarding_callouts: from_setup(),
-                    on_cancel: move |_| {
-                        draft.set(NewFlakeDraft {
-                            name: String::new(),
-                            repo_url: String::new(),
-                            branch: String::new(),
-                            build_scope: "cf_systems_only".to_string(),
-                            credential_type: "none".to_string(),
-                            credential_username: String::new(),
-                            credential_secret: String::new(),
-                            credential_ssh_username: String::new(),
-                        });
-                        add_error.set(None);
-                        show_add_form.set(false);
-                    },
-                    on_submit: move |_| {
-                        let next = draft.read().clone();
-                        if let Err(err) = validate_new_flake(&next, &flakes.read()) {
-                            add_error.set(Some(err));
-                            return;
-                        }
-
-                        let mut flakes = flakes.clone();
-                        let mut draft = draft.clone();
-                        let mut add_error = add_error.clone();
-                        let mut show_add_form = show_add_form.clone();
-                        let mut server_notice = server_notice.clone();
-                        spawn(async move {
-                            let request = CreateFlakeRequest {
-                                name: next.name.trim().to_string(),
-                                repo_url: next.repo_url.trim().to_string(),
-                                branch: normalize_optional_branch(&next.branch),
-                                build_scope: Some(next.build_scope.clone()),
-                            };
-
-                            match create_flake(&request).await {
-                                Ok(created) => {
-                                    if let Err(error) = save_flake_credentials(created.id, &next).await {
-                                        add_error.set(Some(error));
-                                        return;
-                                    }
-                                    let mut values = flakes.read().clone();
-                                    values.push(FlakeListItem::from_registry(created));
-                                    values
-                                        .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-                                    flakes.set(values);
-                                    draft.set(NewFlakeDraft {
-                                        name: String::new(),
-                                        repo_url: String::new(),
-                                        branch: String::new(),
-                                        build_scope: "cf_systems_only".to_string(),
-                                        credential_type: "none".to_string(),
-                                        credential_username: String::new(),
-                                        credential_secret: String::new(),
-                                        credential_ssh_username: String::new(),
-                                    });
-                                    add_error.set(None);
-                                    server_notice.set(None);
-                                    show_add_form.set(false);
-                                }
-                                Err(error) => {
-                                    add_error.set(Some(error.to_string()));
-                                }
-                            }
-                        });
-                    },
-                }
-            }
-
-            FiltersBar {
-                environments: environments.clone(),
-                search: search,
-                environment_filter: environment_filter,
-                commit_filter: commit_filter,
-                size_filter: size_filter,
-                open_dropdown: open_dropdown,
-            }
-
-            if *loading_flakes.read() {
-                Card {
-                    title: Some("Loading flakes".to_string()),
-                    children: rsx! {
-                        p { class: "{theme::text::SECONDARY}", "Fetching registry entries from API..." }
-                    }
-                }
-            } else if filtered_flakes.is_empty() {
-                Card {
-                    title: Some("No flakes".to_string()),
-                    children: rsx! {
-                        p { class: "{theme::text::SECONDARY}", "No flakes matched your filters." }
-                    }
-                }
-            } else if *view_mode.read() == FlakesViewMode::Cards {
-                div {
-                    class: "grid grid-cols-1 xl:grid-cols-2 gap-6",
-                    "data-testid": "flakes-cards",
-                    for flake in filtered_flakes.clone() {
-                        FlakeCard {
-                            flake,
-                            selected_history_flake_id: *selected_history_flake.read(),
-                            on_select_history_flake: move |id| {
-                                selected_history_flake.set(Some(id));
-                                selected_history_commit.set(None);
-                            },
-                            on_remove: move |id| remove_flake_by_id(flakes, pending_remove, id),
-                            on_edit: move |id| start_edit_flake(flakes, editing_flake, edit_error, id),
-                            on_refresh: move |id| refresh_flake_by_id(id, refreshing_flake, sync_note),
-                        }
-                    }
-                }
-            } else {
-                FlakesTable {
-                    flakes: filtered_flakes.clone(),
-                    selected_history_flake_id: *selected_history_flake.read(),
-                    on_select_history_flake: move |id| {
-                        selected_history_flake.set(Some(id));
-                        selected_history_commit.set(None);
-                    },
-                    on_remove: move |id| remove_flake_by_id(flakes, pending_remove, id),
-                    on_edit: move |id| start_edit_flake(flakes, editing_flake, edit_error, id),
-                    on_refresh: move |id| refresh_flake_by_id(id, refreshing_flake, sync_note),
-                }
-            }
-
-            FlakeHistoryExplorer {
-                flakes: filtered_flakes.clone(),
-                selected_flake_id: selected_history_flake,
-                selected_commit_hash: selected_history_commit,
-                timelines: flake_timelines.read().clone(),
-                cve_scan_status: cve_scan_status,
-            }
-
-            if let Some(editing) = editing_flake.read().clone() {
-                EditFlakeDialog {
-                    draft: editing,
-                    error: edit_error,
-                    environments: db_environments.clone(),
-                    on_remove: move |flake_id| {
-                        let target = flakes
-                            .read()
-                            .iter()
-                            .find(|item| item.id == flake_id)
-                            .cloned();
-                        if let Some(flake) = target {
-                            pending_remove.set(Some(flake));
-                            editing_flake.set(None);
-                            edit_error.set(None);
-                        }
-                    },
-                    on_cancel: move |_| {
-                        editing_flake.set(None);
-                        edit_error.set(None);
-                    },
-                    on_change: move |next| editing_flake.set(Some(next)),
-                    on_submit: move |_| {
-                        let Some(next) = editing_flake.read().clone() else {
-                            return;
-                        };
-                        if let Err(err) = validate_flake_edit(&next, &flakes.read()) {
-                            edit_error.set(Some(err));
-                            return;
-                        }
-
-                        let mut flakes = flakes.clone();
-                        let mut editing_flake = editing_flake.clone();
-                        let mut edit_error = edit_error.clone();
-                        let mut server_notice = server_notice.clone();
-                        spawn(async move {
-                            let request = UpdateFlakeRequest {
-                                name: next.name.trim().to_string(),
-                                repo_url: next.repo_url.trim().to_string(),
-                                branch: normalize_optional_branch(&next.branch),
-                                build_scope: Some(next.build_scope.clone()),
-                            };
-
-                            match update_flake(next.id, &request).await {
-                                Ok(updated) => {
-                                    if let Err(error) = save_flake_credentials(updated.id, &next).await {
-                                        edit_error.set(Some(error));
-                                        return;
-                                    }
-                                    let mut values = flakes.read().clone();
-                                    if let Some(target) = values.iter_mut().find(|item| item.id == updated.id)
-                                    {
-                                        target.name = updated.name;
-                                        target.repo_url = updated.repo_url;
-                                        target.branch = updated.branch;
-                                        target.build_scope = updated.build_scope;
-                                        target.system_count = updated.system_count.max(0) as usize;
-                                    }
-                                    values.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-                                    flakes.set(values);
-                                    editing_flake.set(None);
-                                    edit_error.set(None);
-                                    server_notice.set(None);
-                                }
-                                Err(error) => {
-                                    edit_error.set(Some(error.to_string()));
-                                }
-                            }
-                        });
-                    }
-                }
-            }
-
-            if let Some(flake) = pending_remove.read().clone() {
-                RemoveFlakeDialog {
-                    flake_name: flake.name.clone(),
-                    system_count: flake.system_count,
-                    on_cancel: move |_| pending_remove.set(None),
-                    on_confirm: move |(hard, cascade)| {
-                        let mut flakes = flakes.clone();
-                        let mut pending_remove = pending_remove.clone();
-                        let mut server_notice = server_notice.clone();
-                        let remove_id = flake.id;
-                        spawn(async move {
-                            match delete_flake(remove_id, hard, cascade).await {
-                                Ok(()) => {
-                                    let mut values = flakes.read().clone();
-                                    values.retain(|item| item.id != remove_id);
-                                    flakes.set(values);
-                                    server_notice.set(None);
-                                    pending_remove.set(None);
-                                }
-                                Err(error) => {
-                                    server_notice.set(Some(error.to_string()));
-                                }
-                            }
-                        });
-                    }
-                }
-            }
-
-            if let Some((flake_id, flake_name, detail)) = rewrite_prompt.read().clone() {
-                HistoryRewriteDialog {
-                    flake_name: flake_name.clone(),
-                    detail,
-                    on_cancel: move |_| rewrite_prompt.set(None),
-                    on_accept: move |_| {
-                        let flake_name_for_error = flake_name.clone();
-                        let mut rewrite_prompt = rewrite_prompt.clone();
-                        let mut sync_note = sync_note.clone();
-                        let mut last_manual_sync = last_manual_sync.clone();
-                        let mut flakes_signal = flakes.clone();
-                        let mut timelines_signal = flake_timelines.clone();
-                        spawn(async move {
-                            match accept_flake_history_rewrite(flake_id).await {
-                                Ok(response) => {
-                                    rewrite_prompt.set(None);
-                                    sync_note.set(Some(response.message));
-                                    last_manual_sync.set(Some(Utc::now()));
-
-                                    if let Ok(items) = fetch_flakes().await {
-                                        flakes_signal.set(
-                                            items
-                                                .into_iter()
-                                                .map(FlakeListItem::from_registry)
-                                                .collect(),
-                                        );
-                                    }
-
-                                    if let Ok(timelines) = fetch_flake_timelines().await {
-                                        timelines_signal.set(timelines);
-                                    }
-                                }
-                                Err(error) => {
-                                    sync_note.set(Some(format!(
-                                        "Failed to accept rewrite for {flake_name_for_error}: {error}"
-                                    )));
-                                }
-                            }
-                        });
-                    },
-                }
-            }
-        }
-    }
-}
-
-#[component]
-fn ViewToggle(view_mode: FlakesViewMode, on_change: EventHandler<FlakesViewMode>) -> Element {
-    let table_active = view_mode == FlakesViewMode::Table;
-    let cards_active = view_mode == FlakesViewMode::Cards;
-
-    rsx! {
-        div {
-            class: "inline-flex rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG}",
-            button {
-                class: "px-3 py-2 text-sm font-medium rounded-l-lg transition {theme::interactive::FOCUS_RING} {theme::text::SECONDARY} {table_class(table_active)}",
-                onclick: move |_| on_change.call(FlakesViewMode::Table),
-                "Table"
-            }
-            button {
-                class: "px-3 py-2 text-sm font-medium rounded-r-lg transition {theme::interactive::FOCUS_RING} {theme::text::SECONDARY} {table_class(cards_active)}",
-                onclick: move |_| on_change.call(FlakesViewMode::Cards),
-                "Cards"
-            }
-        }
-    }
-}
-
-#[component]
-fn FiltersBar(
-    environments: Vec<String>,
-    search: Signal<String>,
-    environment_filter: Signal<Vec<String>>,
-    commit_filter: Signal<Vec<CommitFilter>>,
-    size_filter: Signal<Vec<SizeBucket>>,
-    open_dropdown: Signal<Option<FilterDropdown>>,
-) -> Element {
-    rsx! {
-        div {
-            class: "relative z-[2000] grid grid-cols-1 lg:grid-cols-4 gap-4",
-            style: "position: sticky; top: 0;",
-            input {
-                class: "rounded-lg px-4 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
-                r#type: "search",
-                placeholder: "Search flakes...",
-                value: "{search.read()}",
-                oninput: move |evt| search.set(evt.value()),
-            }
-            EnvironmentFilterDropdown {
-                environments,
-                selected: environment_filter,
-                open_dropdown: open_dropdown,
-            }
-            CommitFilterDropdown {
-                selected: commit_filter,
-                open_dropdown: open_dropdown,
-            }
-            SizeFilterDropdown {
-                selected: size_filter,
-                open_dropdown: open_dropdown,
-            }
-        }
-    }
-}
-
-#[component]
-fn FlakesTable(
-    flakes: Vec<FlakeListItem>,
-    selected_history_flake_id: Option<i32>,
-    on_select_history_flake: EventHandler<i32>,
-    on_remove: EventHandler<i32>,
-    on_edit: EventHandler<i32>,
-    on_refresh: EventHandler<i32>,
-) -> Element {
-    let sort_column = use_signal(|| None::<SortColumn>);
-    let sort_direction = use_signal(|| SortDirection::Asc);
-
-    let sorted_flakes = {
-        let mut sorted = flakes.clone();
-        if let Some(column) = *sort_column.read() {
-            let dir = *sort_direction.read();
-            sorted.sort_by(|a, b| {
-                let cmp = match column {
-                    SortColumn::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-                    SortColumn::Repo => a.repo_url.to_lowercase().cmp(&b.repo_url.to_lowercase()),
-                    SortColumn::Systems => a.system_count.cmp(&b.system_count),
-                    SortColumn::Environments => {
-                        a.environments.join(", ").cmp(&b.environments.join(", "))
-                    }
-                    SortColumn::LatestCommit => {
-                        let a_commit = a.latest_commit.as_deref().unwrap_or("");
-                        let b_commit = b.latest_commit.as_deref().unwrap_or("");
-                        a_commit.cmp(b_commit)
-                    }
-                };
-                match dir {
-                    SortDirection::Asc => cmp,
-                    SortDirection::Desc => cmp.reverse(),
-                }
-            });
-        }
-        sorted
-    };
-
-    let current_col = *sort_column.read();
-    let current_dir = *sort_direction.read();
-
-    rsx! {
-        div {
-            class: "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden shadow-sm bg-gray-900/60",
-            div {
-                class: "overflow-x-auto",
-                "data-testid": "flakes-table",
-                table {
-                    class: "w-full",
-                    thead {
-                        class: "{theme::surface::SUBTLE_BG}",
-                        tr {
-                                SortableHeader {
-                                    label: "Flake",
-                                    column: SortColumn::Name,
-                                    current_col: current_col,
-                                    current_dir: current_dir,
-                                    sort_column: sort_column,
-                                    sort_direction: sort_direction,
-                                }
-                                SortableHeader {
-                                    label: "Repository",
-                                    column: SortColumn::Repo,
-                                    current_col: current_col,
-                                    current_dir: current_dir,
-                                    sort_column: sort_column,
-                                    sort_direction: sort_direction,
-                                }
-                                SortableHeader {
-                                    label: "Systems",
-                                    column: SortColumn::Systems,
-                                    current_col: current_col,
-                                    current_dir: current_dir,
-                                    sort_column: sort_column,
-                                    sort_direction: sort_direction,
-                                }
-                                SortableHeader {
-                                    label: "Environments",
-                                    column: SortColumn::Environments,
-                                    current_col: current_col,
-                                    current_dir: current_dir,
-                                    sort_column: sort_column,
-                                    sort_direction: sort_direction,
-                                }
-                                SortableHeader {
-                                    label: "Latest Commit",
-                                    column: SortColumn::LatestCommit,
-                                    current_col: current_col,
-                                    current_dir: current_dir,
-                                    sort_column: sort_column,
-                                    sort_direction: sort_direction,
-                                }
-                                th { class: "px-4 py-3 text-right text-xs font-medium text-gray-400 uppercase tracking-wider", "Actions" }
-                            }
-                        }
-                    tbody {
-                        class: "divide-y {theme::surface::DIVIDER}",
-                        for flake in sorted_flakes {
-                            {
-                                let is_selected = selected_history_flake_id == Some(flake.id);
-                                rsx! {
-                                    tr {
-                                        key: "{flake.id}",
-                                        class: if is_selected {
-                                            "cursor-pointer"
-                                        } else {
-                                            "hover:bg-gray-800/40 cursor-pointer"
-                                        },
-                                        style: if is_selected {
-                                            "background-color: rgba(130, 105, 155, 0.32);"
-                                        } else {
-                                            "background-color: transparent;"
-                                        },
-                                        onclick: move |_| on_select_history_flake.call(flake.id),
-                                        td { class: "{theme::spacing::TABLE_CELL} text-sm text-white", "{flake.name}" }
-                                        td {
-                                            class: "{theme::spacing::TABLE_CELL} text-sm text-gray-300",
-                                            div {
-                                                class: "space-y-1",
-                                                p { class: "font-mono", "{flake.repo_url}" }
-                                                p { class: "text-[11px] text-sky-300 font-mono", "branch: {flake.branch}" }
-                                            }
-                                        }
-                                        td { class: "{theme::spacing::TABLE_CELL} text-sm text-gray-200", "{flake.system_count}" }
-                                        td { class: "{theme::spacing::TABLE_CELL} text-sm {theme::text::SECONDARY}", "{environments_label(&flake)}" }
-                                        td { class: "{theme::spacing::TABLE_CELL} text-sm text-gray-300 font-mono", "{latest_commit_label(&flake)}" }
-                                        td {
-                                            class: "{theme::spacing::TABLE_CELL} text-right",
-                                            div {
-                                                class: "inline-flex items-center gap-2",
-                                                button {
-                                                    class: "p-1.5 rounded-md border border-gray-700 text-gray-300 hover:text-white hover:border-gray-500 hover:bg-gray-800/70 transition-colors",
-                                                    onclick: move |evt| {
-                                                        evt.stop_propagation();
-                                                        on_edit.call(flake.id)
-                                                    },
-                                                    "aria-label": "Edit flake",
-                                                    svg {
-                                                        width: "14",
-                                                        height: "14",
-                                                        view_box: "0 0 24 24",
-                                                        fill: "none",
-                                                        stroke: "currentColor",
-                                                        stroke_width: "2",
-                                                        stroke_linecap: "round",
-                                                        stroke_linejoin: "round",
-                                                        circle { cx: "12", cy: "12", r: "3" }
-                                                        path { d: "M19.4 15a1.7 1.7 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.82-.33 1.7 1.7 0 0 0-1 1.52V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.52 1.7 1.7 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .33-1.82 1.7 1.7 0 0 0-1.52-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.52-1 1.7 1.7 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.82.33h.09a1.7 1.7 0 0 0 1-1.52V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.52 1.7 1.7 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.33 1.82v.09a1.7 1.7 0 0 0 1.52 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.52 1z" }
-                                                    }
-                                                }
-                                                button {
-                                                    class: "text-xs text-blue-400 hover:text-blue-300 px-2 py-1 rounded hover:bg-blue-500/10 transition-colors",
-                                                    onclick: move |evt| {
-                                                        evt.stop_propagation();
-                                                        on_refresh.call(flake.id)
-                                                    },
-                                                    "🔄"
-                                                }
-                                                button {
-                                                    class: "text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors",
-                                                    onclick: move |evt| {
-                                                        evt.stop_propagation();
-                                                        on_remove.call(flake.id)
-                                                    },
-                                                    "Remove"
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[component]
-fn FlakeCard(
-    flake: FlakeListItem,
-    selected_history_flake_id: Option<i32>,
-    on_select_history_flake: EventHandler<i32>,
-    on_remove: EventHandler<i32>,
-    on_edit: EventHandler<i32>,
-    on_refresh: EventHandler<i32>,
-) -> Element {
-    let latest_commit = latest_commit_label(&flake);
-    let is_selected = selected_history_flake_id == Some(flake.id);
-
-    rsx! {
-        div {
-            class: if is_selected {
-                "rounded-xl border border-blue-400/70 overflow-hidden shadow-sm ring-2 ring-blue-400/40 cursor-pointer"
-            } else {
-                "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden shadow-sm cursor-pointer"
-            },
-            onclick: move |_| on_select_history_flake.call(flake.id),
-            div {
-                class: "px-5 py-3 border-b border-gray-800 flex items-center justify-between",
-                style: "background: linear-gradient(135deg, rgba(130, 105, 155, 0.42) 0%, rgba(17, 24, 39, 0.92) 100%);",
-                div {
-                    h3 { class: "text-lg font-semibold text-white", "{flake.name}" }
-                    p { class: "text-xs text-gray-300 mt-1 font-mono", "{flake.repo_url}" }
-                    p { class: "text-[11px] text-sky-300 mt-1 font-mono", "branch: {flake.branch}" }
-                }
-                button {
-                    class: "p-1.5 rounded-md border border-gray-700 text-gray-300 hover:text-white hover:border-gray-500 hover:bg-gray-800/70 transition-colors",
-                    onclick: move |evt| {
-                        evt.stop_propagation();
-                        on_edit.call(flake.id)
-                    },
-                    "aria-label": "Edit flake",
-                    svg {
-                        width: "14",
-                        height: "14",
-                        view_box: "0 0 24 24",
-                        fill: "none",
-                        stroke: "currentColor",
-                        stroke_width: "2",
-                        stroke_linecap: "round",
-                        stroke_linejoin: "round",
-                        circle { cx: "12", cy: "12", r: "3" }
-                        path { d: "M19.4 15a1.7 1.7 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.82-.33 1.7 1.7 0 0 0-1 1.52V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.52 1.7 1.7 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .33-1.82 1.7 1.7 0 0 0-1.52-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.52-1 1.7 1.7 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.82.33h.09a1.7 1.7 0 0 0 1-1.52V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.52 1.7 1.7 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.33 1.82v.09a1.7 1.7 0 0 0 1.52 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.52 1z" }
-                    }
-                }
-            }
-            div {
-                class: "px-5 py-2 bg-gray-800/50",
-                div {
-                    class: "flex flex-wrap items-center gap-2 text-xs",
-                    span {
-                        class: "inline-flex px-2 py-1 rounded border text-gray-100 cf-chip-slate",
-                        "{flake.system_count} systems"
-                    }
-                    span {
-                        class: "inline-flex px-2 py-1 rounded border text-gray-100 cf-chip-teal",
-                        "{flake.environments.len()} environments"
-                    }
-                }
-            }
-            div {
-                class: "px-5 py-2 bg-gray-900 space-y-1.5",
-                p { class: "text-[10px] font-semibold uppercase tracking-wider text-gray-500", "Environments" }
-                div {
-                    class: "flex flex-wrap gap-1.5 max-h-12 overflow-hidden",
-                    if flake.environments.is_empty() {
-                        span { class: "text-xs text-gray-500", "None" }
-                    } else {
-                        for env in flake.environments.clone() {
-                            span {
-                                class: "inline-flex px-2 py-1 text-xs rounded border text-blue-100 cf-chip-blue",
-                                "{env}"
-                            }
-                        }
-                    }
-                }
-            }
-            div {
-                class: "px-5 py-2.5 bg-gray-800/50 flex items-center justify-between",
-                div {
-                    class: "space-y-1",
-                    p { class: "text-[10px] font-semibold uppercase tracking-wider text-gray-500", "Latest Commit" }
-                    p { class: "text-sm text-gray-200 font-mono", "{latest_commit}" }
-                }
-                if flake.system_count > 0 {
-                    div {
-                        class: "inline-flex items-center gap-2",
-                        span {
-                            class: "text-xs text-gray-500",
-                            "In Use"
-                        }
-                    }
-                } else {
-                    div {
-                        class: "inline-flex items-center gap-2",
-                        button {
-                            class: "text-xs text-blue-400 hover:text-blue-300 px-2 py-1 rounded hover:bg-blue-500/10 transition-colors",
-                            onclick: move |evt| {
-                                evt.stop_propagation();
-                                on_refresh.call(flake.id)
-                            },
-                            "🔄 Refresh"
-                        }
-                        button {
-                            class: "text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors",
-                            onclick: move |evt| {
-                                evt.stop_propagation();
-                                on_remove.call(flake.id)
-                            },
-                            "Remove"
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[component]
-fn FlakeHistoryExplorer(
-    flakes: Vec<FlakeListItem>,
-    selected_flake_id: Signal<Option<i32>>,
-    selected_commit_hash: Signal<Option<String>>,
-    timelines: Vec<FlakeTimeline>,
-    cve_scan_status: Signal<HashMap<String, String>>,
-) -> Element {
-    use crate::hooks::websocket::{SystemEvalStatus, use_websocket_eval_stream};
-    let navigator = use_navigator();
-
-    let fallback_flake_id = flakes.first().map(|flake| flake.id).unwrap_or(0);
-    let active_flake_id = (*selected_flake_id.read()).unwrap_or(fallback_flake_id);
-
-    // Cache for loaded commit diffs
-    let loaded_diffs = use_signal(|| HashMap::<(i32, String), String>::new());
-    // Track current active commit hash to force re-render when diff loads
-    let current_commit_key = use_signal(|| (0i32, String::new()));
-
-    // Build only the active flake's commits for this render.
-    // Keep this non-memoized so newly fetched timeline props are reflected immediately.
-    let commits_vec = build_flake_commits(&timelines, active_flake_id);
-
-    // Only stream eval updates after an explicit commit selection.
-    // Auto-subscribing to the newest commit can flood the client on busy instances.
-    let active_commit_for_ws = selected_commit_hash
-        .read()
-        .as_ref()
-        .and_then(|hash| commits_vec.iter().find(|commit| &commit.hash == hash))
-        .filter(|commit| commit.total_system_count <= MAX_WS_STREAM_SYSTEMS)
-        .cloned();
-
-    // Connect to WebSocket for active commit's eval status (MUST be unconditional hook call)
-    let commit_id_str = active_commit_for_ws
-        .as_ref()
-        .map(|c| c.id.to_string())
-        .unwrap_or_else(|| "0".to_string());
-    let (_logs, system_status, _conn_state, _reconnect) = use_websocket_eval_stream(&commit_id_str);
-
-    if flakes.is_empty() {
-        return rsx! {
-            Card {
-                title: Some("Git Commit History".to_string()),
-                children: rsx! {
-                    p { class: "text-sm {theme::text::SECONDARY}", "No flakes in scope for commit history." }
-                }
-            }
-        };
-    }
-
-    let active_flake = flakes
-        .iter()
-        .find(|flake| flake.id == active_flake_id)
-        .cloned()
-        .unwrap_or_else(|| flakes[0].clone());
-
-    let active_commit = selected_commit_hash
-        .read()
-        .as_ref()
-        .and_then(|hash| commits_vec.iter().find(|commit| &commit.hash == hash))
-        .map(|commit| commit.clone())
-        .or_else(|| commits_vec.first().cloned());
-
-    // Load diff for the active commit if not already loaded
-    // We read the signal INSIDE use_effect so it tracks the dependency
-    {
-        let loaded_diffs = loaded_diffs.clone();
-        let current_key = current_commit_key.clone();
-
-        use_effect(move || {
-            // Read signals inside the effect so it re-runs when they change
-            let selected_hash = selected_commit_hash.read().clone();
-            let flake_id = active_flake.id;
-
-            if let Some(commit_hash) = &selected_hash {
-                let key = (flake_id, commit_hash.clone());
-                let already_loaded = loaded_diffs.read().contains_key(&key);
-
-                #[cfg(target_arch = "wasm32")]
-                console::log_1(
-                    &format!(
-                        "Effect running - hash: {}, loaded: {}",
-                        &commit_hash[..7.min(commit_hash.len())],
-                        already_loaded
-                    )
-                    .into(),
-                );
-
-                if !already_loaded {
-                    let commit_hash = commit_hash.clone();
-                    let flake_id = flake_id;
-                    let mut loaded_diffs_inner = loaded_diffs.clone();
-                    let mut current_key_inner = current_key.clone();
-
-                    #[cfg(target_arch = "wasm32")]
-                    console::log_1(
-                        &format!(
-                            "Fetching diff for {}...",
-                            &commit_hash[..7.min(commit_hash.len())]
-                        )
-                        .into(),
-                    );
-
-                    spawn(async move {
-                        match fetch_commit_diff(flake_id, &commit_hash).await {
-                            Ok(response) => {
-                                #[cfg(target_arch = "wasm32")]
-                                console::log_1(
-                                    &format!("Diff loaded! {} bytes", response.diff.len()).into(),
-                                );
-                                loaded_diffs_inner
-                                    .write()
-                                    .insert(key.clone(), response.diff);
-                                current_key_inner.set(key);
-                            }
-                            Err(e) => {
-                                #[cfg(target_arch = "wasm32")]
-                                console::log_1(&format!("Error: {}", e).into());
-                                loaded_diffs_inner.write().insert(
-                                    key.clone(),
-                                    format!("Error loading diff: {}\n\nCommit: {}", e, commit_hash),
-                                );
-                                current_key_inner.set(key);
-                            }
-                        }
-                    });
-                }
-            }
-        });
-    }
-
-    // Update active_commit with loaded diff if available
-    let active_commit = if let Some(commit) = active_commit.clone() {
-        let key = (active_flake.id, commit.hash.clone());
-        if let Some(diff) = loaded_diffs.read().get(&key) {
-            let mut commit = commit;
-            commit.diff = diff.clone();
-            // Calculate stats from the diff
-            let (files_changed, insertions, deletions) = diff_stats(&commit.diff);
-            commit.files_changed = files_changed;
-            commit.insertions = insertions;
-            commit.deletions = deletions;
-            Some(commit)
-        } else {
-            Some(commit)
-        }
-    } else {
-        None
-    };
-
-    let active_repo = active_flake.repo_url.clone();
-    let history_title = format!("Git Commit History - {}", active_flake.name);
-    let flake_sync_label = active_flake
-        .last_synced_at
-        .format("%Y-%m-%d %H:%M UTC")
-        .to_string();
-
-    rsx! {
-        Card {
-            title: Some(history_title),
-            children: rsx! {
-                div {
-                    class: "space-y-3",
-                    div {
-                        class: "text-xs {theme::text::MUTED}",
-                        "{active_repo} · last sync {flake_sync_label}"
-                    }
-                    div {
-                        class: "cf-flakes-history-split",
-                        div {
-                            class: "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden cf-history-timeline-bg",
-                            div {
-                                class: "px-3 py-2 border-b {theme::surface::CARD_BORDER} text-xs uppercase tracking-wide text-gray-400",
-                                "Timeline"
-                            }
-                            div {
-                                class: "max-h-[68vh] overflow-y-auto",
-                                if commits_vec.is_empty() {
-                                    p { class: "p-4 text-sm {theme::text::SECONDARY}", "No commits available." }
-                                } else {
-                                    div {
-                                        class: "relative px-2 py-2",
-                                        div {
-                                            class: "absolute bg-slate-700/80",
-                                            style: "left: 14px; top: 0; bottom: 0; width: 2px;",
-                                        }
-                                        div {
-                                            class: "space-y-3 relative",
-                                            for commit in commits_vec.iter() {
-                                                {
-                                                    let commit_id_for_modal = commit.id;
-                                                    let is_active = active_commit
-                                                        .as_ref()
-                                                        .map(|value| value.hash == commit.hash)
-                                                        .unwrap_or(false);
-                                                    let short_hash = commit.hash.chars().take(7).collect::<String>();
-                                                    let commit_time = commit.committed_at.format("%b %d %H:%M").to_string();
-                                                    let (message_title, message_secondary) = commit_message_lines(&commit.message, 120);
-                                                    let commit_for_select = commit.hash.clone();
-                                                    let commit_card_style = if is_active {
-                                                        "background-color: #1B2940; border-color: #7C67A4;"
-                                                    } else {
-                                                        "background-color: #1A212E; border-color: #303A4A;"
-                                                    };
-                                                    let commit_node_style = if is_active {
-                                                        "width: 20px; height: 20px; margin-top: 7px; border-color: #d9c9ea; background-color: #82699B; box-shadow: 0 0 10px 2px rgba(130, 105, 155, 0.45), inset 0 0 0 1px rgba(255,255,255,0.20);"
-                                                    } else {
-                                                        "width: 20px; height: 20px; margin-top: 7px; border-color: #475569; background-color: #0f172a;"
-                                                    };
-                                                    rsx! {
-                                                        div {
-                                                            key: "{commit.hash}",
-                                                            class: "grid",
-                                                            style: "grid-template-columns: 22px 10px minmax(0, 1fr); margin-left: -1px; align-items: start;",
-
-                                                            div {
-                                                                class: "rounded-full border-2 flex items-center justify-center",
-                                                                style: "{commit_node_style}",
-                                                                if is_active {
-                                                                    svg {
-                                                                        class: "w-2.5 h-2.5 text-white",
-                                                                        fill: "none",
-                                                                        stroke: "currentColor",
-                                                                        stroke_width: "2.5",
-                                                                        view_box: "0 0 24 24",
-                                                                        path {
-                                                                            stroke_linecap: "round",
-                                                                            stroke_linejoin: "round",
-                                                                            d: "M5 13l4 4L19 7"
-                                                                        }
-                                                                    }
-                                                                }
-                                                            }
-
-                                                            div {
-                                                                class: "relative",
-                                                                style: "height: 20px; margin-top: 7px;",
-                                                                div {
-                                                                    style: if is_active {
-                                                                        "position: absolute; top: 8px; left: 0; right: 0; height: 2px; border-radius: 2px; background-color: #82699B;"
-                                                                    } else {
-                                                                        "position: absolute; top: 8px; left: 0; right: 0; height: 2px; border-radius: 2px; background-color: #64748b;"
-                                                                    },
-                                                                }
-                                                                div {
-                                                                    style: if is_active {
-                                                                        "position: absolute; top: 6px; right: -2px; width: 5px; height: 5px; transform: rotate(45deg); background-color: #82699B;"
-                                                                    } else {
-                                                                        "position: absolute; top: 6px; right: -2px; width: 5px; height: 5px; transform: rotate(45deg); background-color: #64748b;"
-                                                                    },
-                                                                }
-                                                            }
-
-                                                            button {
-                                                                class: "w-full justify-self-start rounded-xl border px-4 py-3 text-left transition",
-                                                                style: "{commit_card_style}",
-                                                                onclick: move |_| selected_commit_hash.set(Some(commit_for_select.clone())),
-                                                                p {
-                                                                    class: "text-sm text-white font-semibold text-left leading-snug break-words",
-                                                                    style: "text-align: left; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;",
-                                                                    "{message_title}"
-                                                                }
-                                                                if let Some(secondary) = message_secondary {
-                                                                    p {
-                                                                        class: "mt-1 text-xs text-gray-300 leading-snug break-words",
-                                                                        style: "display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden;",
-                                                                        "{secondary}"
-                                                                    }
-                                                                }
-                                                                div {
-                                                                    class: "mt-2 flex flex-wrap items-center gap-2 text-[10px]",
-                                                                    span {
-                                                                        class: "inline-flex items-center px-2.5 py-1 rounded border font-mono leading-none cf-chip-violet",
-                                                                        "{short_hash}"
-                                                                    }
-                                                                    span {
-                                                                        class: "inline-flex items-center px-2.5 py-1 rounded border text-gray-100 leading-none cf-chip-slate",
-                                                                        "{commit.author}"
-                                                                    }
-                                                                    if commit.evaluation_error_message.is_some() {
-                                                                        span {
-                                                                            class: "px-1.5 py-0.5 rounded bg-red-500/30 text-red-300 text-[10px]",
-                                                                            title: "This commit has evaluation errors",
-                                                                            "❌ eval error"
-                                                                        }
-                                                                    }
-                                                                    span {
-                                                                        class: "text-[10px] text-gray-400",
-                                                                        "{commit_time}"
-                                                                    }
-                                                                    button {
-                                                                        class: "px-2 py-1 rounded border text-[10px] hover:opacity-80 transition-opacity cursor-pointer",
-                                                                        style: "{eval_badge_style(commit.evaluation_status.as_deref())}",
-                                                                        title: "Open Evaluations view",
-                                                                        onclick: move |evt| {
-                                                                            evt.stop_propagation();
-                                                                            navigator.push(Route::EvaluationsCommitView { commit_id: commit_id_for_modal });
-                                                                        },
-                                                                        "eval: {eval_badge_label(commit.evaluation_status.as_deref())}"
-                                                                    }
-                                                                    if let Some(build_status) = commit.build_status.clone() {
-                                                                        button {
-                                                                            class: "px-2 py-1 rounded border text-[10px]",
-                                                                            style: "{build_badge_style(&build_status)}",
-                                                                            title: "Open Builds view",
-                                                                            onclick: move |evt| {
-                                                                                evt.stop_propagation();
-                                                                                navigator.push(Route::BuildsView {});
-                                                                            },
-                                                                            "build: {build_badge_label(&build_status)}"
-                }
-            }
-        }
-        
-    }
-}
-
-
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        div {
-                            class: "rounded-xl border {theme::surface::CARD_BORDER} bg-gray-900/50 overflow-hidden",
-                            if let Some(commit) = active_commit {
-                                {
-                                    let (message_title, message_secondary) =
-                                        commit_message_lines(&commit.message, 160);
-                                    rsx! {
-                                        div {
-                                            class: "px-4 py-3 border-b {theme::surface::CARD_BORDER} space-y-2",
-                                            p {
-                                                class: "text-base text-white font-semibold text-left leading-snug whitespace-pre-wrap break-words",
-                                                "{message_title}"
-                                            }
-                                            if let Some(secondary) = message_secondary {
-                                                p {
-                                                    class: "text-sm text-gray-300 text-left leading-snug whitespace-pre-wrap break-words",
-                                                    "{secondary}"
-                                                }
-                                            }
-                                            div {
-                                                class: "flex flex-wrap items-center gap-2 text-xs",
-                                                span {
-                                                    class: "font-mono px-2.5 py-1 rounded border cf-chip-violet",
-                                                    "{commit.hash}"
-                                                }
-                                                span { class: "px-2.5 py-1 rounded bg-gray-800 text-gray-300", "{commit.author}" }
-                                                span {
-                                                    class: "px-2 py-1 rounded bg-gray-800 text-gray-300",
-                                                    {commit.committed_at.format("%Y-%m-%d %H:%M UTC").to_string()}
-                                                }
-                                                span { class: "px-2 py-1 rounded bg-blue-500/20 text-blue-200", "{commit.files_changed} files" }
-                                                span { class: "px-2 py-1 rounded bg-emerald-500/20 text-emerald-200", "+{commit.insertions}" }
-                                                span { class: "px-2 py-1 rounded bg-red-500/20 text-red-200", "-{commit.deletions}" }
-                                                span {
-                                                    class: "px-2 py-1 rounded border",
-                                                    style: "{eval_badge_style(commit.evaluation_status.as_deref())}",
-                                                    title: "Open Evaluations view",
-                                                    onclick: move |_| {
-                                                        navigator.push(Route::EvaluationsCommitView { commit_id: commit.id });
-                                                    },
-                                                    "eval: {eval_badge_label(commit.evaluation_status.as_deref())}"
-                                                }
-                                                if let Some(build_status) = commit.build_status.clone() {
-                                                    button {
-                                                        class: "px-2 py-1 rounded border",
-                                                        style: "{build_badge_style(&build_status)}",
-                                                        title: "Open Builds view",
-                                                        onclick: move |_| {
-                                                            navigator.push(Route::BuildsView {});
-                                                        },
-                                                        "build: {build_badge_label(&build_status)}"
-                                                    }
-                                                }
-                                                span { class: "px-2 py-1 rounded bg-slate-700/70 text-slate-200", "{commit.total_system_count} configs" }
-                                            }
-                                            // Show evaluation error message if present
-                                            if let Some(error_msg) = commit.evaluation_error_message.as_ref() {
-                                                div {
-                                                    class: "mt-3 px-3 py-2 rounded border border-red-500/50 bg-red-900/20",
-                                                    p {
-                                                        class: "text-xs font-semibold text-red-300 mb-1",
-                                                        "❌ Evaluation Error"
-                                                    }
-                                                    pre {
-                                                        class: "text-xs text-red-200 font-mono whitespace-pre-wrap break-words max-h-48 overflow-y-auto",
-                                                        "{error_msg}"
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                div {
-                                    class: "px-4 pb-4 space-y-2",
-                                    p { class: "text-xs uppercase tracking-wide text-gray-400", "nixosConfigurations at this commit" }
-                                    {
-                                        let visible_configs: Vec<String> = if commit.systems.is_empty() {
-                                            commit
-                                                .system_paths
-                                                .iter()
-                                                .map(|detail| detail.config_name.clone())
-                                                .take(MAX_SYSTEMS_STORED_PER_COMMIT)
-                                                .collect()
-                                        } else {
-                                            commit.systems.clone()
-                                        };
-                                        rsx! {
-                                    if visible_configs.is_empty() {
-                                        p { class: "text-sm text-gray-500", "No nixosConfigurations discovered for this commit." }
-                                    } else {
-                                        div {
-                                            class: "space-y-2",
-                                            for (idx, config_name) in preview_systems(&visible_configs).iter().enumerate() {
-                                                {
-                                                    let status = system_status.read().get(config_name).cloned();
-                                                    let chip_style = system_chip_style(status.as_ref());
-                                                    let chip_class = if status == Some(SystemEvalStatus::Evaluating) {
-                                                        "px-2 py-1 rounded border text-xs font-mono animate-pulse"
-                                                    } else {
-                                                        "px-2 py-1 rounded border text-xs font-mono"
-                                                    };
-                                                    let path_detail = commit
-                                                        .system_paths
-                                                        .iter()
-                                                        .find(|path| path.config_name == *config_name || format!("{} [CF system]", path.config_name) == *config_name)
-                                                        .cloned();
-                                                    rsx! {
-                                                        div {
-                                                            key: "{idx}-{config_name}",
-                                                            class: "rounded border border-slate-700/70 bg-slate-900/40 p-2 space-y-1",
-                                                            div { class: "flex flex-wrap items-center gap-2",
-                                                                span {
-                                                                    class: "{chip_class}",
-                                                                    style: "{chip_style}",
-                                                                    "{truncate_system_label(config_name)}"
-                                                                }
-                                                                if let Some(detail) = path_detail.as_ref() {
-                                                                    if detail.is_cf_system {
-                                                                        span { class: "text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-200 border border-blue-500/40", "CF system" }
-                                                                    }
-
-                                                                    {
-                                                                        let scan_key = format!("{}::{}", active_flake_id, detail.config_name);
-                                                                        let current_scan_status = cve_scan_status.read().get(&scan_key).cloned();
-                                                                        let disabled_reason = detail.cve_scan_blocked_reason.clone().unwrap_or_else(|| "CVE scan eligibility unavailable".to_string());
-                                                                        let can_trigger_scan = detail.cve_scan_eligible;
-                                                                        rsx! {
-                                                                            button {
-                                                                                class: "text-[10px] uppercase tracking-wide px-2 py-1 rounded border border-amber-500/50 bg-amber-500/10 text-amber-200 hover:bg-amber-500/20 disabled:opacity-60 disabled:cursor-not-allowed",
-                                                                                disabled: !can_trigger_scan,
-                                                                                title: if can_trigger_scan {
-                                                                                    Some("Run CVE scan immediately")
-                                                                                } else {
-                                                                                    Some(disabled_reason.as_str())
-                                                                                },
-                                                                                onclick: {
-                                                                                    let config_name = detail.config_name.clone();
-                                                                                    move |_| {
-                                                                                        if !can_trigger_scan {
-                                                                                            return;
-                                                                                        }
-
-                                                                                        let key = format!("{}::{}", active_flake_id, config_name.clone());
-                                                                                        let request_config_name = config_name.clone();
-                                                                                        cve_scan_status.write().insert(key.clone(), "queued".to_string());
-
-                                                                                        spawn(async move {
-                                                                                            match trigger_flake_config_cve_scan(active_flake_id, &request_config_name).await {
-                                                                                                Ok(triggered) => {
-                                                                                                    cve_scan_status.write().insert(key.clone(), "running".to_string());
-                                                                                                    for _ in 0..25 {
-                                                                                                        match fetch_cve_scan_status(&triggered.scan_id).await {
-                                                                                                            Ok(status) => {
-                                                                                                                let normalized = status.status.to_lowercase();
-                                                                                                                if normalized == "completed" {
-                                                                                                                    cve_scan_status.write().insert(key.clone(), "completed".to_string());
-                                                                                                                    break;
-                                                                                                                }
-                                                                                                                if normalized == "failed" {
-                                                                                                                    cve_scan_status.write().insert(key.clone(), "failed".to_string());
-                                                                                                                    break;
-                                                                                                                }
-                                                                                                                cve_scan_status.write().insert(key.clone(), "running".to_string());
-                                                                                                            }
-                                                                                                            Err(_) => {
-                                                                                                                cve_scan_status.write().insert(key.clone(), "status_error".to_string());
-                                                                                                                break;
-                                                                                                            }
-                                                                                                        }
-
-                                                                                                        use gloo_timers::future::TimeoutFuture;
-                                                                                                        TimeoutFuture::new(1500).await;
-                                                                                                    }
-                                                                                                }
-                                                                                                Err(_) => {
-                                                                                                    cve_scan_status.write().insert(key.clone(), "trigger_failed".to_string());
-                                                                                                }
-                                                                                            }
-                                                                                        });
-                                                                                    }
-                                                                                },
-                                                                                "Run CVE Scan"
-                                                                            }
-                                                                            if let Some(scan_state) = current_scan_status {
-                                                                                span {
-                                                                                    class: "text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-200 border border-slate-600",
-                                                                                    "scan: {scan_state}"
-                                                                                }
-                                                                            }
-                                                                        }
-                                                                    }
-                                                                }
-                                                            }
-                                                            if let Some(detail) = path_detail {
-                                                                p { class: "text-[11px] text-slate-300 break-all",
-                                                                    span { class: "text-slate-500", "expected path: " }
-                                                                    {detail.expected_store_path.unwrap_or_else(|| "unavailable".to_string())}
-                                                                }
-                                                                if detail.mapped_host_count > 1 {
-                                                                    p { class: "text-[11px] text-blue-200",
-                                                                        "{detail.mapped_host_count} mapped hosts; showing most recent host report."
-                                                                    }
-                                                                }
-                                                                p { class: "text-[11px] text-slate-300 break-all",
-                                                                    span { class: "text-slate-500", "current path" }
-                                                                    if let Some(hostname) = detail.cf_hostname.as_ref() {
-                                                                        span { class: "text-slate-500", " ({hostname}): " }
-                                                                    } else {
-                                                                        span { class: "text-slate-500", ": " }
-                                                                    }
-                                                                    {detail.current_store_path.unwrap_or_else(|| "not reported".to_string())}
-                                                                }
-                                                            } else {
-                                                                p { class: "text-[11px] text-slate-400", "path details unavailable" }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        if commit.total_system_count > visible_configs.len() {
-                                            p {
-                                                class: "text-xs text-amber-300",
-                                                "Showing {visible_configs.len()} of {commit.total_system_count} configurations to keep the UI responsive."
-                                            }
-                                        } else if commit.total_system_count > MAX_SYSTEM_CHIPS_RENDER {
-                                            p {
-                                                class: "text-xs text-amber-300",
-                                                "Showing first {MAX_SYSTEM_CHIPS_RENDER} of {commit.total_system_count} configurations to keep the UI responsive."
-                                            }
-                                        }
-                                        p {
-                                            class: "text-xs text-slate-400",
-                                            "Expected path comes from commit derivation data; current path is host-scoped and shown for the selected mapped CF host (most recent report when multiple hosts share the config)."
-                                        }
-                                    }
-                                        }
-                                    }
-                                }
-                                div {
-                                    class: "p-4 max-h-[68vh] overflow-auto",
-                                    FriendlyDiffViewer {
-                                        diff: commit.diff.clone(),
-                                    }
-                                }
-                            } else {
-                                p { class: "p-4 text-sm {theme::text::SECONDARY}", "Select a commit node to inspect the full diff." }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[component]
-fn FriendlyDiffViewer(diff: String) -> Element {
-    // Show loading message if diff is empty
-    if diff.is_empty() {
-        return rsx! {
-            div {
-                class: "text-sm text-gray-400 p-4 text-center",
-                "Loading diff..."
-            }
-        };
-    }
-
-    let parsed_files = parse_unified_diff(&diff);
-    if parsed_files.is_empty() {
-        return rsx! {
-            pre {
-                class: "text-xs font-mono rounded-lg border border-gray-700 bg-gray-950 p-3 text-gray-200 overflow-x-auto",
-                "{diff}"
-            }
-        };
-    }
-
-    let mut selected_file_index = use_signal(|| 0usize);
-    let mut show_file_list = use_signal(|| true);
-    let file_count = parsed_files.len();
-    let is_file_list_open = *show_file_list.read();
-    let active_index = (*selected_file_index.read()).min(file_count.saturating_sub(1));
-    let active_file = parsed_files.get(active_index).cloned();
-    let (total_insertions, total_deletions) = parsed_files
-        .iter()
-        .map(diff_file_stats)
-        .fold((0usize, 0usize), |(ia, da), (ib, db)| (ia + ib, da + db));
-
-    rsx! {
-        div {
-            class: "space-y-4",
-            tabindex: "0",
-            onkeydown: move |evt| {
-                let key = evt.key();
-                if file_count == 0 {
-                    return;
-                }
-                if key == Key::ArrowDown {
-                    evt.prevent_default();
-                    let next = ((*selected_file_index.read()) + 1).min(file_count - 1);
-                    selected_file_index.set(next);
-                } else if key == Key::ArrowUp {
-                    evt.prevent_default();
-                    let next = (*selected_file_index.read()).saturating_sub(1);
-                    selected_file_index.set(next);
-                }
-            },
-            div {
-                class: "rounded-lg border border-gray-700 bg-gray-900/70",
-                div {
-                    class: "px-3 py-2 border-b border-gray-700 flex items-center justify-between gap-3",
-                    div {
-                        class: "flex flex-wrap items-center gap-2 text-xs",
-                        span { class: "px-2 py-1 rounded bg-blue-500/20 text-blue-200", "{file_count} files changed" }
-                        span { class: "px-2 py-1 rounded bg-emerald-500/20 text-emerald-200", "+{total_insertions}" }
-                        span { class: "px-2 py-1 rounded bg-red-500/20 text-red-200", "-{total_deletions}" }
-                    }
-                    button {
-                        class: "text-xs px-2 py-1 rounded border border-gray-600 text-gray-300 hover:bg-gray-800",
-                        onclick: move |_| show_file_list.set(!is_file_list_open),
-                        if is_file_list_open { "Hide files" } else { "Show files" }
-                    }
-                }
-                if is_file_list_open {
-                    div {
-                        class: "max-h-52 overflow-y-auto divide-y divide-gray-800",
-                        for (idx, file) in parsed_files.iter().enumerate() {
-                            {
-                                let (insertions, deletions) = diff_file_stats(file);
-                                let file_label = diff_file_label(file);
-                                let is_active = idx == active_index;
-                                rsx! {
-                                    button {
-                                        key: "{file.old_path}->{file.new_path}",
-                                        class: if is_active {
-                                            "w-full text-left px-3 py-2 border-l-2 border-violet-300"
-                                        } else {
-                                            "w-full text-left px-3 py-2 border-l-2 border-transparent hover:bg-gray-800/70"
-                                        },
-                                        style: if is_active {
-                                            "background-color: rgba(130, 105, 155, 0.28);"
-                                        } else {
-                                            "background-color: transparent;"
-                                        },
-                                        onclick: move |_| selected_file_index.set(idx),
-                                        div {
-                                            class: "flex items-center justify-between gap-2",
-                                            p { class: "text-xs font-mono text-gray-200 truncate", "{file_label}" }
-                                            div {
-                                                class: "flex items-center gap-2 text-[11px]",
-                                                span { class: "text-emerald-300", "+{insertions}" }
-                                                span { class: "text-red-300", "-{deletions}" }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if let Some(file) = active_file {
-                {
-                    let file_label = diff_file_label(&file);
-                    let (insertions, deletions) = diff_file_stats(&file);
-                    rsx! {
-                        div {
-                            class: "rounded-lg border border-gray-700 overflow-hidden",
-                            div {
-                                class: "px-3 py-2 border-b border-gray-700 bg-gray-900 flex items-center justify-between gap-2",
-                                p { class: "text-xs font-mono text-gray-300 truncate", "{file_label}" }
-                                div {
-                                    class: "flex items-center gap-2",
-                                    span { class: "text-[10px] uppercase tracking-wide text-gray-500", "{file.language}" }
-                                    span { class: "text-[10px] text-emerald-300", "+{insertions}" }
-                                    span { class: "text-[10px] text-red-300", "-{deletions}" }
-                                }
-                            }
-                            div {
-                                class: "bg-gray-950",
-                                for line in file.lines {
-                                    div {
-                                        class: "grid",
-                                        style: "grid-template-columns: 3.2rem 3.2rem 1.5rem minmax(0, 1fr);",
-                                        class: "{line.class_name}",
-                                        div { class: "px-2 py-0.5 text-[10px] text-gray-500 text-right border-r border-gray-800", "{line.old_number.map(|value| value.to_string()).unwrap_or_default()}" }
-                                        div { class: "px-2 py-0.5 text-[10px] text-gray-500 text-right border-r border-gray-800", "{line.new_number.map(|value| value.to_string()).unwrap_or_default()}" }
-                                        div { class: "px-1 py-0.5 text-[11px] text-gray-400 border-r border-gray-800", "{line.prefix}" }
-                                        div {
-                                            class: if line.is_hunk_header {
-                                                "px-2 py-0.5 text-[11px] font-mono text-sky-300"
-                                            } else {
-                                                "px-2 py-0.5 text-[11px] font-mono text-gray-200 hljs language-{file.language}"
-                                            },
-                                            if line.is_hunk_header {
-                                                "{line.content}"
-                                            } else {
-                                                span { dangerous_inner_html: "{highlight_diff_fragment(file.language, &line.content)}" }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            } else {
-                p { class: "text-sm text-gray-400", "No file diff selected." }
-            }
-        }
-    }
-}
+// Legacy FlakesListView and related legacy components removed in TASK-297 cleanup.
 
 #[component]
 fn AddFlakeForm(
@@ -4926,6 +3126,7 @@ pub fn FlakesListViewNew() -> Element {
                     let selected_id = selected_flake.read().as_ref().map(|f| f.id);
                     
                     if mode == "table" {
+                        let all_flakes_for_edit = all_flakes.clone();
                         rsx! { FlakeTableNew { flakes: filtered_flakes.clone(), selected_id, is_admin: is_admin_user, on_select: move |f| selected_flake.set(Some(f)), on_sync: move |flake_id| {
                             let mut reload_nonce = reload_nonce.clone();
                             spawn(async move {
@@ -4948,8 +3149,50 @@ pub fn FlakesListViewNew() -> Element {
                                     }
                                 }
                             });
+                        }, on_edit: move |flake_id| {
+                            if let Some(current) = all_flakes_for_edit.iter().find(|item| item.id == flake_id) {
+                                let base_draft = EditFlakeDraft {
+                                    id: current.id,
+                                    name: current.name.clone(),
+                                    repo_url: current.url.clone(),
+                                    branch: current.branch.clone(),
+                                    environment: current.environment.clone(),
+                                    description: current.description.clone(),
+                                    build_scope: current.build_scope.clone(),
+                                    credential_type: "none".to_string(),
+                                    credential_username: String::new(),
+                                    credential_secret: String::new(),
+                                    credential_ssh_username: String::new(),
+                                    has_existing_secret: false,
+                                };
+                                edit_error.set(None);
+
+                                let mut editing_flake = editing_flake.clone();
+                                let mut edit_error = edit_error.clone();
+                                spawn(async move {
+                                    match fetch_flake_credentials(flake_id).await {
+                                        Ok(credentials) => {
+                                            let mut draft = base_draft.clone();
+                                            draft.credential_type =
+                                                normalize_credential_type(&credentials.auth_type);
+                                            draft.credential_username =
+                                                credentials.username.unwrap_or_default();
+                                            draft.credential_ssh_username =
+                                                credentials.ssh_username.unwrap_or_default();
+                                            draft.has_existing_secret = credentials.has_secret;
+                                            editing_flake.set(Some(draft));
+                                        }
+                                        Err(error) => {
+                                            editing_flake.set(Some(base_draft));
+                                            edit_error
+                                                .set(Some(format!("Failed to load credentials: {error}")));
+                                        }
+                                    }
+                                });
+                            }
                         } } }
                     } else {
+                        let all_flakes_for_edit = all_flakes.clone();
                         rsx! { FlakeCardsNew { flakes: filtered_flakes.clone(), selected_id, is_admin: is_admin_user, on_select: move |f| selected_flake.set(Some(f)), on_sync: move |flake_id| {
                             let mut reload_nonce = reload_nonce.clone();
                             spawn(async move {
@@ -4972,6 +3215,47 @@ pub fn FlakesListViewNew() -> Element {
                                     }
                                 }
                             });
+                        }, on_edit: move |flake_id| {
+                            if let Some(current) = all_flakes_for_edit.iter().find(|item| item.id == flake_id) {
+                                let base_draft = EditFlakeDraft {
+                                    id: current.id,
+                                    name: current.name.clone(),
+                                    repo_url: current.url.clone(),
+                                    branch: current.branch.clone(),
+                                    environment: current.environment.clone(),
+                                    description: current.description.clone(),
+                                    build_scope: current.build_scope.clone(),
+                                    credential_type: "none".to_string(),
+                                    credential_username: String::new(),
+                                    credential_secret: String::new(),
+                                    credential_ssh_username: String::new(),
+                                    has_existing_secret: false,
+                                };
+                                edit_error.set(None);
+
+                                let mut editing_flake = editing_flake.clone();
+                                let mut edit_error = edit_error.clone();
+                                spawn(async move {
+                                    match fetch_flake_credentials(flake_id).await {
+                                        Ok(credentials) => {
+                                            let mut draft = base_draft.clone();
+                                            draft.credential_type =
+                                                normalize_credential_type(&credentials.auth_type);
+                                            draft.credential_username =
+                                                credentials.username.unwrap_or_default();
+                                            draft.credential_ssh_username =
+                                                credentials.ssh_username.unwrap_or_default();
+                                            draft.has_existing_secret = credentials.has_secret;
+                                            editing_flake.set(Some(draft));
+                                        }
+                                        Err(error) => {
+                                            editing_flake.set(Some(base_draft));
+                                            edit_error
+                                                .set(Some(format!("Failed to load credentials: {error}")));
+                                        }
+                                    }
+                                });
+                            }
                         } } }
                     }
                 }
@@ -5777,6 +4061,7 @@ fn FlakeTableNew(
     is_admin: bool,
     on_select: EventHandler<MockFlakeItem>,
     on_sync: EventHandler<i32>,
+    on_edit: EventHandler<i32>,
 ) -> Element {
     rsx! {
         // JSX: <div className="card" style={{ overflow:"hidden" }}>
@@ -5801,6 +4086,7 @@ fn FlakeTableNew(
                             let row_class = if is_selected { "selected" } else { "" };
                             let flake_for_select = flake.clone();
                             let flake_id_for_sync = flake.id;
+                            let flake_id_for_edit = flake.id;
                             
                             rsx! {
                                 tr {
@@ -5875,11 +4161,14 @@ fn FlakeTableNew(
                                                         path { d: "M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" }
                                                     }
                                                 }
-                                                button { 
+                                                button {
                                                     class: "btn-icon focus-ring",
-                                                    title: "More",
-                                                    onclick: move |evt| evt.stop_propagation(),
-                                                    // Inline more icon (3 dots)
+                                                    title: "Edit flake",
+                                                    onclick: move |evt| {
+                                                        evt.stop_propagation();
+                                                        on_edit.call(flake_id_for_edit);
+                                                    },
+                                                    // Inline gear icon
                                                     svg {
                                                         width: "14",
                                                     height: "14",
@@ -5889,9 +4178,8 @@ fn FlakeTableNew(
                                                     stroke_width: "2",
                                                     stroke_linecap: "round",
                                                     stroke_linejoin: "round",
-                                                    circle { cx: "12", cy: "12", r: "1" }
-                                                    circle { cx: "12", cy: "5", r: "1" }
-                                                    circle { cx: "12", cy: "19", r: "1" }
+                                                    circle { cx: "12", cy: "12", r: "3" }
+                                                    path { d: "M19.4 15a1.7 1.7 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.82-.33 1.7 1.7 0 0 0-1 1.52V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.52 1.7 1.7 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .33-1.82 1.7 1.7 0 0 0-1.52-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.52-1 1.7 1.7 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.82.33h.09a1.7 1.7 0 0 0 1-1.52V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.52 1.7 1.7 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.33 1.82v.09a1.7 1.7 0 0 0 1.52 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.52 1z" }
                                                 }
                                             }
                                             }
@@ -5947,6 +4235,7 @@ fn FlakeCardsNew(
     is_admin: bool,
     on_select: EventHandler<MockFlakeItem>,
     on_sync: EventHandler<i32>,
+    on_edit: EventHandler<i32>,
 ) -> Element {
     rsx! {
         // JSX: <div className="cards-grid">
@@ -5956,6 +4245,7 @@ fn FlakeCardsNew(
                     let is_selected = selected_id == Some(flake.id);
                     let flake_for_select = flake.clone();
                     let flake_id_for_sync = flake.id;
+                    let flake_id_for_edit = flake.id;
                     // JSX: const statusColor = { synced:"#34d399", ... }
                     let status_color = match flake.status.as_str() {
                         "synced" => "#34d399",
@@ -6078,8 +4368,9 @@ fn FlakeCardsNew(
                                         "{flake.total_commits} commits"
                                     }
                                 }
-                                // Admin-only sync button
-                                if is_admin {
+                            // Admin-only actions
+                            if is_admin {
+                                div { style: "display: flex; gap: 6px; align-items: center;",
                                     button {
                                         class: "btn btn-subtle focus-ring",
                                         style: "padding: 4px 10px; font-size: 12px;",
@@ -6097,12 +4388,33 @@ fn FlakeCardsNew(
                                             stroke_width: "2",
                                             stroke_linecap: "round",
                                             stroke_linejoin: "round",
-                                        style: "display: inline-block; vertical-align: middle; margin-right: 6px;",
-                                        path { d: "M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" }
+                                            style: "display: inline-block; vertical-align: middle; margin-right: 6px;",
+                                            path { d: "M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" }
+                                        }
+                                        " Sync"
                                     }
-                                    " Sync"
+                                    button {
+                                        class: "btn-icon focus-ring",
+                                        title: "Edit flake",
+                                        onclick: move |evt| {
+                                            evt.stop_propagation();
+                                            on_edit.call(flake_id_for_edit);
+                                        },
+                                        svg {
+                                            width: "12",
+                                            height: "12",
+                                            view_box: "0 0 24 24",
+                                            fill: "none",
+                                            stroke: "currentColor",
+                                            stroke_width: "2",
+                                            stroke_linecap: "round",
+                                            stroke_linejoin: "round",
+                                            circle { cx: "12", cy: "12", r: "3" }
+                                            path { d: "M19.4 15a1.7 1.7 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.82-.33 1.7 1.7 0 0 0-1 1.52V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.52 1.7 1.7 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .33-1.82 1.7 1.7 0 0 0-1.52-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.52-1 1.7 1.7 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.82.33h.09a1.7 1.7 0 0 0 1-1.52V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.52 1.7 1.7 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.33 1.82v.09a1.7 1.7 0 0 0 1.52 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.52 1z" }
+                                        }
                                     }
                                 }
+                            }
                             }
                         }
                     }
