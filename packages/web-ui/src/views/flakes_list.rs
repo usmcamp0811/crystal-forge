@@ -6422,9 +6422,9 @@ fn FlakeTrayNew(
                                         }
 
                                         let replacement = filtered_commits_for_unavailable
-                                            .iter()
-                                            .find(|candidate| candidate.full_hash != missing_hash)
-                                            .cloned();
+                                            .first()
+                                            .cloned()
+                                            .filter(|candidate| candidate.full_hash != missing_hash);
                                         selected_commit.set(replacement);
                                     },
                                     on_history_rewrite_conflict: on_history_rewrite_conflict,
