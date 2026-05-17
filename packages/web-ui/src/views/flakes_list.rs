@@ -2796,23 +2796,33 @@ fn FlakeCredentialFields(
 
             if credential_type == "ssh_key" {
                 div {
-                    class: "field",
-                    label { "Saved SSH key" }
-                    select {
-                        class: "input focus-ring",
-                        option { "id_ed25519_cf — last used 2m ago" }
-                    }
-                    div { style: "margin-top: 8px; padding: 10px 12px; border: 1px solid var(--cf-divider); border-radius: 10px;",
-                        div { class: "mono", style: "font-size: 12px; font-weight: 600;", "SHA256:Hxk2…JdmA" }
-                        div { style: "font-size: 12px; color: var(--cf-text-muted); margin-top: 4px;", "Last used: 2m ago" }
-                    }
-                    div { style: "display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: center; margin-top: 10px;",
+                    style: "display: grid; gap: 10px;",
+                    div { style: "display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: center;",
                         span { style: "font-size: 13px; color: var(--cf-text-secondary);", "SSH username" }
                         input {
                             class: "input focus-ring",
                             value: "{credential_ssh_username}",
                             placeholder: "git",
                             oninput: move |evt| on_change.call(("credential_ssh_username".to_string(), evt.value())),
+                        }
+                    }
+                    div {
+                        class: "field",
+                        span { "Private key" }
+                        textarea {
+                            class: "input focus-ring",
+                            rows: "6",
+                            value: "{credential_secret}",
+                            placeholder: if has_existing_secret {
+                                "-----BEGIN OPENSSH PRIVATE KEY-----\n(leave blank to keep existing key)"
+                            } else {
+                                "-----BEGIN OPENSSH PRIVATE KEY-----"
+                            },
+                            oninput: move |evt| on_change.call(("credential_secret".to_string(), evt.value())),
+                        }
+                        div {
+                            style: "margin-top: 6px; font-size: 11px; color: var(--cf-text-muted);",
+                            "Paste an unencrypted SSH private key. Leave blank to keep the existing key."
                         }
                     }
                 }
@@ -6396,13 +6406,30 @@ fn FlakeTrayNew(
                 // Right pane: Commit detail - JSX lines 192-260
                 section { class: "fl-tray-detail",
                     if let Some(commit) = active_selected_commit.clone() {
-                        CommitDetailNew { 
-                            key: "{commit.full_hash}",
-                            flake: flake.clone(),
-                            flake_id: flake.id,
-                            commit,
-                            on_request_timeline_refresh: on_sync,
-                            on_history_rewrite_conflict: on_history_rewrite_conflict,
+                        {
+                            let selected_commit_hash_for_unavailable = commit.full_hash.clone();
+                            let filtered_commits_for_unavailable = filtered_commits.clone();
+                            rsx! {
+                                CommitDetailNew {
+                                    key: "{commit.full_hash}",
+                                    flake: flake.clone(),
+                                    flake_id: flake.id,
+                                    commit,
+                                    on_request_timeline_refresh: on_sync,
+                                    on_commit_unavailable: move |missing_hash| {
+                                        if missing_hash != selected_commit_hash_for_unavailable {
+                                            return;
+                                        }
+
+                                        let replacement = filtered_commits_for_unavailable
+                                            .iter()
+                                            .find(|candidate| candidate.full_hash != missing_hash)
+                                            .cloned();
+                                        selected_commit.set(replacement);
+                                    },
+                                    on_history_rewrite_conflict: on_history_rewrite_conflict,
+                                }
+                            }
                         }
                     } else {
                         div { class: "empty", style: "margin: 32px;",
@@ -6678,12 +6705,14 @@ fn CommitDetailNew(
     flake_id: i32,
     commit: MockCommitItem,
     on_request_timeline_refresh: EventHandler<i32>,
+    on_commit_unavailable: EventHandler<String>,
     on_history_rewrite_conflict: EventHandler<(i32, String)>,
 ) -> Element {
     let mut selected_file_label = use_signal(String::new);
     let mut active_modal_file = use_signal(|| None::<MockFileItem>);
     let mut rewrite_prompted = use_signal(|| false);
     let mut auto_refresh_requested = use_signal(|| false);
+    let mut unavailable_commit_handled = use_signal(|| false);
     let diff_resource = use_resource({
         let commit_hash = commit.full_hash.clone();
         move || {
@@ -6719,6 +6748,11 @@ fn CommitDetailNew(
         if is_commit_not_found_diff_error(error) && !*auto_refresh_requested.read() {
             auto_refresh_requested.set(true);
             on_request_timeline_refresh.call(flake_id);
+        }
+
+        if is_commit_not_found_diff_error(error) && !*unavailable_commit_handled.read() {
+            unavailable_commit_handled.set(true);
+            on_commit_unavailable.call(commit.full_hash.clone());
         }
 
         if !*rewrite_prompted.read() {
