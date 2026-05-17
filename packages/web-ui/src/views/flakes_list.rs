@@ -2480,7 +2480,7 @@ fn EditFlakeDialog(
     let draft_for_repo = draft.clone();
     let draft_for_branch = draft.clone();
     let draft_for_description = draft.clone();
-    let draft_for_environment = draft.clone();
+    let draft_for_build_scope = draft.clone();
     let draft_signal = use_signal(|| draft.clone());
     {
         let mut draft_signal = draft_signal.clone();
@@ -2569,25 +2569,17 @@ fn EditFlakeDialog(
                         }
                         label {
                             class: "field",
-                            span { "Environment" }
+                            span { "Build Scope" }
                             select {
                                 class: "input focus-ring",
-                                value: "{draft.environment}",
+                                value: "{draft.build_scope}",
                                 onchange: move |evt| {
-                                    let mut next = draft_for_environment.clone();
-                                    next.environment = evt.value();
+                                    let mut next = draft_for_build_scope.clone();
+                                    next.build_scope = evt.value();
                                     on_change.call(next);
                                 },
-                                if environments.is_empty() {
-                                    option { value: "{draft.environment}", "{draft.environment}" }
-                                } else {
-                                    for env in &environments {
-                                        option { 
-                                            value: "{env.name}",
-                                            "{env.name}"
-                                        }
-                                    }
-                                }
+                                option { value: "cf_systems_only", "CF systems only" }
+                                option { value: "all_configs", "All nixosConfigurations" }
                             }
                         }
                     }
@@ -5012,7 +5004,7 @@ pub fn FlakesListViewNew() -> Element {
                                         branch: current.branch.clone(),
                                         environment: current.environment.clone(),
                                         description: current.description.clone(),
-                                        build_scope: "cf_systems_only".to_string(),
+                                        build_scope: current.build_scope.clone(),
                                         credential_type: "none".to_string(),
                                         credential_username: String::new(),
                                         credential_secret: String::new(),
@@ -5232,6 +5224,7 @@ struct MockFlakeItem {
     status: String,
     url: String,
     branch: String,
+    build_scope: String,
     system_count: i32,
     latest_commit: String,
     latest_message: String,
@@ -5256,6 +5249,7 @@ fn map_registry_flake_to_view(item: &FlakeRegistryItem) -> MockFlakeItem {
         status: "synced".to_string(),
         url: item.repo_url.clone(),
         branch: item.branch.clone(),
+        build_scope: item.build_scope.clone(),
         system_count: item.system_count as i32,
         latest_commit: "—".to_string(),
         latest_message: "No commits yet".to_string(),
@@ -5469,6 +5463,7 @@ fn mock_flakes_data() -> Vec<MockFlakeItem> {
             status: "synced".to_string(),
             url: "git@gitlab.com:org/infra.git".to_string(),
             branch: "main".to_string(),
+            build_scope: "cf_systems_only".to_string(),
             system_count: 12,
             latest_commit: "a3f4b2c".to_string(),
             latest_message: "feat: Add monitoring dashboards".to_string(),
@@ -5485,6 +5480,7 @@ fn mock_flakes_data() -> Vec<MockFlakeItem> {
             status: "syncing".to_string(),
             url: "git@gitlab.com:org/apps.git".to_string(),
             branch: "develop".to_string(),
+            build_scope: "all_configs".to_string(),
             system_count: 8,
             latest_commit: "b8d1e9a".to_string(),
             latest_message: "fix: Update container versions".to_string(),
@@ -5501,6 +5497,7 @@ fn mock_flakes_data() -> Vec<MockFlakeItem> {
             status: "error".to_string(),
             url: "git@gitlab.com:org/edge.git".to_string(),
             branch: "main".to_string(),
+            build_scope: "cf_systems_only".to_string(),
             system_count: 24,
             latest_commit: "c2f7d4e".to_string(),
             latest_message: "refactor: Optimize network config".to_string(),
