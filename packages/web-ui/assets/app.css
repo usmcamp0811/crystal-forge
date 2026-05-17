@@ -2349,6 +2349,88 @@ html[data-theme="light"] .sd-nix {
   gap: 8px;
 }
 
+.sys-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.sys-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.sys-hostname {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--cf-text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sys-fqdn {
+  font-size: 12px;
+  color: var(--cf-text-muted);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sys-card-body {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 14px;
+  font-size: 12px;
+}
+
+.sys-kv-key {
+  color: var(--cf-text-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 2px;
+}
+
+.sys-kv-val {
+  color: var(--cf-text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sys-card.compact .sys-kv-key {
+  display: none;
+}
+
+.sys-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--cf-divider);
+}
+
+.sys-card.compact .sys-card-foot {
+  padding-top: 6px;
+}
+
+.chips-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
 .sys-card .status-rail {
   position: absolute;
   left: 0;
