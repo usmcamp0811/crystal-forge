@@ -324,6 +324,10 @@ async fn main() -> anyhow::Result<()> {
                 .patch(flakes::patch_flake_credentials)
                 .delete(flakes::delete_flake_credentials_handler),
         )
+        .route(
+            "/api/v1/flakes/:id/credentials/test",
+            post(flakes::test_flake_credentials),
+        )
         .route("/api/v1/flakes/:id/refresh", post(flakes::refresh_flake))
         .route(
             "/api/v1/flakes/:id/accept-rewrite",

@@ -2,12 +2,12 @@
 
 use dioxus::prelude::*;
 
-use crate::views::flakes_list::FlakesListView;
+use crate::views::flakes_list::FlakesListViewNew;
 
-/// The flakes list page.
+/// The flakes list page - now using the rebuilt pixel-perfect design.
 #[component]
 pub fn FlakesView() -> Element {
     rsx! {
-        FlakesListView {}
+        FlakesListViewNew {}
     }
 }
