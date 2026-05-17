@@ -1155,12 +1155,24 @@ fn FlakesTable(
                                             div {
                                                 class: "inline-flex items-center gap-2",
                                                 button {
-                                                    class: "text-xs px-2 py-1 rounded transition-colors cf-action-link",
+                                                    class: "p-1.5 rounded-md border border-gray-700 text-gray-300 hover:text-white hover:border-gray-500 hover:bg-gray-800/70 transition-colors",
                                                     onclick: move |evt| {
                                                         evt.stop_propagation();
                                                         on_edit.call(flake.id)
                                                     },
-                                                    "Edit"
+                                                    "aria-label": "Edit flake",
+                                                    svg {
+                                                        width: "14",
+                                                        height: "14",
+                                                        view_box: "0 0 24 24",
+                                                        fill: "none",
+                                                        stroke: "currentColor",
+                                                        stroke_width: "2",
+                                                        stroke_linecap: "round",
+                                                        stroke_linejoin: "round",
+                                                        circle { cx: "12", cy: "12", r: "3" }
+                                                        path { d: "M19.4 15a1.7 1.7 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.82-.33 1.7 1.7 0 0 0-1 1.52V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.52 1.7 1.7 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .33-1.82 1.7 1.7 0 0 0-1.52-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.52-1 1.7 1.7 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.82.33h.09a1.7 1.7 0 0 0 1-1.52V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.52 1.7 1.7 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.33 1.82v.09a1.7 1.7 0 0 0 1.52 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.52 1z" }
+                                                    }
                                                 }
                                                 button {
                                                     class: "text-xs text-blue-400 hover:text-blue-300 px-2 py-1 rounded hover:bg-blue-500/10 transition-colors",
@@ -1212,16 +1224,36 @@ fn FlakeCard(
             },
             onclick: move |_| on_select_history_flake.call(flake.id),
             div {
-                class: "px-6 py-4 border-b border-gray-800 flex items-center justify-between",
+                class: "px-5 py-3 border-b border-gray-800 flex items-center justify-between",
                 style: "background: linear-gradient(135deg, rgba(130, 105, 155, 0.42) 0%, rgba(17, 24, 39, 0.92) 100%);",
                 div {
                     h3 { class: "text-lg font-semibold text-white", "{flake.name}" }
                     p { class: "text-xs text-gray-300 mt-1 font-mono", "{flake.repo_url}" }
                     p { class: "text-[11px] text-sky-300 mt-1 font-mono", "branch: {flake.branch}" }
                 }
+                button {
+                    class: "p-1.5 rounded-md border border-gray-700 text-gray-300 hover:text-white hover:border-gray-500 hover:bg-gray-800/70 transition-colors",
+                    onclick: move |evt| {
+                        evt.stop_propagation();
+                        on_edit.call(flake.id)
+                    },
+                    "aria-label": "Edit flake",
+                    svg {
+                        width: "14",
+                        height: "14",
+                        view_box: "0 0 24 24",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        stroke_linecap: "round",
+                        stroke_linejoin: "round",
+                        circle { cx: "12", cy: "12", r: "3" }
+                        path { d: "M19.4 15a1.7 1.7 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.82-.33 1.7 1.7 0 0 0-1 1.52V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.52 1.7 1.7 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .33-1.82 1.7 1.7 0 0 0-1.52-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.52-1 1.7 1.7 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.82.33h.09a1.7 1.7 0 0 0 1-1.52V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.52 1.7 1.7 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.33 1.82v.09a1.7 1.7 0 0 0 1.52 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.52 1z" }
+                    }
+                }
             }
             div {
-                class: "px-6 py-3 bg-gray-800/50",
+                class: "px-5 py-2 bg-gray-800/50",
                 div {
                     class: "flex flex-wrap items-center gap-2 text-xs",
                     span {
@@ -1235,10 +1267,10 @@ fn FlakeCard(
                 }
             }
             div {
-                class: "px-6 py-3 bg-gray-900 space-y-2",
+                class: "px-5 py-2 bg-gray-900 space-y-1.5",
                 p { class: "text-[10px] font-semibold uppercase tracking-wider text-gray-500", "Environments" }
                 div {
-                    class: "flex flex-wrap gap-2",
+                    class: "flex flex-wrap gap-1.5 max-h-12 overflow-hidden",
                     if flake.environments.is_empty() {
                         span { class: "text-xs text-gray-500", "None" }
                     } else {
@@ -1252,7 +1284,7 @@ fn FlakeCard(
                 }
             }
             div {
-                class: "px-6 py-3 bg-gray-800/50 flex items-center justify-between",
+                class: "px-5 py-2.5 bg-gray-800/50 flex items-center justify-between",
                 div {
                     class: "space-y-1",
                     p { class: "text-[10px] font-semibold uppercase tracking-wider text-gray-500", "Latest Commit" }
@@ -1261,14 +1293,6 @@ fn FlakeCard(
                 if flake.system_count > 0 {
                     div {
                         class: "inline-flex items-center gap-2",
-                        button {
-                            class: "text-xs px-2 py-1 rounded transition-colors cf-action-link",
-                            onclick: move |evt| {
-                                evt.stop_propagation();
-                                on_edit.call(flake.id)
-                            },
-                            "Edit"
-                        }
                         span {
                             class: "text-xs text-gray-500",
                             "In Use"
@@ -1277,14 +1301,6 @@ fn FlakeCard(
                 } else {
                     div {
                         class: "inline-flex items-center gap-2",
-                        button {
-                            class: "text-xs px-2 py-1 rounded transition-colors cf-action-link",
-                            onclick: move |evt| {
-                                evt.stop_propagation();
-                                on_edit.call(flake.id)
-                            },
-                            "Edit"
-                        }
                         button {
                             class: "text-xs text-blue-400 hover:text-blue-300 px-2 py-1 rounded hover:bg-blue-500/10 transition-colors",
                             onclick: move |evt| {
