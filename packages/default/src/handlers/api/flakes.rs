@@ -21,8 +21,9 @@ use crate::config::CrystalForgeConfig;
 use crate::flake::commits::sync_commits_for_flake;
 use crate::flake::commits::{
     GitCommitMetadata, branch_exists, branch_exists_with_creds, get_commit_changed_files,
-    get_commit_diff, get_commit_metadata, get_commit_nixos_configurations, infer_default_branch,
-    infer_default_branch_with_creds, is_history_rewrite_error,
+    get_commit_diff, get_commit_metadata, get_commit_nixos_configurations,
+    get_recent_branch_commit_hashes_with_creds, infer_default_branch, infer_default_branch_with_creds,
+    is_history_rewrite_error,
 };
 use crate::flake::credentials::FlakeCredentialEnv;
 use crate::handlers::agent_request::CFState;
@@ -135,6 +136,68 @@ pub async fn get_flake_timelines(
             // Dashboard view doesn't need git metadata (message/author), skip hydration
             if use_dashboard_view {
                 return (StatusCode::OK, Json(timelines)).into_response();
+            }
+
+            // For flakes view, treat remote branch history as source of truth for commit order/visibility.
+            // This prevents stale DB rows from showing after force-push/rewrite while keeping audit history intact.
+            for timeline in &mut timelines {
+                let flake = match get_flake_by_id(&pool, timeline.flake_id).await {
+                    Ok(flake) => flake,
+                    Err(err) => {
+                        warn!(
+                            "Failed to load flake {} for remote-order timeline filter: {err:#}",
+                            timeline.flake_id
+                        );
+                        continue;
+                    }
+                };
+
+                let creds = FlakeCredentialEnv::load(&pool, timeline.flake_id)
+                    .await
+                    .unwrap_or_else(|e| {
+                        warn!(
+                            "Failed to load credentials for flake {} during timeline reorder: {e:#}",
+                            timeline.flake_id
+                        );
+                        None
+                    });
+
+                let remote_hashes = match get_recent_branch_commit_hashes_with_creds(
+                    &flake.repo_url,
+                    &flake.branch,
+                    max_commits as usize,
+                    creds.as_ref(),
+                )
+                .await
+                {
+                    Ok(hashes) => hashes,
+                    Err(err) => {
+                        warn!(
+                            "Failed to fetch remote commit order for flake {} ({} @ {}): {err:#}",
+                            flake.id,
+                            flake.repo_url,
+                            flake.branch
+                        );
+                        continue;
+                    }
+                };
+
+                let remote_positions: HashMap<String, usize> = remote_hashes
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, hash)| (hash.clone(), idx))
+                    .collect();
+
+                timeline
+                    .commits
+                    .retain(|commit| remote_positions.contains_key(&commit.hash));
+
+                timeline.commits.sort_by_key(|commit| {
+                    remote_positions
+                        .get(&commit.hash)
+                        .copied()
+                        .unwrap_or(usize::MAX)
+                });
             }
 
             let mut remaining_hydration_budget = MAX_HYDRATION_COMMITS_PER_REQUEST;

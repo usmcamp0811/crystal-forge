@@ -583,6 +583,20 @@ async fn get_commits_with_full_metadata(
     commits
 }
 
+/// Read recent commit hashes from the remote branch in source-of-truth order.
+///
+/// This reflects `git log` ordering from the fetched branch and can be used
+/// to filter stale database commits after force-push/rewrite events.
+pub async fn get_recent_branch_commit_hashes_with_creds(
+    repo_url: &str,
+    branch: &str,
+    limit: usize,
+    creds: Option<&FlakeCredentialEnv>,
+) -> Result<Vec<String>> {
+    let commits = get_commits_with_full_metadata(repo_url, branch, Some(limit), None, creds).await?;
+    Ok(commits.into_iter().map(|c| c.hash).collect())
+}
+
 /// Legacy function for backward compatibility - returns only hash and timestamp
 async fn get_commits_with_timestamps(
     repo_url: &str,
