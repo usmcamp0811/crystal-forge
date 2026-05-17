@@ -364,7 +364,7 @@ pub async fn infer_default_branch_with_creds(
     repo_url: &str,
     creds: Option<&FlakeCredentialEnv>,
 ) -> Result<String> {
-    let git_url = normalize_repo_url_for_git(repo_url);
+    let git_url = normalize_repo_url_for_git(repo_url, creds);
     let mut cmd = tokio::process::Command::new("git");
     cmd.args(["ls-remote", "--symref", &git_url, "HEAD"]);
     apply_optional_creds(&mut cmd, creds);
@@ -404,7 +404,7 @@ pub async fn branch_exists_with_creds(
     branch: &str,
     creds: Option<&FlakeCredentialEnv>,
 ) -> Result<bool> {
-    let git_url = normalize_repo_url_for_git(repo_url);
+    let git_url = normalize_repo_url_for_git(repo_url, creds);
     let refspec = format!("refs/heads/{branch}");
 
     let mut cmd = tokio::process::Command::new("git");
@@ -436,7 +436,7 @@ fn apply_optional_creds(cmd: &mut tokio::process::Command, creds: Option<&FlakeC
     }
 }
 
-fn normalize_repo_url_for_git(repo_url: &str) -> String {
+fn normalize_repo_url_for_git(repo_url: &str, creds: Option<&FlakeCredentialEnv>) -> String {
     let base_url = if let Some(stripped) = repo_url.strip_prefix("git+") {
         stripped
     } else if repo_url.starts_with("github:") {
@@ -450,11 +450,44 @@ fn normalize_repo_url_for_git(repo_url: &str) -> String {
     };
 
     // Strip query parameters for git operations
-    if let Some(question_mark_pos) = base_url.find('?') {
+    let normalized = if let Some(question_mark_pos) = base_url.find('?') {
         base_url[..question_mark_pos].to_string()
     } else {
         base_url.to_string()
+    };
+
+    if creds.map(|c| c.uses_ssh_key()).unwrap_or(false) {
+        if let Some(converted) = normalize_https_hosted_git_to_ssh(&normalized) {
+            return converted;
+        }
     }
+
+    normalized
+}
+
+fn normalize_https_hosted_git_to_ssh(url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    let without_scheme = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))?;
+
+    let (host, path) = without_scheme.split_once('/')?;
+    if host.is_empty() || path.is_empty() {
+        return None;
+    }
+
+    let path = path.trim_start_matches('/').trim_end_matches('/');
+    if path.is_empty() {
+        return None;
+    }
+
+    let path = if path.ends_with(".git") {
+        path.to_string()
+    } else {
+        format!("{path}.git")
+    };
+
+    Some(format!("git@{host}:{path}"))
 }
 
 /// Get commits with timestamps, optionally since a specific commit
@@ -474,7 +507,7 @@ async fn get_commits_with_full_metadata(
     since_commit: Option<&str>,
     creds: Option<&FlakeCredentialEnv>,
 ) -> Result<Vec<CommitData>> {
-    let git_url = normalize_repo_url_for_git(repo_url);
+    let git_url = normalize_repo_url_for_git(repo_url, creds);
     let temp_dir = tempfile::tempdir().context("Failed to create temporary directory")?;
     let clone_path = temp_dir.path();
 
@@ -581,6 +614,20 @@ async fn get_commits_with_full_metadata(
         .collect();
 
     commits
+}
+
+/// Read recent commit hashes from the remote branch in source-of-truth order.
+///
+/// This reflects `git log` ordering from the fetched branch and can be used
+/// to filter stale database commits after force-push/rewrite events.
+pub async fn get_recent_branch_commit_hashes_with_creds(
+    repo_url: &str,
+    branch: &str,
+    limit: usize,
+    creds: Option<&FlakeCredentialEnv>,
+) -> Result<Vec<String>> {
+    let commits = get_commits_with_full_metadata(repo_url, branch, Some(limit), None, creds).await?;
+    Ok(commits.into_iter().map(|c| c.hash).collect())
 }
 
 /// Legacy function for backward compatibility - returns only hash and timestamp
@@ -723,7 +770,7 @@ async fn remote_branch_head_hash(
     branch: &str,
     creds: Option<&FlakeCredentialEnv>,
 ) -> Result<Option<String>> {
-    let git_url = normalize_repo_url_for_git(repo_url);
+    let git_url = normalize_repo_url_for_git(repo_url, creds);
     let refspec = format!("refs/heads/{branch}");
 
     let mut cmd = tokio::process::Command::new("git");
@@ -777,7 +824,7 @@ pub async fn get_commit_metadata(
         return Ok(HashMap::new());
     }
 
-    let git_url = normalize_repo_url_for_git(repo_url);
+    let git_url = normalize_repo_url_for_git(repo_url, None);
     let temp_dir = tempfile::tempdir().context("Failed to create temporary directory")?;
     let clone_path = temp_dir.path();
 
@@ -897,7 +944,7 @@ pub async fn get_commit_changed_files(
         return Ok(HashMap::new());
     }
 
-    let git_url = normalize_repo_url_for_git(repo_url);
+    let git_url = normalize_repo_url_for_git(repo_url, None);
     let temp_dir = tempfile::tempdir().context("Failed to create temporary directory")?;
     let clone_path = temp_dir.path();
 
@@ -1072,7 +1119,16 @@ async fn load_commit_metadata(
 /// Returns the full unified diff output from `git show`.
 /// Tries multiple common branch names if the specified branch doesn't work.
 pub async fn get_commit_diff(repo_url: &str, branch: &str, commit_hash: &str) -> Result<String> {
-    let git_url = normalize_repo_url_for_git(repo_url);
+    get_commit_diff_with_creds(repo_url, branch, commit_hash, None).await
+}
+
+pub async fn get_commit_diff_with_creds(
+    repo_url: &str,
+    branch: &str,
+    commit_hash: &str,
+    creds: Option<&FlakeCredentialEnv>,
+) -> Result<String> {
+    let git_url = normalize_repo_url_for_git(repo_url, creds);
     let temp_dir = tempfile::tempdir().context("Failed to create temporary directory")?;
     let clone_path = temp_dir.path();
 
@@ -1086,7 +1142,7 @@ pub async fn get_commit_diff(repo_url: &str, branch: &str, commit_hash: &str) ->
 
     for branch_to_try in branches_to_try.iter() {
         let result =
-            try_get_diff_for_branch(&git_url, clone_path, branch_to_try, commit_hash).await;
+            try_get_diff_for_branch(&git_url, clone_path, branch_to_try, commit_hash, creds).await;
         if let Ok(diff) = result {
             return Ok(diff);
         }
@@ -1106,22 +1162,24 @@ async fn try_get_diff_for_branch(
     clone_path: &std::path::Path,
     branch: &str,
     commit_hash: &str,
+    creds: Option<&FlakeCredentialEnv>,
 ) -> Result<String> {
     // Clone with minimal depth since we only need one specific commit
-    let clone_output = tokio::process::Command::new("git")
-        .args(&[
+    let mut clone_cmd = tokio::process::Command::new("git");
+    clone_cmd
+        .args([
             "clone",
             "--depth",
             "50", // Get enough depth to potentially find the commit
             "--branch",
             branch,
             "--single-branch",
-            &git_url,
+            git_url,
             ".",
         ])
-        .current_dir(clone_path)
-        .output()
-        .await?;
+        .current_dir(clone_path);
+    apply_optional_creds(&mut clone_cmd, creds);
+    let clone_output = clone_cmd.output().await?;
 
     if !clone_output.status.success() {
         // Clone failed for this branch, try next one
@@ -1140,31 +1198,83 @@ async fn try_get_diff_for_branch(
         .await?;
 
     if !show_output.status.success() {
-        // If the commit isn't in the shallow clone, try to fetch it
-        let fetch_output = tokio::process::Command::new("git")
-            .args(&["fetch", "origin", commit_hash])
-            .current_dir(clone_path)
-            .output()
-            .await?;
+        // If the commit isn't in the shallow clone, try deepening first.
+        // Some providers reject direct hash fetches even for reachable commits.
+        let mut deepen_cmd = tokio::process::Command::new("git");
+        deepen_cmd
+            .args(["fetch", "--deepen", "1000", "origin", branch])
+            .current_dir(clone_path);
+        apply_optional_creds(&mut deepen_cmd, creds);
+        let deepen_output = deepen_cmd.output().await?;
 
-        if !fetch_output.status.success() {
-            let stderr = String::from_utf8_lossy(&show_output.stderr);
-            bail!("Failed to fetch commit {}: {}", commit_hash, stderr);
+        if deepen_output.status.success() {
+            let deepened_retry = tokio::process::Command::new("git")
+                .args(&["show", "--format=", commit_hash])
+                .current_dir(clone_path)
+                .output()
+                .await?;
+
+            if deepened_retry.status.success() {
+                return Ok(String::from_utf8_lossy(&deepened_retry.stdout).to_string());
+            }
         }
 
-        // Retry git show
-        let retry_output = tokio::process::Command::new("git")
-            .args(&["show", "--format=", commit_hash])
-            .current_dir(clone_path)
-            .output()
-            .await?;
+        // Fallback: direct hash fetch for providers that allow it.
+        let mut fetch_cmd = tokio::process::Command::new("git");
+        fetch_cmd
+            .args(["fetch", "origin", commit_hash])
+            .current_dir(clone_path);
+        apply_optional_creds(&mut fetch_cmd, creds);
+        let fetch_output = fetch_cmd.output().await?;
 
-        if !retry_output.status.success() {
-            let stderr = String::from_utf8_lossy(&retry_output.stderr);
+        if fetch_output.status.success() {
+            // Retry git show
+            let retry_output = tokio::process::Command::new("git")
+                .args(&["show", "--format=", commit_hash])
+                .current_dir(clone_path)
+                .output()
+                .await?;
+
+            if retry_output.status.success() {
+                return Ok(String::from_utf8_lossy(&retry_output.stdout).to_string());
+            }
+        }
+
+        // Last resort: fully unshallow and retry once.
+        let mut unshallow_cmd = tokio::process::Command::new("git");
+        unshallow_cmd
+            .args(["fetch", "--unshallow", "origin", branch])
+            .current_dir(clone_path);
+        apply_optional_creds(&mut unshallow_cmd, creds);
+        let unshallow_output = unshallow_cmd.output().await?;
+
+        if unshallow_output.status.success() {
+            let unshallow_retry = tokio::process::Command::new("git")
+                .args(&["show", "--format=", commit_hash])
+                .current_dir(clone_path)
+                .output()
+                .await?;
+
+            if unshallow_retry.status.success() {
+                return Ok(String::from_utf8_lossy(&unshallow_retry.stdout).to_string());
+            }
+
+            let stderr = String::from_utf8_lossy(&unshallow_retry.stderr);
             bail!("git show failed for {}: {}", commit_hash, stderr);
         }
 
-        return Ok(String::from_utf8_lossy(&retry_output.stdout).to_string());
+        let show_stderr = String::from_utf8_lossy(&show_output.stderr);
+        let fetch_stderr = String::from_utf8_lossy(&fetch_output.stderr);
+        let deepen_stderr = String::from_utf8_lossy(&deepen_output.stderr);
+        let unshallow_stderr = String::from_utf8_lossy(&unshallow_output.stderr);
+        bail!(
+            "Failed to resolve commit {} after shallow/deepen/fetch/unshallow retries. show='{}' deepen='{}' fetch='{}' unshallow='{}'",
+            commit_hash,
+            show_stderr.trim(),
+            deepen_stderr.trim(),
+            fetch_stderr.trim(),
+            unshallow_stderr.trim()
+        );
     }
 
     Ok(String::from_utf8_lossy(&show_output.stdout).to_string())

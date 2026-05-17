@@ -71,6 +71,11 @@ impl FlakeCredentialEnv {
         self.netrc_path.is_some() || self.ssh_key_path.is_some()
     }
 
+    /// Returns true when this credential set uses SSH-key auth.
+    pub fn uses_ssh_key(&self) -> bool {
+        self.ssh_key_path.is_some()
+    }
+
     /// Apply credential environment variables to a `git` command.
     ///
     /// Sets:
@@ -124,6 +129,30 @@ impl FlakeCredentialEnv {
             );
             cmd.env("GIT_SSH_COMMAND", ssh_cmd);
         }
+    }
+
+    pub fn from_inline(
+        flake_id: i32,
+        repo_url: &str,
+        auth_type: String,
+        username: Option<String>,
+        secret: Option<String>,
+        ssh_username: Option<String>,
+    ) -> Result<Option<Self>> {
+        if auth_type.trim().eq_ignore_ascii_case("none") {
+            return Ok(None);
+        }
+        let credential = FlakeCredential {
+            id: 0,
+            flake_id,
+            auth_type,
+            username,
+            secret_encrypted: secret,
+            ssh_username,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        Ok(Some(Self::materialise(credential, repo_url)?))
     }
 
     fn materialise(credential: FlakeCredential, repo_url: &str) -> Result<Self> {

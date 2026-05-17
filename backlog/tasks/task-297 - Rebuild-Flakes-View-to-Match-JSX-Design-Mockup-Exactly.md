@@ -1,10 +1,10 @@
 ---
 id: TASK-297
 title: Rebuild Flakes View to Match JSX Design Mockup Exactly
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-05-13 02:56'
-updated_date: '2026-05-13 02:57'
+updated_date: '2026-05-13 03:00'
 labels:
   - ui
   - web-ui
@@ -428,4 +428,10 @@ nix build .#checks.x86_64-linux.web-ui
 8. web-ui checks pass
 9. No console errors
 10. No performance regressions (load within 5s)
+
+LOCK: assistant on gray in ~/code/crystal-forge/TASK-297-rebuild-flakes-view
+
+Started: 2026-05-13 03:00 UTC
+
+Phase 1: Creating dedicated worktree and studying design file
 <!-- SECTION:NOTES:END -->

@@ -1834,6 +1834,7 @@ in {
       path = with pkgs; [
         nix
         git
+        openssh
         nix-fast-build
         nix-eval-jobs
         vulnix

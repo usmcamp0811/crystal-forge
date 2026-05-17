@@ -82,8 +82,8 @@ pub async fn fetch_cve_scan_freshness() -> Result<Vec<CveScanFreshnessRow>, ApiC
     fetch_json(&url).await
 }
 
-pub async fn fetch_hardening_fleet_summary(
-) -> Result<HardeningFleetSummaryResponse, ApiClientError> {
+pub async fn fetch_hardening_fleet_summary() -> Result<HardeningFleetSummaryResponse, ApiClientError>
+{
     let url = format!("{}/hardening/summary", base_url());
     fetch_json(&url).await
 }
@@ -98,8 +98,8 @@ pub async fn fetch_hardening_top_services(
     fetch_json(&url).await
 }
 
-pub async fn fetch_hardening_system_postures(
-) -> Result<Vec<HardeningSystemPostureResponse>, ApiClientError> {
+pub async fn fetch_hardening_system_postures()
+-> Result<Vec<HardeningSystemPostureResponse>, ApiClientError> {
     let url = format!("{}/hardening/systems", base_url());
     fetch_json(&url).await
 }
@@ -756,6 +756,15 @@ pub async fn delete_flake_credentials(id: i32) -> Result<(), ApiClientError> {
     send_empty_with_csrf::<()>("DELETE", &url, None).await
 }
 
+/// Test flake credentials against remote repository access.
+pub async fn test_flake_credentials(
+    id: i32,
+    request: &TestFlakeCredentialRequest,
+) -> Result<TestFlakeCredentialResponse, ApiClientError> {
+    let url = format!("{}/flakes/{id}/credentials/test", base_url());
+    send_json_with_csrf("POST", &url, Some(request)).await
+}
+
 /// Remove a flake by id.
 pub async fn delete_flake(id: i32, hard: bool, cascade: bool) -> Result<(), ApiClientError> {
     let mut url = format!("{}/flakes/{id}", base_url());
@@ -805,6 +814,14 @@ pub async fn fetch_flake_timelines_for_ids(
         .collect::<Vec<_>>()
         .join(",");
     let url = format!("{}/flakes/timelines?ids={}", base_url(), ids);
+    fetch_json(&url).await
+}
+
+/// Fetch flake timeline for a single flake with extended commit limit (for tray view).
+pub async fn fetch_flake_timeline_for_tray(
+    flake_id: i32,
+) -> Result<Vec<FlakeTimeline>, ApiClientError> {
+    let url = format!("{}/flakes/timelines?ids={}&limit=200", base_url(), flake_id);
     fetch_json(&url).await
 }
 

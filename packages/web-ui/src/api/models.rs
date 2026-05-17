@@ -479,6 +479,24 @@ pub struct UpdateFlakeCredentialRequest {
     pub ssh_username: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TestFlakeCredentialRequest {
+    pub repo_url: Option<String>,
+    pub branch: Option<String>,
+    pub auth_type: String,
+    pub username: Option<String>,
+    pub secret: Option<String>,
+    pub ssh_username: Option<String>,
+    pub use_stored_secret_if_empty: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TestFlakeCredentialResponse {
+    pub ok: bool,
+    pub message: String,
+    pub branch: String,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Environment DTOs — GET /api/v1/environments, GET /api/v1/environments/:id
 // ─────────────────────────────────────────────────────────────────────────────
