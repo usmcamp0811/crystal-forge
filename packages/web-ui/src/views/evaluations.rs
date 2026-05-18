@@ -961,8 +961,8 @@ fn EvalDrawer(
                     }
                     div {
                         class: "ed-stats",
-                        div { class: "ed-stat", div { class: "ed-stat-label", "Started" } div { class: "ed-stat-val", style: "font-size: 13px;", "{format_relative_time(ev.committed_at)}" } }
-                        div { class: "ed-stat", div { class: "ed-stat-label", "Duration" } div { class: "ed-stat-val", class: "mono", "—" } }
+                        div { class: "ed-stat", div { class: "ed-stat-label", "Started" } div { class: "ed-stat-val", style: "font-size: 13px; font-weight: 600;", "{format_relative_time(ev.committed_at)}" } }
+                        div { class: "ed-stat", div { class: "ed-stat-label", "Duration" } div { class: "ed-stat-val mono", "—" } }
                         div { class: "ed-stat", div { class: "ed-stat-label", "Systems" } div { class: "ed-stat-val", "{ev.system_count}" } }
                         div {
                             class: "ed-stat",
@@ -982,30 +982,31 @@ fn EvalDrawer(
                     }
                     div {
                         class: "sd-tabs",
-                        style: "padding: 0 16px; border-bottom: 1px solid var(--cf-card-border);",
+                        style: "padding: 0 16px; border-bottom: 1px solid var(--cf-card-border); flex-shrink: 0;",
                         button {
                             class: if drawer_tab() == "log" { "sd-tab focus-ring active" } else { "sd-tab focus-ring" },
                             onclick: move |_| drawer_tab.set("log".to_string()),
                             Icon { name: IconName::Terminal, size: 12 }
                             " Log"
+                            if is_live { span { class: "ed-pulse" } }
                         }
                         button {
                             class: if drawer_tab() == "policy" { "sd-tab focus-ring active" } else { "sd-tab focus-ring" },
                             onclick: move |_| drawer_tab.set("policy".to_string()),
-                            Icon { name: IconName::Sync, size: 12 }
-                            " Policy"
+                            Icon { name: IconName::Shield, size: 12 }
+                            " Policy matrix"
                         }
                         button {
                             class: if drawer_tab() == "graph" { "sd-tab focus-ring active" } else { "sd-tab focus-ring" },
                             onclick: move |_| drawer_tab.set("graph".to_string()),
-                            Icon { name: IconName::Terminal, size: 12 }
-                            " Graph"
+                            Icon { name: IconName::Git, size: 12 }
+                            " Dependency graph"
                         }
                     }
                     div {
                         class: "ed-body",
                         if drawer_tab() == "log" {
-                            EvalDrawerLogTabQueue { ev: ev.clone() }
+                            EvalDrawerLogTabQueue { ev: ev.clone(), live: is_live }
                         } else if drawer_tab() == "policy" {
                             EvalDrawerPolicyTab {
                                 systems: ev.system_count,
@@ -1013,7 +1014,11 @@ fn EvalDrawer(
                                 fail: ev.policy_failed_count,
                             }
                         } else {
-                            EvalDrawerGraphTab { systems: ev.system_count, derivations: ev.system_count * 18 }
+                            EvalDrawerGraphTab {
+                                commit: ev.commit_hash.chars().take(12).collect::<String>(),
+                                systems: ev.system_count,
+                                derivations: ev.system_count * 18,
+                            }
                         }
                     }
                     div {
@@ -1074,8 +1079,8 @@ fn EvalDrawer(
                     }
                     div {
                         class: "ed-stats",
-                        div { class: "ed-stat", div { class: "ed-stat-label", "Started" } div { class: "ed-stat-val", style: "font-size: 13px;", "{format_relative_time(ev.committed_at)}" } }
-                        div { class: "ed-stat", div { class: "ed-stat-label", "Duration" } div { class: "ed-stat-val", class: "mono", "{format_eval_duration(&ev)}" } }
+                        div { class: "ed-stat", div { class: "ed-stat-label", "Started" } div { class: "ed-stat-val", style: "font-size: 13px; font-weight: 600;", "{format_relative_time(ev.committed_at)}" } }
+                        div { class: "ed-stat", div { class: "ed-stat-label", "Duration" } div { class: "ed-stat-val mono", "{format_eval_duration(&ev)}" } }
                         div { class: "ed-stat", div { class: "ed-stat-label", "Systems" } div { class: "ed-stat-val", "{ev.system_count}" } }
                         div {
                             class: "ed-stat",
@@ -1095,30 +1100,31 @@ fn EvalDrawer(
                     }
                     div {
                         class: "sd-tabs",
-                        style: "padding: 0 16px; border-bottom: 1px solid var(--cf-card-border);",
+                        style: "padding: 0 16px; border-bottom: 1px solid var(--cf-card-border); flex-shrink: 0;",
                         button {
                             class: if drawer_tab() == "log" { "sd-tab focus-ring active" } else { "sd-tab focus-ring" },
                             onclick: move |_| drawer_tab.set("log".to_string()),
                             Icon { name: IconName::Terminal, size: 12 }
                             " Log"
+                            if is_live { span { class: "ed-pulse" } }
                         }
                         button {
                             class: if drawer_tab() == "policy" { "sd-tab focus-ring active" } else { "sd-tab focus-ring" },
                             onclick: move |_| drawer_tab.set("policy".to_string()),
-                            Icon { name: IconName::Sync, size: 12 }
-                            " Policy"
+                            Icon { name: IconName::Shield, size: 12 }
+                            " Policy matrix"
                         }
                         button {
                             class: if drawer_tab() == "graph" { "sd-tab focus-ring active" } else { "sd-tab focus-ring" },
                             onclick: move |_| drawer_tab.set("graph".to_string()),
-                            Icon { name: IconName::Terminal, size: 12 }
-                            " Graph"
+                            Icon { name: IconName::Git, size: 12 }
+                            " Dependency graph"
                         }
                     }
                     div {
                         class: "ed-body",
                         if drawer_tab() == "log" {
-                            EvalDrawerLogTabHistory { ev: ev.clone() }
+                            EvalDrawerLogTabHistory { ev: ev.clone(), live: is_live }
                         } else if drawer_tab() == "policy" {
                             EvalDrawerPolicyTab {
                                 systems: ev.system_count,
@@ -1126,7 +1132,11 @@ fn EvalDrawer(
                                 fail: ev.policy_failed_count,
                             }
                         } else {
-                            EvalDrawerGraphTab { systems: ev.system_count, derivations: ev.system_count * 18 }
+                            EvalDrawerGraphTab {
+                                commit: ev.commit_hash.chars().take(12).collect::<String>(),
+                                systems: ev.system_count,
+                                derivations: ev.system_count * 18,
+                            }
                         }
                     }
                     div {
@@ -1160,15 +1170,10 @@ fn EvalDrawer(
 }
 
 #[component]
-fn EvalDrawerLogTabQueue(ev: EvalQueueItem) -> Element {
+fn EvalDrawerLogTabQueue(ev: EvalQueueItem, live: bool) -> Element {
     let mut autoscroll = use_signal(|| true);
-    let lines = vec![
-        format!("[eval] {} @ {}", ev.flake_name, ev.commit_hash),
-        "loading flake inputs...".to_string(),
-        "evaluating nixosConfigurations...".to_string(),
-        format!("policy summary: {} pass / {} fail", ev.passed_count, ev.policy_failed_count),
-        "finalizing derivation graph...".to_string(),
-    ];
+    // Mock log lines matching JSX EVAL_DEFAULT_LOG pattern
+    let lines = generate_eval_log_lines(&ev.flake_name, &ev.commit_hash, ev.system_count, ev.passed_count, ev.policy_failed_count, &ev.evaluation_status);
 
     rsx! {
         div { style: "display: flex; flex-direction: column; flex: 1; min-height: 0;",
@@ -1186,19 +1191,35 @@ fn EvalDrawerLogTabQueue(ev: EvalQueueItem) -> Element {
                     }
                     "Auto-scroll"
                 }
+                button {
+                    class: "btn-icon focus-ring",
+                    title: "Download",
+                    Icon { name: IconName::Download, size: 13 }
+                }
             }
-            pre { class: "fl-diff", style: "margin: 0; padding: 10px 16px; font-size: 11px; line-height: 1.55; flex: 1;",
+            pre { class: "fl-diff", style: "flex: 1; font-size: 11px; line-height: 1.55; padding: 10px 16px; margin: 0;",
                 for (idx, line) in lines.iter().enumerate() {
-                    div {
-                        span { style: "color: var(--cf-text-muted); user-select: none; display: inline-block; width: 36px;", "{idx + 1}" }
-                        " {line}"
+                    {
+                        let color = log_line_color(line);
+                        let line_num = format!("{:>3}", idx + 1);
+                        rsx! {
+                            div { style: "color: {color};",
+                                span { style: "color: var(--cf-text-muted); user-select: none; display: inline-block; width: 36px;", "{line_num}" }
+                                " {line}"
+                            }
+                        }
                     }
                 }
-                if autoscroll() {
-                    div {
-                        style: "color: #60a5fa;",
-                        span { style: "color: var(--cf-text-muted); display: inline-block; width: 36px;", "{lines.len() + 1}" }
-                        span { class: "ed-pulse", style: "margin-left: 0;" }
+                if live {
+                    {
+                        let next_line_num = format!("{:>3}", lines.len() + 1);
+                        rsx! {
+                            div { style: "color: #60a5fa;",
+                                span { style: "color: var(--cf-text-muted); display: inline-block; width: 36px;", "{next_line_num}" }
+                                " "
+                                span { class: "ed-pulse", style: "margin-left: 0;" }
+                            }
+                        }
                     }
                 }
             }
@@ -1207,23 +1228,57 @@ fn EvalDrawerLogTabQueue(ev: EvalQueueItem) -> Element {
 }
 
 #[component]
-fn EvalDrawerLogTabHistory(ev: EvalHistoryItem) -> Element {
-    let mut lines = vec![
-        format!("[eval] {} @ {}", ev.flake_name, ev.commit_hash),
-        format!("status: {}", ev.evaluation_status),
-        format!("systems: {}", ev.system_count),
-        format!("policy summary: {} pass / {} fail", ev.passed_count, ev.policy_failed_count),
-    ];
-    if let Some(err) = &ev.evaluation_error_message {
-        lines.push(format!("error: {err}"));
-    }
+fn EvalDrawerLogTabHistory(ev: EvalHistoryItem, live: bool) -> Element {
+    let mut autoscroll = use_signal(|| true);
+    // Mock log lines matching JSX EVAL_DEFAULT_LOG pattern
+    let lines = generate_eval_log_lines(&ev.flake_name, &ev.commit_hash, ev.system_count, ev.passed_count, ev.policy_failed_count, &ev.evaluation_status);
 
     rsx! {
-        pre { class: "fl-diff", style: "margin: 0; padding: 10px 16px; font-size: 11px; line-height: 1.55;",
-            for (idx, line) in lines.iter().enumerate() {
-                div {
-                    span { style: "color: var(--cf-text-muted); user-select: none; display: inline-block; width: 36px;", "{idx + 1}" }
-                    " {line}"
+        div { style: "display: flex; flex-direction: column; flex: 1; min-height: 0;",
+            div {
+                style: "padding: 8px 16px; border-bottom: 1px solid var(--cf-divider); display: flex; gap: 10px; align-items: center; flex-shrink: 0;",
+                span { style: "font-size: 11px; color: var(--cf-text-muted);", "{lines.len()} lines" }
+                div { style: "flex: 1;" }
+                label {
+                    style: "display: flex; gap: 6px; align-items: center; font-size: 11px;",
+                    input {
+                        r#type: "checkbox",
+                        class: "ed-checkbox",
+                        checked: autoscroll(),
+                        oninput: move |_| autoscroll.set(!autoscroll()),
+                    }
+                    "Auto-scroll"
+                }
+                button {
+                    class: "btn-icon focus-ring",
+                    title: "Download",
+                    Icon { name: IconName::Download, size: 13 }
+                }
+            }
+            pre { class: "fl-diff", style: "flex: 1; font-size: 11px; line-height: 1.55; padding: 10px 16px; margin: 0;",
+                for (idx, line) in lines.iter().enumerate() {
+                    {
+                        let color = log_line_color(line);
+                        let line_num = format!("{:>3}", idx + 1);
+                        rsx! {
+                            div { style: "color: {color};",
+                                span { style: "color: var(--cf-text-muted); user-select: none; display: inline-block; width: 36px;", "{line_num}" }
+                                " {line}"
+                            }
+                        }
+                    }
+                }
+                if live {
+                    {
+                        let next_line_num = format!("{:>3}", lines.len() + 1);
+                        rsx! {
+                            div { style: "color: #60a5fa;",
+                                span { style: "color: var(--cf-text-muted); display: inline-block; width: 36px;", "{next_line_num}" }
+                                " "
+                                span { class: "ed-pulse", style: "margin-left: 0;" }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1233,74 +1288,407 @@ fn EvalDrawerLogTabHistory(ev: EvalHistoryItem) -> Element {
 #[component]
 fn EvalDrawerPolicyTab(systems: i64, pass: i64, fail: i64) -> Element {
     let mut filter = use_signal(|| "all".to_string());
-    let clean = (systems - fail).max(0);
+    let mut sort = use_signal(|| "health".to_string());
+    let mut policy_filter = use_signal(|| Option::<String>::None);
+    let mut expanded = use_signal(|| Option::<String>::None);
+
+    // Generate mock policy matrix data matching JSX EVAL_DEFAULT_POLICY
+    let policies = vec!["stig.audit", "stig.fw", "stig.sshd", "stig.tls", "cf.hb", "cf.cve", "cf.cache"];
+    let hosts: Vec<String> = (0..systems.max(1).min(9))
+        .map(|i| {
+            let names = ["atlas-01", "gaia-web-02", "orion-db", "helios-edge", "titan-build", "artemis-cdn", "apollo-net", "luna-mon", "perseus-vpn"];
+            names.get(i as usize).unwrap_or(&"host").to_string()
+        })
+        .collect();
+
+    // Build rows with results
+    let rows: Vec<PolicyRow> = hosts.iter().enumerate().map(|(i, host)| {
+        let results: Vec<&str> = policies.iter().enumerate().map(|(j, _)| {
+            let r = ((i * 13 + j * 7) % 100) as i32;
+            if fail > 0 && j == 3 && i == 0 { "fail" }
+            else if r > 92 { "fail" }
+            else if r > 80 { "warn" }
+            else { "pass" }
+        }).collect();
+        let fail_count = results.iter().filter(|&&r| r == "fail").count() as i64;
+        let warn_count = results.iter().filter(|&&r| r == "warn").count() as i64;
+        let pass_count = results.iter().filter(|&&r| r == "pass").count() as i64;
+        PolicyRow {
+            host: host.clone(),
+            results: results.iter().map(|s| s.to_string()).collect(),
+            fail: fail_count,
+            warn: warn_count,
+            pass: pass_count,
+        }
+    }).collect();
+
+    // Compute counts
+    let fail_count = rows.iter().filter(|r| r.fail > 0).count() as i64;
+    let warn_count = rows.iter().filter(|r| r.fail == 0 && r.warn > 0).count() as i64;
+    let clean_count = rows.iter().filter(|r| r.fail == 0 && r.warn == 0).count() as i64;
+
+    // Per-policy stats for headers
+    let policy_stats: Vec<(i64, i64, i64)> = (0..policies.len()).map(|j| {
+        let f = rows.iter().filter(|r| r.results.get(j).map(|s| s == "fail").unwrap_or(false)).count() as i64;
+        let w = rows.iter().filter(|r| r.results.get(j).map(|s| s == "warn").unwrap_or(false)).count() as i64;
+        let p = rows.iter().filter(|r| r.results.get(j).map(|s| s == "pass").unwrap_or(false)).count() as i64;
+        (f, w, p)
+    }).collect();
+
+    // Top issues (policies with failures)
+    let top_issues: Vec<(String, i64, i64)> = policies.iter().enumerate()
+        .map(|(j, p)| (p.to_string(), policy_stats[j].0, rows.len() as i64))
+        .filter(|(_, f, _)| *f > 0)
+        .take(3)
+        .collect();
+
+    // Apply filters
+    let mut filtered: Vec<&PolicyRow> = rows.iter().collect();
+    let fval = filter();
+    if fval == "fail" { filtered.retain(|r| r.fail > 0); }
+    if fval == "warn" { filtered.retain(|r| r.warn > 0 && r.fail == 0); }
+    if fval == "clean" { filtered.retain(|r| r.fail == 0 && r.warn == 0); }
+    if let Some(ref pf) = *policy_filter.read() {
+        if let Some(idx) = policies.iter().position(|&p| p == pf) {
+            filtered.retain(|r| r.results.get(idx).map(|s| s != "pass").unwrap_or(false));
+        }
+    }
+
+    // Sort
+    if sort() == "health" {
+        filtered.sort_by(|a, b| (b.fail * 10 + b.warn).cmp(&(a.fail * 10 + a.warn)));
+    } else {
+        filtered.sort_by(|a, b| a.host.cmp(&b.host));
+    }
+
+    let total = rows.len() as i64;
 
     rsx! {
-        div { style: "padding: 12px 16px; display: flex; flex-direction: column; gap: 10px;",
-            div { class: "pm-issues",
-                div { class: "pm-issues-label", "Top issues" }
-                button { class: "pm-issue-chip active", span { class: "pm-issue-dot" } span { class: "mono", "openssh" } span { style: "color: #f87171; font-weight: 700;", "{fail.max(1)}" } span { style: "color: var(--cf-text-muted);", "/{systems.max(1)} fail" } }
-                button { class: "pm-issue-chip", span { class: "pm-issue-dot" } span { class: "mono", "kernel" } span { style: "color: #f59e0b; font-weight: 700;", "{(fail / 2).max(1)}" } span { style: "color: var(--cf-text-muted);", "/{systems.max(1)} warn" } }
-            }
-            div { class: "pm-controls",
-                div { class: "seg",
-                    button { class: if filter() == "all" { "active" } else { "" }, onclick: move |_| filter.set("all".to_string()), "All", span { class: "pm-count", "{systems}" } }
-                    button { class: if filter() == "fail" { "active" } else { "" }, onclick: move |_| filter.set("fail".to_string()), "Failing", span { class: "pm-count pm-count-fail", "{fail}" } }
-                    button { class: if filter() == "clean" { "active" } else { "" }, onclick: move |_| filter.set("clean".to_string()), "Clean", span { class: "pm-count pm-count-pass", "{clean}" } }
-                }
-            }
-            table { class: "pm-table",
-                thead { tr { th { "System" } th { "openssh" } th { "auditd" } th { "users" } th { "kernel" } } }
-                tbody {
-                    for idx in 0..systems.max(1) {
-                        if filter() == "all" || (filter() == "fail" && idx % 4 == 0) || (filter() == "clean" && idx % 4 != 0) {
-                        tr { class: "pm-row",
-                            td { class: "pm-td-host", "host-{idx + 1}" }
-                            td { class: "pm-td-cell pm-pass", span { class: "pm-glyph", "✓" } }
-                            td { class: if idx % 4 == 0 { "pm-td-cell pm-fail" } else { "pm-td-cell pm-pass" }, span { class: "pm-glyph", if idx % 4 == 0 { "✗" } else { "✓" } } }
-                            td { class: "pm-td-cell pm-pass", span { class: "pm-glyph", "✓" } }
-                            td { class: if idx % 3 == 0 { "pm-td-cell pm-warn" } else { "pm-td-cell pm-pass" }, span { class: "pm-glyph", if idx % 3 == 0 { "!" } else { "✓" } } }
+        div { style: "flex: 1; overflow: hidden; display: flex; flex-direction: column;",
+            // Top issues callout
+            if !top_issues.is_empty() {
+                div { class: "pm-issues",
+                    div { class: "pm-issues-label", "Top issues" }
+                    for (name, fail_ct, tot) in top_issues.iter() {
+                        {
+                            let is_active = policy_filter.read().as_ref() == Some(name);
+                            let name_clone = name.clone();
+                            let name_clone2 = name.clone();
+                            rsx! {
+                                button {
+                                    key: "{name}",
+                                    class: if is_active { "pm-issue-chip active" } else { "pm-issue-chip" },
+                                    onclick: move |_| {
+                                        let current = policy_filter.read().clone();
+                                        if current.as_ref() == Some(&name_clone) {
+                                            policy_filter.set(None);
+                                        } else {
+                                            policy_filter.set(Some(name_clone.clone()));
+                                        }
+                                    },
+                                    span { class: "pm-issue-dot" }
+                                    span { class: "mono", "{name_clone2}" }
+                                    span { style: "color: #f87171; font-weight: 700;", "{fail_ct}" }
+                                    span { style: "color: var(--cf-text-muted);", "/{tot} fail" }
+                                }
+                            }
                         }
+                    }
+                    if policy_filter.read().is_some() {
+                        button {
+                            class: "btn-icon focus-ring",
+                            style: "margin-left: auto;",
+                            title: "Clear policy filter",
+                            onclick: move |_| policy_filter.set(None),
+                            Icon { name: IconName::X, size: 12 }
                         }
                     }
                 }
             }
-            div { class: "ed-graph-legend",
-                span { span { class: "ed-graph-sw pm-pass" } "pass" }
-                span { span { class: "ed-graph-sw pm-warn" } "warn" }
-                span { span { class: "ed-graph-sw pm-fail" } "fail" }
-                span { style: "margin-left: auto;", "pass {pass} · fail {fail}" }
+
+            // Controls
+            div { class: "pm-controls",
+                div { class: "seg",
+                    button { class: if filter() == "all" { "active" } else { "" }, onclick: move |_| filter.set("all".to_string()), "All ", span { class: "pm-count", "{total}" } }
+                    button { class: if filter() == "fail" { "active" } else { "" }, onclick: move |_| filter.set("fail".to_string()), "Failing ", span { class: "pm-count pm-count-fail", "{fail_count}" } }
+                    button { class: if filter() == "warn" { "active" } else { "" }, onclick: move |_| filter.set("warn".to_string()), "Warning ", span { class: "pm-count pm-count-warn", "{warn_count}" } }
+                    button { class: if filter() == "clean" { "active" } else { "" }, onclick: move |_| filter.set("clean".to_string()), "Clean ", span { class: "pm-count pm-count-pass", "{clean_count}" } }
+                }
+                div { style: "flex: 1;" }
+                span { style: "font-size: 11px; color: var(--cf-text-muted);", "Sort" }
+                div { class: "seg",
+                    button { class: if sort() == "health" { "active" } else { "" }, onclick: move |_| sort.set("health".to_string()), "Worst first" }
+                    button { class: if sort() == "name" { "active" } else { "" }, onclick: move |_| sort.set("name".to_string()), "Name" }
+                }
+            }
+
+            // Matrix table
+            div { class: "pm-scroll",
+                table { class: "pm-table",
+                    thead {
+                        tr {
+                            th { class: "pm-th-host", "System" }
+                            th { class: "pm-th-health", "Health" }
+                            for (j, policy) in policies.iter().enumerate() {
+                                {
+                                    let (f, w, p) = policy_stats[j];
+                                    let tot = (f + w + p).max(1);
+                                    let is_filtered = policy_filter.read().as_ref().map(|pf| pf == *policy).unwrap_or(false);
+                                    let policy_name = policy.to_string();
+                                    let policy_name2 = policy.to_string();
+                                    rsx! {
+                                        th {
+                                            key: "{policy}",
+                                            class: if is_filtered { "pm-th-policy filtered" } else { "pm-th-policy" },
+                                            title: "{policy} — {f} fail / {w} warn / {p} pass",
+                                            onclick: move |_| {
+                                                let current = policy_filter.read().clone();
+                                                if current.as_ref() == Some(&policy_name) {
+                                                    policy_filter.set(None);
+                                                } else {
+                                                    policy_filter.set(Some(policy_name.clone()));
+                                                }
+                                            },
+                                            div { class: "pm-th-policy-inner",
+                                                span { class: "pm-th-policy-label", "{policy_name2}" }
+                                            }
+                                            div { class: "pm-th-policy-bar",
+                                                div { style: "width: {(f * 100 / tot)}%; background: #f87171;" }
+                                                div { style: "width: {(w * 100 / tot)}%; background: #f59e0b;" }
+                                                div { style: "width: {(p * 100 / tot)}%; background: #34d399;" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    tbody {
+                        for row in filtered.iter() {
+                            {
+                                let is_exp = expanded.read().as_ref() == Some(&row.host);
+                                let health_color = if row.fail > 0 { "#f87171" } else if row.warn > 0 { "#f59e0b" } else { "#34d399" };
+                                let host_clone = row.host.clone();
+                                let host_clone2 = row.host.clone();
+                                let pol_len = policies.len() as i64;
+                                rsx! {
+                                    tr {
+                                        key: "{row.host}",
+                                        class: if is_exp { "pm-row expanded" } else { "pm-row" },
+                                        onclick: move |_| {
+                                            let current = expanded.read().clone();
+                                            if current.as_ref() == Some(&host_clone) {
+                                                expanded.set(None);
+                                            } else {
+                                                expanded.set(Some(host_clone.clone()));
+                                            }
+                                        },
+                                        td { class: "pm-td-host",
+                                            div { class: "pm-host-cell",
+                                                Icon {
+                                                    name: if is_exp { IconName::ChevronDown } else { IconName::ChevronRight },
+                                                    size: 11
+                                                }
+                                                span { class: "mono pm-host-name", "{host_clone2}" }
+                                            }
+                                        }
+                                        td { class: "pm-td-health",
+                                            div { class: "pm-health",
+                                                div { class: "pm-health-bar",
+                                                    if row.fail > 0 { div { style: "width: {(row.fail * 100 / pol_len)}%; background: #f87171;" } }
+                                                    if row.warn > 0 { div { style: "width: {(row.warn * 100 / pol_len)}%; background: #f59e0b;" } }
+                                                    if row.pass > 0 { div { style: "width: {(row.pass * 100 / pol_len)}%; background: #34d399;" } }
+                                                }
+                                                span { class: "mono pm-health-num", style: "color: {health_color};", "{row.pass}/{pol_len}" }
+                                            }
+                                        }
+                                        for (j, res) in row.results.iter().enumerate() {
+                                            {
+                                                let res_class = format!("pm-td-cell pm-{}", res);
+                                                let is_col_filtered = policy_filter.read().as_ref().map(|pf| pf == policies[j]).unwrap_or(false);
+                                                let cell_class = if is_col_filtered {
+                                                    format!("{} col-filtered", res_class)
+                                                } else {
+                                                    res_class
+                                                };
+                                                let glyph = match res.as_str() {
+                                                    "pass" => "✓",
+                                                    "warn" => "!",
+                                                    _ => "✗",
+                                                };
+                                                let policy_click = policies[j].to_string();
+                                                rsx! {
+                                                    td {
+                                                        key: "{j}",
+                                                        class: "{cell_class}",
+                                                        title: "{policies[j]}: {res}",
+                                                        onclick: move |e| {
+                                                            e.stop_propagation();
+                                                            let current = policy_filter.read().clone();
+                                                            if current.as_ref() == Some(&policy_click) {
+                                                                policy_filter.set(None);
+                                                            } else {
+                                                                policy_filter.set(Some(policy_click.clone()));
+                                                            }
+                                                        },
+                                                        span { class: "pm-glyph", "{glyph}" }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if is_exp {
+                                        tr { class: "pm-expand-row",
+                                            td { colspan: "{policies.len() + 2}",
+                                                div { class: "pm-expand",
+                                                    div { style: "display: flex; gap: 14px; flex-wrap: wrap;",
+                                                        for (j, res) in row.results.iter().enumerate() {
+                                                            if res != "pass" {
+                                                                {
+                                                                    let glyph = if res == "fail" { "✗" } else { "!" };
+                                                                    let card_class = format!("pm-failcard pm-failcard-{} focus-ring", res);
+                                                                    let policy_name = policies[j];
+                                                                    let desc = if res == "fail" { "Blocks deployment until resolved" } else { "Soft warning — deploy will proceed" };
+                                                                    rsx! {
+                                                                        button {
+                                                                            key: "{j}",
+                                                                            class: "{card_class}",
+                                                                            title: "Open policy: {policy_name}",
+                                                                            span { class: "pm-failcard-glyph pm-{res}", "{glyph}" }
+                                                                            div { style: "min-width: 0; text-align: left;",
+                                                                                div { class: "mono", style: "font-weight: 600; font-size: 12px;", "{policy_name}" }
+                                                                                div { style: "font-size: 11px; color: var(--cf-text-muted); margin-top: 2px;", "{desc}" }
+                                                                            }
+                                                                            Icon { name: IconName::ArrowRight, size: 12 }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        if row.fail == 0 && row.warn == 0 {
+                                                            div { style: "font-size: 12px; color: #34d399; display: flex; align-items: center; gap: 8px;",
+                                                                Icon { name: IconName::Check, size: 14 }
+                                                                " All policies pass for this system."
+                                                            }
+                                                        }
+                                                    }
+                                                    div { style: "display: flex; gap: 6px; margin-left: auto; flex-shrink: 0;",
+                                                        button { class: "btn btn-ghost focus-ring xs",
+                                                            Icon { name: IconName::ArrowRight, size: 11 }
+                                                            " Open system"
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if filtered.is_empty() {
+                            tr {
+                                td { colspan: "{policies.len() + 2}", style: "padding: 24px; text-align: center; color: var(--cf-text-muted); font-size: 13px;",
+                                    "No systems match this filter."
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Legend
+            div { class: "pm-legend",
+                span { span { class: "pm-legend-sw pm-pass", "✓" } " Pass" }
+                span { span { class: "pm-legend-sw pm-warn", "!" } " Warning" }
+                span { span { class: "pm-legend-sw pm-fail", "✗" } " Fail — blocks deploy" }
+                span { style: "margin-left: auto; font-size: 11px; color: var(--cf-text-muted);", "Click any policy header to filter · Click a row to expand" }
             }
         }
     }
 }
 
 #[component]
-fn EvalDrawerGraphTab(systems: i64, derivations: i64) -> Element {
-    let cached = (derivations * 6) / 10;
-    let build = derivations - cached;
+fn EvalDrawerGraphTab(commit: String, systems: i64, derivations: i64) -> Element {
+    // Generate mock package data matching JSX EVAL_DEFAULT_GRAPH
+    let packages = vec![
+        ("systemd", 48, 2),
+        ("openssl", 0, 8),
+        ("nginx", 6, 0),
+        ("linux-kernel", 1, 0),
+        ("python311", 34, 1),
+        ("glibc", 12, 0),
+        ("audit", 0, 4),
+        ("sops-nix", 3, 0),
+    ];
+
+    let cached: i64 = packages.iter().map(|(_, c, _)| *c as i64).sum();
+    let to_build: i64 = packages.iter().map(|(_, _, b)| *b as i64).sum();
+    let total_derivs = cached + to_build;
+
     rsx! {
-        div { style: "padding: 14px 16px;",
+        div { style: "flex: 1; overflow: auto; padding: 18px;",
+            // Top: source → eval → fanout
             div { class: "ed-graph-summary",
-                span { class: "ed-graph-node ed-graph-source", "flake source" }
-                span { "→" }
-                span { class: "ed-graph-node ed-graph-eval", "evaluation" }
-                span { "→" }
-                span { class: "ed-graph-node", "{systems} systems" }
-            }
-            div { class: "ed-graph-list",
-                div { class: "ed-graph-row",
-                    div { class: "ed-graph-pkg", span { "Derivation fanout" } span { class: "mono", "{derivations} derivations" } }
-                    div { class: "ed-graph-bar",
-                        div { class: "ed-graph-bar-cached", style: "width: {(cached * 100 / derivations.max(1))}%" }
-                        div { class: "ed-graph-bar-build", style: "width: {(build * 100 / derivations.max(1))}%" }
-                    }
-                    div { class: "mono", style: "font-size: 11px; text-align: right;", "{cached} / {build}" }
+                div { class: "ed-graph-node ed-graph-source",
+                    Icon { name: IconName::Git, size: 12 }
+                    span { class: "mono", "{commit}" }
+                }
+                span { style: "color: var(--cf-text-muted);", "→" }
+                div { class: "ed-graph-node ed-graph-eval",
+                    Icon { name: IconName::Terminal, size: 12 }
+                    "eval"
+                }
+                span { style: "color: var(--cf-text-muted);", "→" }
+                div { class: "ed-graph-node ed-graph-fan",
+                    span { style: "font-weight: 700;", "{total_derivs}" }
+                    span { style: "font-size: 10px; color: var(--cf-text-muted);", "derivations" }
+                }
+                span { style: "color: var(--cf-text-muted);", "→" }
+                div { class: "ed-graph-node ed-graph-fan",
+                    span { style: "font-weight: 700; color: #34d399;", "{cached}" }
+                    span { style: "font-size: 10px; color: var(--cf-text-muted);", "cached" }
+                }
+                div { class: "ed-graph-node ed-graph-fan",
+                    span { style: "font-weight: 700; color: #60a5fa;", "{to_build}" }
+                    span { style: "font-size: 10px; color: var(--cf-text-muted);", "to build" }
                 }
             }
+
+            // List of derivations
+            div { style: "display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px;",
+                h3 { style: "font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--cf-text-muted); font-weight: 700; margin: 0;", "Derivations by package" }
+                span { style: "font-size: 11px; color: var(--cf-text-muted);", "{packages.len()} packages" }
+            }
+            div { class: "ed-graph-list",
+                for (name, c, b) in packages.iter() {
+                    {
+                        let total = (*c + *b).max(1) as i64;
+                        let cached_pct = (*c as i64 * 100) / total;
+                        let build_pct = (*b as i64 * 100) / total;
+                        rsx! {
+                            div { key: "{name}", class: "ed-graph-row",
+                                div { class: "ed-graph-pkg",
+                                    span { style: "font-size: 12px; font-weight: 600;", class: "mono truncate", "{name}" }
+                                    span { style: "font-size: 10px; color: var(--cf-text-muted);", "{total} derivs" }
+                                }
+                                div { class: "ed-graph-bar",
+                                    div { class: "ed-graph-bar-cached", style: "width: {cached_pct}%;" }
+                                    div { class: "ed-graph-bar-build", style: "width: {build_pct}%;" }
+                                }
+                                div { style: "display: flex; gap: 6px; justify-content: flex-end; font-size: 11px;",
+                                    span { style: "color: #34d399; font-weight: 600;", "{c}" }
+                                    span { style: "color: var(--cf-text-muted);", "·" }
+                                    span { style: "color: #60a5fa; font-weight: 600;", "{b}" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             div { class: "ed-graph-legend",
-                span { span { class: "ed-graph-sw", style: "background: #34d399;" } "cached" }
-                span { span { class: "ed-graph-sw", style: "background: #60a5fa;" } "build" }
+                span { span { class: "ed-graph-sw", style: "background: #34d399;" } "Cached (already in binary cache)" }
+                span { span { class: "ed-graph-sw", style: "background: #60a5fa;" } "To build (will fan out to builders)" }
             }
         }
     }
@@ -1309,6 +1697,14 @@ fn EvalDrawerGraphTab(systems: i64, derivations: i64) -> Element {
 // ============================================================================
 // Helper types and functions
 // ============================================================================
+
+struct PolicyRow {
+    host: String,
+    results: Vec<String>,
+    fail: i64,
+    warn: i64,
+    pass: i64,
+}
 
 struct StatusMeta {
     label: &'static str,
@@ -1395,4 +1791,60 @@ fn format_eval_duration(item: &EvalHistoryItem) -> String {
             }
         })
         .unwrap_or_else(|| "—".to_string())
+}
+
+/// Generate mock log lines matching the JSX EVAL_DEFAULT_LOG pattern
+fn generate_eval_log_lines(
+    flake: &str,
+    commit: &str,
+    system_count: i64,
+    passed_count: i64,
+    policy_failed_count: i64,
+    status: &str,
+) -> Vec<String> {
+    let hosts = ["atlas-01", "gaia-web-02", "orion-db", "helios-edge", "titan-build"];
+    let mut lines = vec![
+        format!("evaluating flake {}@{}", flake, &commit[..12.min(commit.len())]),
+        "loading flake.lock".to_string(),
+        "resolving inputs… nixpkgs (locked at 24.11.20260401)".to_string(),
+        format!("building eval config for {} systems", system_count),
+    ];
+
+    for (i, host) in hosts.iter().take(system_count.min(5) as usize).enumerate() {
+        lines.push(format!("  ► evaluating {}.nix", host));
+        lines.push("    policy: stig.audit_rules ✓".to_string());
+        lines.push("    policy: stig.firewall ✓".to_string());
+        lines.push("    policy: cf.heartbeat_interval ✓".to_string());
+        lines.push(format!("  ✓ {} evaluated ({} derivations)", host, 18 + (i % 5)));
+    }
+
+    match status.to_lowercase().as_str() {
+        "complete" => {
+            lines.push(format!("policy summary: {} pass / {} fail", passed_count, policy_failed_count));
+            lines.push("evaluation complete".to_string());
+        }
+        "failed" => {
+            lines.push("✗ error: attribute 'foo' missing at hosts/atlas-01/services.nix:42:14".to_string());
+        }
+        "in_progress" | "pending" => {
+            lines.push("evaluating package overrides…".to_string());
+        }
+        _ => {}
+    }
+
+    lines
+}
+
+/// Determine line color based on content (matches JSX logic)
+fn log_line_color(line: &str) -> &'static str {
+    let lower = line.to_lowercase();
+    if lower.contains("error") || lower.contains("fail") || lower.contains("✗") {
+        "#f87171"
+    } else if lower.contains("warn") || lower.contains("skip") {
+        "#f59e0b"
+    } else if lower.contains("ok") || lower.contains("pass") || lower.contains("✓") || lower.contains("complete") {
+        "#34d399"
+    } else {
+        "inherit"
+    }
 }

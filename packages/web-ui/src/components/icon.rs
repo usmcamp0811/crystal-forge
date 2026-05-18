@@ -9,6 +9,12 @@ pub enum IconName {
     Terminal,
     X,
     Download,
+    Shield,
+    Git,
+    ChevronRight,
+    ChevronDown,
+    ArrowRight,
+    Check,
 }
 
 #[component]
@@ -53,6 +59,51 @@ pub fn Icon(name: IconName, #[props(default = 16)] size: u32) -> Element {
         IconName::Download => rsx! {
             path {
                 d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+        },
+        IconName::Shield => rsx! {
+            path {
+                d: "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+        },
+        IconName::Git => rsx! {
+            circle { cx: "12", cy: "18", r: "3" }
+            circle { cx: "6", cy: "6", r: "3" }
+            circle { cx: "18", cy: "6", r: "3" }
+            path {
+                d: "M18 9a9 9 0 0 1-9 9M9 6h6",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+        },
+        IconName::ChevronRight => rsx! {
+            path {
+                d: "m9 18 6-6-6-6",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+        },
+        IconName::ChevronDown => rsx! {
+            path {
+                d: "m6 9 6 6 6-6",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+        },
+        IconName::ArrowRight => rsx! {
+            path {
+                d: "M5 12h14M12 5l7 7-7 7",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+        },
+        IconName::Check => rsx! {
+            path {
+                d: "M20 6 9 17l-5-5",
                 stroke_linecap: "round",
                 stroke_linejoin: "round"
             }
