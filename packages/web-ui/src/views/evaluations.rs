@@ -878,6 +878,8 @@ fn EvalDrawer(
     open_queue_logs: EventHandler<EvalQueueItem>,
     open_history_logs: EventHandler<EvalHistoryItem>,
 ) -> Element {
+    let mut drawer_tab = use_signal(|| String::from("log"));
+
     match target {
         EvalDrawerTarget::Queue(ev) => {
             let status_meta = eval_status_meta(&ev.evaluation_status);
@@ -896,7 +898,7 @@ fn EvalDrawer(
                     role: "dialog",
                     "aria-label": "Evaluation detail",
                     header {
-                        class: "panel-head",
+                        class: "panel-head ed-drawer-head",
                         div {
                             class: "panel-title",
                             h2 {
@@ -953,22 +955,74 @@ fn EvalDrawer(
                         }
                     }
                     div {
-                        class: "panel-body",
-                        div {
-                            class: "panel-section",
-                            h3 { "Evaluation details" }
-                            dl {
-                                class: "kv-grid",
-                                dt { "Started" }
-                                dd { "{format_relative_time(ev.committed_at)}" }
-                                dt { "Systems" }
-                                dd { "{ev.system_count}" }
-                                dt { "Policy pass" }
-                                dd { "{ev.passed_count}" }
-                                dt { "Policy fail" }
-                                dd { "{ev.policy_failed_count}" }
-                                dt { "Queue position" }
-                                dd { "{ev.queue_position}" }
+                        class: "ed-stats",
+                        div { class: "ed-stat", div { class: "ed-stat-label", "Started" } div { class: "ed-stat-val", "{format_relative_time(ev.committed_at)}" } }
+                        div { class: "ed-stat", div { class: "ed-stat-label", "Systems" } div { class: "ed-stat-val", "{ev.system_count}" } }
+                        div { class: "ed-stat", div { class: "ed-stat-label", "Policy" } div { class: "ed-stat-val", "{ev.passed_count} / {ev.policy_failed_count}" } }
+                        div { class: "ed-stat", div { class: "ed-stat-label", "Queue" } div { class: "ed-stat-val", "#{ev.queue_position}" } }
+                    }
+                    div {
+                        class: "sd-tabs",
+                        style: "padding: 0 16px; border-bottom: 1px solid var(--cf-card-border);",
+                        button {
+                            class: if drawer_tab() == "log" { "sd-tab focus-ring active" } else { "sd-tab focus-ring" },
+                            onclick: move |_| drawer_tab.set("log".to_string()),
+                            Icon { name: IconName::Terminal, size: 12 }
+                            " Log"
+                        }
+                        button {
+                            class: if drawer_tab() == "policy" { "sd-tab focus-ring active" } else { "sd-tab focus-ring" },
+                            onclick: move |_| drawer_tab.set("policy".to_string()),
+                            Icon { name: IconName::Sync, size: 12 }
+                            " Policy"
+                        }
+                        button {
+                            class: if drawer_tab() == "graph" { "sd-tab focus-ring active" } else { "sd-tab focus-ring" },
+                            onclick: move |_| drawer_tab.set("graph".to_string()),
+                            Icon { name: IconName::Terminal, size: 12 }
+                            " Graph"
+                        }
+                    }
+                    div {
+                        class: "panel-body ed-body",
+                        if drawer_tab() == "log" {
+                            div {
+                                class: "panel-section",
+                                h3 { "Evaluation details" }
+                                dl {
+                                    class: "kv-grid",
+                                    dt { "Commit" }
+                                    dd { "{ev.commit_hash}" }
+                                    dt { "Systems" }
+                                    dd { "{ev.system_count}" }
+                                    dt { "Policy pass" }
+                                    dd { "{ev.passed_count}" }
+                                    dt { "Policy fail" }
+                                    dd { "{ev.policy_failed_count}" }
+                                }
+                            }
+                        } else if drawer_tab() == "policy" {
+                            div {
+                                class: "panel-section",
+                                h3 { "Policy matrix summary" }
+                                dl {
+                                    class: "kv-grid",
+                                    dt { "Passed" }
+                                    dd { "{ev.passed_count}" }
+                                    dt { "Failed" }
+                                    dd { "{ev.policy_failed_count}" }
+                                    dt { "Eval status" }
+                                    dd { "{status_meta.label}" }
+                                }
+                            }
+                        } else {
+                            div {
+                                class: "panel-section",
+                                h3 { "Dependency graph" }
+                                p {
+                                    style: "margin: 0; color: var(--cf-text-secondary); font-size: 13px;",
+                                    "Graph preview unavailable in this slice; open logs for derivation ordering details."
+                                }
                             }
                         }
                     }
@@ -999,7 +1053,7 @@ fn EvalDrawer(
                     role: "dialog",
                     "aria-label": "Evaluation detail",
                     header {
-                        class: "panel-head",
+                        class: "panel-head ed-drawer-head",
                         div {
                             class: "panel-title",
                             h2 {
@@ -1024,22 +1078,72 @@ fn EvalDrawer(
                         }
                     }
                     div {
-                        class: "panel-body",
-                        div {
-                            class: "panel-section",
-                            h3 { "Evaluation details" }
-                            dl {
-                                class: "kv-grid",
-                                dt { "Completed" }
-                                dd { "{format_eval_completed_at(&ev)}" }
-                                dt { "Duration" }
-                                dd { "{format_eval_duration(&ev)}" }
-                                dt { "Systems" }
-                                dd { "{ev.system_count}" }
-                                dt { "Policy pass" }
-                                dd { "{ev.passed_count}" }
-                                dt { "Policy fail" }
-                                dd { "{ev.policy_failed_count}" }
+                        class: "ed-stats",
+                        div { class: "ed-stat", div { class: "ed-stat-label", "Completed" } div { class: "ed-stat-val", "{format_eval_completed_at(&ev)}" } }
+                        div { class: "ed-stat", div { class: "ed-stat-label", "Duration" } div { class: "ed-stat-val", "{format_eval_duration(&ev)}" } }
+                        div { class: "ed-stat", div { class: "ed-stat-label", "Systems" } div { class: "ed-stat-val", "{ev.system_count}" } }
+                        div { class: "ed-stat", div { class: "ed-stat-label", "Policy" } div { class: "ed-stat-val", "{ev.passed_count} / {ev.policy_failed_count}" } }
+                    }
+                    div {
+                        class: "sd-tabs",
+                        style: "padding: 0 16px; border-bottom: 1px solid var(--cf-card-border);",
+                        button {
+                            class: if drawer_tab() == "log" { "sd-tab focus-ring active" } else { "sd-tab focus-ring" },
+                            onclick: move |_| drawer_tab.set("log".to_string()),
+                            Icon { name: IconName::Terminal, size: 12 }
+                            " Log"
+                        }
+                        button {
+                            class: if drawer_tab() == "policy" { "sd-tab focus-ring active" } else { "sd-tab focus-ring" },
+                            onclick: move |_| drawer_tab.set("policy".to_string()),
+                            Icon { name: IconName::Sync, size: 12 }
+                            " Policy"
+                        }
+                        button {
+                            class: if drawer_tab() == "graph" { "sd-tab focus-ring active" } else { "sd-tab focus-ring" },
+                            onclick: move |_| drawer_tab.set("graph".to_string()),
+                            Icon { name: IconName::Terminal, size: 12 }
+                            " Graph"
+                        }
+                    }
+                    div {
+                        class: "panel-body ed-body",
+                        if drawer_tab() == "log" {
+                            div {
+                                class: "panel-section",
+                                h3 { "Evaluation details" }
+                                dl {
+                                    class: "kv-grid",
+                                    dt { "Commit" }
+                                    dd { "{ev.commit_hash}" }
+                                    dt { "Completed" }
+                                    dd { "{format_eval_completed_at(&ev)}" }
+                                    dt { "Duration" }
+                                    dd { "{format_eval_duration(&ev)}" }
+                                }
+                            }
+                        } else if drawer_tab() == "policy" {
+                            div {
+                                class: "panel-section",
+                                h3 { "Policy matrix summary" }
+                                dl {
+                                    class: "kv-grid",
+                                    dt { "Passed" }
+                                    dd { "{ev.passed_count}" }
+                                    dt { "Failed" }
+                                    dd { "{ev.policy_failed_count}" }
+                                    dt { "Eval status" }
+                                    dd { "{status_meta.label}" }
+                                }
+                            }
+                        } else {
+                            div {
+                                class: "panel-section",
+                                h3 { "Dependency graph" }
+                                p {
+                                    style: "margin: 0; color: var(--cf-text-secondary); font-size: 13px;",
+                                    "Graph preview unavailable in this slice; open logs for derivation ordering details."
+                                }
                             }
                         }
                     }

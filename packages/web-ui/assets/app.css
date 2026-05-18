@@ -2609,6 +2609,42 @@ html[data-theme="light"] .sd-nix {
   justify-content: flex-end;
 }
 
+/* Evaluations drawer */
+.ed-drawer-head {
+  align-items: flex-start;
+}
+
+.ed-stats {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--cf-divider);
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.ed-stat {
+  border: 1px solid var(--cf-divider);
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: rgba(148, 163, 184, 0.06);
+}
+
+.ed-stat-label {
+  font-size: 11px;
+  color: var(--cf-text-muted);
+}
+
+.ed-stat-val {
+  margin-top: 2px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--cf-text-primary);
+}
+
+.ed-body {
+  gap: 12px;
+}
+
 .panel-section h3 {
   font-size: 11px;
   text-transform: uppercase;
