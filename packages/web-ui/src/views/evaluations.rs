@@ -19,6 +19,12 @@ enum EvaluationsTab {
     History,
 }
 
+#[derive(Clone, PartialEq)]
+enum EvalDrawerTarget {
+    Queue(EvalQueueItem),
+    History(EvalHistoryItem),
+}
+
 #[component]
 pub fn EvaluationsView() -> Element {
     rsx! { EvaluationsPage {} }
@@ -37,6 +43,7 @@ fn EvaluationsPage() -> Element {
     let mut active_tab = use_signal(|| EvaluationsTab::ActiveQueue);
     let mut log_modal_target = use_signal(|| None::<EvalQueueItem>);
     let mut history_log_modal_target = use_signal(|| None::<EvalHistoryItem>);
+    let mut drawer_target = use_signal(|| None::<EvalDrawerTarget>);
     let mut history_selected_ids = use_signal(std::collections::HashSet::<i32>::new);
 
     // History tab state
@@ -264,6 +271,7 @@ fn EvaluationsPage() -> Element {
                         refresh: refresh,
                         queue_items: queue_items,
                         log_modal_target: log_modal_target,
+                        drawer_target: drawer_target,
                     }
                 }
 
@@ -328,7 +336,18 @@ fn EvaluationsPage() -> Element {
                         refresh: refresh,
                         history_log_modal_target: history_log_modal_target,
                         history_selected_ids: history_selected_ids,
+                        drawer_target: drawer_target,
                     }
+                }
+            }
+
+            if let Some(target) = drawer_target.read().clone() {
+                EvalDrawer {
+                    target: target,
+                    refresh: refresh,
+                    on_close: move |_| drawer_target.set(None),
+                    open_queue_logs: move |item: EvalQueueItem| log_modal_target.set(Some(item)),
+                    open_history_logs: move |item: EvalHistoryItem| history_log_modal_target.set(Some(item)),
                 }
             }
 
@@ -382,6 +401,7 @@ fn EvalActiveQueue(
     mut refresh: Signal<u64>,
     queue_items: Signal<Vec<EvalQueueItem>>,
     mut log_modal_target: Signal<Option<EvalQueueItem>>,
+    mut drawer_target: Signal<Option<EvalDrawerTarget>>,
 ) -> Element {
     if evals.is_empty() {
         return rsx! {
@@ -426,7 +446,7 @@ fn EvalActiveQueue(
                             tr {
                                 key: "{commit_id}",
                                 style: "cursor: pointer;",
-                                onclick: move |_| log_modal_target.set(Some(ev_for_row.clone())),
+                                onclick: move |_| drawer_target.set(Some(EvalDrawerTarget::Queue(ev_for_row.clone()))),
                                 td {
                                     style: "color: var(--cf-text-muted); font-size: 12px;",
                                     "{ev.queue_position}"
@@ -602,6 +622,7 @@ fn EvalHistory(
     mut refresh: Signal<u64>,
     mut history_log_modal_target: Signal<Option<EvalHistoryItem>>,
     mut history_selected_ids: Signal<std::collections::HashSet<i32>>,
+    mut drawer_target: Signal<Option<EvalDrawerTarget>>,
 ) -> Element {
     let history_snapshot = history_resource.read();
 
@@ -724,7 +745,7 @@ fn EvalHistory(
                                         tr {
                                             key: "{commit_id}",
                                             style: "cursor: pointer;",
-                                            onclick: move |_| history_log_modal_target.set(Some(ev_for_row.clone())),
+                                            onclick: move |_| drawer_target.set(Some(EvalDrawerTarget::History(ev_for_row.clone()))),
                                             td {
                                                 onclick: move |evt| {
                                                     evt.stop_propagation();
@@ -842,6 +863,209 @@ fn EvalHistory(
                     div {
                         style: "padding: 24px; display: flex; align-items: center; gap: 12px; color: var(--cf-text-muted);",
                         "Loading history…"
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn EvalDrawer(
+    target: EvalDrawerTarget,
+    mut refresh: Signal<u64>,
+    on_close: EventHandler<MouseEvent>,
+    open_queue_logs: EventHandler<EvalQueueItem>,
+    open_history_logs: EventHandler<EvalHistoryItem>,
+) -> Element {
+    match target {
+        EvalDrawerTarget::Queue(ev) => {
+            let status_meta = eval_status_meta(&ev.evaluation_status);
+            let can_cancel = matches!(ev.evaluation_status.as_str(), "pending" | "in_progress");
+            let can_force_cancel = ev.evaluation_status == "cancelling";
+            let open_logs_ev = ev.clone();
+            let close_click = move |evt: MouseEvent| on_close.call(evt);
+
+            rsx! {
+                div {
+                    class: "side-panel-backdrop",
+                    onclick: close_click,
+                }
+                aside {
+                    class: "side-panel",
+                    role: "dialog",
+                    "aria-label": "Evaluation detail",
+                    header {
+                        class: "panel-head",
+                        div {
+                            class: "panel-title",
+                            h2 {
+                                "{ev.flake_name}"
+                                span { class: "chip chip-unknown", style: "font-size: 10px;", "{ev.branch}" }
+                                span {
+                                    class: "chip {status_meta.cls}",
+                                    span { class: "chip-dot", style: "background: {status_meta.color};" }
+                                    "{status_meta.label}"
+                                }
+                            }
+                            div {
+                                class: "fqdn",
+                                "{ev.commit_hash} · {ev.commit_id}"
+                            }
+                        }
+                        div {
+                            style: "display: flex; gap: 6px; align-items: center;",
+                            if can_cancel {
+                                button {
+                                    class: "btn btn-ghost focus-ring xs",
+                                    onclick: move |_| {
+                                        let mut refresh_sig = refresh.clone();
+                                        let commit_id = ev.commit_id;
+                                        spawn(async move {
+                                            let _ = cancel_commit_evaluation(commit_id).await;
+                                            refresh_sig.set(refresh_sig() + 1);
+                                        });
+                                    },
+                                    "Cancel"
+                                }
+                            }
+                            if can_force_cancel {
+                                button {
+                                    class: "btn btn-ghost focus-ring xs",
+                                    style: "color: #f87171;",
+                                    onclick: move |_| {
+                                        let mut refresh_sig = refresh.clone();
+                                        let commit_id = ev.commit_id;
+                                        spawn(async move {
+                                            let _ = force_cancel_commit_evaluation(commit_id).await;
+                                            refresh_sig.set(refresh_sig() + 1);
+                                        });
+                                    },
+                                    "Force-cancel"
+                                }
+                            }
+                            button {
+                                class: "btn-icon focus-ring",
+                                onclick: close_click,
+                                title: "Close",
+                                Icon { name: IconName::X, size: 16 }
+                            }
+                        }
+                    }
+                    div {
+                        class: "panel-body",
+                        div {
+                            class: "panel-section",
+                            h3 { "Evaluation details" }
+                            dl {
+                                class: "kv-grid",
+                                dt { "Started" }
+                                dd { "{format_relative_time(ev.committed_at)}" }
+                                dt { "Systems" }
+                                dd { "{ev.system_count}" }
+                                dt { "Policy pass" }
+                                dd { "{ev.passed_count}" }
+                                dt { "Policy fail" }
+                                dd { "{ev.policy_failed_count}" }
+                                dt { "Queue position" }
+                                dd { "{ev.queue_position}" }
+                            }
+                        }
+                    }
+                    div {
+                        class: "panel-actions",
+                        button {
+                            class: "btn btn-ghost focus-ring",
+                            onclick: move |_| open_queue_logs.call(open_logs_ev.clone()),
+                            Icon { name: IconName::Terminal, size: 14 }
+                            " Logs"
+                        }
+                    }
+                }
+            }
+        }
+        EvalDrawerTarget::History(ev) => {
+            let status_meta = eval_status_meta(&ev.evaluation_status);
+            let open_logs_ev = ev.clone();
+            let close_click = move |evt: MouseEvent| on_close.call(evt);
+
+            rsx! {
+                div {
+                    class: "side-panel-backdrop",
+                    onclick: close_click,
+                }
+                aside {
+                    class: "side-panel",
+                    role: "dialog",
+                    "aria-label": "Evaluation detail",
+                    header {
+                        class: "panel-head",
+                        div {
+                            class: "panel-title",
+                            h2 {
+                                "{ev.flake_name}"
+                                span { class: "chip chip-unknown", style: "font-size: 10px;", "{ev.branch}" }
+                                span {
+                                    class: "chip {status_meta.cls}",
+                                    span { class: "chip-dot", style: "background: {status_meta.color};" }
+                                    "{status_meta.label}"
+                                }
+                            }
+                            div {
+                                class: "fqdn",
+                                "{ev.commit_hash} · {ev.commit_id}"
+                            }
+                        }
+                        button {
+                            class: "btn-icon focus-ring",
+                            onclick: close_click,
+                            title: "Close",
+                            Icon { name: IconName::X, size: 16 }
+                        }
+                    }
+                    div {
+                        class: "panel-body",
+                        div {
+                            class: "panel-section",
+                            h3 { "Evaluation details" }
+                            dl {
+                                class: "kv-grid",
+                                dt { "Completed" }
+                                dd { "{format_eval_completed_at(&ev)}" }
+                                dt { "Duration" }
+                                dd { "{format_eval_duration(&ev)}" }
+                                dt { "Systems" }
+                                dd { "{ev.system_count}" }
+                                dt { "Policy pass" }
+                                dd { "{ev.passed_count}" }
+                                dt { "Policy fail" }
+                                dd { "{ev.policy_failed_count}" }
+                            }
+                        }
+                    }
+                    div {
+                        class: "panel-actions",
+                        if ev.evaluation_status != "complete" {
+                            button {
+                                class: "btn btn-ghost focus-ring",
+                                onclick: move |_| {
+                                    let mut refresh_sig = refresh.clone();
+                                    let commit_id = ev.commit_id;
+                                    spawn(async move {
+                                        let _ = re_evaluate_commit(commit_id).await;
+                                        refresh_sig.set(refresh_sig() + 1);
+                                    });
+                                },
+                                Icon { name: IconName::Sync, size: 14 }
+                                " Re-evaluate"
+                            }
+                        }
+                        button {
+                            class: "btn btn-ghost focus-ring",
+                            onclick: move |_| open_history_logs.call(open_logs_ev.clone()),
+                            Icon { name: IconName::Terminal, size: 14 }
+                            " Logs"
+                        }
                     }
                 }
             }

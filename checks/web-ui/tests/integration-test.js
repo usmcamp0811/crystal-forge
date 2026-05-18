@@ -4203,6 +4203,11 @@ const steps = [
       await compareBtn.waitFor({ timeout: 5000 });
       await expect(compareBtn).toBeDisabled();
 
+      // Clicking a history row opens the evaluation detail drawer
+      const historyRow = page.locator(".sys-table tbody tr").first();
+      await historyRow.click();
+      await page.locator("aside.side-panel[role='dialog']").first().waitFor({ timeout: 5000 });
+
       await page.unroute("**/api/v1/commits/eval-queue**");
       await page.unroute("**/api/v1/commits/eval-history**");
     },
