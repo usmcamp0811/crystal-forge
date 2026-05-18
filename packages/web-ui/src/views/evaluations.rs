@@ -1484,48 +1484,6 @@ fn format_eval_duration(item: &EvalHistoryItem) -> String {
         .unwrap_or_else(|| "—".to_string())
 }
 
-/// Generate mock log lines matching the JSX EVAL_DEFAULT_LOG pattern
-fn generate_eval_log_lines(
-    flake: &str,
-    commit: &str,
-    system_count: i64,
-    passed_count: i64,
-    policy_failed_count: i64,
-    status: &str,
-) -> Vec<String> {
-    let hosts = ["atlas-01", "gaia-web-02", "orion-db", "helios-edge", "titan-build"];
-    let mut lines = vec![
-        format!("evaluating flake {}@{}", flake, &commit[..12.min(commit.len())]),
-        "loading flake.lock".to_string(),
-        "resolving inputs… nixpkgs (locked at 24.11.20260401)".to_string(),
-        format!("building eval config for {} systems", system_count),
-    ];
-
-    for (i, host) in hosts.iter().take(system_count.min(5) as usize).enumerate() {
-        lines.push(format!("  ► evaluating {}.nix", host));
-        lines.push("    policy: stig.audit_rules ✓".to_string());
-        lines.push("    policy: stig.firewall ✓".to_string());
-        lines.push("    policy: cf.heartbeat_interval ✓".to_string());
-        lines.push(format!("  ✓ {} evaluated ({} derivations)", host, 18 + (i % 5)));
-    }
-
-    match status.to_lowercase().as_str() {
-        "complete" => {
-            lines.push(format!("policy summary: {} pass / {} fail", passed_count, policy_failed_count));
-            lines.push("evaluation complete".to_string());
-        }
-        "failed" => {
-            lines.push("✗ error: attribute 'foo' missing at hosts/atlas-01/services.nix:42:14".to_string());
-        }
-        "in_progress" | "pending" => {
-            lines.push("evaluating package overrides…".to_string());
-        }
-        _ => {}
-    }
-
-    lines
-}
-
 /// Determine line color based on content (matches JSX logic)
 fn log_line_color(line: &str) -> &'static str {
     let lower = line.to_lowercase();
