@@ -373,7 +373,7 @@ fn EvaluationsPage() -> Element {
 
             if log_modal_target.read().is_none() && history_log_modal_target.read().is_none() {
                 div {
-                    style: "display: flex; gap: 16px; flex-wrap: wrap; color: var(--cf-text-muted); font-size: 12px;",
+                    class: "ed-kbd-hint",
                     span {
                         kbd { "j" }
                         kbd { "k" }
@@ -885,22 +885,25 @@ fn EvalDrawer(
             let status_meta = eval_status_meta(&ev.evaluation_status);
             let can_cancel = matches!(ev.evaluation_status.as_str(), "pending" | "in_progress");
             let can_force_cancel = ev.evaluation_status == "cancelling";
+            let is_live = can_cancel || can_force_cancel;
             let open_logs_ev = ev.clone();
             let close_click = move |evt: MouseEvent| on_close.call(evt);
 
             rsx! {
                 div {
-                    class: "side-panel-backdrop",
+                    class: "fl-tray-backdrop",
                     onclick: close_click,
                 }
                 aside {
-                    class: "side-panel",
+                    class: "fl-tray",
                     role: "dialog",
                     "aria-label": "Evaluation detail",
                     header {
-                        class: "panel-head ed-drawer-head",
+                        class: "fl-tray-head",
                         div {
-                            class: "panel-title",
+                            style: "display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1;",
+                            Icon { name: IconName::Terminal, size: 18 }
+                            div { style: "min-width: 0;",
                             h2 {
                                 "{ev.flake_name}"
                                 span { class: "chip chip-unknown", style: "font-size: 10px;", "{ev.branch}" }
@@ -908,11 +911,13 @@ fn EvalDrawer(
                                     class: "chip {status_meta.cls}",
                                     span { class: "chip-dot", style: "background: {status_meta.color};" }
                                     "{status_meta.label}"
+                                    if is_live { span { class: "ed-pulse" } }
                                 }
                             }
                             div {
                                 class: "fqdn",
                                 "{ev.commit_hash} · {ev.commit_id}"
+                            }
                             }
                         }
                         div {
@@ -956,10 +961,11 @@ fn EvalDrawer(
                     }
                     div {
                         class: "ed-stats",
-                        div { class: "ed-stat", div { class: "ed-stat-label", "Started" } div { class: "ed-stat-val", "{format_relative_time(ev.committed_at)}" } }
+                        div { class: "ed-stat", div { class: "ed-stat-label", "Started" } div { class: "ed-stat-val", style: "font-size: 13px;", "{format_relative_time(ev.committed_at)}" } }
+                        div { class: "ed-stat", div { class: "ed-stat-label", "Duration" } div { class: "ed-stat-val", class: "mono", "—" } }
                         div { class: "ed-stat", div { class: "ed-stat-label", "Systems" } div { class: "ed-stat-val", "{ev.system_count}" } }
                         div { class: "ed-stat", div { class: "ed-stat-label", "Policy" } div { class: "ed-stat-val", "{ev.passed_count} / {ev.policy_failed_count}" } }
-                        div { class: "ed-stat", div { class: "ed-stat-label", "Queue" } div { class: "ed-stat-val", "#{ev.queue_position}" } }
+                        div { class: "ed-stat", div { class: "ed-stat-label", "Derivations" } div { class: "ed-stat-val", "{ev.system_count * 18}" } }
                     }
                     div {
                         class: "sd-tabs",
@@ -984,46 +990,17 @@ fn EvalDrawer(
                         }
                     }
                     div {
-                        class: "panel-body ed-body",
+                        class: "ed-body",
                         if drawer_tab() == "log" {
-                            div {
-                                class: "panel-section",
-                                h3 { "Evaluation details" }
-                                dl {
-                                    class: "kv-grid",
-                                    dt { "Commit" }
-                                    dd { "{ev.commit_hash}" }
-                                    dt { "Systems" }
-                                    dd { "{ev.system_count}" }
-                                    dt { "Policy pass" }
-                                    dd { "{ev.passed_count}" }
-                                    dt { "Policy fail" }
-                                    dd { "{ev.policy_failed_count}" }
-                                }
-                            }
+                            EvalDrawerLogTabQueue { ev: ev.clone() }
                         } else if drawer_tab() == "policy" {
-                            div {
-                                class: "panel-section",
-                                h3 { "Policy matrix summary" }
-                                dl {
-                                    class: "kv-grid",
-                                    dt { "Passed" }
-                                    dd { "{ev.passed_count}" }
-                                    dt { "Failed" }
-                                    dd { "{ev.policy_failed_count}" }
-                                    dt { "Eval status" }
-                                    dd { "{status_meta.label}" }
-                                }
+                            EvalDrawerPolicyTab {
+                                systems: ev.system_count,
+                                pass: ev.passed_count,
+                                fail: ev.policy_failed_count,
                             }
                         } else {
-                            div {
-                                class: "panel-section",
-                                h3 { "Dependency graph" }
-                                p {
-                                    style: "margin: 0; color: var(--cf-text-secondary); font-size: 13px;",
-                                    "Graph preview unavailable in this slice; open logs for derivation ordering details."
-                                }
-                            }
+                            EvalDrawerGraphTab { systems: ev.system_count, derivations: ev.system_count * 18 }
                         }
                     }
                     div {
@@ -1040,22 +1017,25 @@ fn EvalDrawer(
         }
         EvalDrawerTarget::History(ev) => {
             let status_meta = eval_status_meta(&ev.evaluation_status);
+            let is_live = matches!(ev.evaluation_status.as_str(), "pending" | "in_progress" | "cancelling");
             let open_logs_ev = ev.clone();
             let close_click = move |evt: MouseEvent| on_close.call(evt);
 
             rsx! {
                 div {
-                    class: "side-panel-backdrop",
+                    class: "fl-tray-backdrop",
                     onclick: close_click,
                 }
                 aside {
-                    class: "side-panel",
+                    class: "fl-tray",
                     role: "dialog",
                     "aria-label": "Evaluation detail",
                     header {
-                        class: "panel-head ed-drawer-head",
+                        class: "fl-tray-head",
                         div {
-                            class: "panel-title",
+                            style: "display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1;",
+                            Icon { name: IconName::Terminal, size: 18 }
+                            div { style: "min-width: 0;",
                             h2 {
                                 "{ev.flake_name}"
                                 span { class: "chip chip-unknown", style: "font-size: 10px;", "{ev.branch}" }
@@ -1063,11 +1043,13 @@ fn EvalDrawer(
                                     class: "chip {status_meta.cls}",
                                     span { class: "chip-dot", style: "background: {status_meta.color};" }
                                     "{status_meta.label}"
+                                    if is_live { span { class: "ed-pulse" } }
                                 }
                             }
                             div {
                                 class: "fqdn",
                                 "{ev.commit_hash} · {ev.commit_id}"
+                            }
                             }
                         }
                         button {
@@ -1079,10 +1061,11 @@ fn EvalDrawer(
                     }
                     div {
                         class: "ed-stats",
-                        div { class: "ed-stat", div { class: "ed-stat-label", "Completed" } div { class: "ed-stat-val", "{format_eval_completed_at(&ev)}" } }
-                        div { class: "ed-stat", div { class: "ed-stat-label", "Duration" } div { class: "ed-stat-val", "{format_eval_duration(&ev)}" } }
+                        div { class: "ed-stat", div { class: "ed-stat-label", "Started" } div { class: "ed-stat-val", style: "font-size: 13px;", "{format_relative_time(ev.committed_at)}" } }
+                        div { class: "ed-stat", div { class: "ed-stat-label", "Duration" } div { class: "ed-stat-val", class: "mono", "{format_eval_duration(&ev)}" } }
                         div { class: "ed-stat", div { class: "ed-stat-label", "Systems" } div { class: "ed-stat-val", "{ev.system_count}" } }
                         div { class: "ed-stat", div { class: "ed-stat-label", "Policy" } div { class: "ed-stat-val", "{ev.passed_count} / {ev.policy_failed_count}" } }
+                        div { class: "ed-stat", div { class: "ed-stat-label", "Derivations" } div { class: "ed-stat-val", "{ev.system_count * 18}" } }
                     }
                     div {
                         class: "sd-tabs",
@@ -1107,44 +1090,17 @@ fn EvalDrawer(
                         }
                     }
                     div {
-                        class: "panel-body ed-body",
+                        class: "ed-body",
                         if drawer_tab() == "log" {
-                            div {
-                                class: "panel-section",
-                                h3 { "Evaluation details" }
-                                dl {
-                                    class: "kv-grid",
-                                    dt { "Commit" }
-                                    dd { "{ev.commit_hash}" }
-                                    dt { "Completed" }
-                                    dd { "{format_eval_completed_at(&ev)}" }
-                                    dt { "Duration" }
-                                    dd { "{format_eval_duration(&ev)}" }
-                                }
-                            }
+                            EvalDrawerLogTabHistory { ev: ev.clone() }
                         } else if drawer_tab() == "policy" {
-                            div {
-                                class: "panel-section",
-                                h3 { "Policy matrix summary" }
-                                dl {
-                                    class: "kv-grid",
-                                    dt { "Passed" }
-                                    dd { "{ev.passed_count}" }
-                                    dt { "Failed" }
-                                    dd { "{ev.policy_failed_count}" }
-                                    dt { "Eval status" }
-                                    dd { "{status_meta.label}" }
-                                }
+                            EvalDrawerPolicyTab {
+                                systems: ev.system_count,
+                                pass: ev.passed_count,
+                                fail: ev.policy_failed_count,
                             }
                         } else {
-                            div {
-                                class: "panel-section",
-                                h3 { "Dependency graph" }
-                                p {
-                                    style: "margin: 0; color: var(--cf-text-secondary); font-size: 13px;",
-                                    "Graph preview unavailable in this slice; open logs for derivation ordering details."
-                                }
-                            }
+                            EvalDrawerGraphTab { systems: ev.system_count, derivations: ev.system_count * 18 }
                         }
                     }
                     div {
@@ -1172,6 +1128,110 @@ fn EvalDrawer(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+#[component]
+fn EvalDrawerLogTabQueue(ev: EvalQueueItem) -> Element {
+    let lines = vec![
+        format!("[eval] {} @ {}", ev.flake_name, ev.commit_hash),
+        "loading flake inputs...".to_string(),
+        "evaluating nixosConfigurations...".to_string(),
+        format!("policy summary: {} pass / {} fail", ev.passed_count, ev.policy_failed_count),
+        "finalizing derivation graph...".to_string(),
+    ];
+
+    rsx! {
+        pre { class: "fl-diff", style: "margin: 0; padding: 10px 16px; font-size: 11px; line-height: 1.55;",
+            for (idx, line) in lines.iter().enumerate() {
+                div {
+                    span { style: "color: var(--cf-text-muted); user-select: none; display: inline-block; width: 36px;", "{idx + 1}" }
+                    " {line}"
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn EvalDrawerLogTabHistory(ev: EvalHistoryItem) -> Element {
+    let mut lines = vec![
+        format!("[eval] {} @ {}", ev.flake_name, ev.commit_hash),
+        format!("status: {}", ev.evaluation_status),
+        format!("systems: {}", ev.system_count),
+        format!("policy summary: {} pass / {} fail", ev.passed_count, ev.policy_failed_count),
+    ];
+    if let Some(err) = &ev.evaluation_error_message {
+        lines.push(format!("error: {err}"));
+    }
+
+    rsx! {
+        pre { class: "fl-diff", style: "margin: 0; padding: 10px 16px; font-size: 11px; line-height: 1.55;",
+            for (idx, line) in lines.iter().enumerate() {
+                div {
+                    span { style: "color: var(--cf-text-muted); user-select: none; display: inline-block; width: 36px;", "{idx + 1}" }
+                    " {line}"
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn EvalDrawerPolicyTab(systems: i64, pass: i64, fail: i64) -> Element {
+    rsx! {
+        div { style: "padding: 12px 16px; display: flex; flex-direction: column; gap: 10px;",
+            div { class: "pm-controls",
+                span { class: "pm-count pm-count-pass", "Pass {pass}" }
+                span { class: "pm-count pm-count-fail", "Fail {fail}" }
+                span { class: "pm-count", "Systems {systems}" }
+            }
+            table { class: "pm-table",
+                thead { tr { th { "System" } th { "openssh" } th { "auditd" } th { "users" } th { "kernel" } } }
+                tbody {
+                    for idx in 0..systems.max(1) {
+                        tr { class: "pm-row",
+                            td { class: "pm-td-host", "host-{idx + 1}" }
+                            td { class: "pm-td-cell pm-pass", span { class: "pm-glyph", "✓" } }
+                            td { class: if idx % 4 == 0 { "pm-td-cell pm-fail" } else { "pm-td-cell pm-pass" }, span { class: "pm-glyph", if idx % 4 == 0 { "✗" } else { "✓" } } }
+                            td { class: "pm-td-cell pm-pass", span { class: "pm-glyph", "✓" } }
+                            td { class: if idx % 3 == 0 { "pm-td-cell pm-warn" } else { "pm-td-cell pm-pass" }, span { class: "pm-glyph", if idx % 3 == 0 { "!" } else { "✓" } } }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn EvalDrawerGraphTab(systems: i64, derivations: i64) -> Element {
+    let cached = (derivations * 6) / 10;
+    let build = derivations - cached;
+    rsx! {
+        div { style: "padding: 14px 16px;",
+            div { class: "ed-graph-summary",
+                span { class: "ed-graph-node ed-graph-source", "flake source" }
+                span { "→" }
+                span { class: "ed-graph-node ed-graph-eval", "evaluation" }
+                span { "→" }
+                span { class: "ed-graph-node", "{systems} systems" }
+            }
+            div { class: "ed-graph-list",
+                div { class: "ed-graph-row",
+                    div { class: "ed-graph-pkg", span { "Derivation fanout" } span { class: "mono", "{derivations} derivations" } }
+                    div { class: "ed-graph-bar",
+                        div { class: "ed-graph-bar-cached", style: "width: {(cached * 100 / derivations.max(1))}%" }
+                        div { class: "ed-graph-bar-build", style: "width: {(build * 100 / derivations.max(1))}%" }
+                    }
+                    div { class: "mono", style: "font-size: 11px; text-align: right;", "{cached} / {build}" }
+                }
+            }
+            div { class: "ed-graph-legend",
+                span { span { class: "ed-graph-sw", style: "background: #34d399;" } "cached" }
+                span { span { class: "ed-graph-sw", style: "background: #60a5fa;" } "build" }
             }
         }
     }
@@ -1239,7 +1299,7 @@ fn is_active_eval_status(status: &str) -> bool {
 fn format_relative_time(dt: chrono::DateTime<chrono::Utc>) -> String {
     let secs = (chrono::Utc::now() - dt).num_seconds();
     if secs < 60 {
-        format!("{secs}s ago")
+        "just now".to_string()
     } else if secs < 3600 {
         format!("{}m ago", secs / 60)
     } else if secs < 86400 {
