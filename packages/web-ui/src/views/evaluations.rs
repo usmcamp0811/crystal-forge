@@ -964,7 +964,20 @@ fn EvalDrawer(
                         div { class: "ed-stat", div { class: "ed-stat-label", "Started" } div { class: "ed-stat-val", style: "font-size: 13px;", "{format_relative_time(ev.committed_at)}" } }
                         div { class: "ed-stat", div { class: "ed-stat-label", "Duration" } div { class: "ed-stat-val", class: "mono", "—" } }
                         div { class: "ed-stat", div { class: "ed-stat-label", "Systems" } div { class: "ed-stat-val", "{ev.system_count}" } }
-                        div { class: "ed-stat", div { class: "ed-stat-label", "Policy" } div { class: "ed-stat-val", "{ev.passed_count} / {ev.policy_failed_count}" } }
+                        div {
+                            class: "ed-stat",
+                            div { class: "ed-stat-label", "Policy" }
+                            div {
+                                class: "ed-stat-val",
+                                style: "display: flex; gap: 6px; align-items: baseline;",
+                                span { style: "color: #34d399;", "{ev.passed_count}" }
+                                span { style: "font-size: 12px; color: var(--cf-text-muted);", "/" }
+                                span {
+                                    style: if ev.policy_failed_count > 0 { "color: #f87171;" } else { "color: var(--cf-text-muted);" },
+                                    "{ev.policy_failed_count}"
+                                }
+                            }
+                        }
                         div { class: "ed-stat", div { class: "ed-stat-label", "Derivations" } div { class: "ed-stat-val", "{ev.system_count * 18}" } }
                     }
                     div {
@@ -1064,7 +1077,20 @@ fn EvalDrawer(
                         div { class: "ed-stat", div { class: "ed-stat-label", "Started" } div { class: "ed-stat-val", style: "font-size: 13px;", "{format_relative_time(ev.committed_at)}" } }
                         div { class: "ed-stat", div { class: "ed-stat-label", "Duration" } div { class: "ed-stat-val", class: "mono", "{format_eval_duration(&ev)}" } }
                         div { class: "ed-stat", div { class: "ed-stat-label", "Systems" } div { class: "ed-stat-val", "{ev.system_count}" } }
-                        div { class: "ed-stat", div { class: "ed-stat-label", "Policy" } div { class: "ed-stat-val", "{ev.passed_count} / {ev.policy_failed_count}" } }
+                        div {
+                            class: "ed-stat",
+                            div { class: "ed-stat-label", "Policy" }
+                            div {
+                                class: "ed-stat-val",
+                                style: "display: flex; gap: 6px; align-items: baseline;",
+                                span { style: "color: #34d399;", "{ev.passed_count}" }
+                                span { style: "font-size: 12px; color: var(--cf-text-muted);", "/" }
+                                span {
+                                    style: if ev.policy_failed_count > 0 { "color: #f87171;" } else { "color: var(--cf-text-muted);" },
+                                    "{ev.policy_failed_count}"
+                                }
+                            }
+                        }
                         div { class: "ed-stat", div { class: "ed-stat-label", "Derivations" } div { class: "ed-stat-val", "{ev.system_count * 18}" } }
                     }
                     div {
@@ -1135,6 +1161,7 @@ fn EvalDrawer(
 
 #[component]
 fn EvalDrawerLogTabQueue(ev: EvalQueueItem) -> Element {
+    let mut autoscroll = use_signal(|| true);
     let lines = vec![
         format!("[eval] {} @ {}", ev.flake_name, ev.commit_hash),
         "loading flake inputs...".to_string(),
@@ -1144,11 +1171,35 @@ fn EvalDrawerLogTabQueue(ev: EvalQueueItem) -> Element {
     ];
 
     rsx! {
-        pre { class: "fl-diff", style: "margin: 0; padding: 10px 16px; font-size: 11px; line-height: 1.55;",
-            for (idx, line) in lines.iter().enumerate() {
-                div {
-                    span { style: "color: var(--cf-text-muted); user-select: none; display: inline-block; width: 36px;", "{idx + 1}" }
-                    " {line}"
+        div { style: "display: flex; flex-direction: column; flex: 1; min-height: 0;",
+            div {
+                style: "padding: 8px 16px; border-bottom: 1px solid var(--cf-divider); display: flex; gap: 10px; align-items: center; flex-shrink: 0;",
+                span { style: "font-size: 11px; color: var(--cf-text-muted);", "{lines.len()} lines" }
+                div { style: "flex: 1;" }
+                label {
+                    style: "display: flex; gap: 6px; align-items: center; font-size: 11px;",
+                    input {
+                        r#type: "checkbox",
+                        class: "ed-checkbox",
+                        checked: autoscroll(),
+                        oninput: move |_| autoscroll.set(!autoscroll()),
+                    }
+                    "Auto-scroll"
+                }
+            }
+            pre { class: "fl-diff", style: "margin: 0; padding: 10px 16px; font-size: 11px; line-height: 1.55; flex: 1;",
+                for (idx, line) in lines.iter().enumerate() {
+                    div {
+                        span { style: "color: var(--cf-text-muted); user-select: none; display: inline-block; width: 36px;", "{idx + 1}" }
+                        " {line}"
+                    }
+                }
+                if autoscroll() {
+                    div {
+                        style: "color: #60a5fa;",
+                        span { style: "color: var(--cf-text-muted); display: inline-block; width: 36px;", "{lines.len() + 1}" }
+                        span { class: "ed-pulse", style: "margin-left: 0;" }
+                    }
                 }
             }
         }
@@ -1181,17 +1232,28 @@ fn EvalDrawerLogTabHistory(ev: EvalHistoryItem) -> Element {
 
 #[component]
 fn EvalDrawerPolicyTab(systems: i64, pass: i64, fail: i64) -> Element {
+    let mut filter = use_signal(|| "all".to_string());
+    let clean = (systems - fail).max(0);
+
     rsx! {
         div { style: "padding: 12px 16px; display: flex; flex-direction: column; gap: 10px;",
+            div { class: "pm-issues",
+                div { class: "pm-issues-label", "Top issues" }
+                button { class: "pm-issue-chip active", span { class: "pm-issue-dot" } span { class: "mono", "openssh" } span { style: "color: #f87171; font-weight: 700;", "{fail.max(1)}" } span { style: "color: var(--cf-text-muted);", "/{systems.max(1)} fail" } }
+                button { class: "pm-issue-chip", span { class: "pm-issue-dot" } span { class: "mono", "kernel" } span { style: "color: #f59e0b; font-weight: 700;", "{(fail / 2).max(1)}" } span { style: "color: var(--cf-text-muted);", "/{systems.max(1)} warn" } }
+            }
             div { class: "pm-controls",
-                span { class: "pm-count pm-count-pass", "Pass {pass}" }
-                span { class: "pm-count pm-count-fail", "Fail {fail}" }
-                span { class: "pm-count", "Systems {systems}" }
+                div { class: "seg",
+                    button { class: if filter() == "all" { "active" } else { "" }, onclick: move |_| filter.set("all".to_string()), "All", span { class: "pm-count", "{systems}" } }
+                    button { class: if filter() == "fail" { "active" } else { "" }, onclick: move |_| filter.set("fail".to_string()), "Failing", span { class: "pm-count pm-count-fail", "{fail}" } }
+                    button { class: if filter() == "clean" { "active" } else { "" }, onclick: move |_| filter.set("clean".to_string()), "Clean", span { class: "pm-count pm-count-pass", "{clean}" } }
+                }
             }
             table { class: "pm-table",
                 thead { tr { th { "System" } th { "openssh" } th { "auditd" } th { "users" } th { "kernel" } } }
                 tbody {
                     for idx in 0..systems.max(1) {
+                        if filter() == "all" || (filter() == "fail" && idx % 4 == 0) || (filter() == "clean" && idx % 4 != 0) {
                         tr { class: "pm-row",
                             td { class: "pm-td-host", "host-{idx + 1}" }
                             td { class: "pm-td-cell pm-pass", span { class: "pm-glyph", "✓" } }
@@ -1199,8 +1261,15 @@ fn EvalDrawerPolicyTab(systems: i64, pass: i64, fail: i64) -> Element {
                             td { class: "pm-td-cell pm-pass", span { class: "pm-glyph", "✓" } }
                             td { class: if idx % 3 == 0 { "pm-td-cell pm-warn" } else { "pm-td-cell pm-pass" }, span { class: "pm-glyph", if idx % 3 == 0 { "!" } else { "✓" } } }
                         }
+                        }
                     }
                 }
+            }
+            div { class: "ed-graph-legend",
+                span { span { class: "ed-graph-sw pm-pass" } "pass" }
+                span { span { class: "ed-graph-sw pm-warn" } "warn" }
+                span { span { class: "ed-graph-sw pm-fail" } "fail" }
+                span { style: "margin-left: auto;", "pass {pass} · fail {fail}" }
             }
         }
     }
