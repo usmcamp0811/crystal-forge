@@ -810,16 +810,22 @@ pub async fn fetch_eval_dependency_breakdown(
     pool: &PgPool,
     commit_id: i32,
 ) -> Result<Vec<EvalDependencyPackageRow>> {
+    // Evaluation only writes nixos-type derivations (one per NixOS system config).
+    // We expose each system as a "package" row with its build status breakdown.
+    // status_id reference:
+    //   3 = DryRunPending, 4 = DryRunInProgress, 5 = DryRunComplete
+    //   6 = DryRunFailed,  7 = BuildPending,     8 = BuildInProgress
+    //  10 = BuildComplete, 12 = BuildFailed
     let rows = sqlx::query_as::<_, EvalDependencyPackageRow>(
         r#"
         SELECT
             COALESCE(NULLIF(BTRIM(d.derivation_name), ''), 'unknown') AS package_name,
-            COUNT(*) FILTER (WHERE d.status_id IN (5, 10))::BIGINT AS ready_count,
+            COUNT(*) FILTER (WHERE d.status_id IN (5, 10))::BIGINT  AS ready_count,
             COUNT(*) FILTER (WHERE d.status_id IN (3, 4, 7, 8))::BIGINT AS pending_count,
-            COUNT(*) FILTER (WHERE d.status_id IN (6, 12))::BIGINT AS failed_count
+            COUNT(*) FILTER (WHERE d.status_id IN (6, 12))::BIGINT  AS failed_count
         FROM derivations d
         WHERE d.commit_id = $1
-          AND d.derivation_type = 'package'
+          AND d.derivation_type = 'nixos'
         GROUP BY COALESCE(NULLIF(BTRIM(d.derivation_name), ''), 'unknown')
         ORDER BY package_name ASC
         "#,

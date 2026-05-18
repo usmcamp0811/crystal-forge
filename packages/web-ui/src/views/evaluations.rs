@@ -1413,26 +1413,50 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
                 None => rsx! { div { style: "color: var(--cf-text-muted); font-size: 12px;", "Loading dependency graph..." } },
                 Some(Err(_)) => rsx! { div { style: "color: #f87171; font-size: 12px;", "Failed to load dependency graph" } },
                 Some(Ok(data)) => rsx! {
-                    div { style: "display: flex; justify-content: space-between; margin-bottom: 10px;",
-                        h3 { style: "margin: 0; font-size: 12px; color: var(--cf-text-muted);", "Packages" }
-                        span { style: "font-size: 12px; color: var(--cf-text-muted);", "{data.total_packages}" }
+                    div { style: "display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 10px;",
+                        h3 { style: "margin: 0; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--cf-text-muted); font-weight: 700;", "Systems" }
+                        span { style: "font-size: 11px; color: var(--cf-text-muted);", "{data.total_packages} systems" }
                     }
                     if data.packages.is_empty() {
-                        div { style: "color: var(--cf-text-muted); font-size: 12px;", "No package derivations for this commit" }
+                        div { style: "color: var(--cf-text-muted); font-size: 12px;", "No derivations for this commit yet" }
                     } else {
                         div { class: "ed-graph-list",
                             for pkg in data.packages.iter() {
-                                div { class: "ed-graph-row",
-                                    div { class: "ed-graph-pkg",
-                                        span { class: "mono", style: "font-size: 12px; font-weight: 600;", "{pkg.package_name}" }
-                                    }
-                                    div { style: "display: flex; gap: 10px; font-size: 11px;",
-                                        span { style: "color: #34d399;", "ready {pkg.ready_count}" }
-                                        span { style: "color: #60a5fa;", "pending {pkg.pending_count}" }
-                                        span { style: "color: #f87171;", "failed {pkg.failed_count}" }
+                                {
+                                    let total = pkg.ready_count + pkg.pending_count + pkg.failed_count;
+                                    let ready_pct = if total > 0 { pkg.ready_count * 100 / total } else { 0 };
+                                    let pending_pct = if total > 0 { pkg.pending_count * 100 / total } else { 0 };
+                                    let failed_pct = if total > 0 { pkg.failed_count * 100 / total } else { 0 };
+                                    rsx! {
+                                        div { key: "{pkg.package_name}", class: "ed-graph-row",
+                                            div { class: "ed-graph-pkg",
+                                                span { class: "mono", style: "font-size: 12px; font-weight: 600;", "{pkg.package_name}" }
+                                            }
+                                            div { class: "ed-graph-bar",
+                                                if ready_pct > 0 { div { class: "ed-graph-bar-cached", style: "width: {ready_pct}%;" } }
+                                                if pending_pct > 0 { div { style: "width: {pending_pct}%; background: #60a5fa;" } }
+                                                if failed_pct > 0 { div { class: "ed-graph-bar-build", style: "width: {failed_pct}%;" } }
+                                            }
+                                            div { style: "display: flex; gap: 8px; font-size: 11px; justify-content: flex-end;",
+                                                if pkg.ready_count > 0 {
+                                                    span { style: "color: #34d399; font-weight: 600;", "✓ {pkg.ready_count}" }
+                                                }
+                                                if pkg.pending_count > 0 {
+                                                    span { style: "color: #60a5fa;", "⋯ {pkg.pending_count}" }
+                                                }
+                                                if pkg.failed_count > 0 {
+                                                    span { style: "color: #f87171; font-weight: 600;", "✗ {pkg.failed_count}" }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
+                        }
+                        div { class: "ed-graph-legend",
+                            span { span { class: "ed-graph-sw", style: "background: #34d399;" } " Evaluated" }
+                            span { span { class: "ed-graph-sw", style: "background: #60a5fa;" } " Building / Pending" }
+                            span { span { class: "ed-graph-sw", style: "background: #f87171;" } " Failed" }
                         }
                     }
                 }
