@@ -6,8 +6,9 @@ use gloo_timers::future::TimeoutFuture;
 
 use crate::api::{
     client::{
-        ApiClientError, cancel_commit_evaluation, fetch_eval_history, fetch_eval_queue,
-        force_cancel_commit_evaluation, re_evaluate_commit, reorder_eval_queue,
+        ApiClientError, cancel_commit_evaluation, fetch_eval_dependency_graph, fetch_eval_history,
+        fetch_eval_policy_matrix, fetch_eval_queue, force_cancel_commit_evaluation,
+        re_evaluate_commit, reorder_eval_queue,
     },
     models::{EvalHistoryItem, EvalHistoryPage, EvalQueueItem},
 };
@@ -1009,15 +1010,11 @@ fn EvalDrawer(
                             EvalDrawerLogTabQueue { ev: ev.clone(), live: is_live }
                         } else if drawer_tab() == "policy" {
                             EvalDrawerPolicyTab {
-                                systems: ev.system_count,
-                                pass: ev.passed_count,
-                                fail: ev.policy_failed_count,
+                                commit_id: ev.commit_id,
                             }
                         } else {
                             EvalDrawerGraphTab {
-                                commit: ev.commit_hash.chars().take(12).collect::<String>(),
-                                systems: ev.system_count,
-                                derivations: ev.system_count * 18,
+                                commit_id: ev.commit_id,
                             }
                         }
                     }
@@ -1127,15 +1124,11 @@ fn EvalDrawer(
                             EvalDrawerLogTabHistory { ev: ev.clone(), live: is_live }
                         } else if drawer_tab() == "policy" {
                             EvalDrawerPolicyTab {
-                                systems: ev.system_count,
-                                pass: ev.passed_count,
-                                fail: ev.policy_failed_count,
+                                commit_id: ev.commit_id,
                             }
                         } else {
                             EvalDrawerGraphTab {
-                                commit: ev.commit_hash.chars().take(12).collect::<String>(),
-                                systems: ev.system_count,
-                                derivations: ev.system_count * 18,
+                                commit_id: ev.commit_id,
                             }
                         }
                     }
@@ -1354,19 +1347,54 @@ fn EvalDrawerLogTabHistory(ev: EvalHistoryItem, live: bool) -> Element {
 }
 
 #[component]
-fn EvalDrawerPolicyTab(systems: i64, pass: i64, fail: i64) -> Element {
-    let _ = (systems, pass, fail);
+fn EvalDrawerPolicyTab(commit_id: i32) -> Element {
+    let policy_resource = use_resource(move || async move { fetch_eval_policy_matrix(commit_id).await });
+    let policy_snapshot = policy_resource.read();
 
     rsx! {
-        div { style: "flex: 1; overflow: auto; display: flex; align-items: center; justify-content: center; padding: 24px;",
-            div { style: "max-width: 560px; text-align: center; border: 1px solid var(--cf-card-border); background: var(--cf-card-bg); border-radius: 10px; padding: 20px;",
-                div { style: "display: flex; align-items: center; justify-content: center; gap: 8px; margin-bottom: 10px;",
-                    Icon { name: IconName::Shield, size: 14 }
-                    h3 { style: "margin: 0; font-size: 14px;", "Policy matrix data unavailable" }
-                }
-                p { style: "margin: 0; color: var(--cf-text-secondary); font-size: 12px; line-height: 1.6;",
-                    "This tab requires a backend endpoint for per-system policy results. "
-                    "Queue/History and Logs use real API data; policy matrix is waiting on API support."
+        div { style: "flex: 1; overflow: auto; padding: 14px;",
+            match &*policy_snapshot {
+                None => rsx! {
+                    div { style: "color: var(--cf-text-muted); font-size: 12px;", "Loading policy matrix..." }
+                },
+                Some(Err(_)) => rsx! {
+                    div { style: "color: #f87171; font-size: 12px;", "Failed to load policy matrix" }
+                },
+                Some(Ok(data)) => rsx! {
+                    if data.systems.is_empty() {
+                        div { style: "color: var(--cf-text-muted); font-size: 12px;", "No policy matrix rows for this commit" }
+                    } else {
+                        table { class: "pm-table",
+                            thead {
+                                tr {
+                                    th { class: "pm-th-host", "System" }
+                                    for policy in data.policies.iter() {
+                                        th { class: "pm-th-health", "{policy}" }
+                                    }
+                                }
+                            }
+                            tbody {
+                                for row in data.systems.iter() {
+                                    tr {
+                                        td { class: "pm-td-host", div { class: "pm-host-cell", span { class: "mono pm-host-name", "{row.system_name}" } } }
+                                        for result in row.results.iter() {
+                                            {
+                                                let cls = format!("pm-td-cell pm-{}", result);
+                                                let glyph = match result.as_str() {
+                                                    "pass" => "✓",
+                                                    "fail" => "✗",
+                                                    _ => "!",
+                                                };
+                                                rsx! {
+                                                    td { class: "{cls}", span { class: "pm-glyph", "{glyph}" } }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1374,19 +1402,39 @@ fn EvalDrawerPolicyTab(systems: i64, pass: i64, fail: i64) -> Element {
 }
 
 #[component]
-fn EvalDrawerGraphTab(commit: String, systems: i64, derivations: i64) -> Element {
-    let _ = (commit, systems, derivations);
+fn EvalDrawerGraphTab(commit_id: i32) -> Element {
+    let graph_resource =
+        use_resource(move || async move { fetch_eval_dependency_graph(commit_id).await });
+    let graph_snapshot = graph_resource.read();
 
     rsx! {
-        div { style: "flex: 1; overflow: auto; display: flex; align-items: center; justify-content: center; padding: 24px;",
-            div { style: "max-width: 560px; text-align: center; border: 1px solid var(--cf-card-border); background: var(--cf-card-bg); border-radius: 10px; padding: 20px;",
-                div { style: "display: flex; align-items: center; justify-content: center; gap: 8px; margin-bottom: 10px;",
-                    Icon { name: IconName::Git, size: 14 }
-                    h3 { style: "margin: 0; font-size: 14px;", "Dependency graph data unavailable" }
-                }
-                p { style: "margin: 0; color: var(--cf-text-secondary); font-size: 12px; line-height: 1.6;",
-                    "This tab requires a backend endpoint for derivation/package breakdown. "
-                    "Queue/History and Logs use real API data; dependency graph is waiting on API support."
+        div { style: "flex: 1; overflow: auto; padding: 14px;",
+            match &*graph_snapshot {
+                None => rsx! { div { style: "color: var(--cf-text-muted); font-size: 12px;", "Loading dependency graph..." } },
+                Some(Err(_)) => rsx! { div { style: "color: #f87171; font-size: 12px;", "Failed to load dependency graph" } },
+                Some(Ok(data)) => rsx! {
+                    div { style: "display: flex; justify-content: space-between; margin-bottom: 10px;",
+                        h3 { style: "margin: 0; font-size: 12px; color: var(--cf-text-muted);", "Packages" }
+                        span { style: "font-size: 12px; color: var(--cf-text-muted);", "{data.total_packages}" }
+                    }
+                    if data.packages.is_empty() {
+                        div { style: "color: var(--cf-text-muted); font-size: 12px;", "No package derivations for this commit" }
+                    } else {
+                        div { class: "ed-graph-list",
+                            for pkg in data.packages.iter() {
+                                div { class: "ed-graph-row",
+                                    div { class: "ed-graph-pkg",
+                                        span { class: "mono", style: "font-size: 12px; font-weight: 600;", "{pkg.package_name}" }
+                                    }
+                                    div { style: "display: flex; gap: 10px; font-size: 11px;",
+                                        span { style: "color: #34d399;", "ready {pkg.ready_count}" }
+                                        span { style: "color: #60a5fa;", "pending {pkg.pending_count}" }
+                                        span { style: "color: #f87171;", "failed {pkg.failed_count}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

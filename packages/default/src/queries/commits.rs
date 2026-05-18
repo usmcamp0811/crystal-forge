@@ -768,6 +768,69 @@ pub async fn list_eval_history(
     })
 }
 
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct EvalPolicySystemRow {
+    pub system_name: String,
+    pub policy_status: String,
+}
+
+pub async fn fetch_eval_policy_matrix(pool: &PgPool, commit_id: i32) -> Result<Vec<EvalPolicySystemRow>> {
+    let rows = sqlx::query_as::<_, EvalPolicySystemRow>(
+        r#"
+        SELECT
+            d.derivation_name AS system_name,
+            CASE
+                WHEN d.cf_agent_enabled IS TRUE THEN 'pass'
+                WHEN d.cf_agent_enabled IS FALSE THEN 'fail'
+                WHEN d.status_id = 6 OR d.error_message IS NOT NULL THEN 'warn'
+                ELSE 'warn'
+            END AS policy_status
+        FROM derivations d
+        WHERE d.commit_id = $1
+          AND d.derivation_type = 'nixos'
+        ORDER BY d.derivation_name ASC
+        "#,
+    )
+    .bind(commit_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows)
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct EvalDependencyPackageRow {
+    pub package_name: String,
+    pub ready_count: i64,
+    pub pending_count: i64,
+    pub failed_count: i64,
+}
+
+pub async fn fetch_eval_dependency_breakdown(
+    pool: &PgPool,
+    commit_id: i32,
+) -> Result<Vec<EvalDependencyPackageRow>> {
+    let rows = sqlx::query_as::<_, EvalDependencyPackageRow>(
+        r#"
+        SELECT
+            COALESCE(NULLIF(BTRIM(d.derivation_name), ''), 'unknown') AS package_name,
+            COUNT(*) FILTER (WHERE d.status_id IN (5, 10))::BIGINT AS ready_count,
+            COUNT(*) FILTER (WHERE d.status_id IN (3, 4, 7, 8))::BIGINT AS pending_count,
+            COUNT(*) FILTER (WHERE d.status_id IN (6, 12))::BIGINT AS failed_count
+        FROM derivations d
+        WHERE d.commit_id = $1
+          AND d.derivation_type = 'package'
+        GROUP BY COALESCE(NULLIF(BTRIM(d.derivation_name), ''), 'unknown')
+        ORDER BY package_name ASC
+        "#,
+    )
+    .bind(commit_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::validate_eval_queue_reorder_payload;

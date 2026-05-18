@@ -890,6 +890,34 @@ pub struct EvalLogEntry {
     pub message: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvalPolicyMatrixResponse {
+    pub commit_id: i32,
+    pub policies: Vec<String>,
+    pub systems: Vec<EvalPolicySystemRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvalPolicySystemRow {
+    pub system_name: String,
+    pub results: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvalDependencyGraphResponse {
+    pub commit_id: i32,
+    pub total_packages: i64,
+    pub packages: Vec<EvalDependencyPackageRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvalDependencyPackageRow {
+    pub package_name: String,
+    pub ready_count: i64,
+    pub pending_count: i64,
+    pub failed_count: i64,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Pagination
 // ─────────────────────────────────────────────────────────────────────────────

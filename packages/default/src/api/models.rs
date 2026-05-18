@@ -449,6 +449,37 @@ pub struct EvalHistoryPage {
     pub items: Vec<EvalHistoryItem>,
 }
 
+/// Per-system policy matrix for a single commit evaluation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvalPolicyMatrixResponse {
+    pub commit_id: i32,
+    pub policies: Vec<String>,
+    pub systems: Vec<EvalPolicySystemRow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvalPolicySystemRow {
+    pub system_name: String,
+    /// One entry per policy in `EvalPolicyMatrixResponse.policies`.
+    pub results: Vec<String>,
+}
+
+/// Dependency/derivation breakdown for a single commit evaluation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvalDependencyGraphResponse {
+    pub commit_id: i32,
+    pub total_packages: i64,
+    pub packages: Vec<EvalDependencyPackageRow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvalDependencyPackageRow {
+    pub package_name: String,
+    pub ready_count: i64,
+    pub pending_count: i64,
+    pub failed_count: i64,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // System DTOs — GET /api/v1/systems, GET /api/v1/systems/:id
 // ─────────────────────────────────────────────────────────────────────────────

@@ -429,6 +429,30 @@ pub async fn fetch_eval_logs(commit_id: i32) -> Result<Vec<EvalLogEntry>, ApiCli
     fetch_json(&url).await
 }
 
+pub async fn fetch_eval_policy_matrix(
+    commit_id: i32,
+) -> Result<EvalPolicyMatrixResponse, ApiClientError> {
+    let url = format!(
+        "{}/commits/{}/eval/policy-matrix?_ts={}",
+        base_url(),
+        commit_id,
+        js_sys::Date::now()
+    );
+    fetch_json(&url).await
+}
+
+pub async fn fetch_eval_dependency_graph(
+    commit_id: i32,
+) -> Result<EvalDependencyGraphResponse, ApiClientError> {
+    let url = format!(
+        "{}/commits/{}/eval/dependency-graph?_ts={}",
+        base_url(),
+        commit_id,
+        js_sys::Date::now()
+    );
+    fetch_json(&url).await
+}
+
 /// Fetch paginated evaluation history (complete, failed, cancelled).
 pub async fn fetch_eval_history(
     page: i64,
