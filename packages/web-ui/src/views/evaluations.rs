@@ -120,6 +120,29 @@ fn EvaluationsPage() -> Element {
         .filter(|item| item.evaluation_status == "failed")
         .count() as i64;
     let total_count = queue_items.read().len() as i64;
+    let selected_count = history_selected_ids.read().len();
+    let selected_history_rows = history_resource
+        .read()
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .map(|page| {
+            page.items
+                .iter()
+                .filter(|item| history_selected_ids.read().contains(&item.commit_id))
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let same_flake_pair = selected_history_rows.len() == 2
+        && selected_history_rows[0].flake_name == selected_history_rows[1].flake_name;
+    let compare_disabled = selected_count != 2 || !same_flake_pair;
+    let compare_title = if selected_count != 2 {
+        "Select exactly 2 evaluations to compare"
+    } else if !same_flake_pair {
+        "Compare only works for two evaluations of the same flake"
+    } else {
+        "Compare selected evaluations"
+    };
 
     rsx! {
         div {
@@ -250,15 +273,49 @@ fn EvaluationsPage() -> Element {
                             class: "ed-bulkbar",
                             span {
                                 style: "font-size: 13px; font-weight: 600;",
-                                "{history_selected_ids.read().len()} selected"
+                                "{selected_count} selected"
                             }
-                            div { style: "flex: 1;" }
                             button {
                                 class: "btn btn-ghost focus-ring xs",
                                 onclick: move |_| {
+                                    let selected_ids: Vec<i32> = history_selected_ids.read().iter().copied().collect();
+                                    let mut refresh_sig = refresh.clone();
+                                    let mut selected_sig = history_selected_ids.clone();
+                                    spawn(async move {
+                                        for commit_id in selected_ids {
+                                            let _ = re_evaluate_commit(commit_id).await;
+                                        }
+                                        selected_sig.write().clear();
+                                        refresh_sig.set(refresh_sig() + 1);
+                                    });
+                                },
+                                Icon { name: IconName::Sync, size: 11 }
+                                " Re-evaluate"
+                            }
+                            button {
+                                class: "btn btn-ghost focus-ring xs",
+                                disabled: compare_disabled,
+                                title: "{compare_title}",
+                                style: if compare_disabled {
+                                    "opacity: 0.4; cursor: not-allowed;"
+                                } else {
+                                    ""
+                                },
+                                "Compare"
+                            }
+                            button {
+                                class: "btn btn-ghost focus-ring xs",
+                                Icon { name: IconName::Download, size: 11 }
+                                " Download logs"
+                            }
+                            div { style: "flex: 1;" }
+                            button {
+                                class: "btn-icon focus-ring",
+                                onclick: move |_| {
                                     history_selected_ids.write().clear();
                                 },
-                                "Clear"
+                                title: "Clear",
+                                Icon { name: IconName::X, size: 14 }
                             }
                         }
                     }
@@ -292,6 +349,27 @@ fn EvaluationsPage() -> Element {
                     commit_hash: target.commit_hash,
                     evaluation_status: target.evaluation_status,
                     on_close: move |_| history_log_modal_target.set(None),
+                }
+            }
+
+            if log_modal_target.read().is_none() && history_log_modal_target.read().is_none() {
+                div {
+                    style: "display: flex; gap: 16px; flex-wrap: wrap; color: var(--cf-text-muted); font-size: 12px;",
+                    span {
+                        kbd { "j" }
+                        kbd { "k" }
+                        " navigate"
+                    }
+                    span {
+                        kbd { "↵" }
+                        " open"
+                    }
+                    if active_tab() == EvaluationsTab::ActiveQueue {
+                        span {
+                            kbd { "c" }
+                            " cancel"
+                        }
+                    }
                 }
             }
         }
@@ -341,10 +419,14 @@ fn EvalActiveQueue(
                         let can_force_cancel = ev.evaluation_status == "cancelling";
                         let is_first = i == 0;
                         let is_last = i == evals.len() - 1;
+                        let ev_for_row = ev_clone.clone();
+                        let ev_for_log_button = ev_clone.clone();
 
                         rsx! {
                             tr {
                                 key: "{commit_id}",
+                                style: "cursor: pointer;",
+                                onclick: move |_| log_modal_target.set(Some(ev_for_row.clone())),
                                 td {
                                     style: "color: var(--cf-text-muted); font-size: 12px;",
                                     "{ev.queue_position}"
@@ -397,6 +479,7 @@ fn EvalActiveQueue(
                                     "{format_relative_time(ev_clone.committed_at)}"
                                 }
                                 td {
+                                    onclick: move |evt| evt.stop_propagation(),
                                     div {
                                         class: "row-actions",
                                         style: "opacity: 1; gap: 4px; justify-content: flex-end;",
@@ -466,7 +549,7 @@ fn EvalActiveQueue(
                                         button {
                                             class: "btn-icon focus-ring",
                                             title: "View logs",
-                                            onclick: move |_| log_modal_target.set(Some(ev_clone.clone())),
+                                            onclick: move |_| log_modal_target.set(Some(ev_for_log_button.clone())),
                                             Icon { name: IconName::Terminal, size: 14 }
                                         }
 
@@ -634,10 +717,14 @@ fn EvalHistory(
                                     let ev = ev.clone();
                                     let commit_id = ev.commit_id;
                                     let status_meta = eval_status_meta(&ev.evaluation_status);
+                                    let ev_for_row = ev.clone();
+                                    let ev_for_log_button = ev.clone();
 
                                     rsx! {
                                         tr {
                                             key: "{commit_id}",
+                                            style: "cursor: pointer;",
+                                            onclick: move |_| history_log_modal_target.set(Some(ev_for_row.clone())),
                                             td {
                                                 onclick: move |evt| {
                                                     evt.stop_propagation();
@@ -713,10 +800,11 @@ fn EvalHistory(
                                              td {
                                                 div {
                                                     class: "row-actions",
+                                                    onclick: move |evt| evt.stop_propagation(),
                                                     button {
                                                         class: "btn-icon focus-ring",
                                                         title: "View evaluation logs",
-                                                        onclick: move |_| history_log_modal_target.set(Some(ev.clone())),
+                                                        onclick: move |_| history_log_modal_target.set(Some(ev_for_log_button.clone())),
                                                         Icon { name: IconName::Terminal, size: 14 }
                                                     }
                                                     if ev.evaluation_status != "complete" {

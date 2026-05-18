@@ -4190,6 +4190,19 @@ const steps = [
       const reEvalBtn = page.getByRole("button", { name: /Re-evaluate/i }).first();
       await reEvalBtn.waitFor({ timeout: 5000 });
 
+      // Select one history row and verify bulk action bar appears
+      const firstRowCheckbox = page.locator(".sys-table tbody .ed-checkbox").first();
+      await firstRowCheckbox.waitFor({ timeout: 5000 });
+      await firstRowCheckbox.click();
+
+      const bulkSelected = page.getByText(/1 selected/i).first();
+      await bulkSelected.waitFor({ timeout: 5000 });
+      await page.getByRole("button", { name: /Download logs/i }).first().waitFor({ timeout: 5000 });
+
+      const compareBtn = page.getByRole("button", { name: /^Compare$/i }).first();
+      await compareBtn.waitFor({ timeout: 5000 });
+      await expect(compareBtn).toBeDisabled();
+
       await page.unroute("**/api/v1/commits/eval-queue**");
       await page.unroute("**/api/v1/commits/eval-history**");
     },
