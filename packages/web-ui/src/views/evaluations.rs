@@ -1172,8 +1172,34 @@ fn EvalDrawer(
 #[component]
 fn EvalDrawerLogTabQueue(ev: EvalQueueItem, live: bool) -> Element {
     let mut autoscroll = use_signal(|| true);
-    // Mock log lines matching JSX EVAL_DEFAULT_LOG pattern
-    let lines = generate_eval_log_lines(&ev.flake_name, &ev.commit_hash, ev.system_count, ev.passed_count, ev.policy_failed_count, &ev.evaluation_status);
+    let commit_id = ev.commit_id;
+
+    // Fetch real logs from the API
+    let logs_resource = use_resource(move || async move {
+        crate::api::client::fetch_eval_logs(commit_id).await
+    });
+
+    let logs_snapshot = logs_resource.read();
+    let lines: Vec<String> = match &*logs_snapshot {
+        Some(Ok(entries)) => entries
+            .iter()
+            .map(|e| {
+                let level = e
+                    .level
+                    .as_ref()
+                    .map(|s| s.to_uppercase())
+                    .unwrap_or_else(|| "INFO".to_string());
+                format!(
+                    "{} [{}] {}",
+                    e.timestamp.format("%Y-%m-%d %H:%M:%S%.3fZ"),
+                    level,
+                    e.message
+                )
+            })
+            .collect(),
+        Some(Err(_)) | None => Vec::new(),
+    };
+    let is_loading = logs_snapshot.is_none();
 
     rsx! {
         div { style: "display: flex; flex-direction: column; flex: 1; min-height: 0;",
@@ -1197,15 +1223,23 @@ fn EvalDrawerLogTabQueue(ev: EvalQueueItem, live: bool) -> Element {
                     Icon { name: IconName::Download, size: 13 }
                 }
             }
-            pre { class: "fl-diff", style: "flex: 1; font-size: 11px; line-height: 1.55; padding: 10px 16px; margin: 0;",
-                for (idx, line) in lines.iter().enumerate() {
-                    {
-                        let color = log_line_color(line);
-                        let line_num = format!("{:>3}", idx + 1);
-                        rsx! {
-                            div { style: "color: {color};",
-                                span { style: "color: var(--cf-text-muted); user-select: none; display: inline-block; width: 36px;", "{line_num}" }
-                                " {line}"
+            pre { class: "fl-diff",
+                if is_loading {
+                    div { style: "color: var(--cf-text-muted); padding: 12px;", "Loading logs..." }
+                } else if lines.is_empty() {
+                    div { style: "color: var(--cf-text-muted); padding: 12px;",
+                        if live { "Waiting for log output..." } else { "No logs available" }
+                    }
+                } else {
+                    for (idx, line) in lines.iter().enumerate() {
+                        {
+                            let color = log_line_color(line);
+                            let line_num = format!("{:>3}", idx + 1);
+                            rsx! {
+                                div { style: "color: {color};",
+                                    span { style: "color: var(--cf-text-muted); user-select: none; display: inline-block; width: 36px;", "{line_num}" }
+                                    " {line}"
+                                }
                             }
                         }
                     }
@@ -1230,8 +1264,34 @@ fn EvalDrawerLogTabQueue(ev: EvalQueueItem, live: bool) -> Element {
 #[component]
 fn EvalDrawerLogTabHistory(ev: EvalHistoryItem, live: bool) -> Element {
     let mut autoscroll = use_signal(|| true);
-    // Mock log lines matching JSX EVAL_DEFAULT_LOG pattern
-    let lines = generate_eval_log_lines(&ev.flake_name, &ev.commit_hash, ev.system_count, ev.passed_count, ev.policy_failed_count, &ev.evaluation_status);
+    let commit_id = ev.commit_id;
+
+    // Fetch real logs from the API
+    let logs_resource = use_resource(move || async move {
+        crate::api::client::fetch_eval_logs(commit_id).await
+    });
+
+    let logs_snapshot = logs_resource.read();
+    let lines: Vec<String> = match &*logs_snapshot {
+        Some(Ok(entries)) => entries
+            .iter()
+            .map(|e| {
+                let level = e
+                    .level
+                    .as_ref()
+                    .map(|s| s.to_uppercase())
+                    .unwrap_or_else(|| "INFO".to_string());
+                format!(
+                    "{} [{}] {}",
+                    e.timestamp.format("%Y-%m-%d %H:%M:%S%.3fZ"),
+                    level,
+                    e.message
+                )
+            })
+            .collect(),
+        Some(Err(_)) | None => Vec::new(),
+    };
+    let is_loading = logs_snapshot.is_none();
 
     rsx! {
         div { style: "display: flex; flex-direction: column; flex: 1; min-height: 0;",
@@ -1255,15 +1315,23 @@ fn EvalDrawerLogTabHistory(ev: EvalHistoryItem, live: bool) -> Element {
                     Icon { name: IconName::Download, size: 13 }
                 }
             }
-            pre { class: "fl-diff", style: "flex: 1; font-size: 11px; line-height: 1.55; padding: 10px 16px; margin: 0;",
-                for (idx, line) in lines.iter().enumerate() {
-                    {
-                        let color = log_line_color(line);
-                        let line_num = format!("{:>3}", idx + 1);
-                        rsx! {
-                            div { style: "color: {color};",
-                                span { style: "color: var(--cf-text-muted); user-select: none; display: inline-block; width: 36px;", "{line_num}" }
-                                " {line}"
+            pre { class: "fl-diff",
+                if is_loading {
+                    div { style: "color: var(--cf-text-muted); padding: 12px;", "Loading logs..." }
+                } else if lines.is_empty() {
+                    div { style: "color: var(--cf-text-muted); padding: 12px;",
+                        if live { "Waiting for log output..." } else { "No logs available" }
+                    }
+                } else {
+                    for (idx, line) in lines.iter().enumerate() {
+                        {
+                            let color = log_line_color(line);
+                            let line_num = format!("{:>3}", idx + 1);
+                            rsx! {
+                                div { style: "color: {color};",
+                                    span { style: "color: var(--cf-text-muted); user-select: none; display: inline-block; width: 36px;", "{line_num}" }
+                                    " {line}"
+                                }
                             }
                         }
                     }
@@ -1287,321 +1355,19 @@ fn EvalDrawerLogTabHistory(ev: EvalHistoryItem, live: bool) -> Element {
 
 #[component]
 fn EvalDrawerPolicyTab(systems: i64, pass: i64, fail: i64) -> Element {
-    let mut filter = use_signal(|| "all".to_string());
-    let mut sort = use_signal(|| "health".to_string());
-    let mut policy_filter = use_signal(|| Option::<String>::None);
-    let mut expanded = use_signal(|| Option::<String>::None);
-
-    // Generate mock policy matrix data matching JSX EVAL_DEFAULT_POLICY
-    let policies = vec!["stig.audit", "stig.fw", "stig.sshd", "stig.tls", "cf.hb", "cf.cve", "cf.cache"];
-    let hosts: Vec<String> = (0..systems.max(1).min(9))
-        .map(|i| {
-            let names = ["atlas-01", "gaia-web-02", "orion-db", "helios-edge", "titan-build", "artemis-cdn", "apollo-net", "luna-mon", "perseus-vpn"];
-            names.get(i as usize).unwrap_or(&"host").to_string()
-        })
-        .collect();
-
-    // Build rows with results
-    let rows: Vec<PolicyRow> = hosts.iter().enumerate().map(|(i, host)| {
-        let results: Vec<&str> = policies.iter().enumerate().map(|(j, _)| {
-            let r = ((i * 13 + j * 7) % 100) as i32;
-            if fail > 0 && j == 3 && i == 0 { "fail" }
-            else if r > 92 { "fail" }
-            else if r > 80 { "warn" }
-            else { "pass" }
-        }).collect();
-        let fail_count = results.iter().filter(|&&r| r == "fail").count() as i64;
-        let warn_count = results.iter().filter(|&&r| r == "warn").count() as i64;
-        let pass_count = results.iter().filter(|&&r| r == "pass").count() as i64;
-        PolicyRow {
-            host: host.clone(),
-            results: results.iter().map(|s| s.to_string()).collect(),
-            fail: fail_count,
-            warn: warn_count,
-            pass: pass_count,
-        }
-    }).collect();
-
-    // Compute counts
-    let fail_count = rows.iter().filter(|r| r.fail > 0).count() as i64;
-    let warn_count = rows.iter().filter(|r| r.fail == 0 && r.warn > 0).count() as i64;
-    let clean_count = rows.iter().filter(|r| r.fail == 0 && r.warn == 0).count() as i64;
-
-    // Per-policy stats for headers
-    let policy_stats: Vec<(i64, i64, i64)> = (0..policies.len()).map(|j| {
-        let f = rows.iter().filter(|r| r.results.get(j).map(|s| s == "fail").unwrap_or(false)).count() as i64;
-        let w = rows.iter().filter(|r| r.results.get(j).map(|s| s == "warn").unwrap_or(false)).count() as i64;
-        let p = rows.iter().filter(|r| r.results.get(j).map(|s| s == "pass").unwrap_or(false)).count() as i64;
-        (f, w, p)
-    }).collect();
-
-    // Top issues (policies with failures)
-    let top_issues: Vec<(String, i64, i64)> = policies.iter().enumerate()
-        .map(|(j, p)| (p.to_string(), policy_stats[j].0, rows.len() as i64))
-        .filter(|(_, f, _)| *f > 0)
-        .take(3)
-        .collect();
-
-    // Apply filters
-    let mut filtered: Vec<&PolicyRow> = rows.iter().collect();
-    let fval = filter();
-    if fval == "fail" { filtered.retain(|r| r.fail > 0); }
-    if fval == "warn" { filtered.retain(|r| r.warn > 0 && r.fail == 0); }
-    if fval == "clean" { filtered.retain(|r| r.fail == 0 && r.warn == 0); }
-    if let Some(ref pf) = *policy_filter.read() {
-        if let Some(idx) = policies.iter().position(|&p| p == pf) {
-            filtered.retain(|r| r.results.get(idx).map(|s| s != "pass").unwrap_or(false));
-        }
-    }
-
-    // Sort
-    if sort() == "health" {
-        filtered.sort_by(|a, b| (b.fail * 10 + b.warn).cmp(&(a.fail * 10 + a.warn)));
-    } else {
-        filtered.sort_by(|a, b| a.host.cmp(&b.host));
-    }
-
-    let total = rows.len() as i64;
+    let _ = (systems, pass, fail);
 
     rsx! {
-        div { style: "flex: 1; overflow: hidden; display: flex; flex-direction: column;",
-            // Top issues callout
-            if !top_issues.is_empty() {
-                div { class: "pm-issues",
-                    div { class: "pm-issues-label", "Top issues" }
-                    for (name, fail_ct, tot) in top_issues.iter() {
-                        {
-                            let is_active = policy_filter.read().as_ref() == Some(name);
-                            let name_clone = name.clone();
-                            let name_clone2 = name.clone();
-                            rsx! {
-                                button {
-                                    key: "{name}",
-                                    class: if is_active { "pm-issue-chip active" } else { "pm-issue-chip" },
-                                    onclick: move |_| {
-                                        let current = policy_filter.read().clone();
-                                        if current.as_ref() == Some(&name_clone) {
-                                            policy_filter.set(None);
-                                        } else {
-                                            policy_filter.set(Some(name_clone.clone()));
-                                        }
-                                    },
-                                    span { class: "pm-issue-dot" }
-                                    span { class: "mono", "{name_clone2}" }
-                                    span { style: "color: #f87171; font-weight: 700;", "{fail_ct}" }
-                                    span { style: "color: var(--cf-text-muted);", "/{tot} fail" }
-                                }
-                            }
-                        }
-                    }
-                    if policy_filter.read().is_some() {
-                        button {
-                            class: "btn-icon focus-ring",
-                            style: "margin-left: auto;",
-                            title: "Clear policy filter",
-                            onclick: move |_| policy_filter.set(None),
-                            Icon { name: IconName::X, size: 12 }
-                        }
-                    }
+        div { style: "flex: 1; overflow: auto; display: flex; align-items: center; justify-content: center; padding: 24px;",
+            div { style: "max-width: 560px; text-align: center; border: 1px solid var(--cf-card-border); background: var(--cf-card-bg); border-radius: 10px; padding: 20px;",
+                div { style: "display: flex; align-items: center; justify-content: center; gap: 8px; margin-bottom: 10px;",
+                    Icon { name: IconName::Shield, size: 14 }
+                    h3 { style: "margin: 0; font-size: 14px;", "Policy matrix data unavailable" }
                 }
-            }
-
-            // Controls
-            div { class: "pm-controls",
-                div { class: "seg",
-                    button { class: if filter() == "all" { "active" } else { "" }, onclick: move |_| filter.set("all".to_string()), "All ", span { class: "pm-count", "{total}" } }
-                    button { class: if filter() == "fail" { "active" } else { "" }, onclick: move |_| filter.set("fail".to_string()), "Failing ", span { class: "pm-count pm-count-fail", "{fail_count}" } }
-                    button { class: if filter() == "warn" { "active" } else { "" }, onclick: move |_| filter.set("warn".to_string()), "Warning ", span { class: "pm-count pm-count-warn", "{warn_count}" } }
-                    button { class: if filter() == "clean" { "active" } else { "" }, onclick: move |_| filter.set("clean".to_string()), "Clean ", span { class: "pm-count pm-count-pass", "{clean_count}" } }
+                p { style: "margin: 0; color: var(--cf-text-secondary); font-size: 12px; line-height: 1.6;",
+                    "This tab requires a backend endpoint for per-system policy results. "
+                    "Queue/History and Logs use real API data; policy matrix is waiting on API support."
                 }
-                div { style: "flex: 1;" }
-                span { style: "font-size: 11px; color: var(--cf-text-muted);", "Sort" }
-                div { class: "seg",
-                    button { class: if sort() == "health" { "active" } else { "" }, onclick: move |_| sort.set("health".to_string()), "Worst first" }
-                    button { class: if sort() == "name" { "active" } else { "" }, onclick: move |_| sort.set("name".to_string()), "Name" }
-                }
-            }
-
-            // Matrix table
-            div { class: "pm-scroll",
-                table { class: "pm-table",
-                    thead {
-                        tr {
-                            th { class: "pm-th-host", "System" }
-                            th { class: "pm-th-health", "Health" }
-                            for (j, policy) in policies.iter().enumerate() {
-                                {
-                                    let (f, w, p) = policy_stats[j];
-                                    let tot = (f + w + p).max(1);
-                                    let is_filtered = policy_filter.read().as_ref().map(|pf| pf == *policy).unwrap_or(false);
-                                    let policy_name = policy.to_string();
-                                    let policy_name2 = policy.to_string();
-                                    rsx! {
-                                        th {
-                                            key: "{policy}",
-                                            class: if is_filtered { "pm-th-policy filtered" } else { "pm-th-policy" },
-                                            title: "{policy} — {f} fail / {w} warn / {p} pass",
-                                            onclick: move |_| {
-                                                let current = policy_filter.read().clone();
-                                                if current.as_ref() == Some(&policy_name) {
-                                                    policy_filter.set(None);
-                                                } else {
-                                                    policy_filter.set(Some(policy_name.clone()));
-                                                }
-                                            },
-                                            div { class: "pm-th-policy-inner",
-                                                span { class: "pm-th-policy-label", "{policy_name2}" }
-                                            }
-                                            div { class: "pm-th-policy-bar",
-                                                div { style: "width: {(f * 100 / tot)}%; background: #f87171;" }
-                                                div { style: "width: {(w * 100 / tot)}%; background: #f59e0b;" }
-                                                div { style: "width: {(p * 100 / tot)}%; background: #34d399;" }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    tbody {
-                        for row in filtered.iter() {
-                            {
-                                let is_exp = expanded.read().as_ref() == Some(&row.host);
-                                let health_color = if row.fail > 0 { "#f87171" } else if row.warn > 0 { "#f59e0b" } else { "#34d399" };
-                                let host_clone = row.host.clone();
-                                let host_clone2 = row.host.clone();
-                                let pol_len = policies.len() as i64;
-                                rsx! {
-                                    tr {
-                                        key: "{row.host}",
-                                        class: if is_exp { "pm-row expanded" } else { "pm-row" },
-                                        onclick: move |_| {
-                                            let current = expanded.read().clone();
-                                            if current.as_ref() == Some(&host_clone) {
-                                                expanded.set(None);
-                                            } else {
-                                                expanded.set(Some(host_clone.clone()));
-                                            }
-                                        },
-                                        td { class: "pm-td-host",
-                                            div { class: "pm-host-cell",
-                                                Icon {
-                                                    name: if is_exp { IconName::ChevronDown } else { IconName::ChevronRight },
-                                                    size: 11
-                                                }
-                                                span { class: "mono pm-host-name", "{host_clone2}" }
-                                            }
-                                        }
-                                        td { class: "pm-td-health",
-                                            div { class: "pm-health",
-                                                div { class: "pm-health-bar",
-                                                    if row.fail > 0 { div { style: "width: {(row.fail * 100 / pol_len)}%; background: #f87171;" } }
-                                                    if row.warn > 0 { div { style: "width: {(row.warn * 100 / pol_len)}%; background: #f59e0b;" } }
-                                                    if row.pass > 0 { div { style: "width: {(row.pass * 100 / pol_len)}%; background: #34d399;" } }
-                                                }
-                                                span { class: "mono pm-health-num", style: "color: {health_color};", "{row.pass}/{pol_len}" }
-                                            }
-                                        }
-                                        for (j, res) in row.results.iter().enumerate() {
-                                            {
-                                                let res_class = format!("pm-td-cell pm-{}", res);
-                                                let is_col_filtered = policy_filter.read().as_ref().map(|pf| pf == policies[j]).unwrap_or(false);
-                                                let cell_class = if is_col_filtered {
-                                                    format!("{} col-filtered", res_class)
-                                                } else {
-                                                    res_class
-                                                };
-                                                let glyph = match res.as_str() {
-                                                    "pass" => "✓",
-                                                    "warn" => "!",
-                                                    _ => "✗",
-                                                };
-                                                let policy_click = policies[j].to_string();
-                                                rsx! {
-                                                    td {
-                                                        key: "{j}",
-                                                        class: "{cell_class}",
-                                                        title: "{policies[j]}: {res}",
-                                                        onclick: move |e| {
-                                                            e.stop_propagation();
-                                                            let current = policy_filter.read().clone();
-                                                            if current.as_ref() == Some(&policy_click) {
-                                                                policy_filter.set(None);
-                                                            } else {
-                                                                policy_filter.set(Some(policy_click.clone()));
-                                                            }
-                                                        },
-                                                        span { class: "pm-glyph", "{glyph}" }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    if is_exp {
-                                        tr { class: "pm-expand-row",
-                                            td { colspan: "{policies.len() + 2}",
-                                                div { class: "pm-expand",
-                                                    div { style: "display: flex; gap: 14px; flex-wrap: wrap;",
-                                                        for (j, res) in row.results.iter().enumerate() {
-                                                            if res != "pass" {
-                                                                {
-                                                                    let glyph = if res == "fail" { "✗" } else { "!" };
-                                                                    let card_class = format!("pm-failcard pm-failcard-{} focus-ring", res);
-                                                                    let policy_name = policies[j];
-                                                                    let desc = if res == "fail" { "Blocks deployment until resolved" } else { "Soft warning — deploy will proceed" };
-                                                                    rsx! {
-                                                                        button {
-                                                                            key: "{j}",
-                                                                            class: "{card_class}",
-                                                                            title: "Open policy: {policy_name}",
-                                                                            span { class: "pm-failcard-glyph pm-{res}", "{glyph}" }
-                                                                            div { style: "min-width: 0; text-align: left;",
-                                                                                div { class: "mono", style: "font-weight: 600; font-size: 12px;", "{policy_name}" }
-                                                                                div { style: "font-size: 11px; color: var(--cf-text-muted); margin-top: 2px;", "{desc}" }
-                                                                            }
-                                                                            Icon { name: IconName::ArrowRight, size: 12 }
-                                                                        }
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                        if row.fail == 0 && row.warn == 0 {
-                                                            div { style: "font-size: 12px; color: #34d399; display: flex; align-items: center; gap: 8px;",
-                                                                Icon { name: IconName::Check, size: 14 }
-                                                                " All policies pass for this system."
-                                                            }
-                                                        }
-                                                    }
-                                                    div { style: "display: flex; gap: 6px; margin-left: auto; flex-shrink: 0;",
-                                                        button { class: "btn btn-ghost focus-ring xs",
-                                                            Icon { name: IconName::ArrowRight, size: 11 }
-                                                            " Open system"
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if filtered.is_empty() {
-                            tr {
-                                td { colspan: "{policies.len() + 2}", style: "padding: 24px; text-align: center; color: var(--cf-text-muted); font-size: 13px;",
-                                    "No systems match this filter."
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Legend
-            div { class: "pm-legend",
-                span { span { class: "pm-legend-sw pm-pass", "✓" } " Pass" }
-                span { span { class: "pm-legend-sw pm-warn", "!" } " Warning" }
-                span { span { class: "pm-legend-sw pm-fail", "✗" } " Fail — blocks deploy" }
-                span { style: "margin-left: auto; font-size: 11px; color: var(--cf-text-muted);", "Click any policy header to filter · Click a row to expand" }
             }
         }
     }
@@ -1609,86 +1375,19 @@ fn EvalDrawerPolicyTab(systems: i64, pass: i64, fail: i64) -> Element {
 
 #[component]
 fn EvalDrawerGraphTab(commit: String, systems: i64, derivations: i64) -> Element {
-    // Generate mock package data matching JSX EVAL_DEFAULT_GRAPH
-    let packages = vec![
-        ("systemd", 48, 2),
-        ("openssl", 0, 8),
-        ("nginx", 6, 0),
-        ("linux-kernel", 1, 0),
-        ("python311", 34, 1),
-        ("glibc", 12, 0),
-        ("audit", 0, 4),
-        ("sops-nix", 3, 0),
-    ];
-
-    let cached: i64 = packages.iter().map(|(_, c, _)| *c as i64).sum();
-    let to_build: i64 = packages.iter().map(|(_, _, b)| *b as i64).sum();
-    let total_derivs = cached + to_build;
+    let _ = (commit, systems, derivations);
 
     rsx! {
-        div { style: "flex: 1; overflow: auto; padding: 18px;",
-            // Top: source → eval → fanout
-            div { class: "ed-graph-summary",
-                div { class: "ed-graph-node ed-graph-source",
-                    Icon { name: IconName::Git, size: 12 }
-                    span { class: "mono", "{commit}" }
+        div { style: "flex: 1; overflow: auto; display: flex; align-items: center; justify-content: center; padding: 24px;",
+            div { style: "max-width: 560px; text-align: center; border: 1px solid var(--cf-card-border); background: var(--cf-card-bg); border-radius: 10px; padding: 20px;",
+                div { style: "display: flex; align-items: center; justify-content: center; gap: 8px; margin-bottom: 10px;",
+                    Icon { name: IconName::Git, size: 14 }
+                    h3 { style: "margin: 0; font-size: 14px;", "Dependency graph data unavailable" }
                 }
-                span { style: "color: var(--cf-text-muted);", "→" }
-                div { class: "ed-graph-node ed-graph-eval",
-                    Icon { name: IconName::Terminal, size: 12 }
-                    "eval"
+                p { style: "margin: 0; color: var(--cf-text-secondary); font-size: 12px; line-height: 1.6;",
+                    "This tab requires a backend endpoint for derivation/package breakdown. "
+                    "Queue/History and Logs use real API data; dependency graph is waiting on API support."
                 }
-                span { style: "color: var(--cf-text-muted);", "→" }
-                div { class: "ed-graph-node ed-graph-fan",
-                    span { style: "font-weight: 700;", "{total_derivs}" }
-                    span { style: "font-size: 10px; color: var(--cf-text-muted);", "derivations" }
-                }
-                span { style: "color: var(--cf-text-muted);", "→" }
-                div { class: "ed-graph-node ed-graph-fan",
-                    span { style: "font-weight: 700; color: #34d399;", "{cached}" }
-                    span { style: "font-size: 10px; color: var(--cf-text-muted);", "cached" }
-                }
-                div { class: "ed-graph-node ed-graph-fan",
-                    span { style: "font-weight: 700; color: #60a5fa;", "{to_build}" }
-                    span { style: "font-size: 10px; color: var(--cf-text-muted);", "to build" }
-                }
-            }
-
-            // List of derivations
-            div { style: "display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px;",
-                h3 { style: "font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--cf-text-muted); font-weight: 700; margin: 0;", "Derivations by package" }
-                span { style: "font-size: 11px; color: var(--cf-text-muted);", "{packages.len()} packages" }
-            }
-            div { class: "ed-graph-list",
-                for (name, c, b) in packages.iter() {
-                    {
-                        let total = (*c + *b).max(1) as i64;
-                        let cached_pct = (*c as i64 * 100) / total;
-                        let build_pct = (*b as i64 * 100) / total;
-                        rsx! {
-                            div { key: "{name}", class: "ed-graph-row",
-                                div { class: "ed-graph-pkg",
-                                    span { style: "font-size: 12px; font-weight: 600;", class: "mono truncate", "{name}" }
-                                    span { style: "font-size: 10px; color: var(--cf-text-muted);", "{total} derivs" }
-                                }
-                                div { class: "ed-graph-bar",
-                                    div { class: "ed-graph-bar-cached", style: "width: {cached_pct}%;" }
-                                    div { class: "ed-graph-bar-build", style: "width: {build_pct}%;" }
-                                }
-                                div { style: "display: flex; gap: 6px; justify-content: flex-end; font-size: 11px;",
-                                    span { style: "color: #34d399; font-weight: 600;", "{c}" }
-                                    span { style: "color: var(--cf-text-muted);", "·" }
-                                    span { style: "color: #60a5fa; font-weight: 600;", "{b}" }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            div { class: "ed-graph-legend",
-                span { span { class: "ed-graph-sw", style: "background: #34d399;" } "Cached (already in binary cache)" }
-                span { span { class: "ed-graph-sw", style: "background: #60a5fa;" } "To build (will fan out to builders)" }
             }
         }
     }
@@ -1697,14 +1396,6 @@ fn EvalDrawerGraphTab(commit: String, systems: i64, derivations: i64) -> Element
 // ============================================================================
 // Helper types and functions
 // ============================================================================
-
-struct PolicyRow {
-    host: String,
-    results: Vec<String>,
-    fail: i64,
-    warn: i64,
-    pass: i64,
-}
 
 struct StatusMeta {
     label: &'static str,
