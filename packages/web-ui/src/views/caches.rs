@@ -292,7 +292,7 @@ pub fn CachesView() -> Element {
                 }
                 span {
                     class: "filter-count",
-                    "{caches().len()} caches"
+                    {format!("{} caches", caches().len())}
                 }
             }
 
@@ -321,7 +321,7 @@ pub fn CachesView() -> Element {
                                 for cache in caches() {
                                     CacheRow {
                                         key: "{cache.id}",
-                                        cache: cache.clone(),
+                                        cache: cache,
                                         on_edit: move |c: CacheDestination| {
                                             edit_cache.set(Some(c));
                                         }
