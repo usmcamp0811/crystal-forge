@@ -49,6 +49,20 @@ async function assertHidden(locator, message) {
   }
 }
 
+async function assertDisabled(locator, message) {
+  const disabled = await locator.isDisabled().catch(() => false);
+  if (!disabled) {
+    throw new Error(message);
+  }
+}
+
+async function assertEnabled(locator, message) {
+  const disabled = await locator.isDisabled().catch(() => true);
+  if (disabled) {
+    throw new Error(message);
+  }
+}
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -4201,7 +4215,14 @@ const steps = [
 
       const compareBtn = page.getByRole("button", { name: /^Compare$/i }).first();
       await compareBtn.waitFor({ timeout: 5000 });
-      await expect(compareBtn).toBeDisabled();
+      await assertDisabled(compareBtn, "Expected Compare to stay disabled with only one selected history row");
+
+      // Select a second row from the same flake and verify Compare is enabled
+      const thirdRowCheckbox = page.locator(".sys-table tbody .ed-checkbox").nth(2);
+      await thirdRowCheckbox.waitFor({ timeout: 5000 });
+      await thirdRowCheckbox.click();
+      await page.getByText(/2 selected/i).first().waitFor({ timeout: 5000 });
+      await assertEnabled(compareBtn, "Expected Compare to be enabled for two selected rows from the same flake");
 
       // Clicking a history row opens the evaluation detail drawer
       const historyRow = page.locator(".sys-table tbody tr").first();

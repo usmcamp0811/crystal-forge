@@ -575,6 +575,8 @@ fn EvalActiveQueue(
                                 td {
                                     onclick: move |evt| evt.stop_propagation(),
                                     div {
+                                        // Keep row actions isolated from row-click drawer open.
+                                        // Any new nested controls here must preserve stop_propagation.
                                         class: "row-actions",
                                         style: "opacity: 1; gap: 4px; justify-content: flex-end;",
 
@@ -889,6 +891,8 @@ fn EvalHistory(
                                              td {
                                                 div {
                                                     class: "row-actions",
+                                                    // Keep row actions isolated from row-click drawer open.
+                                                    // Any new nested controls here must preserve stop_propagation.
                                                     onclick: move |evt| evt.stop_propagation(),
                                                     if ev.evaluation_status != "complete" {
                                                         button {
