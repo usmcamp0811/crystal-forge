@@ -12,7 +12,7 @@ use crate::api::{
     },
     models::{EvalHistoryItem, EvalHistoryPage, EvalQueueItem},
 };
-use crate::components::{EvalLogModal, Icon, IconName};
+use crate::components::{Icon, IconName};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EvaluationsTab {
@@ -42,8 +42,6 @@ fn EvaluationsPage() -> Element {
     let mut queue_items = use_signal(Vec::<EvalQueueItem>::new);
     let mut refresh = use_signal(|| 0_u64);
     let mut active_tab = use_signal(|| EvaluationsTab::ActiveQueue);
-    let mut log_modal_target = use_signal(|| None::<EvalQueueItem>);
-    let mut history_log_modal_target = use_signal(|| None::<EvalHistoryItem>);
     let mut drawer_target = use_signal(|| None::<EvalDrawerTarget>);
     let mut history_selected_ids = use_signal(std::collections::HashSet::<i32>::new);
     // Keyboard navigation: index into the currently visible list (queue or history)
@@ -159,16 +157,7 @@ fn EvaluationsPage() -> Element {
             style: "display: flex; flex-direction: column; gap: 16px; outline: none;",
             tabindex: 0,
             onkeydown: move |evt| {
-                // No keyboard nav when a modal or drawer is open
-                if log_modal_target.read().is_some()
-                    || history_log_modal_target.read().is_some()
-                {
-                    if evt.key() == Key::Escape {
-                        log_modal_target.set(None);
-                        history_log_modal_target.set(None);
-                    }
-                    return;
-                }
+                // No keyboard nav while drawer is open
                 if drawer_target.read().is_some() {
                     if evt.key() == Key::Escape {
                         drawer_target.set(None);
@@ -378,7 +367,6 @@ fn EvaluationsPage() -> Element {
                         evals: active_items.clone(),
                         refresh: refresh,
                         queue_items: queue_items,
-                        log_modal_target: log_modal_target,
                         drawer_target: drawer_target,
                         focused_index: focused_index,
                     }
@@ -443,7 +431,6 @@ fn EvaluationsPage() -> Element {
                         history_flake_filter: history_flake_filter,
                         history_page: history_page,
                         refresh: refresh,
-                        history_log_modal_target: history_log_modal_target,
                         history_selected_ids: history_selected_ids,
                         drawer_target: drawer_target,
                         focused_index: focused_index,
@@ -456,53 +443,29 @@ fn EvaluationsPage() -> Element {
                     target: target,
                     refresh: refresh,
                     on_close: move |_| drawer_target.set(None),
-                    open_queue_logs: move |item: EvalQueueItem| log_modal_target.set(Some(item)),
-                    open_history_logs: move |item: EvalHistoryItem| history_log_modal_target.set(Some(item)),
                 }
             }
 
-            // Log modal (from active queue)
-            if let Some(target) = log_modal_target.read().clone() {
-                EvalLogModal {
-                    commit_id: target.commit_id,
-                    commit_hash: target.commit_hash,
-                    evaluation_status: target.evaluation_status,
-                    on_close: move |_| log_modal_target.set(None),
+            div {
+                class: "ed-kbd-hint",
+                span {
+                    kbd { "j" }
+                    kbd { "k" }
+                    " navigate"
                 }
-            }
-
-            // Log modal (from history tab)
-            if let Some(target) = history_log_modal_target.read().clone() {
-                EvalLogModal {
-                    commit_id: target.commit_id,
-                    commit_hash: target.commit_hash,
-                    evaluation_status: target.evaluation_status,
-                    on_close: move |_| history_log_modal_target.set(None),
+                span {
+                    kbd { "↵" }
+                    " open"
                 }
-            }
-
-            if log_modal_target.read().is_none() && history_log_modal_target.read().is_none() {
-                div {
-                    class: "ed-kbd-hint",
+                if active_tab() == EvaluationsTab::ActiveQueue {
                     span {
-                        kbd { "j" }
-                        kbd { "k" }
-                        " navigate"
-                    }
-                    span {
-                        kbd { "↵" }
-                        " open"
-                    }
-                    if active_tab() == EvaluationsTab::ActiveQueue {
-                        span {
-                            kbd { "c" }
-                            " cancel"
-                        }
+                        kbd { "c" }
+                        " cancel"
                     }
                 }
             }
-        }
     }
+}
 }
 
 #[component]
@@ -510,7 +473,6 @@ fn EvalActiveQueue(
     evals: Vec<EvalQueueItem>,
     mut refresh: Signal<u64>,
     queue_items: Signal<Vec<EvalQueueItem>>,
-    mut log_modal_target: Signal<Option<EvalQueueItem>>,
     mut drawer_target: Signal<Option<EvalDrawerTarget>>,
     focused_index: Signal<Option<usize>>,
 ) -> Element {
@@ -725,7 +687,6 @@ fn EvalHistory(
     mut history_flake_filter: Signal<String>,
     mut history_page: Signal<i64>,
     mut refresh: Signal<u64>,
-    mut history_log_modal_target: Signal<Option<EvalHistoryItem>>,
     mut history_selected_ids: Signal<std::collections::HashSet<i32>>,
     mut drawer_target: Signal<Option<EvalDrawerTarget>>,
     focused_index: Signal<Option<usize>>,
@@ -976,8 +937,6 @@ fn EvalDrawer(
     target: EvalDrawerTarget,
     mut refresh: Signal<u64>,
     on_close: EventHandler<MouseEvent>,
-    open_queue_logs: EventHandler<EvalQueueItem>,
-    open_history_logs: EventHandler<EvalHistoryItem>,
 ) -> Element {
     let mut drawer_tab = use_signal(|| String::from("log"));
 
@@ -987,7 +946,6 @@ fn EvalDrawer(
             let can_cancel = matches!(ev.evaluation_status.as_str(), "pending" | "in_progress");
             let can_force_cancel = ev.evaluation_status == "cancelling";
             let is_live = can_cancel || can_force_cancel;
-            let open_logs_ev = ev.clone();
             let close_click = move |evt: MouseEvent| on_close.call(evt);
 
             rsx! {
@@ -1118,22 +1076,12 @@ fn EvalDrawer(
                             }
                         }
                     }
-                    div {
-                        class: "panel-actions",
-                        button {
-                            class: "btn btn-ghost focus-ring",
-                            onclick: move |_| open_queue_logs.call(open_logs_ev.clone()),
-                            Icon { name: IconName::Terminal, size: 14 }
-                            " Logs"
-                        }
-                    }
                 }
             }
         }
         EvalDrawerTarget::History(ev) => {
             let status_meta = eval_status_meta(&ev.evaluation_status);
             let is_live = matches!(ev.evaluation_status.as_str(), "pending" | "in_progress" | "cancelling");
-            let open_logs_ev = ev.clone();
             let close_click = move |evt: MouseEvent| on_close.call(evt);
 
             rsx! {
@@ -1248,12 +1196,6 @@ fn EvalDrawer(
                                 Icon { name: IconName::Sync, size: 14 }
                                 " Re-evaluate"
                             }
-                        }
-                        button {
-                            class: "btn btn-ghost focus-ring",
-                            onclick: move |_| open_history_logs.call(open_logs_ev.clone()),
-                            Icon { name: IconName::Terminal, size: 14 }
-                            " Logs"
                         }
                     }
                 }
@@ -1559,10 +1501,22 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
                     div { style: "color: #f87171; font-size: 12px;", "Failed to load dependency graph" }
                 },
                 Some(Ok(data)) => {
-                    let cached: i64 = data.packages.iter().map(|p| p.ready_count).sum();
-                    let to_build: i64 = data.packages.iter().map(|p| p.pending_count).sum();
-                    let failed: i64 = data.packages.iter().map(|p| p.failed_count).sum();
-                    let total_derivs = cached + to_build + failed;
+                    let systems_total = data.packages.len() as i64;
+                    let systems_to_build = data
+                        .packages
+                        .iter()
+                        .filter(|p| p.pending_count > 0)
+                        .count() as i64;
+                    let systems_built = data
+                        .packages
+                        .iter()
+                        .filter(|p| p.pending_count == 0 && p.ready_count > 0)
+                        .count() as i64;
+                    let systems_failed = data
+                        .packages
+                        .iter()
+                        .filter(|p| p.failed_count > 0)
+                        .count() as i64;
                     let commit_short: String = {
                         // We don't have the hash here but we can use the commit_id
                         format!("commit #{}", commit_id)
@@ -1581,21 +1535,21 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
                             }
                             span { style: "color: var(--cf-text-muted);", "→" }
                             div { class: "ed-graph-node ed-graph-fan",
-                                span { style: "font-weight: 700;", "{total_derivs}" }
+                                span { style: "font-weight: 700;", "{systems_total}" }
                                 span { style: "font-size: 10px; color: var(--cf-text-muted);", "systems" }
                             }
                             span { style: "color: var(--cf-text-muted);", "→" }
                             div { class: "ed-graph-node ed-graph-fan",
-                                span { style: "font-weight: 700; color: #34d399;", "{cached}" }
+                                span { style: "font-weight: 700; color: #34d399;", "{systems_built}" }
                                 span { style: "font-size: 10px; color: var(--cf-text-muted);", "built" }
                             }
                             div { class: "ed-graph-node ed-graph-fan",
-                                span { style: "font-weight: 700; color: #60a5fa;", "{to_build}" }
+                                span { style: "font-weight: 700; color: #60a5fa;", "{systems_to_build}" }
                                 span { style: "font-size: 10px; color: var(--cf-text-muted);", "to build" }
                             }
-                            if failed > 0 {
+                            if systems_failed > 0 {
                                 div { class: "ed-graph-node ed-graph-fan",
-                                    span { style: "font-weight: 700; color: #f87171;", "{failed}" }
+                                    span { style: "font-weight: 700; color: #f87171;", "{systems_failed}" }
                                     span { style: "font-size: 10px; color: var(--cf-text-muted);", "failed" }
                                 }
                             }
@@ -1625,7 +1579,7 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
                                                 div { class: "ed-graph-pkg",
                                                     span { class: "mono truncate", style: "font-size: 12px; font-weight: 600;", "{pkg.package_name}" }
                                                     span { style: "font-size: 10px; color: var(--cf-text-muted);",
-                                                        "{row_total} derivs"
+                                                        "{pkg.pending_count} to build / {row_total} total"
                                                     }
                                                 }
                                                 div { class: "ed-graph-bar",
