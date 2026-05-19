@@ -1517,6 +1517,11 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
                         .iter()
                         .filter(|p| p.failed_count > 0)
                         .count() as i64;
+                    let systems_unknown = data
+                        .packages
+                        .iter()
+                        .filter(|p| p.ready_count == 0 && p.pending_count == 0 && p.failed_count == 0)
+                        .count() as i64;
                     let commit_short: String = {
                         // We don't have the hash here but we can use the commit_id
                         format!("commit #{}", commit_id)
@@ -1553,6 +1558,12 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
                                     span { style: "font-size: 10px; color: var(--cf-text-muted);", "failed" }
                                 }
                             }
+                            if systems_unknown > 0 {
+                                div { class: "ed-graph-node ed-graph-fan",
+                                    span { style: "font-weight: 700; color: #9ca3af;", "{systems_unknown}" }
+                                    span { style: "font-size: 10px; color: var(--cf-text-muted);", "unknown" }
+                                }
+                            }
                         }
 
                         // Per-system breakdown list
@@ -1571,28 +1582,41 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
                             div { class: "ed-graph-list",
                                 for pkg in data.packages.iter() {
                                     {
-                                        let row_total = (pkg.ready_count + pkg.pending_count + pkg.failed_count).max(1);
-                                        let cached_pct = pkg.ready_count * 100 / row_total;
-                                        let build_pct = pkg.pending_count * 100 / row_total;
+                                        let row_total = pkg.ready_count + pkg.pending_count + pkg.failed_count;
+                                        let has_counts = row_total > 0;
+                                        let cached_pct = if has_counts { pkg.ready_count * 100 / row_total } else { 0 };
+                                        let build_pct = if has_counts { pkg.pending_count * 100 / row_total } else { 0 };
                                         rsx! {
                                             div { key: "{pkg.package_name}", class: "ed-graph-row",
                                                 div { class: "ed-graph-pkg",
                                                     span { class: "mono truncate", style: "font-size: 12px; font-weight: 600;", "{pkg.package_name}" }
-                                                    span { style: "font-size: 10px; color: var(--cf-text-muted);",
-                                                        "{pkg.pending_count} to build / {row_total} total"
+                                                    if has_counts {
+                                                        span { style: "font-size: 10px; color: var(--cf-text-muted);",
+                                                            "{pkg.pending_count} to build / {row_total} total"
+                                                        }
+                                                    } else {
+                                                        span { style: "font-size: 10px; color: #9ca3af;",
+                                                            "pending classification"
+                                                        }
                                                     }
                                                 }
                                                 div { class: "ed-graph-bar",
                                                     div { class: "ed-graph-bar-cached", style: "width: {cached_pct}%;" }
                                                     div { class: "ed-graph-bar-build", style: "width: {build_pct}%;" }
                                                 }
-                                                div { style: "display: flex; gap: 6px; justify-content: flex-end; font-size: 11px;",
-                                                    span { style: "color: #34d399; font-weight: 600;", "{pkg.ready_count}" }
-                                                    span { style: "color: var(--cf-text-muted);", "·" }
-                                                    span { style: "color: #60a5fa; font-weight: 600;", "{pkg.pending_count}" }
-                                                    if pkg.failed_count > 0 {
+                                                if has_counts {
+                                                    div { style: "display: flex; gap: 6px; justify-content: flex-end; font-size: 11px;",
+                                                        span { style: "color: #34d399; font-weight: 600;", "{pkg.ready_count}" }
                                                         span { style: "color: var(--cf-text-muted);", "·" }
-                                                        span { style: "color: #f87171; font-weight: 600;", "{pkg.failed_count}" }
+                                                        span { style: "color: #60a5fa; font-weight: 600;", "{pkg.pending_count}" }
+                                                        if pkg.failed_count > 0 {
+                                                            span { style: "color: var(--cf-text-muted);", "·" }
+                                                            span { style: "color: #f87171; font-weight: 600;", "{pkg.failed_count}" }
+                                                        }
+                                                    }
+                                                } else {
+                                                    div { style: "display: flex; justify-content: flex-end; font-size: 11px; color: #9ca3af;",
+                                                        "—"
                                                     }
                                                 }
                                             }
