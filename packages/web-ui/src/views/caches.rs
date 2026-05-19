@@ -216,6 +216,9 @@ pub fn CachesView() -> Element {
         }
     });
 
+    // Extract totals for use in rsx
+    let (total, healthy, issues, paths) = totals();
+
     rsx! {
         // Page container - JSX: div with display:flex, flexDirection:column, gap:16
         div {
@@ -228,7 +231,7 @@ pub fn CachesView() -> Element {
                     h1 { class: "page-title", "Caches" }
                     p {
                         class: "page-subtitle",
-                        "{totals().0} destinations · {totals().1} healthy · {totals().3} paths cached"
+                        "{total} destinations · {healthy} healthy · {paths} paths cached"
                     }
                 }
                 button {
@@ -255,10 +258,10 @@ pub fn CachesView() -> Element {
             // Stat strip - JSX: stat-strip class
             div {
                 class: "stat-strip",
-                StatCard { label: "Total caches", value: "{totals().0}", color: "#a78bfa" }
-                StatCard { label: "Healthy", value: "{totals().1}", color: "#34d399" }
-                StatCard { label: "Issues", value: "{totals().2}", color: "#fbbf24" }
-                StatCard { label: "Paths cached", value: "{totals().3}", color: "#60a5fa" }
+                StatCard { label: "Total caches".to_string(), value: format!("{}", total), color: "#a78bfa".to_string() }
+                StatCard { label: "Healthy".to_string(), value: format!("{}", healthy), color: "#34d399".to_string() }
+                StatCard { label: "Issues".to_string(), value: format!("{}", issues), color: "#fbbf24".to_string() }
+                StatCard { label: "Paths cached".to_string(), value: format!("{}", paths), color: "#60a5fa".to_string() }
             }
 
             // Filterbar - JSX: filterbar class
