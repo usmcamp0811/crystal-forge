@@ -258,10 +258,30 @@ pub fn CachesView() -> Element {
             // Stat strip - JSX: stat-strip class
             div {
                 class: "stat-strip",
-                StatCard { label: "Total caches", value: total.to_string(), color: "#a78bfa" }
-                StatCard { label: "Healthy", value: healthy.to_string(), color: "#34d399" }
-                StatCard { label: "Issues", value: issues.to_string(), color: "#fbbf24" }
-                StatCard { label: "Paths cached", value: paths.to_string(), color: "#60a5fa" }
+                div {
+                    class: "stat",
+                    span { class: "stat-accent", style: "--stat-color: #a78bfa;" }
+                    div { class: "stat-label", "Total caches" }
+                    div { class: "stat-value", "{total}" }
+                }
+                div {
+                    class: "stat",
+                    span { class: "stat-accent", style: "--stat-color: #34d399;" }
+                    div { class: "stat-label", "Healthy" }
+                    div { class: "stat-value", "{healthy}" }
+                }
+                div {
+                    class: "stat",
+                    span { class: "stat-accent", style: "--stat-color: #fbbf24;" }
+                    div { class: "stat-label", "Issues" }
+                    div { class: "stat-value", "{issues}" }
+                }
+                div {
+                    class: "stat",
+                    span { class: "stat-accent", style: "--stat-color: #60a5fa;" }
+                    div { class: "stat-label", "Paths cached" }
+                    div { class: "stat-value", "{paths}" }
+                }
             }
 
             // Filterbar - JSX: filterbar class
