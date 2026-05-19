@@ -46,6 +46,8 @@ fn EvaluationsPage() -> Element {
     let mut history_log_modal_target = use_signal(|| None::<EvalHistoryItem>);
     let mut drawer_target = use_signal(|| None::<EvalDrawerTarget>);
     let mut history_selected_ids = use_signal(std::collections::HashSet::<i32>::new);
+    // Keyboard navigation: index into the currently visible list (queue or history)
+    let mut focused_index: Signal<Option<usize>> = use_signal(|| None);
 
     // History tab state
     let mut history_page = use_signal(|| 1_i64);
@@ -154,7 +156,112 @@ fn EvaluationsPage() -> Element {
 
     rsx! {
         div {
-            style: "display: flex; flex-direction: column; gap: 16px;",
+            style: "display: flex; flex-direction: column; gap: 16px; outline: none;",
+            tabindex: 0,
+            onkeydown: move |evt| {
+                // No keyboard nav when a modal or drawer is open
+                if log_modal_target.read().is_some()
+                    || history_log_modal_target.read().is_some()
+                {
+                    if evt.key() == Key::Escape {
+                        log_modal_target.set(None);
+                        history_log_modal_target.set(None);
+                    }
+                    return;
+                }
+                if drawer_target.read().is_some() {
+                    if evt.key() == Key::Escape {
+                        drawer_target.set(None);
+                    }
+                    return;
+                }
+
+                let list_len = if active_tab() == EvaluationsTab::ActiveQueue {
+                    active_items.len()
+                } else {
+                    history_resource
+                        .read()
+                        .as_ref()
+                        .and_then(|r| r.as_ref().ok())
+                        .map(|p| p.items.len())
+                        .unwrap_or(0)
+                };
+
+                match evt.key() {
+                    Key::Character(ref c) if c == "j" || c == "ArrowDown" => {
+                        let next = match focused_index() {
+                            None => 0,
+                            Some(i) => (i + 1).min(list_len.saturating_sub(1)),
+                        };
+                        focused_index.set(Some(next));
+                    }
+                    Key::ArrowDown => {
+                        let next = match focused_index() {
+                            None => 0,
+                            Some(i) => (i + 1).min(list_len.saturating_sub(1)),
+                        };
+                        focused_index.set(Some(next));
+                    }
+                    Key::Character(ref c) if c == "k" => {
+                        let next = match focused_index() {
+                            None => 0,
+                            Some(0) => 0,
+                            Some(i) => i - 1,
+                        };
+                        focused_index.set(Some(next));
+                    }
+                    Key::ArrowUp => {
+                        let next = match focused_index() {
+                            None => 0,
+                            Some(0) => 0,
+                            Some(i) => i - 1,
+                        };
+                        focused_index.set(Some(next));
+                    }
+                    Key::Enter => {
+                        if let Some(idx) = focused_index() {
+                            if active_tab() == EvaluationsTab::ActiveQueue {
+                                if let Some(ev) = active_items.get(idx) {
+                                    drawer_target.set(Some(EvalDrawerTarget::Queue(ev.clone())));
+                                }
+                            } else {
+                                let item = history_resource
+                                    .read()
+                                    .as_ref()
+                                    .and_then(|r| r.as_ref().ok())
+                                    .and_then(|p| p.items.get(idx).cloned());
+                                if let Some(ev) = item {
+                                    drawer_target.set(Some(EvalDrawerTarget::History(ev)));
+                                }
+                            }
+                        }
+                    }
+                    Key::Character(ref c) if c == "c" => {
+                        if active_tab() == EvaluationsTab::ActiveQueue {
+                            if let Some(idx) = focused_index() {
+                                if let Some(ev) = active_items.get(idx) {
+                                    let commit_id = ev.commit_id;
+                                    let can_cancel = matches!(
+                                        ev.evaluation_status.as_str(),
+                                        "pending" | "in_progress"
+                                    );
+                                    if can_cancel {
+                                        let mut refresh_sig = refresh;
+                                        spawn(async move {
+                                            let _ = cancel_commit_evaluation(commit_id).await;
+                                            refresh_sig.set(refresh_sig() + 1);
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Key::Escape => {
+                        focused_index.set(None);
+                    }
+                    _ => {}
+                }
+            },
 
             // Page head
             div {
@@ -273,6 +380,7 @@ fn EvaluationsPage() -> Element {
                         queue_items: queue_items,
                         log_modal_target: log_modal_target,
                         drawer_target: drawer_target,
+                        focused_index: focused_index,
                     }
                 }
 
@@ -338,6 +446,7 @@ fn EvaluationsPage() -> Element {
                         history_log_modal_target: history_log_modal_target,
                         history_selected_ids: history_selected_ids,
                         drawer_target: drawer_target,
+                        focused_index: focused_index,
                     }
                 }
             }
@@ -403,6 +512,7 @@ fn EvalActiveQueue(
     queue_items: Signal<Vec<EvalQueueItem>>,
     mut log_modal_target: Signal<Option<EvalQueueItem>>,
     mut drawer_target: Signal<Option<EvalDrawerTarget>>,
+    focused_index: Signal<Option<usize>>,
 ) -> Element {
     if evals.is_empty() {
         return rsx! {
@@ -441,11 +551,12 @@ fn EvalActiveQueue(
                         let is_first = i == 0;
                         let is_last = i == evals.len() - 1;
                         let ev_for_row = ev_clone.clone();
-                        let ev_for_log_button = ev_clone.clone();
+                        let is_focused = focused_index() == Some(i);
 
                         rsx! {
                             tr {
                                 key: "{commit_id}",
+                                class: if is_focused { "kbd-focused" } else { "" },
                                 style: "cursor: pointer;",
                                 onclick: move |_| drawer_target.set(Some(EvalDrawerTarget::Queue(ev_for_row.clone()))),
                                 td {
@@ -567,13 +678,6 @@ fn EvalActiveQueue(
                                             "↓"
                                         }
 
-                                        button {
-                                            class: "btn-icon focus-ring",
-                                            title: "View logs",
-                                            onclick: move |_| log_modal_target.set(Some(ev_for_log_button.clone())),
-                                            Icon { name: IconName::Terminal, size: 14 }
-                                        }
-
                                         if can_force_cancel {
                                             button {
                                                 class: "btn btn-danger focus-ring",
@@ -624,6 +728,7 @@ fn EvalHistory(
     mut history_log_modal_target: Signal<Option<EvalHistoryItem>>,
     mut history_selected_ids: Signal<std::collections::HashSet<i32>>,
     mut drawer_target: Signal<Option<EvalDrawerTarget>>,
+    focused_index: Signal<Option<usize>>,
 ) -> Element {
     let history_snapshot = history_resource.read();
 
@@ -734,17 +839,18 @@ fn EvalHistory(
                             }
                         }
                         tbody {
-                            for ev in page_data.items.iter() {
+                            for (row_i, ev) in page_data.items.iter().enumerate() {
                                 {
                                     let ev = ev.clone();
                                     let commit_id = ev.commit_id;
                                     let status_meta = eval_status_meta(&ev.evaluation_status);
                                     let ev_for_row = ev.clone();
-                                    let ev_for_log_button = ev.clone();
+                                    let is_focused = focused_index() == Some(row_i);
 
                                     rsx! {
                                         tr {
                                             key: "{commit_id}",
+                                            class: if is_focused { "kbd-focused" } else { "" },
                                             style: "cursor: pointer;",
                                             onclick: move |_| drawer_target.set(Some(EvalDrawerTarget::History(ev_for_row.clone()))),
                                             td {
@@ -823,12 +929,6 @@ fn EvalHistory(
                                                 div {
                                                     class: "row-actions",
                                                     onclick: move |evt| evt.stop_propagation(),
-                                                    button {
-                                                        class: "btn-icon focus-ring",
-                                                        title: "View evaluation logs",
-                                                        onclick: move |_| history_log_modal_target.set(Some(ev_for_log_button.clone())),
-                                                        Icon { name: IconName::Terminal, size: 14 }
-                                                    }
                                                     if ev.evaluation_status != "complete" {
                                                         button {
                                                             class: "btn-icon focus-ring",
@@ -1166,9 +1266,30 @@ fn EvalDrawer(
 fn EvalDrawerLogTabQueue(ev: EvalQueueItem, live: bool) -> Element {
     let mut autoscroll = use_signal(|| true);
     let commit_id = ev.commit_id;
+    let mut poll_tick = use_signal(|| 0_u64);
 
-    // Fetch real logs from the API
+    // When live, poll every 2 s to pick up new log lines
+    {
+        use_future(move || async move {
+            loop {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    gloo_timers::future::TimeoutFuture::new(2000).await;
+                    if live {
+                        poll_tick.set(poll_tick() + 1);
+                    } else {
+                        break;
+                    }
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                break;
+            }
+        });
+    }
+
+    // Re-fetch whenever poll_tick changes (driven by the loop above when live)
     let logs_resource = use_resource(move || async move {
+        let _ = poll_tick();
         crate::api::client::fetch_eval_logs(commit_id).await
     });
 
@@ -1258,9 +1379,30 @@ fn EvalDrawerLogTabQueue(ev: EvalQueueItem, live: bool) -> Element {
 fn EvalDrawerLogTabHistory(ev: EvalHistoryItem, live: bool) -> Element {
     let mut autoscroll = use_signal(|| true);
     let commit_id = ev.commit_id;
+    let mut poll_tick = use_signal(|| 0_u64);
 
-    // Fetch real logs from the API
+    // When live (cancelling state), poll every 2 s
+    {
+        use_future(move || async move {
+            loop {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    gloo_timers::future::TimeoutFuture::new(2000).await;
+                    if live {
+                        poll_tick.set(poll_tick() + 1);
+                    } else {
+                        break;
+                    }
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                break;
+            }
+        });
+    }
+
+    // Re-fetch whenever poll_tick changes
     let logs_resource = use_resource(move || async move {
+        let _ = poll_tick();
         crate::api::client::fetch_eval_logs(commit_id).await
     });
 

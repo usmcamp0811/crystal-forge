@@ -2743,6 +2743,12 @@ html[data-theme="light"] .sd-nix {
   color: var(--cf-text-secondary);
 }
 
+/* Keyboard-focused table row */
+tr.kbd-focused > td {
+  background: color-mix(in oklab, var(--cf-brand-purple) 10%, var(--cf-card-bg)) !important;
+  box-shadow: inset 2px 0 0 var(--cf-brand-purple);
+}
+
 /* Policy matrix - Top issues */
 .pm-issues {
   display: flex;
