@@ -321,7 +321,7 @@ pub fn CachesView() -> Element {
                                 for cache in caches() {
                                     CacheRow {
                                         key: "{cache.id}",
-                                        cache: cache,
+                                        cache: cache.clone(),
                                         on_edit: move |c: CacheDestination| {
                                             edit_cache.set(Some(c));
                                         }
