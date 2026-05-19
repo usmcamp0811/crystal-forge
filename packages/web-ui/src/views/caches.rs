@@ -258,10 +258,10 @@ pub fn CachesView() -> Element {
             // Stat strip - JSX: stat-strip class
             div {
                 class: "stat-strip",
-                StatCard { label: "Total caches".to_string(), value: format!("{}", total), color: "#a78bfa".to_string() }
-                StatCard { label: "Healthy".to_string(), value: format!("{}", healthy), color: "#34d399".to_string() }
-                StatCard { label: "Issues".to_string(), value: format!("{}", issues), color: "#fbbf24".to_string() }
-                StatCard { label: "Paths cached".to_string(), value: format!("{}", paths), color: "#60a5fa".to_string() }
+                StatCard { label: "Total caches", value: "{total}", color: "#a78bfa" }
+                StatCard { label: "Healthy", value: "{healthy}", color: "#34d399" }
+                StatCard { label: "Issues", value: "{issues}", color: "#fbbf24" }
+                StatCard { label: "Paths cached", value: "{paths}", color: "#60a5fa" }
             }
 
             // Filterbar - JSX: filterbar class
@@ -363,7 +363,7 @@ pub fn CachesView() -> Element {
 
 /// Stat card component for the stat strip
 #[component]
-fn StatCard(label: String, value: String, color: String) -> Element {
+fn StatCard(label: &'static str, value: String, color: &'static str) -> Element {
     rsx! {
         div {
             class: "stat",
