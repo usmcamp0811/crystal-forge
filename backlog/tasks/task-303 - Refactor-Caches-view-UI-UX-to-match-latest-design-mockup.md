@@ -1,9 +1,10 @@
 ---
 id: TASK-303
 title: Refactor Caches view UI/UX to match latest design mockup
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-05-19 13:21'
+updated_date: '2026-05-19 13:21'
 labels:
   - ui
   - ux
@@ -78,3 +79,9 @@ Medium: highly visible UI area; interaction/layout regressions are possible with
 - [ ] #5 `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` succeeds after implementation.
 - [ ] #6 `nix build .#checks.x86_64-linux.web-ui` succeeds and includes Caches-view screenshot/assertion coverage proving intended behavior.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: agent on gray in ~/code/crystal-forge/TASK-300-refactor-caches-view
+<!-- SECTION:NOTES:END -->
