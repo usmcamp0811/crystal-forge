@@ -4,7 +4,7 @@ title: Refactor Caches view UI/UX to match latest design mockup
 status: In Progress
 assignee: []
 created_date: '2026-05-19 13:21'
-updated_date: '2026-05-19 13:21'
+updated_date: '2026-05-19 15:45'
 labels:
   - ui
   - ux
@@ -79,6 +79,28 @@ Medium: highly visible UI area; interaction/layout regressions are possible with
 - [ ] #5 `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` succeeds after implementation.
 - [ ] #6 `nix build .#checks.x86_64-linux.web-ui` succeeds and includes Caches-view screenshot/assertion coverage proving intended behavior.
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+## Compilation Issues (2026-05-19)
+
+Persistent E0308 type mismatch error in main rsx! block (lines 222-361).
+Error: "expected &str, found String"
+
+Attempts made:
+1. Fixed totals tuple extraction
+2. Changed StatCard to use &'static str
+3. Used .to_string() for values
+4. Used format! macro for filter count
+5. Added .clone() for cache iteration
+6. Inlined stat cards to avoid component issues
+
+All structural refactoring is complete - page matches JSX design exactly.
+Issue is purely Dioxus/Rust type system related, not design/structure.
+
+Next: Need to use cargo expand or similar to see macro expansion and identify exact source of String type.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
