@@ -84,4 +84,6 @@ Medium: highly visible UI area; interaction/layout regressions are possible with
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: agent on gray in ~/code/crystal-forge/TASK-300-refactor-caches-view
+
+LOCK: agent on gray in ~/code/crystal-forge/TASK-303-refactor-caches-view
 <!-- SECTION:NOTES:END -->
