@@ -1408,55 +1408,106 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
     let graph_snapshot = graph_resource.read();
 
     rsx! {
-        div { style: "flex: 1; overflow: auto; padding: 14px;",
+        div { style: "flex: 1; overflow: auto; padding: 18px;",
             match &*graph_snapshot {
-                None => rsx! { div { style: "color: var(--cf-text-muted); font-size: 12px;", "Loading dependency graph..." } },
-                Some(Err(_)) => rsx! { div { style: "color: #f87171; font-size: 12px;", "Failed to load dependency graph" } },
-                Some(Ok(data)) => rsx! {
-                    div { style: "display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 10px;",
-                        h3 { style: "margin: 0; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--cf-text-muted); font-weight: 700;", "Systems" }
-                        span { style: "font-size: 11px; color: var(--cf-text-muted);", "{data.total_packages} systems" }
-                    }
-                    if data.packages.is_empty() {
-                        div { style: "color: var(--cf-text-muted); font-size: 12px;", "No derivations for this commit yet" }
-                    } else {
-                        div { class: "ed-graph-list",
-                            for pkg in data.packages.iter() {
-                                {
-                                    let total = pkg.ready_count + pkg.pending_count + pkg.failed_count;
-                                    let ready_pct = if total > 0 { pkg.ready_count * 100 / total } else { 0 };
-                                    let pending_pct = if total > 0 { pkg.pending_count * 100 / total } else { 0 };
-                                    let failed_pct = if total > 0 { pkg.failed_count * 100 / total } else { 0 };
-                                    rsx! {
-                                        div { key: "{pkg.package_name}", class: "ed-graph-row",
-                                            div { class: "ed-graph-pkg",
-                                                span { class: "mono", style: "font-size: 12px; font-weight: 600;", "{pkg.package_name}" }
-                                            }
-                                            div { class: "ed-graph-bar",
-                                                if ready_pct > 0 { div { class: "ed-graph-bar-cached", style: "width: {ready_pct}%;" } }
-                                                if pending_pct > 0 { div { style: "width: {pending_pct}%; background: #60a5fa;" } }
-                                                if failed_pct > 0 { div { class: "ed-graph-bar-build", style: "width: {failed_pct}%;" } }
-                                            }
-                                            div { style: "display: flex; gap: 8px; font-size: 11px; justify-content: flex-end;",
-                                                if pkg.ready_count > 0 {
-                                                    span { style: "color: #34d399; font-weight: 600;", "✓ {pkg.ready_count}" }
+                None => rsx! {
+                    div { style: "color: var(--cf-text-muted); font-size: 12px;", "Loading dependency graph..." }
+                },
+                Some(Err(_)) => rsx! {
+                    div { style: "color: #f87171; font-size: 12px;", "Failed to load dependency graph" }
+                },
+                Some(Ok(data)) => {
+                    let cached: i64 = data.packages.iter().map(|p| p.ready_count).sum();
+                    let to_build: i64 = data.packages.iter().map(|p| p.pending_count).sum();
+                    let failed: i64 = data.packages.iter().map(|p| p.failed_count).sum();
+                    let total_derivs = cached + to_build + failed;
+                    let commit_short: String = {
+                        // We don't have the hash here but we can use the commit_id
+                        format!("commit #{}", commit_id)
+                    };
+                    rsx! {
+                        // Summary flow: source → eval → derivations → cached / to-build
+                        div { class: "ed-graph-summary",
+                            div { class: "ed-graph-node ed-graph-source",
+                                Icon { name: IconName::Git, size: 12 }
+                                span { class: "mono", "{commit_short}" }
+                            }
+                            span { style: "color: var(--cf-text-muted);", "→" }
+                            div { class: "ed-graph-node ed-graph-eval",
+                                Icon { name: IconName::Terminal, size: 12 }
+                                "eval"
+                            }
+                            span { style: "color: var(--cf-text-muted);", "→" }
+                            div { class: "ed-graph-node ed-graph-fan",
+                                span { style: "font-weight: 700;", "{total_derivs}" }
+                                span { style: "font-size: 10px; color: var(--cf-text-muted);", "systems" }
+                            }
+                            span { style: "color: var(--cf-text-muted);", "→" }
+                            div { class: "ed-graph-node ed-graph-fan",
+                                span { style: "font-weight: 700; color: #34d399;", "{cached}" }
+                                span { style: "font-size: 10px; color: var(--cf-text-muted);", "built" }
+                            }
+                            div { class: "ed-graph-node ed-graph-fan",
+                                span { style: "font-weight: 700; color: #60a5fa;", "{to_build}" }
+                                span { style: "font-size: 10px; color: var(--cf-text-muted);", "to build" }
+                            }
+                            if failed > 0 {
+                                div { class: "ed-graph-node ed-graph-fan",
+                                    span { style: "font-weight: 700; color: #f87171;", "{failed}" }
+                                    span { style: "font-size: 10px; color: var(--cf-text-muted);", "failed" }
+                                }
+                            }
+                        }
+
+                        // Per-system breakdown list
+                        div { style: "display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px;",
+                            h3 { style: "font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--cf-text-muted); font-weight: 700; margin: 0;",
+                                "Systems evaluated"
+                            }
+                            span { style: "font-size: 11px; color: var(--cf-text-muted);",
+                                "{data.packages.len()} systems"
+                            }
+                        }
+
+                        if data.packages.is_empty() {
+                            div { style: "color: var(--cf-text-muted); font-size: 12px;", "No derivations recorded for this commit yet." }
+                        } else {
+                            div { class: "ed-graph-list",
+                                for pkg in data.packages.iter() {
+                                    {
+                                        let row_total = (pkg.ready_count + pkg.pending_count + pkg.failed_count).max(1);
+                                        let cached_pct = pkg.ready_count * 100 / row_total;
+                                        let build_pct = pkg.pending_count * 100 / row_total;
+                                        rsx! {
+                                            div { key: "{pkg.package_name}", class: "ed-graph-row",
+                                                div { class: "ed-graph-pkg",
+                                                    span { class: "mono truncate", style: "font-size: 12px; font-weight: 600;", "{pkg.package_name}" }
+                                                    span { style: "font-size: 10px; color: var(--cf-text-muted);",
+                                                        "{row_total} derivs"
+                                                    }
                                                 }
-                                                if pkg.pending_count > 0 {
-                                                    span { style: "color: #60a5fa;", "⋯ {pkg.pending_count}" }
+                                                div { class: "ed-graph-bar",
+                                                    div { class: "ed-graph-bar-cached", style: "width: {cached_pct}%;" }
+                                                    div { class: "ed-graph-bar-build", style: "width: {build_pct}%;" }
                                                 }
-                                                if pkg.failed_count > 0 {
-                                                    span { style: "color: #f87171; font-weight: 600;", "✗ {pkg.failed_count}" }
+                                                div { style: "display: flex; gap: 6px; justify-content: flex-end; font-size: 11px;",
+                                                    span { style: "color: #34d399; font-weight: 600;", "{pkg.ready_count}" }
+                                                    span { style: "color: var(--cf-text-muted);", "·" }
+                                                    span { style: "color: #60a5fa; font-weight: 600;", "{pkg.pending_count}" }
+                                                    if pkg.failed_count > 0 {
+                                                        span { style: "color: var(--cf-text-muted);", "·" }
+                                                        span { style: "color: #f87171; font-weight: 600;", "{pkg.failed_count}" }
+                                                    }
                                                 }
                                             }
                                         }
                                     }
                                 }
                             }
-                        }
-                        div { class: "ed-graph-legend",
-                            span { span { class: "ed-graph-sw", style: "background: #34d399;" } " Evaluated" }
-                            span { span { class: "ed-graph-sw", style: "background: #60a5fa;" } " Building / Pending" }
-                            span { span { class: "ed-graph-sw", style: "background: #f87171;" } " Failed" }
+                            div { class: "ed-graph-legend",
+                                span { span { class: "ed-graph-sw", style: "background: #34d399;" } "Built (in store)" }
+                                span { span { class: "ed-graph-sw", style: "background: #60a5fa;" } "To build" }
+                            }
                         }
                     }
                 }

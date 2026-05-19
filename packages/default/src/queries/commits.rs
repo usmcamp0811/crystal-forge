@@ -810,8 +810,12 @@ pub async fn fetch_eval_dependency_breakdown(
     pool: &PgPool,
     commit_id: i32,
 ) -> Result<Vec<EvalDependencyPackageRow>> {
-    // Evaluation only writes nixos-type derivations (one per NixOS system config).
-    // We expose each system as a "package" row with its build status breakdown.
+    // Evaluation writes one nixos-type derivation per NixOS system config.
+    // We map each system to a row showing:
+    //   ready_count  = built (store_path populated, status BuildComplete)
+    //   pending_count = evaluated but not yet built (DryRunComplete, BuildPending/InProgress)
+    //   failed_count  = eval or build failed
+    //
     // status_id reference:
     //   3 = DryRunPending, 4 = DryRunInProgress, 5 = DryRunComplete
     //   6 = DryRunFailed,  7 = BuildPending,     8 = BuildInProgress
@@ -820,9 +824,18 @@ pub async fn fetch_eval_dependency_breakdown(
         r#"
         SELECT
             COALESCE(NULLIF(BTRIM(d.derivation_name), ''), 'unknown') AS package_name,
-            COUNT(*) FILTER (WHERE d.status_id IN (5, 10))::BIGINT  AS ready_count,
-            COUNT(*) FILTER (WHERE d.status_id IN (3, 4, 7, 8))::BIGINT AS pending_count,
-            COUNT(*) FILTER (WHERE d.status_id IN (6, 12))::BIGINT  AS failed_count
+            -- ready = build complete or has a store_path
+            COUNT(*) FILTER (
+                WHERE d.status_id = 10
+                   OR (d.store_path IS NOT NULL AND d.store_path != '')
+            )::BIGINT AS ready_count,
+            -- pending = evaluated (drv known) but not yet built
+            COUNT(*) FILTER (
+                WHERE d.status_id IN (5, 7, 8)
+                  AND (d.store_path IS NULL OR d.store_path = '')
+            )::BIGINT AS pending_count,
+            -- failed = eval or build failed
+            COUNT(*) FILTER (WHERE d.status_id IN (6, 12))::BIGINT AS failed_count
         FROM derivations d
         WHERE d.commit_id = $1
           AND d.derivation_type = 'nixos'

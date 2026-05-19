@@ -913,8 +913,11 @@ pub struct EvalDependencyGraphResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvalDependencyPackageRow {
     pub package_name: String,
+    /// Built (store_path present / BuildComplete).
     pub ready_count: i64,
+    /// Evaluated but not yet built.
     pub pending_count: i64,
+    /// Eval or build failed.
     pub failed_count: i64,
 }
 

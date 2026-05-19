@@ -475,8 +475,11 @@ pub struct EvalDependencyGraphResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvalDependencyPackageRow {
     pub package_name: String,
+    /// Systems with a completed build (store_path present / BuildComplete).
     pub ready_count: i64,
+    /// Systems evaluated but not yet built (DryRunComplete / pending build).
     pub pending_count: i64,
+    /// Systems whose eval or build failed.
     pub failed_count: i64,
 }
 
