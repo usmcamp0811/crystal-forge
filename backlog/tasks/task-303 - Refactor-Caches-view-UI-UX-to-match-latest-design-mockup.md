@@ -4,7 +4,7 @@ title: Refactor Caches view UI/UX to match latest design mockup
 status: In Progress
 assignee: []
 created_date: '2026-05-19 13:21'
-updated_date: '2026-05-20 17:34'
+updated_date: '2026-05-20 17:35'
 labels:
   - ui
   - ux
@@ -72,13 +72,15 @@ Medium: highly visible UI area; interaction/layout regressions are possible with
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Caches view layout and styling match the latest local design mockup across desktop and mobile breakpoints.
-- [ ] #2 Primary Caches workflows and controls reflect the mockup's wording, hierarchy, and interaction behavior.
-- [ ] #3 Any new/changed Caches-specific UI components keep presentation separated from state/data mapping.
-- [ ] #4 No backend/API contract changes are introduced by this task.
-- [ ] #5 `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` succeeds after implementation.
+- [x] #1 Caches view layout and styling match the latest local design mockup across desktop and mobile breakpoints.
+- [x] #2 Primary Caches workflows and controls reflect the mockup's wording, hierarchy, and interaction behavior.
+- [x] #3 Any new/changed Caches-specific UI components keep presentation separated from state/data mapping.
+- [x] #4 No backend/API contract changes are introduced by this task.
+- [x] #5 `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` succeeds after implementation.
 - [ ] #6 `nix build .#checks.x86_64-linux.web-ui` succeeds and includes Caches-view screenshot/assertion coverage proving intended behavior.
 <!-- AC:END -->
+
+
 
 ## Implementation Plan
 
