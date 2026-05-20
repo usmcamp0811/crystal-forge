@@ -4,7 +4,7 @@ title: Refactor Caches view UI/UX to match latest design mockup
 status: In Progress
 assignee: []
 created_date: '2026-05-19 13:21'
-updated_date: '2026-05-20 17:20'
+updated_date: '2026-05-20 17:26'
 labels:
   - ui
   - ux
@@ -184,4 +184,35 @@ Instead of patching the rewritten UI:
 4. Do not remove functionality
 
 Starting fresh approach now.
+
+## Incremental Visual Changes Applied (2026-05-20 17:45)
+
+Successfully applied visual changes from mockup while preserving all functionality:
+
+**Commit f3fc9809** - Restored working caches.rs from dev
+- All API calls, validation, credentials, push jobs, onboarding restored
+
+**Commit b34936ad** - Page header and stat strip
+- Title: "Caches" (was "Cache Management")
+- Subtitle shows "X destinations · Y healthy"
+- Button: "+ Add cache" (was "+ Add Destination")
+- Added stat strip with Total/Healthy/Issues metrics
+- Applied page-head, stat-strip CSS classes
+
+**Commit 1f4a146a** - Filter bar with search
+- Search input with icon, placeholder "Search caches…"
+- Live filtering by name or URL
+- Shows "X caches" count dynamically
+- Applied filterbar, filter-search CSS classes
+
+All functionality preserved:
+✅ Real API calls (create/update/delete/toggle/test)
+✅ Validation with field errors
+✅ Credential management
+✅ Environment assignment
+✅ Push jobs tab
+✅ Setup tour/onboarding
+✅ Tabs functional
+
+Next: Continue applying table/card styling from mockup.
 <!-- SECTION:NOTES:END -->
