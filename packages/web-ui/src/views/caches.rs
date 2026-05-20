@@ -361,6 +361,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
     let mut edit_cred_id = use_signal(String::new);
     let mut edit_environment_ids = use_signal(|| Vec::<Uuid>::new());
     let mut edit_testing = use_signal(|| None::<String>);
+    let mut edit_show_cred_modal = use_signal(|| false);
     
     // Pre-populate edit form when destination changes
     use_effect(move || {
@@ -1321,12 +1322,19 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                             class: "input focus-ring",
                                             style: "flex:1;",
                                             value: edit_cred_id(),
-                                            onchange: move |evt| edit_cred_id.set(evt.value()),
+                                            onchange: move |evt| {
+                                                let val = evt.value();
+                                                if val == "__new__" {
+                                                    edit_show_cred_modal.set(true);
+                                                } else {
+                                                    edit_cred_id.set(val);
+                                                }
+                                            },
                                             option { value: "", "Select a credential…" }
-                                            option { value: "existing-credential", "Configured credential" }
                                             option { value: "aws-prod-role", "aws-prod-role (IAM role)" }
                                             option { value: "aws-staging-role", "aws-staging-role (IAM role)" }
                                             option { value: "attic-token-dev", "attic-token-dev (Attic token)" }
+                                            option { value: "__new__", "+ Add new credential…" }
                                         }
                                         button {
                                             class: "btn btn-ghost focus-ring xs",
@@ -1453,6 +1461,196 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                 " Save changes"
                             }
                         }
+                    }
+                    
+                    // Nested credential modal (mockup lines 273-283, 286-359)
+                    if edit_show_cred_modal() {
+                        CacheCredModal {
+                            cache_type: edit_type(),
+                            on_close: move |new_cred_id: Option<String>| {
+                                edit_show_cred_modal.set(false);
+                                if let Some(cred_id) = new_cred_id {
+                                    edit_cred_id.set(cred_id);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Cache credential modal (mockup lines 286-359)
+#[component]
+fn CacheCredModal(cache_type: String, on_close: EventHandler<Option<String>>) -> Element {
+    let mut cred_kind = use_signal(|| {
+        if cache_type == "s3" { "aws-key" } else { "token" }
+    });
+    let mut cred_name = use_signal(String::new);
+    let mut cred_access_key = use_signal(String::new);
+    let mut cred_secret_key = use_signal(String::new);
+    let mut cred_token = use_signal(String::new);
+    let mut cred_role_arn = use_signal(String::new);
+    
+    rsx! {
+        div {
+            class: "modal-backdrop",
+            style: "z-index:95;",
+            onclick: move |_| on_close.call(None),
+            div {
+                class: "modal",
+                style: "width:min(520px,96vw);",
+                onclick: move |e| e.stop_propagation(),
+                
+                div {
+                    class: "modal-head",
+                    h2 {
+                        svg {
+                            width: "14",
+                            height: "14",
+                            view_box: "0 0 24 24",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            style: "margin-right:6px; vertical-align:text-bottom;",
+                            rect { x: "3", y: "11", width: "18", height: "11", rx: "2", ry: "2" }
+                            path { d: "M7 11V7a5 5 0 0 1 10 0v4" }
+                        }
+                        "Add credential"
+                    }
+                    p { "Saved credentials can be reused across caches. Secrets are encrypted at rest." }
+                }
+                
+                div {
+                    class: "modal-body",
+                    
+                    div {
+                        class: "field",
+                        label { "Name" }
+                        input {
+                            class: "input focus-ring",
+                            value: cred_name(),
+                            oninput: move |evt| cred_name.set(evt.value()),
+                            placeholder: "e.g. aws-prod-role"
+                        }
+                    }
+                    
+                    div {
+                        class: "field",
+                        label { "Type" }
+                        div {
+                            class: "seg",
+                            if cache_type == "s3" {
+                                button {
+                                    class: if cred_kind() == "aws-key" { "active" } else { "" },
+                                    onclick: move |_| cred_kind.set("aws-key"),
+                                    "AWS access key"
+                                }
+                                button {
+                                    class: if cred_kind() == "aws-role" { "active" } else { "" },
+                                    onclick: move |_| cred_kind.set("aws-role"),
+                                    "IAM role (IRSA)"
+                                }
+                            } else {
+                                button {
+                                    class: "active",
+                                    "API token"
+                                }
+                            }
+                        }
+                    }
+                    
+                    if cred_kind() == "aws-key" {
+                        div {
+                            class: "field",
+                            label { "Access key ID" }
+                            input {
+                                class: "input focus-ring mono",
+                                style: "font-size:12px;",
+                                value: cred_access_key(),
+                                oninput: move |evt| cred_access_key.set(evt.value()),
+                                placeholder: "AKIA…"
+                            }
+                        }
+                        div {
+                            class: "field",
+                            label { "Secret access key" }
+                            input {
+                                r#type: "password",
+                                class: "input focus-ring mono",
+                                style: "font-size:12px;",
+                                value: cred_secret_key(),
+                                oninput: move |evt| cred_secret_key.set(evt.value()),
+                                placeholder: "•••••••••••••••••"
+                            }
+                        }
+                    }
+                    
+                    if cred_kind() == "aws-role" {
+                        div {
+                            class: "field",
+                            label { "Role ARN" }
+                            input {
+                                class: "input focus-ring mono",
+                                style: "font-size:12px;",
+                                value: cred_role_arn(),
+                                oninput: move |evt| cred_role_arn.set(evt.value()),
+                                placeholder: "arn:aws:iam::123456789012:role/cache-pusher"
+                            }
+                            div {
+                                class: "help",
+                                "Crystal Forge must be running with permission to assume this role."
+                            }
+                        }
+                    }
+                    
+                    if cred_kind() == "token" {
+                        div {
+                            class: "field",
+                            label { "Token" }
+                            input {
+                                r#type: "password",
+                                class: "input focus-ring mono",
+                                style: "font-size:12px;",
+                                value: cred_token(),
+                                oninput: move |evt| cred_token.set(evt.value()),
+                                placeholder: "•••••••••••••••••"
+                            }
+                            div {
+                                class: "help",
+                                "Attic / cache-server bearer token with push permission."
+                            }
+                        }
+                    }
+                }
+                
+                div {
+                    class: "modal-foot",
+                    button {
+                        class: "btn btn-ghost focus-ring",
+                        onclick: move |_| on_close.call(None),
+                        "Cancel"
+                    }
+                    button {
+                        class: "btn btn-primary focus-ring",
+                        disabled: cred_name().trim().is_empty(),
+                        onclick: move |_| {
+                            let name = cred_name();
+                            let cred_id = format!("cred-{}", name.to_lowercase().replace(|c: char| !c.is_ascii_alphanumeric(), "-"));
+                            on_close.call(Some(cred_id));
+                        },
+                        svg {
+                            width: "13",
+                            height: "13",
+                            view_box: "0 0 24 24",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            style: "display:inline-block; vertical-align:text-bottom;",
+                            polyline { points: "20 6 9 17 4 12" }
+                        }
+                        " Save credential"
                     }
                 }
             }
