@@ -4,7 +4,7 @@ title: Refactor Caches view UI/UX to match latest design mockup
 status: In Progress
 assignee: []
 created_date: '2026-05-19 13:21'
-updated_date: '2026-05-19 15:45'
+updated_date: '2026-05-20 16:48'
 labels:
   - ui
   - ux
@@ -108,4 +108,14 @@ Next: Need to use cargo expand or similar to see macro expansion and identify ex
 LOCK: agent on gray in ~/code/crystal-forge/TASK-300-refactor-caches-view
 
 LOCK: agent on gray in ~/code/crystal-forge/TASK-303-refactor-caches-view
+
+## Edit Modal Pre-population Issue (2026-05-20)
+
+The edit modal currently does not pre-populate form fields with existing cache values.
+
+Fields that need initialization from cache data:
+- form_requires_auth: Should be true if s3_secret_access_key, attic_token, or other auth fields are present
+- form_cred_id: Should reflect the credential type/configuration (though we don't have a direct credId field, we need to derive from available fields)
+
+Note: The simplified form doesn't expose all the detailed S3/Attic fields yet, but the basic fields (name, type, url, requiresAuth, environments) need to work properly for edit mode.
 <!-- SECTION:NOTES:END -->
