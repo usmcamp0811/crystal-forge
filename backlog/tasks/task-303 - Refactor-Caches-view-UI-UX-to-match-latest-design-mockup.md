@@ -5,6 +5,7 @@ status: Done
 assignee: []
 created_date: '2026-05-19 13:21'
 updated_date: '2026-05-23 03:42'
+updated_date: '2026-05-20 17:19'
 labels:
   - ui
   - ux
@@ -117,6 +118,59 @@ Next: Need to use cargo expand or similar to see macro expansion and identify ex
 MR #257 is already merged.
 
 Task worktree cleaned: git worktree remove ../TASK-303-refactor-caches-view && git worktree prune.
+LOCK: agent on gray in ~/code/crystal-forge/TASK-303-refactor-caches-view
+
+## Edit Modal Pre-population Issue (2026-05-20)
+
+The edit modal currently does not pre-populate form fields with existing cache values.
+
+Fields that need initialization from cache data:
+- form_requires_auth: Should be true if s3_secret_access_key, attic_token, or other auth fields are present
+- form_cred_id: Should reflect the credential type/configuration (though we don't have a direct credId field, we need to derive from available fields)
+
+Note: The simplified form doesn't expose all the detailed S3/Attic fields yet, but the basic fields (name, type, url, requiresAuth, environments) need to work properly for edit mode.
+
+## Resolution (2026-05-20 16:55)
+
+Fixed the edit modal pre-population issue:
+
+1. **form_requires_auth initialization**: Now properly infers from presence of auth fields:
+   - S3: checks for s3_secret_access_key or s3_access_key_id
+   - Attic: checks for attic_token
+   - Defaults to true for new caches
+
+2. **form_cred_id initialization**: Now derives credential identifier from cache:
+   - S3: returns "aws-configured" if s3_access_key_id is present
+   - Attic: returns "attic-configured" if attic_token is present
+   - Note: This is a simplified approach since we don't have a direct credId field in the model
+
+3. **Added integration test**: New test "25a-caches-edit-modal" verifies that clicking the edit button opens the modal with the correct heading
+
+Commit: 8146e067 - fix(web-ui): pre-populate edit cache modal with existing values
+
+The basic fields (name, type, url, requiresAuth, environments) now properly initialize in edit mode.
+
+## Actual Fix (2026-05-20 17:15)
+
+The first attempt (commit 8146e067) didn't actually work because I misunderstood Dioxus reactivity.
+
+**Root Cause**: use_signal closures that capture component parameters only run ONCE on component creation. They are NOT reactive to prop changes.
+
+**Real Solution** (commit fca0299d):
+1. Initialize all form signals with empty/default values first
+2. Use use_effect to reactively populate signals from the cache prop
+3. use_effect runs whenever its dependencies change, so it will update when cache changes
+4. Clone the cache parameter for use in multiple places (initialization, environment loading, heading)
+
+Now when you click edit on a cache:
+- Name field shows the current cache name
+- Type selector shows the current cache type (S3/Attic/Nix)
+- URL field shows the current push_to URL
+- "Requires authentication" checkbox is checked if auth fields are present
+- Credential dropdown shows a placeholder if credentials are configured
+- Environment chips show the assigned environments
+
+The form is now properly pre-populated for editing.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
