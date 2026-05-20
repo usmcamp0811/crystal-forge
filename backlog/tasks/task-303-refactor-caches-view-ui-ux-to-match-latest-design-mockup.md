@@ -4,7 +4,7 @@ title: Refactor Caches view UI/UX to match latest design mockup
 status: Review
 assignee: []
 created_date: '2026-05-19 13:21'
-updated_date: '2026-05-20 03:00'
+updated_date: '2026-05-20 03:08'
 labels:
   - ui
   - ux
@@ -89,4 +89,6 @@ LOCK: agent on gray in ~/code/crystal-forge/TASK-300-refactor-caches-view
 ✅ Branch pushed: TASK-303-refactor-caches-view
 ⏳ MR URL: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/new?merge_request%5Bsource_branch%5D=TASK-303-refactor-caches-view
 ⏳ Web-UI check build in progress
+
+✅ MR created: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/257
 <!-- SECTION:NOTES:END -->
