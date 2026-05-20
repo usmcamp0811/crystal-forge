@@ -577,53 +577,64 @@ fn EnvBadge(env_name: String) -> Element {
 fn CacheFormModal(mode: &'static str, cache: Option<CacheDestination>, on_close: EventHandler<()>) -> Element {
     let is_edit = mode == "edit";
     
-    // Form state
-    let mut form_name = use_signal(|| {
-        cache.as_ref().map(|c| c.name.clone()).unwrap_or_default()
-    });
-    let mut form_type = use_signal(|| {
-        cache.as_ref().map(|c| c.cache_type.clone()).unwrap_or_else(|| "s3".to_string())
-    });
-    let mut form_url = use_signal(|| {
-        cache.as_ref().and_then(|c| c.push_to.clone()).unwrap_or_default()
-    });
-    let mut form_requires_auth = use_signal(|| {
-        // Infer requiresAuth from presence of auth fields
-        cache.as_ref().map(|c| {
-            match c.cache_type.to_lowercase().as_str() {
+    // Clone cache for use in closures and rendering
+    let cache_for_init = cache.clone();
+    let cache_for_env = cache.clone();
+    let cache_for_heading = cache.clone();
+    
+    // Form state - initialize with empty values first
+    let mut form_name = use_signal(String::new);
+    let mut form_type = use_signal(|| "s3".to_string());
+    let mut form_url = use_signal(String::new);
+    let mut form_requires_auth = use_signal(|| true);
+    let mut form_cred_id = use_signal(String::new);
+    let mut form_environments = use_signal(Vec::<Uuid>::new);
+    let mut testing = use_signal(|| None::<String>);
+    
+    // Initialize form values from cache data when component mounts or cache changes
+    use_effect(move || {
+        if let Some(ref c) = cache_for_init {
+            form_name.set(c.name.clone());
+            form_type.set(c.cache_type.clone());
+            form_url.set(c.push_to.clone().unwrap_or_default());
+            
+            // Infer requiresAuth from presence of auth fields
+            let requires_auth = match c.cache_type.to_lowercase().as_str() {
                 "s3" => c.s3_secret_access_key.is_some() || c.s3_access_key_id.is_some(),
                 "attic" => c.attic_token.is_some(),
                 _ => false,
-            }
-        }).unwrap_or(true)
-    });
-    let mut form_cred_id = use_signal(|| {
-        // Derive credential identifier from cache data
-        // For now, we use a simplified approach since we don't have direct credId field
-        cache.as_ref().and_then(|c| {
-            match c.cache_type.to_lowercase().as_str() {
+            };
+            form_requires_auth.set(requires_auth);
+            
+            // Derive credential identifier from cache data
+            let cred_id = match c.cache_type.to_lowercase().as_str() {
                 "s3" => {
                     if c.s3_access_key_id.is_some() {
-                        // In a real implementation, we'd look up the credential by access_key_id
-                        // For now, return a placeholder indicating auth is configured
-                        Some("aws-configured".to_string())
+                        "aws-configured".to_string()
                     } else {
-                        None
+                        String::new()
                     }
                 },
                 "attic" => {
                     if c.attic_token.is_some() {
-                        Some("attic-configured".to_string())
+                        "attic-configured".to_string()
                     } else {
-                        None
+                        String::new()
                     }
                 },
-                _ => None,
-            }
-        }).unwrap_or_default()
+                _ => String::new(),
+            };
+            form_cred_id.set(cred_id);
+        } else {
+            // Reset to defaults for "add" mode
+            form_name.set(String::new());
+            form_type.set("s3".to_string());
+            form_url.set(String::new());
+            form_requires_auth.set(true);
+            form_cred_id.set(String::new());
+            form_environments.set(Vec::new());
+        }
     });
-    let mut form_environments = use_signal(Vec::<Uuid>::new);
-    let mut testing = use_signal(|| None::<String>);
 
     // Load environments
     let environments = use_resource(|| async move {
@@ -631,7 +642,7 @@ fn CacheFormModal(mode: &'static str, cache: Option<CacheDestination>, on_close:
     });
 
     // Load current environment assignments if editing
-    if let Some(ref c) = cache {
+    if let Some(ref c) = cache_for_env {
         let cache_id = c.id;
         let env_ids = use_resource(move || async move {
             client::get_cache_environments(cache_id).await.unwrap_or_default()
@@ -664,7 +675,7 @@ fn CacheFormModal(mode: &'static str, cache: Option<CacheDestination>, on_close:
                     h2 {
                         if is_edit {
                             {render_icon("gear", 14, "margin-right:6px; vertical-align:text-bottom;")}
-                            if let Some(ref c) = cache {
+                            if let Some(ref c) = cache_for_heading {
                                 "Edit {c.name}"
                             }
                         } else {
