@@ -1232,7 +1232,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                         div {
                             class: "modal-head",
                             h2 {
-                                // Gear icon
+                                // Gear icon (simple cog/settings icon)
                                 svg {
                                     width: "14",
                                     height: "14",
@@ -1240,9 +1240,9 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                     fill: "none",
                                     stroke: "currentColor",
                                     stroke_width: "2",
-                                    style: "margin-right:6px; vertical-align:text-bottom; display:inline-block;",
+                                    style: "margin-right:6px; vertical-align:text-bottom;",
                                     circle { cx: "12", cy: "12", r: "3" }
-                                    path { d: "M12 1v6m0 6v6m-9-7h6m6 0h6m-1-5l-4 4m-6 6l-4 4m0-12l4 4m6 6l4 4" }
+                                    path { d: "M12 1v6M12 17v6M5.64 5.64l4.24 4.24M14.12 14.12l4.24 4.24M1 12h6M17 12h6M5.64 18.36l4.24-4.24M14.12 9.88l4.24-4.24" }
                                 }
                                 "Edit {dest.name}"
                             }
@@ -1293,7 +1293,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                     oninput: move |evt| edit_url.set(evt.value()),
                                     placeholder: match edit_type().as_str() {
                                         "s3" => "s3://bucket?region=us-east-1",
-                                        "attic" => "https://attic.example.com",
+                                        "attic" => "attic://host/cache",
                                         _ => "https://cache.nixos.org"
                                     }
                                 }
@@ -1829,7 +1829,7 @@ fn CacheDestinationRow(destination: CacheDestination, on_edit: EventHandler<Cach
                             e.stop_propagation();
                             on_edit.call(dest_for_edit_btn.clone());
                         },
-                        // Gear icon (inline SVG simplified)
+                        // Gear icon (simple cog/settings icon)
                         svg {
                             width: "14",
                             height: "14",
@@ -1838,7 +1838,7 @@ fn CacheDestinationRow(destination: CacheDestination, on_edit: EventHandler<Cach
                             stroke: "currentColor",
                             stroke_width: "2",
                             circle { cx: "12", cy: "12", r: "3" }
-                            path { d: "M12 1v6m0 6v6m-9-7h6m6 0h6m-1-5l-4 4m-6 6l-4 4m0-12l4 4m6 6l4 4" }
+                            path { d: "M12 1v6M12 17v6M5.64 5.64l4.24 4.24M14.12 14.12l4.24 4.24M1 12h6M17 12h6M5.64 18.36l4.24-4.24M14.12 9.88l4.24-4.24" }
                         }
                     }
                 }
