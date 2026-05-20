@@ -1,10 +1,10 @@
 ---
 id: TASK-303
 title: Refactor Caches view UI/UX to match latest design mockup
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-05-19 13:21'
-updated_date: '2026-05-19 13:21'
+updated_date: '2026-05-20 02:59'
 labels:
   - ui
   - ux
