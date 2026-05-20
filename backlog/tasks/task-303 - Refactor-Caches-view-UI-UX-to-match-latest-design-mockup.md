@@ -4,7 +4,7 @@ title: Refactor Caches view UI/UX to match latest design mockup
 status: In Progress
 assignee: []
 created_date: '2026-05-19 13:21'
-updated_date: '2026-05-20 16:59'
+updated_date: '2026-05-20 17:19'
 labels:
   - ui
   - ux
@@ -138,4 +138,26 @@ Fixed the edit modal pre-population issue:
 Commit: 8146e067 - fix(web-ui): pre-populate edit cache modal with existing values
 
 The basic fields (name, type, url, requiresAuth, environments) now properly initialize in edit mode.
+
+## Actual Fix (2026-05-20 17:15)
+
+The first attempt (commit 8146e067) didn't actually work because I misunderstood Dioxus reactivity.
+
+**Root Cause**: use_signal closures that capture component parameters only run ONCE on component creation. They are NOT reactive to prop changes.
+
+**Real Solution** (commit fca0299d):
+1. Initialize all form signals with empty/default values first
+2. Use use_effect to reactively populate signals from the cache prop
+3. use_effect runs whenever its dependencies change, so it will update when cache changes
+4. Clone the cache parameter for use in multiple places (initialization, environment loading, heading)
+
+Now when you click edit on a cache:
+- Name field shows the current cache name
+- Type selector shows the current cache type (S3/Attic/Nix)
+- URL field shows the current push_to URL
+- "Requires authentication" checkbox is checked if auth fields are present
+- Credential dropdown shows a placeholder if credentials are configured
+- Environment chips show the assigned environments
+
+The form is now properly pre-populated for editing.
 <!-- SECTION:NOTES:END -->
