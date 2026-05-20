@@ -409,7 +409,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>)
                 }
             }
 
-            // List
+            // List - table format matching mockup (JSX lines 58-76)
             match &*destinations.read_unchecked() {
                 Some(Ok(dests)) => {
                     // Filter destinations based on search query
@@ -436,12 +436,31 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>)
                                 p { class: "{theme::text::MUTED} text-sm mt-2", "Add your first cache destination to start pushing build artifacts." }
                             }
                         } else {
+                            // Table structure matching mockup
                             div {
-                                class: "grid gap-4",
-                                for dest in filtered {
-                                    CacheDestinationCard {
-                                        destination: dest.clone(),
-                                        on_change: move |_| refresh_nonce.set(refresh_nonce() + 1),
+                                class: "card",
+                                style: "overflow:hidden;",
+                                table {
+                                    class: "sys-table",
+                                    thead {
+                                        tr {
+                                            th { "Cache" }
+                                            th { "Type" }
+                                            th { "Status" }
+                                            th { "Storage" }
+                                            th { "Paths" }
+                                            th { "Last push" }
+                                            th { "Environments" }
+                                            th { style: "text-align:right;", " " }
+                                        }
+                                    }
+                                    tbody {
+                                        for dest in filtered {
+                                            CacheDestinationRow {
+                                                destination: dest.clone(),
+                                                on_change: move |_| refresh_nonce.set(refresh_nonce() + 1),
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -1134,6 +1153,214 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>)
 
 /// Individual cache destination card
 #[component]
+/// Cache destination table row matching mockup (JSX lines 89-153)
+#[component]
+fn CacheDestinationRow(destination: CacheDestination, on_change: EventHandler<()>) -> Element {
+    let mut show_edit_modal = use_signal(|| false);
+    let mut show_delete_confirm = use_signal(|| false);
+    
+    // Status mapping
+    let (status_cls, status_color, status_label) = if destination.enabled {
+        ("chip-healthy", "#34d399", "healthy")
+    } else {
+        ("chip-critical", "#f87171", "error")
+    };
+    
+    // Type icon
+    let type_icon = match destination.cache_type.as_str() {
+        "S3" => "download",
+        "Attic" => "download",
+        "Nix" | "Http" => "link",
+        _ => "download",
+    };
+    
+    // Fetch environment assignments
+    let cache_id = destination.id;
+    let env_ids = use_resource(move || async move {
+        client::get_cache_environments(cache_id).await.unwrap_or_default()
+    });
+    let environments = use_resource(|| async move { client::fetch_environments().await });
+    
+    let dest_for_modal = destination.clone();
+    
+    rsx! {
+        tr {
+            style: "cursor:pointer;",
+            onclick: move |_| show_edit_modal.set(true),
+            
+            // Cache column
+            td {
+                div {
+                    style: "font-weight:600; font-size:13px; display:flex; align-items:center; gap:6px;",
+                    // Icon (inline SVG simplified)
+                    span { style: "opacity:0.6;", {type_icon} }
+                    "{destination.name}"
+                }
+                if let Some(ref url) = destination.push_to {
+                    div {
+                        class: "mono",
+                        style: "font-size:11px; color:var(--cf-text-muted);",
+                        "{url}"
+                    }
+                }
+            }
+            
+            // Type column
+            td {
+                span {
+                    class: "chip chip-unknown mono",
+                    style: "font-size:10px;",
+                    "{destination.cache_type}"
+                }
+            }
+            
+            // Status column
+            td {
+                span {
+                    class: "chip {status_cls}",
+                    title: "{status_label}",
+                    span {
+                        class: "chip-dot",
+                        style: "background: {status_color};",
+                    }
+                    "{status_label}"
+                }
+            }
+            
+            // Storage column (placeholder - API doesn't provide this)
+            td {
+                div {
+                    style: "min-width:120px; height:30px; display:flex; flex-direction:column; justify-content:center; gap:3px;",
+                    div {
+                        style: "font-size:11px; color:var(--cf-text-secondary);",
+                        span { class: "mono", "—" }
+                    }
+                }
+            }
+            
+            // Paths column (placeholder - API doesn't provide this)
+            td {
+                class: "mono",
+                style: "font-size:12px;",
+                "—"
+            }
+            
+            // Last push column
+            td {
+                style: "font-size:12px; color:var(--cf-text-secondary);",
+                if let Some(ref last_used) = destination.last_used_at {
+                    {format!("{}", last_used.format("%Y-%m-%d %H:%M"))}
+                } else {
+                    "—"
+                }
+            }
+            
+            // Environments column
+            td {
+                div {
+                    style: "display:flex; gap:4px; flex-wrap:wrap;",
+                    match (env_ids.read().as_ref(), environments.read().as_ref()) {
+                        (Some(ids), Some(Ok(all_envs))) if !ids.is_empty() => {
+                            let matching_envs: Vec<_> = all_envs.iter()
+                                .filter(|e| ids.contains(&e.id))
+                                .take(3)
+                                .collect();
+                            
+                            rsx! {
+                                for env in matching_envs {
+                                    EnvBadge { env_name: env.name.clone() }
+                                }
+                                if ids.len() > 3 {
+                                    span {
+                                        class: "chip chip-unknown",
+                                        style: "font-size:10px;",
+                                        "+{ids.len() - 3}"
+                                    }
+                                }
+                            }
+                        },
+                        _ => rsx! {
+                            span {
+                                style: "font-size:11px; color:var(--cf-text-muted);",
+                                "none"
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Actions column
+            td {
+                div {
+                    class: "row-actions",
+                    button {
+                        class: "btn-icon focus-ring",
+                        title: "Edit",
+                        onclick: move |e| {
+                            e.stop_propagation();
+                            show_edit_modal.set(true);
+                        },
+                        // Gear icon (inline SVG simplified)
+                        svg {
+                            width: "14",
+                            height: "14",
+                            view_box: "0 0 24 24",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            circle { cx: "12", cy: "12", r: "3" }
+                            path { d: "M12 1v6m0 6v6m-9-7h6m6 0h6m-1-5l-4 4m-6 6l-4 4m0-12l4 4m6 6l4 4" }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // TODO: Edit modal will be added separately
+        // For now, clicking opens the old card-based modal
+        if show_edit_modal() {
+            div {
+                class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4",
+                onclick: move |_| show_edit_modal.set(false),
+                div {
+                    class: "relative bg-slate-900 border border-slate-700 rounded-xl shadow-2xl p-6 w-full max-w-4xl",
+                    onclick: move |e| e.stop_propagation(),
+                    h2 { "Edit {dest_for_modal.name}" }
+                    p { "Edit functionality will be restored from CacheDestinationCard modal" }
+                    button {
+                        class: "btn btn-ghost focus-ring",
+                        onclick: move |_| show_edit_modal.set(false),
+                        "Close"
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Environment badge component
+#[component]
+fn EnvBadge(env_name: String) -> Element {
+    let color = match env_name.to_lowercase().as_str() {
+        "production" => "#f43f5e",
+        "staging" => "#f59e0b",
+        "dev" | "development" => "#3b82f6",
+        "edge" => "#8b5cf6",
+        _ => "#6b7280",
+    };
+    
+    rsx! {
+        span {
+            class: "chip chip-env",
+            style: "font-size:10px; padding:3px 7px; border:1px solid {color}; background:color-mix(in oklab, {color} 14%, var(--cf-card-bg)); color:{color};",
+            span {
+                style: "width:5px; height:5px; border-radius:50%; background:{color}; display:inline-block; margin-right:4px;",
+            }
+            "{env_name}"
+        }
+    }
+}
+
 fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<()>) -> Element {
     let enabled_badge_class = if destination.enabled {
         format!(
