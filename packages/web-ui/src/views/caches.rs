@@ -318,6 +318,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>)
         async move { client::fetch_cache_destinations(false).await }
     });
 
+    let mut search_query = use_signal(String::new);
     let mut show_add_modal = use_signal(|| false);
     let mut add_name = use_signal(String::new);
     let mut add_type = use_signal(|| "Nix".to_string());
@@ -354,63 +355,94 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>)
         div {
             class: "space-y-4",
 
-            // Header with Add button
+            // Filter bar matching mockup (JSX lines 50-56)
             div {
-                class: "flex justify-between items-center",
-                h2 {
-                    class: "{theme::typography::SECTION_TITLE} {theme::text::PRIMARY}",
-                    "Cache Destinations"
-                }
+                class: "filterbar",
                 div {
-                    class: "relative",
-                    button {
-                        class: if show_add_target_callout {
-                            "px-4 py-2 rounded-lg text-sm font-medium {theme::interactive::PRIMARY_BTN} animate-pulse ring-2 ring-blue-300/70 ring-offset-2 ring-offset-slate-950"
-                        } else {
-                            "px-4 py-2 rounded-lg text-sm font-medium {theme::interactive::PRIMARY_BTN}"
-                        },
-                        onclick: move |_| {
-                            dismiss_add_target_callout.set(true);
-                            show_add_modal.set(true);
-                            if show_onboarding_hint {
-                                show_cache_name_callout.set(true);
-                                show_cache_type_callout.set(false);
-                                show_cache_endpoint_callout.set(false);
-                                show_cache_env_callout.set(false);
-                            }
-                        },
-                        "+ Add Destination"
+                    class: "filter-search",
+                    style: "max-width:320px;",
+                    // Search icon (simplified inline SVG)
+                    svg {
+                        width: "16",
+                        height: "16",
+                        view_box: "0 0 24 24",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        circle { cx: "11", cy: "11", r: "8" }
+                        path { d: "m21 21-4.3-4.3" }
                     }
-                    if show_add_target_callout {
-                        div {
-                            "data-testid": "setup-coach-caches-target-callout",
-                            style: "position:absolute; right:0; top:calc(100% + 10px); background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; width:220px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
-                            div {
-                                style: "position:absolute; top:-6px; right:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
-                            }
-                            p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
-                            p { style: "margin:2px 0 0 0;", "Click Add Destination to create your first cache endpoint." }
-                        }
+                    input {
+                        class: "input focus-ring",
+                        placeholder: "Search caches…",
+                        value: "{search_query}",
+                        oninput: move |evt| search_query.set(evt.value())
                     }
+                }
+                span {
+                    class: "filter-count",
+                    // Show filtered count
+                    match &*destinations.peek() {
+                        Some(Ok(dests)) => {
+                            let query = search_query().to_lowercase();
+                            let filtered = if query.is_empty() {
+                                dests.len()
+                            } else {
+                                dests.iter().filter(|d| {
+                                    d.name.to_lowercase().contains(&query) ||
+                                    d.push_to.as_ref().map(|u| u.to_lowercase().contains(&query)).unwrap_or(false)
+                                }).count()
+                            };
+                            rsx! { "{filtered} caches" }
+                        },
+                        _ => rsx! { "— caches" }
+                    }
+                }
+            }
+
+            if show_add_target_callout {
+                div {
+                    "data-testid": "setup-coach-caches-target-callout",
+                    style: "position:relative; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; margin-bottom:16px;",
+                    p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
+                    p { style: "margin:2px 0 0 0;", "Click Add cache (in the page header above) to create your first cache endpoint." }
                 }
             }
 
             // List
             match &*destinations.read_unchecked() {
-                Some(Ok(dests)) => rsx! {
-                    if dests.is_empty() {
-                        div {
-                            class: "{theme::presets::CARD} text-center py-12",
-                            p { class: "{theme::text::SECONDARY}", "No cache destinations configured." }
-                            p { class: "{theme::text::MUTED} text-sm mt-2", "Add your first cache destination to start pushing build artifacts." }
-                        }
+                Some(Ok(dests)) => {
+                    // Filter destinations based on search query
+                    let query = search_query().to_lowercase();
+                    let filtered: Vec<_> = if query.is_empty() {
+                        dests.iter().collect()
                     } else {
-                        div {
-                            class: "grid gap-4",
-                            for dest in dests {
-                                CacheDestinationCard {
-                                    destination: dest.clone(),
-                                    on_change: move |_| refresh_nonce.set(refresh_nonce() + 1),
+                        dests.iter().filter(|d| {
+                            d.name.to_lowercase().contains(&query) ||
+                            d.push_to.as_ref().map(|u| u.to_lowercase().contains(&query)).unwrap_or(false)
+                        }).collect()
+                    };
+                    
+                    rsx! {
+                        if filtered.is_empty() && !query.is_empty() {
+                            div {
+                                class: "{theme::presets::CARD} text-center py-12",
+                                p { class: "{theme::text::SECONDARY}", "No caches match \"{query}\"" }
+                            }
+                        } else if dests.is_empty() {
+                            div {
+                                class: "{theme::presets::CARD} text-center py-12",
+                                p { class: "{theme::text::SECONDARY}", "No cache destinations configured." }
+                                p { class: "{theme::text::MUTED} text-sm mt-2", "Add your first cache destination to start pushing build artifacts." }
+                            }
+                        } else {
+                            div {
+                                class: "grid gap-4",
+                                for dest in filtered {
+                                    CacheDestinationCard {
+                                        destination: dest.clone(),
+                                        on_change: move |_| refresh_nonce.set(refresh_nonce() + 1),
+                                    }
                                 }
                             }
                         }
