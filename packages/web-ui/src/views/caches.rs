@@ -218,6 +218,9 @@ pub fn CachesView() -> Element {
 
     // Extract totals for use in rsx
     let (total, healthy, issues, paths) = totals();
+    
+    // Compute modal mode outside rsx to avoid type issues
+    let modal_mode: &'static str = if add_open() { "add" } else { "edit" };
 
     rsx! {
         // Page container - JSX: div with display:flex, flexDirection:column, gap:16
@@ -368,7 +371,7 @@ pub fn CachesView() -> Element {
             // Modals
             if edit_cache().is_some() || add_open() {
                 CacheFormModal {
-                    mode: if add_open() { "add" } else { "edit" },
+                    mode: modal_mode,
                     cache: edit_cache(),
                     on_close: move |_| {
                         edit_cache.set(None);
@@ -377,22 +380,6 @@ pub fn CachesView() -> Element {
                     }
                 }
             }
-        }
-    }
-}
-
-/// Stat card component for the stat strip
-#[component]
-fn StatCard(label: &'static str, value: String, color: &'static str) -> Element {
-    rsx! {
-        div {
-            class: "stat",
-            span {
-                class: "stat-accent",
-                style: "--stat-color: {color};",
-            }
-            div { class: "stat-label", "{label}" }
-            div { class: "stat-value", "{value}" }
         }
     }
 }
@@ -427,11 +414,6 @@ fn CacheRow(cache: CacheDestination, on_edit: EventHandler<CacheDestination>) ->
 
     let cache_for_click = cache.clone();
     let cache_for_edit = cache.clone();
-    
-    // Format the last_used date outside rsx! to avoid interpolation issues
-    let last_used_str: String = cache.last_used_at.as_ref()
-        .map(|dt| format!("{}", dt.format("%Y-%m-%d %H:%M")))
-        .unwrap_or_else(|| "—".to_string());
 
     rsx! {
         tr {
@@ -506,7 +488,11 @@ fn CacheRow(cache: CacheDestination, on_edit: EventHandler<CacheDestination>) ->
             // Last push column - JSX line 134
             td {
                 style: "font-size:12px; color:var(--cf-text-secondary);",
-                "{last_used_str}"
+                if let Some(ref last_used) = cache.last_used_at {
+                    {format!("{}", last_used.format("%Y-%m-%d %H:%M"))}
+                } else {
+                    "—"
+                }
             }
 
             // Environments column - JSX lines 135-143
@@ -775,21 +761,10 @@ fn CacheFormModal(mode: &'static str, cache: Option<CacheDestination>, on_close:
                                         let env_id = env.id;
                                         let env_name = env.name.clone();
                                         let is_selected = form_environments().contains(&env_id);
-                                        let env_color = match env_name.to_lowercase().as_str() {
-                                            "production" => "#f43f5e",
-                                            "staging" => "#f59e0b",
-                                            "dev" | "development" => "#3b82f6",
-                                            "edge" => "#8b5cf6",
-                                            _ => "#6b7280",
-                                        };
-                                        
-                                        let border_style = if is_selected { format!("border: 1px solid {};", env_color) } else { "border: 1px solid var(--cf-card-border);".to_string() };
-                                        let bg_style = if is_selected { format!("background: color-mix(in oklab, {} 14%, var(--cf-card-bg));", env_color) } else { "background: transparent;".to_string() };
-                                        let color_style = if is_selected { format!("color: {};", env_color) } else { "color: var(--cf-text-secondary);".to_string() };
                                         
                                         rsx! {
                                             button {
-                                                class: "focus-ring",
+                                                class: if is_selected { "chip chip-info focus-ring" } else { "chip chip-unknown focus-ring" },
                                                 onclick: move |_| {
                                                     let mut envs = form_environments();
                                                     if is_selected {
@@ -799,10 +774,7 @@ fn CacheFormModal(mode: &'static str, cache: Option<CacheDestination>, on_close:
                                                     }
                                                     form_environments.set(envs);
                                                 },
-                                                style: "padding: 4px 10px; border-radius: 99px; font-size: 11px; {border_style} {bg_style} {color_style} cursor: pointer; display: inline-flex; align-items: center; gap: 6px; font-family: inherit;",
-                                                span {
-                                                    style: "width:6px; height:6px; border-radius:50%; background:{env_color};",
-                                                }
+                                                style: "padding: 4px 10px; border-radius: 99px; font-size: 11px; cursor: pointer;",
                                                 "{env_name}"
                                             }
                                         }
