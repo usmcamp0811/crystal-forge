@@ -6,6 +6,7 @@ assignee: []
 created_date: '2026-05-19 13:21'
 updated_date: '2026-05-23 03:42'
 updated_date: '2026-05-20 17:19'
+updated_date: '2026-05-20 17:20'
 labels:
   - ui
   - ux
@@ -171,6 +172,30 @@ Now when you click edit on a cache:
 - Environment chips show the assigned environments
 
 The form is now properly pre-populated for editing.
+
+## Critical Issues Identified (2026-05-20 17:30)
+
+User correctly identified that the current MR is not mergeable due to functional regressions:
+
+1. **Save/add/edit is fake** - Just closes modal, no API calls
+2. **Credential test is fake** - Simulated timer, lies to user
+3. **Push jobs tab removed** - No replacement surface
+4. **Setup/onboarding deleted** - came_from_setup logic removed
+5. **Cache type handling broke API compatibility** - Changed to lowercase without verifying backend
+6. **Mismatched placeholders** - attic:// placeholder but validation requires https://
+7. **Fake stats** - Shows "0 paths cached" placeholder
+8. **N+1 resource fetching** - Fetches environments per row
+9. **Weak integration test** - Only verifies modal opens
+
+## Correct Strategy
+
+Instead of patching the rewritten UI:
+1. Restore working caches.rs from dev
+2. Re-apply ONLY visual shell changes incrementally
+3. Keep all working behavior: API calls, validation, credentials, push jobs, onboarding
+4. Do not remove functionality
+
+Starting fresh approach now.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
