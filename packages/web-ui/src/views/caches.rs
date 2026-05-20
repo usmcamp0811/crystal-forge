@@ -312,7 +312,7 @@ pub fn CachesView() -> Element {
                 }
                 span {
                     class: "filter-count",
-                    {format!("{} caches", caches().len())}
+                    "{caches().len()} caches"
                 }
             }
 
@@ -427,6 +427,11 @@ fn CacheRow(cache: CacheDestination, on_edit: EventHandler<CacheDestination>) ->
 
     let cache_for_click = cache.clone();
     let cache_for_edit = cache.clone();
+    
+    // Format the last_used date outside rsx! to avoid interpolation issues
+    let last_used_str: String = cache.last_used_at.as_ref()
+        .map(|dt| format!("{}", dt.format("%Y-%m-%d %H:%M")))
+        .unwrap_or_else(|| "—".to_string());
 
     rsx! {
         tr {
@@ -501,11 +506,7 @@ fn CacheRow(cache: CacheDestination, on_edit: EventHandler<CacheDestination>) ->
             // Last push column - JSX line 134
             td {
                 style: "font-size:12px; color:var(--cf-text-secondary);",
-                if let Some(ref last_used) = cache.last_used_at {
-                    "{last_used.format(\"%Y-%m-%d %H:%M\")}"
-                } else {
-                    "—"
-                }
+                "{last_used_str}"
             }
 
             // Environments column - JSX lines 135-143
@@ -782,6 +783,10 @@ fn CacheFormModal(mode: &'static str, cache: Option<CacheDestination>, on_close:
                                             _ => "#6b7280",
                                         };
                                         
+                                        let border_style = if is_selected { format!("border: 1px solid {};", env_color) } else { "border: 1px solid var(--cf-card-border);".to_string() };
+                                        let bg_style = if is_selected { format!("background: color-mix(in oklab, {} 14%, var(--cf-card-bg));", env_color) } else { "background: transparent;".to_string() };
+                                        let color_style = if is_selected { format!("color: {};", env_color) } else { "color: var(--cf-text-secondary);".to_string() };
+                                        
                                         rsx! {
                                             button {
                                                 class: "focus-ring",
@@ -794,19 +799,7 @@ fn CacheFormModal(mode: &'static str, cache: Option<CacheDestination>, on_close:
                                                     }
                                                     form_environments.set(envs);
                                                 },
-                                                style: "
-                                                    padding: 4px 10px;
-                                                    border-radius: 99px;
-                                                    font-size: 11px;
-                                                    border: 1px solid {if is_selected { env_color } else { \"var(--cf-card-border)\" }};
-                                                    background: {if is_selected { format!(\"color-mix(in oklab, {} 14%, var(--cf-card-bg))\", env_color) } else { \"transparent\".to_string() }};
-                                                    color: {if is_selected { env_color } else { \"var(--cf-text-secondary)\" }};
-                                                    cursor: pointer;
-                                                    display: inline-flex;
-                                                    align-items: center;
-                                                    gap: 6px;
-                                                    font-family: inherit;
-                                                ",
+                                                style: "padding: 4px 10px; border-radius: 99px; font-size: 11px; {border_style} {bg_style} {color_style} cursor: pointer; display: inline-flex; align-items: center; gap: 6px; font-family: inherit;",
                                                 span {
                                                     style: "width:6px; height:6px; border-radius:50%; background:{env_color};",
                                                 }
