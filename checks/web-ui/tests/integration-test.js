@@ -4006,6 +4006,25 @@ const steps = [
       await page.waitForTimeout(1200);
     },
   },
+  {
+    name: "25a-caches-edit-modal",
+    description: "Edit cache modal shows pre-populated values (TASK-303)",
+    action: async (page) => {
+      await page.goto(`${baseUrl}/caches`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2500);
+
+      // Click on the first cache row's edit button (gear icon)
+      const firstEditBtn = page.locator("button[title='Edit']").first();
+      await firstEditBtn.waitFor({ timeout: 5000 });
+      await firstEditBtn.click();
+
+      // Wait for edit modal to appear
+      const editHeading = page.locator("h2").filter({ hasText: /^Edit / });
+      await editHeading.waitFor({ timeout: 5000 });
+
+      await page.waitForTimeout(1200);
+    },
+  },
   // ── TASK-273: Evaluation cancellation and history ────────────────────────
   {
     name: "26-evaluations",

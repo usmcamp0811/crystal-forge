@@ -587,8 +587,41 @@ fn CacheFormModal(mode: &'static str, cache: Option<CacheDestination>, on_close:
     let mut form_url = use_signal(|| {
         cache.as_ref().and_then(|c| c.push_to.clone()).unwrap_or_default()
     });
-    let mut form_requires_auth = use_signal(|| true);
-    let mut form_cred_id = use_signal(String::new);
+    let mut form_requires_auth = use_signal(|| {
+        // Infer requiresAuth from presence of auth fields
+        cache.as_ref().map(|c| {
+            match c.cache_type.to_lowercase().as_str() {
+                "s3" => c.s3_secret_access_key.is_some() || c.s3_access_key_id.is_some(),
+                "attic" => c.attic_token.is_some(),
+                _ => false,
+            }
+        }).unwrap_or(true)
+    });
+    let mut form_cred_id = use_signal(|| {
+        // Derive credential identifier from cache data
+        // For now, we use a simplified approach since we don't have direct credId field
+        cache.as_ref().and_then(|c| {
+            match c.cache_type.to_lowercase().as_str() {
+                "s3" => {
+                    if c.s3_access_key_id.is_some() {
+                        // In a real implementation, we'd look up the credential by access_key_id
+                        // For now, return a placeholder indicating auth is configured
+                        Some("aws-configured".to_string())
+                    } else {
+                        None
+                    }
+                },
+                "attic" => {
+                    if c.attic_token.is_some() {
+                        Some("attic-configured".to_string())
+                    } else {
+                        None
+                    }
+                },
+                _ => None,
+            }
+        }).unwrap_or_default()
+    });
     let mut form_environments = use_signal(Vec::<Uuid>::new);
     let mut testing = use_signal(|| None::<String>);
 
