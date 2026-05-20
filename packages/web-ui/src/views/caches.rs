@@ -1384,9 +1384,29 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>)
                             button {
                                 class: "btn btn-primary focus-ring",
                                 onclick: move |_| {
-                                    // TODO: Implement save - needs to map simplified form back to full cache model
-                                    edit_destination.set(None);
-                                    refresh_nonce.set(refresh_nonce() + 1);
+                                    let cache_id = dest.id;
+                                    spawn(async move {
+                                        // Update basic cache fields
+                                        let req = UpdateCacheDestination {
+                                            name: Some(edit_name()),
+                                            cache_type: Some(edit_type()),
+                                            push_to: Some(edit_url()),
+                                            ..Default::default()
+                                        };
+                                        
+                                        match client::update_cache_destination(cache_id, &req).await {
+                                            Ok(_) => {
+                                                // Update environment assignments
+                                                let _ = client::assign_cache_environments(cache_id, edit_environment_ids()).await;
+                                                edit_destination.set(None);
+                                                refresh_nonce.set(refresh_nonce() + 1);
+                                            }
+                                            Err(e) => {
+                                                // TODO: Show error
+                                                web_sys::console::error_1(&format!("Failed to update cache: {}", e).into());
+                                            }
+                                        }
+                                    });
                                 },
                                 // Check icon
                                 svg {
