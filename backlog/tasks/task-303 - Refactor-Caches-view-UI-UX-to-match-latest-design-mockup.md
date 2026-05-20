@@ -8,6 +8,7 @@ updated_date: '2026-05-23 03:42'
 updated_date: '2026-05-20 17:19'
 updated_date: '2026-05-20 17:20'
 updated_date: '2026-05-20 17:26'
+updated_date: '2026-05-20 17:34'
 labels:
   - ui
   - ux
@@ -228,6 +229,36 @@ All functionality preserved:
 ✅ Tabs functional
 
 Next: Continue applying table/card styling from mockup.
+
+## Table Structure Complete (2026-05-20 18:00)
+
+Additional commits:
+
+**Commit 84bc3c8e** - Table layout
+- Converted cards to table with proper sys-table structure
+- Created CacheDestinationRow component
+- All columns from mockup: Cache, Type, Status, Storage, Paths, Last push, Environments, Actions
+- Environment badges with color coding
+- Clickable rows and gear icon for edit
+
+**Commit d909d7da** - Edit modal infrastructure
+- Lifted edit state to list level for single modal instance
+- Rows trigger on_edit handler
+- Placeholder edit modal shows
+
+Status:
+✅ Page header with correct title/subtitle
+✅ Stat strip with metrics
+✅ Filter bar with live search
+✅ Table structure matching mockup
+✅ Row display with all columns
+✅ Environment badges
+✅ Clickable rows
+✅ Edit modal opens
+
+⚠️ Remaining: Full edit modal needs ~600 lines of form fields migrated from CacheDestinationCard. Current placeholder is functional but needs complete form.
+
+This should be a separate focused task to avoid scope creep.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
