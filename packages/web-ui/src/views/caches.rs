@@ -320,6 +320,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>)
 
     let mut search_query = use_signal(String::new);
     let mut show_add_modal = use_signal(|| false);
+    let mut edit_destination = use_signal(|| None::<CacheDestination>);
     let mut add_name = use_signal(String::new);
     let mut add_type = use_signal(|| "Nix".to_string());
     let mut add_push_to = use_signal(String::new);
@@ -458,6 +459,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>)
                                         for dest in filtered {
                                             CacheDestinationRow {
                                                 destination: dest.clone(),
+                                                on_edit: move |d: CacheDestination| edit_destination.set(Some(d)),
                                                 on_change: move |_| refresh_nonce.set(refresh_nonce() + 1),
                                             }
                                         }
@@ -1147,6 +1149,55 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>)
                     }
                 }
             }
+            
+            // Edit modal (when a destination is selected)
+            if let Some(dest) = edit_destination() {
+                div {
+                    class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4",
+                    onclick: move |_| edit_destination.set(None),
+                    div {
+                        class: "relative bg-slate-900 border border-slate-700 rounded-xl shadow-2xl p-6 w-full max-w-4xl",
+                        onclick: move |e| e.stop_propagation(),
+                        div {
+                            class: "flex justify-between items-center mb-6",
+                            h2 {
+                                class: "text-xl font-semibold text-slate-100",
+                                "Edit {dest.name}"
+                            }
+                            button {
+                                class: "text-slate-400 hover:text-slate-100",
+                                onclick: move |_| edit_destination.set(None),
+                                "✕"
+                            }
+                        }
+                        p {
+                            class: "text-slate-300 mb-4",
+                            "Edit modal will use the full CacheDestinationCard edit functionality"
+                        }
+                        p {
+                            class: "text-sm text-slate-400",
+                            "Cache ID: {dest.id}, Type: {dest.cache_type}"
+                        }
+                        div {
+                            class: "mt-6 flex gap-3 justify-end",
+                            button {
+                                class: "btn btn-ghost focus-ring",
+                                onclick: move |_| edit_destination.set(None),
+                                "Cancel"
+                            }
+                            button {
+                                class: "btn btn-primary focus-ring",
+                                onclick: move |_| {
+                                    // TODO: Save changes
+                                    edit_destination.set(None);
+                                    refresh_nonce.set(refresh_nonce() + 1);
+                                },
+                                "Save changes"
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -1155,8 +1206,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>)
 #[component]
 /// Cache destination table row matching mockup (JSX lines 89-153)
 #[component]
-fn CacheDestinationRow(destination: CacheDestination, on_change: EventHandler<()>) -> Element {
-    let mut show_edit_modal = use_signal(|| false);
+fn CacheDestinationRow(destination: CacheDestination, on_edit: EventHandler<CacheDestination>, on_change: EventHandler<()>) -> Element {
     let mut show_delete_confirm = use_signal(|| false);
     
     // Status mapping
@@ -1181,12 +1231,13 @@ fn CacheDestinationRow(destination: CacheDestination, on_change: EventHandler<()
     });
     let environments = use_resource(|| async move { client::fetch_environments().await });
     
-    let dest_for_modal = destination.clone();
+    let dest_for_click = destination.clone();
+    let dest_for_edit_btn = destination.clone();
     
     rsx! {
         tr {
             style: "cursor:pointer;",
-            onclick: move |_| show_edit_modal.set(true),
+            onclick: move |_| on_edit.call(dest_for_click.clone()),
             
             // Cache column
             td {
@@ -1298,7 +1349,7 @@ fn CacheDestinationRow(destination: CacheDestination, on_change: EventHandler<()
                         title: "Edit",
                         onclick: move |e| {
                             e.stop_propagation();
-                            show_edit_modal.set(true);
+                            on_edit.call(dest_for_edit_btn.clone());
                         },
                         // Gear icon (inline SVG simplified)
                         svg {
@@ -1316,25 +1367,7 @@ fn CacheDestinationRow(destination: CacheDestination, on_change: EventHandler<()
             }
         }
         
-        // TODO: Edit modal will be added separately
-        // For now, clicking opens the old card-based modal
-        if show_edit_modal() {
-            div {
-                class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4",
-                onclick: move |_| show_edit_modal.set(false),
-                div {
-                    class: "relative bg-slate-900 border border-slate-700 rounded-xl shadow-2xl p-6 w-full max-w-4xl",
-                    onclick: move |e| e.stop_propagation(),
-                    h2 { "Edit {dest_for_modal.name}" }
-                    p { "Edit functionality will be restored from CacheDestinationCard modal" }
-                    button {
-                        class: "btn btn-ghost focus-ring",
-                        onclick: move |_| show_edit_modal.set(false),
-                        "Close"
-                    }
-                }
-            }
-        }
+
     }
 }
 
