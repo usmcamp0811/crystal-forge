@@ -9,6 +9,7 @@ updated_date: '2026-05-20 17:19'
 updated_date: '2026-05-20 17:20'
 updated_date: '2026-05-20 17:26'
 updated_date: '2026-05-20 17:34'
+updated_date: '2026-05-20 17:35'
 labels:
   - ui
   - ux
@@ -91,7 +92,12 @@ Medium: highly visible UI area; interaction/layout regressions are possible with
 - [x] #4 No backend/API contract changes are introduced by this task except the reviewed and scoped `/api/v1/caches/test-credentials` credential-test response hardening required for UI parity.
 - [x] #5 `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` succeeds after implementation.
 - [x] #6 `nix build .#checks.x86_64-linux.web-ui` succeeds and includes Caches-view screenshot/assertion coverage proving intended behavior.
+- [x] #4 No backend/API contract changes are introduced by this task.
+- [x] #5 `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` succeeds after implementation.
+- [ ] #6 `nix build .#checks.x86_64-linux.web-ui` succeeds and includes Caches-view screenshot/assertion coverage proving intended behavior.
 <!-- AC:END -->
+
+
 
 ## Implementation Plan
 
