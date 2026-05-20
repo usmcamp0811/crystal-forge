@@ -321,6 +321,54 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>)
     let mut search_query = use_signal(String::new);
     let mut show_add_modal = use_signal(|| false);
     let mut edit_destination = use_signal(|| None::<CacheDestination>);
+    
+    // Edit form state
+    let mut edit_name = use_signal(String::new);
+    let mut edit_type = use_signal(|| "Nix".to_string());
+    let mut edit_push_to = use_signal(String::new);
+    let mut edit_attic_cache_name = use_signal(String::new);
+    let mut edit_attic_public_key = use_signal(String::new);
+    let mut edit_attic_token = use_signal(String::new);
+    let mut edit_signing_key_path = use_signal(String::new);
+    let mut edit_compression = use_signal(String::new);
+    let mut edit_s3_region = use_signal(String::new);
+    let mut edit_s3_profile = use_signal(String::new);
+    let mut edit_s3_access_key_id = use_signal(String::new);
+    let mut edit_s3_secret_access_key = use_signal(String::new);
+    let mut edit_s3_session_token = use_signal(String::new);
+    let mut edit_s3_endpoint_url = use_signal(String::new);
+    let mut edit_environment_ids = use_signal(|| Vec::<Uuid>::new());
+    let mut edit_error = use_signal(|| None::<String>);
+    let mut edit_field_errors = use_signal(|| std::collections::HashMap::<String, String>::new());
+    let mut edit_submitting = use_signal(|| false);
+    
+    // Pre-populate edit form when destination changes
+    use_effect(move || {
+        if let Some(dest) = edit_destination() {
+            edit_name.set(dest.name.clone());
+            edit_type.set(dest.cache_type.clone());
+            edit_push_to.set(dest.push_to.clone().unwrap_or_default());
+            edit_attic_cache_name.set(dest.attic_cache_name.clone().unwrap_or_default());
+            edit_attic_public_key.set(dest.attic_public_key.clone().unwrap_or_default());
+            edit_signing_key_path.set(dest.signing_key_path.clone().unwrap_or_default());
+            edit_compression.set(dest.compression.clone().unwrap_or_default());
+            edit_s3_region.set(dest.s3_region.clone().unwrap_or_default());
+            edit_s3_profile.set(dest.s3_profile.clone().unwrap_or_default());
+            edit_s3_access_key_id.set(dest.s3_access_key_id.clone().unwrap_or_default());
+            edit_s3_session_token.set(dest.s3_session_token.clone().unwrap_or_default());
+            edit_s3_endpoint_url.set(dest.s3_endpoint_url.clone().unwrap_or_default());
+            edit_error.set(None);
+            edit_field_errors.set(std::collections::HashMap::new());
+            
+            // Load environment assignments
+            let cache_id = dest.id;
+            spawn(async move {
+                if let Ok(env_ids) = client::get_cache_environments(cache_id).await {
+                    edit_environment_ids.set(env_ids);
+                }
+            });
+        }
+    });
     let mut add_name = use_signal(String::new);
     let mut add_type = use_signal(|| "Nix".to_string());
     let mut add_push_to = use_signal(String::new);
@@ -1150,49 +1198,329 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>)
                 }
             }
             
-            // Edit modal (when a destination is selected)
+            // Edit modal (full form)
             if let Some(dest) = edit_destination() {
                 div {
-                    class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4",
+                    class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
+                    tabindex: "0",
                     onclick: move |_| edit_destination.set(None),
+                    onkeydown: move |evt| {
+                        if evt.key() == Key::Escape {
+                            edit_destination.set(None);
+                        }
+                    },
                     div {
-                        class: "relative bg-slate-900 border border-slate-700 rounded-xl shadow-2xl p-6 w-full max-w-4xl",
+                        class: "relative {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl shadow-2xl p-6 w-full cf-modal-panel-44 flex flex-col",
+                        style: "max-height: calc(100dvh - 2rem);",
+                        role: "dialog",
+                        aria_modal: "true",
                         onclick: move |e| e.stop_propagation(),
+
+                        // Header
                         div {
-                            class: "flex justify-between items-center mb-6",
-                            h2 {
-                                class: "text-xl font-semibold text-slate-100",
-                                "Edit {dest.name}"
+                            class: "flex justify-between items-center mb-6 shrink-0",
+                            h3 {
+                                class: "{theme::typography::SECTION_TITLE} {theme::text::PRIMARY}",
+                                "Edit Cache Destination"
                             }
                             button {
-                                class: "text-slate-400 hover:text-slate-100",
+                                r#type: "button",
+                                class: "{theme::text::SECONDARY} hover:{theme::text::PRIMARY} text-lg",
                                 onclick: move |_| edit_destination.set(None),
                                 "✕"
                             }
                         }
-                        p {
-                            class: "text-slate-300 mb-4",
-                            "Edit modal will use the full CacheDestinationCard edit functionality"
-                        }
-                        p {
-                            class: "text-sm text-slate-400",
-                            "Cache ID: {dest.id}, Type: {dest.cache_type}"
-                        }
+
+                        // Scrollable body
                         div {
-                            class: "mt-6 flex gap-3 justify-end",
+                            class: "flex-1 min-h-0 overflow-y-auto space-y-4 pr-1",
+                            
+                            // Name
+                            div {
+                                label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Name *" }
+                                input {
+                                    class: if edit_field_errors().contains_key("name") {
+                                        "w-full rounded-lg border px-3 py-2 text-sm {theme::text::PRIMARY} cf-policy-modal-field-error focus:outline-none"
+                                    } else {
+                                        "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} {theme::text::PRIMARY} focus:outline-none"
+                                    },
+                                    value: edit_name(),
+                                    oninput: move |evt| {
+                                        edit_name.set(evt.value());
+                                        let mut errors = edit_field_errors();
+                                        errors.remove("name");
+                                        edit_field_errors.set(errors);
+                                    },
+                                }
+                                if let Some(err) = edit_field_errors().get("name") {
+                                    p { class: "text-[11px] text-red-300 mt-1", "{err}" }
+                                }
+                            }
+
+                            // Type
+                            div {
+                                label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Type" }
+                                select {
+                                    class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                    value: edit_type(),
+                                    onchange: move |evt| edit_type.set(evt.value()),
+                                    option { value: "Nix", "Nix" }
+                                    option { value: "Http", "Http" }
+                                    option { value: "S3", "S3" }
+                                    option { value: "Attic", "Attic" }
+                                }
+                            }
+
+                            // Push To URL
+                            div {
+                                label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Push To URL" }
+                                input {
+                                    class: if edit_field_errors().contains_key("push_to") {
+                                        "w-full rounded-lg border px-3 py-2 text-sm {theme::text::PRIMARY} cf-policy-modal-field-error focus:outline-none font-mono"
+                                    } else {
+                                        "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} {theme::text::PRIMARY} focus:outline-none font-mono"
+                                    },
+                                    value: edit_push_to(),
+                                    oninput: move |evt| {
+                                        edit_push_to.set(evt.value());
+                                        let mut errors = edit_field_errors();
+                                        errors.remove("push_to");
+                                        edit_field_errors.set(errors);
+                                    },
+                                }
+                                if let Some(err) = edit_field_errors().get("push_to") {
+                                    p { class: "text-[11px] text-red-300 mt-1", "{err}" }
+                                }
+                            }
+
+                            // Type-specific fields
+                            match edit_type().as_str() {
+                                "Attic" => rsx! {
+                                    div {
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Attic Cache Name *" }
+                                        input {
+                                            class: if edit_field_errors().contains_key("attic_cache_name") {
+                                                "w-full rounded-lg border px-3 py-2 text-sm cf-policy-modal-field-error focus:outline-none"
+                                            } else {
+                                                "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} focus:outline-none"
+                                            },
+                                            value: edit_attic_cache_name(),
+                                            oninput: move |evt| {
+                                                edit_attic_cache_name.set(evt.value());
+                                                let mut errors = edit_field_errors();
+                                                errors.remove("attic_cache_name");
+                                                edit_field_errors.set(errors);
+                                            },
+                                        }
+                                        if let Some(err) = edit_field_errors().get("attic_cache_name") {
+                                            p { class: "text-[11px] text-red-300 mt-1", "{err}" }
+                                        }
+                                    }
+                                    div {
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Attic Public Key *" }
+                                        input {
+                                            class: if edit_field_errors().contains_key("attic_public_key") {
+                                                "w-full rounded-lg border px-3 py-2 text-sm cf-policy-modal-field-error focus:outline-none font-mono"
+                                            } else {
+                                                "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} focus:outline-none font-mono"
+                                            },
+                                            value: edit_attic_public_key(),
+                                            oninput: move |evt| {
+                                                edit_attic_public_key.set(evt.value());
+                                                let mut errors = edit_field_errors();
+                                                errors.remove("attic_public_key");
+                                                edit_field_errors.set(errors);
+                                            },
+                                        }
+                                        if let Some(err) = edit_field_errors().get("attic_public_key") {
+                                            p { class: "text-[11px] text-red-300 mt-1", "{err}" }
+                                        }
+                                    }
+                                    div {
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Attic Token (leave empty to keep existing)" }
+                                        input {
+                                            r#type: "password",
+                                            class: "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} focus:outline-none",
+                                            value: edit_attic_token(),
+                                            oninput: move |evt| edit_attic_token.set(evt.value()),
+                                        }
+                                    }
+                                },
+                                "S3" => rsx! {
+                                    div {
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "S3 Region" }
+                                        input {
+                                            class: if edit_field_errors().contains_key("s3_region") {
+                                                "w-full rounded-lg border px-3 py-2 text-sm cf-policy-modal-field-error focus:outline-none"
+                                            } else {
+                                                "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} focus:outline-none"
+                                            },
+                                            value: edit_s3_region(),
+                                            oninput: move |evt| {
+                                                edit_s3_region.set(evt.value());
+                                                let mut errors = edit_field_errors();
+                                                errors.remove("s3_region");
+                                                edit_field_errors.set(errors);
+                                            },
+                                        }
+                                        if let Some(err) = edit_field_errors().get("s3_region") {
+                                            p { class: "text-[11px] text-red-300 mt-1", "{err}" }
+                                        }
+                                    }
+                                    div {
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "S3 Access Key ID" }
+                                        input {
+                                            class: "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} focus:outline-none font-mono",
+                                            value: edit_s3_access_key_id(),
+                                            oninput: move |evt| edit_s3_access_key_id.set(evt.value()),
+                                        }
+                                    }
+                                    div {
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "S3 Secret Access Key (leave empty to keep existing)" }
+                                        input {
+                                            r#type: "password",
+                                            class: "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} focus:outline-none font-mono",
+                                            value: edit_s3_secret_access_key(),
+                                            oninput: move |evt| edit_s3_secret_access_key.set(evt.value()),
+                                        }
+                                    }
+                                    div {
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "S3 Endpoint URL (optional)" }
+                                        input {
+                                            class: "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} focus:outline-none font-mono",
+                                            value: edit_s3_endpoint_url(),
+                                            oninput: move |evt| edit_s3_endpoint_url.set(evt.value()),
+                                        }
+                                    }
+                                },
+                                _ => rsx! {}
+                            }
+
+                            // Environment assignment
+                            if let Some(Ok(envs)) = environments.read().as_ref() {
+                                div {
+                                    label { class: "block text-sm {theme::text::SECONDARY} mb-2", "Assigned Environments" }
+                                    div {
+                                        class: "flex flex-wrap gap-2",
+                                        for env in envs {
+                                            {
+                                                let env_id = env.id;
+                                                let env_name = env.name.clone();
+                                                let is_selected = edit_environment_ids().contains(&env_id);
+                                                rsx! {
+                                                    button {
+                                                        r#type: "button",
+                                                        class: if is_selected {
+                                                            "px-3 py-1 text-xs rounded-lg border-2 border-blue-500 bg-blue-500/20 text-blue-300"
+                                                        } else {
+                                                            "px-3 py-1 text-xs rounded-lg border border-slate-600 bg-slate-800 {theme::text::SECONDARY} hover:border-slate-500"
+                                                        },
+                                                        onclick: move |_| {
+                                                            let mut ids = edit_environment_ids();
+                                                            if is_selected {
+                                                                ids.retain(|&id| id != env_id);
+                                                            } else {
+                                                                ids.push(env_id);
+                                                            }
+                                                            edit_environment_ids.set(ids);
+                                                        },
+                                                        "{env_name}"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Error display
+                            if let Some(err) = edit_error() {
+                                div {
+                                    class: "p-3 rounded-lg bg-red-500/10 border border-red-500/30",
+                                    p { class: "text-sm text-red-300", "{err}" }
+                                }
+                            }
+                        }
+
+                        // Footer buttons
+                        div {
+                            class: "flex gap-3 justify-end mt-6 pt-4 border-t {theme::surface::DIVIDER} shrink-0",
                             button {
-                                class: "btn btn-ghost focus-ring",
+                                r#type: "button",
+                                class: "px-4 py-2 rounded-lg text-sm font-medium {theme::interactive::GHOST_BTN}",
                                 onclick: move |_| edit_destination.set(None),
                                 "Cancel"
                             }
                             button {
-                                class: "btn btn-primary focus-ring",
+                                r#type: "button",
+                                class: "px-4 py-2 rounded-lg text-sm font-medium {theme::interactive::PRIMARY_BTN}",
+                                disabled: edit_submitting(),
                                 onclick: move |_| {
-                                    // TODO: Save changes
-                                    edit_destination.set(None);
-                                    refresh_nonce.set(refresh_nonce() + 1);
+                                    edit_submitting.set(true);
+                                    edit_error.set(None);
+                                    edit_field_errors.set(std::collections::HashMap::new());
+
+                                    let cache_id = dest.id;
+                                    let validation_input = CacheFormValidationInput {
+                                        name: edit_name(),
+                                        cache_type: edit_type(),
+                                        push_to: edit_push_to(),
+                                        attic_cache_name: edit_attic_cache_name(),
+                                        attic_public_key: edit_attic_public_key(),
+                                        attic_token: edit_attic_token(),
+                                        s3_region: edit_s3_region(),
+                                        s3_access_key_id: edit_s3_access_key_id(),
+                                        s3_secret_access_key: edit_s3_secret_access_key(),
+                                        s3_endpoint_url: edit_s3_endpoint_url(),
+                                        require_attic_token: false,
+                                        require_s3_secret_access_key: false,
+                                    };
+
+                                    let errors = validate_cache_destination_form(&validation_input);
+                                    if !errors.is_empty() {
+                                        edit_field_errors.set(errors);
+                                        edit_submitting.set(false);
+                                        return;
+                                    }
+
+                                    spawn(async move {
+                                        let req = UpdateCacheDestination {
+                                            name: Some(edit_name()),
+                                            cache_type: Some(edit_type()),
+                                            push_to: Some(edit_push_to()),
+                                            enabled: None,
+                                            signing_key_path: if edit_signing_key_path().is_empty() { None } else { Some(edit_signing_key_path()) },
+                                            compression: if edit_compression().is_empty() { None } else { Some(edit_compression()) },
+                                            s3_region: if edit_s3_region().is_empty() { None } else { Some(edit_s3_region()) },
+                                            s3_profile: if edit_s3_profile().is_empty() { None } else { Some(edit_s3_profile()) },
+                                            s3_access_key_id: if edit_s3_access_key_id().is_empty() { None } else { Some(edit_s3_access_key_id()) },
+                                            s3_secret_access_key: if edit_s3_secret_access_key().is_empty() { None } else { Some(edit_s3_secret_access_key()) },
+                                            s3_session_token: if edit_s3_session_token().is_empty() { None } else { Some(edit_s3_session_token()) },
+                                            s3_endpoint_url: if edit_s3_endpoint_url().is_empty() { None } else { Some(edit_s3_endpoint_url()) },
+                                            attic_token: if edit_attic_token().is_empty() { None } else { Some(edit_attic_token()) },
+                                            attic_cache_name: if edit_attic_cache_name().is_empty() { None } else { Some(edit_attic_cache_name()) },
+                                            attic_public_key: if edit_attic_public_key().is_empty() { None } else { Some(edit_attic_public_key()) },
+                                            ..Default::default()
+                                        };
+
+                                        match client::update_cache_destination(cache_id, &req).await {
+                                            Ok(_) => {
+                                                // Update environment assignments
+                                                if let Err(e) = client::assign_cache_environments(cache_id, edit_environment_ids()).await {
+                                                    edit_error.set(Some(format!("Cache updated but environment assignment failed: {e}")));
+                                                } else {
+                                                    edit_destination.set(None);
+                                                    refresh_nonce.set(refresh_nonce() + 1);
+                                                }
+                                            }
+                                            Err(e) => {
+                                                edit_error.set(Some(format!("Failed to update destination: {e}")));
+                                            }
+                                        }
+                                        edit_submitting.set(false);
+                                    });
                                 },
-                                "Save changes"
+                                if edit_submitting() { "Saving..." } else { "Save Changes" }
                             }
                         }
                     }
