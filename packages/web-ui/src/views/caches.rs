@@ -189,6 +189,7 @@ enum CachesTab {
 pub fn CachesView() -> Element {
     let mut active_tab = use_signal(|| CachesTab::Destinations);
     let from_setup = use_signal(came_from_setup);
+    let mut show_add_modal = use_signal(|| false);
     
     // Load destinations for stats display
     let mut refresh_nonce = use_signal(|| 0_u32);
@@ -223,11 +224,33 @@ pub fn CachesView() -> Element {
                             Some(Ok(dests)) => {
                                 let total = dests.len();
                                 let healthy = dests.iter().filter(|d| d.enabled).count();
-                                rsx! { "{total} destinations · {healthy} healthy" }
+                                // TODO: Get actual paths count from API when available
+                                let paths = 0;
+                                rsx! { "{total} destinations · {healthy} healthy · {paths} paths cached" }
                             },
                             _ => rsx! { "Loading…" }
                         }
                     }
+                }
+                // + Add cache button (mockup lines 30-32)
+                button {
+                    class: "btn btn-primary focus-ring",
+                    onclick: move |_| {
+                        active_tab.set(CachesTab::Destinations);
+                        show_add_modal.set(true);
+                    },
+                    svg {
+                        width: "14",
+                        height: "14",
+                        view_box: "0 0 24 24",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        style: "display:inline-block; vertical-align:text-bottom; margin-right:4px;",
+                        line { x1: "12", y1: "5", x2: "12", y2: "19" }
+                        line { x1: "5", y1: "12", x2: "19", y2: "12" }
+                    }
+                    " Add cache"
                 }
             }
 
@@ -239,6 +262,8 @@ pub fn CachesView() -> Element {
                         let total = dests.len();
                         let healthy = dests.iter().filter(|d| d.enabled).count();
                         let issues = total - healthy;
+                        // TODO: Get actual paths count from API when available
+                        let paths = 0;
                         rsx! {
                             div {
                                 class: "stat",
@@ -257,6 +282,12 @@ pub fn CachesView() -> Element {
                                 span { class: "stat-accent", style: "--stat-color: #fbbf24;" }
                                 div { class: "stat-label", "Issues" }
                                 div { class: "stat-value", "{issues}" }
+                            }
+                            div {
+                                class: "stat",
+                                span { class: "stat-accent", style: "--stat-color: #60a5fa;" }
+                                div { class: "stat-label", "Paths cached" }
+                                div { class: "stat-value", "{paths}" }
                             }
                         }
                     },
@@ -300,6 +331,7 @@ pub fn CachesView() -> Element {
                     CacheDestinationsList {
                         show_onboarding_hint: from_setup(),
                         refresh_nonce: refresh_nonce,
+                        show_add_modal: show_add_modal,
                     }
                 },
                 CachesTab::PushJobs => rsx! {
@@ -312,14 +344,13 @@ pub fn CachesView() -> Element {
 
 /// List of cache destinations with CRUD operations
 #[component]
-fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>) -> Element {
+fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>, mut show_add_modal: Signal<bool>) -> Element {
     let destinations = use_resource(move || {
         let _nonce = refresh_nonce();
         async move { client::fetch_cache_destinations(false).await }
     });
 
     let mut search_query = use_signal(String::new);
-    let mut show_add_modal = use_signal(|| false);
     let mut edit_destination = use_signal(|| None::<CacheDestination>);
     
     // Edit form state - simplified to match mockup
