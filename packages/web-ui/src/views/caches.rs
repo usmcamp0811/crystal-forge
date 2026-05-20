@@ -189,6 +189,13 @@ enum CachesTab {
 pub fn CachesView() -> Element {
     let mut active_tab = use_signal(|| CachesTab::Destinations);
     let from_setup = use_signal(came_from_setup);
+    
+    // Load destinations for stats display
+    let mut refresh_nonce = use_signal(|| 0_u32);
+    let destinations = use_resource(move || {
+        let _nonce = refresh_nonce();
+        async move { client::fetch_cache_destinations(false).await }
+    });
 
     rsx! {
         div {
@@ -204,37 +211,86 @@ pub fn CachesView() -> Element {
                 }
             }
 
-            header {
-                class: "flex flex-col gap-4",
+            // Page header matching mockup (JSX lines 23-33)
+            div {
+                class: "page-head",
                 div {
-                    h1 { class: "{theme::typography::PAGE_TITLE} {theme::text::PRIMARY}", "Cache Management" }
+                    h1 { class: "page-title", "Caches" }
                     p {
-                        class: "text-sm {theme::text::SECONDARY}",
-                        "Configure binary cache destinations and monitor artifact push jobs."
+                        class: "page-subtitle",
+                        // Show totals: X destinations · Y healthy · Z paths cached
+                        match &*destinations.peek() {
+                            Some(Ok(dests)) => {
+                                let total = dests.len();
+                                let healthy = dests.iter().filter(|d| d.enabled).count();
+                                rsx! { "{total} destinations · {healthy} healthy" }
+                            },
+                            _ => rsx! { "Loading…" }
+                        }
                     }
                 }
+            }
 
-                // Tabs
-                div {
-                    class: "flex border-b {theme::surface::DIVIDER}",
-                    button {
-                        class: if active_tab() == CachesTab::Destinations {
-                            "px-4 py-2 border-b-2 border-blue-500 text-blue-400 font-medium"
-                        } else {
-                            "px-4 py-2 border-b-2 border-transparent {theme::text::SECONDARY} hover:{theme::text::PRIMARY} transition-colors"
-                        },
-                        onclick: move |_| active_tab.set(CachesTab::Destinations),
-                        "Cache Destinations"
+            // Stat strip matching mockup (JSX lines 35-48)
+            div {
+                class: "stat-strip",
+                match &*destinations.peek() {
+                    Some(Ok(dests)) => {
+                        let total = dests.len();
+                        let healthy = dests.iter().filter(|d| d.enabled).count();
+                        let issues = total - healthy;
+                        rsx! {
+                            div {
+                                class: "stat",
+                                span { class: "stat-accent", style: "--stat-color: #a78bfa;" }
+                                div { class: "stat-label", "Total caches" }
+                                div { class: "stat-value", "{total}" }
+                            }
+                            div {
+                                class: "stat",
+                                span { class: "stat-accent", style: "--stat-color: #34d399;" }
+                                div { class: "stat-label", "Healthy" }
+                                div { class: "stat-value", "{healthy}" }
+                            }
+                            div {
+                                class: "stat",
+                                span { class: "stat-accent", style: "--stat-color: #fbbf24;" }
+                                div { class: "stat-label", "Issues" }
+                                div { class: "stat-value", "{issues}" }
+                            }
+                        }
+                    },
+                    _ => rsx! {
+                        div {
+                            class: "stat",
+                            span { class: "stat-accent", style: "--stat-color: #a78bfa;" }
+                            div { class: "stat-label", "Total caches" }
+                            div { class: "stat-value", "—" }
+                        }
                     }
-                    button {
-                        class: if active_tab() == CachesTab::PushJobs {
-                            "px-4 py-2 border-b-2 border-blue-500 text-blue-400 font-medium"
-                        } else {
-                            "px-4 py-2 border-b-2 border-transparent {theme::text::SECONDARY} hover:{theme::text::PRIMARY} transition-colors"
-                        },
-                        onclick: move |_| active_tab.set(CachesTab::PushJobs),
-                        "Push Jobs"
-                    }
+                }
+            }
+
+            // Tabs
+            div {
+                class: "flex border-b {theme::surface::DIVIDER}",
+                button {
+                    class: if active_tab() == CachesTab::Destinations {
+                        "px-4 py-2 border-b-2 border-blue-500 text-blue-400 font-medium"
+                    } else {
+                        "px-4 py-2 border-b-2 border-transparent {theme::text::SECONDARY} hover:{theme::text::PRIMARY} transition-colors"
+                    },
+                    onclick: move |_| active_tab.set(CachesTab::Destinations),
+                    "Cache Destinations"
+                }
+                button {
+                    class: if active_tab() == CachesTab::PushJobs {
+                        "px-4 py-2 border-b-2 border-blue-500 text-blue-400 font-medium"
+                    } else {
+                        "px-4 py-2 border-b-2 border-transparent {theme::text::SECONDARY} hover:{theme::text::PRIMARY} transition-colors"
+                    },
+                    onclick: move |_| active_tab.set(CachesTab::PushJobs),
+                    "Push Jobs"
                 }
             }
 
@@ -243,6 +299,7 @@ pub fn CachesView() -> Element {
                 CachesTab::Destinations => rsx! {
                     CacheDestinationsList {
                         show_onboarding_hint: from_setup(),
+                        refresh_nonce: refresh_nonce,
                     }
                 },
                 CachesTab::PushJobs => rsx! {
@@ -255,8 +312,7 @@ pub fn CachesView() -> Element {
 
 /// List of cache destinations with CRUD operations
 #[component]
-fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
-    let mut refresh_nonce = use_signal(|| 0_u32);
+fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>) -> Element {
     let destinations = use_resource(move || {
         let _nonce = refresh_nonce();
         async move { client::fetch_cache_destinations(false).await }
