@@ -353,40 +353,50 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
     let mut search_query = use_signal(String::new);
     let mut edit_destination = use_signal(|| None::<CacheDestination>);
     
-    // Edit form state - simplified to match mockup
-    let mut edit_name = use_signal(String::new);
-    let mut edit_type = use_signal(|| "s3".to_string());
-    let mut edit_url = use_signal(String::new);
-    let mut edit_requires_auth = use_signal(|| true);
-    let mut edit_cred_id = use_signal(String::new);
-    let mut edit_environment_ids = use_signal(|| Vec::<Uuid>::new());
-    let mut edit_testing = use_signal(|| None::<String>);
-    let mut edit_show_cred_modal = use_signal(|| false);
+    // Unified form state for both add and edit (simplified to match mockup)
+    let mut form_name = use_signal(String::new);
+    let mut form_type = use_signal(|| "s3".to_string());
+    let mut form_url = use_signal(String::new);
+    let mut form_requires_auth = use_signal(|| true);
+    let mut form_cred_id = use_signal(String::new);
+    let mut form_environment_ids = use_signal(|| Vec::<Uuid>::new());
+    let mut form_testing = use_signal(|| None::<String>);
+    let mut form_show_cred_modal = use_signal(|| false);
     
-    // Pre-populate edit form when destination changes
+    // Pre-populate form when switching between add/edit
     use_effect(move || {
         if let Some(dest) = edit_destination() {
-            edit_name.set(dest.name.clone());
-            edit_type.set(dest.cache_type.to_lowercase());
-            edit_url.set(dest.push_to.clone().unwrap_or_default());
+            // Edit mode - populate from existing cache
+            form_name.set(dest.name.clone());
+            form_type.set(dest.cache_type.to_lowercase());
+            form_url.set(dest.push_to.clone().unwrap_or_default());
             // Infer requires auth from presence of credentials
             let has_auth = dest.s3_secret_access_key.is_some() || dest.s3_access_key_id.is_some() || dest.attic_token.is_some();
-            edit_requires_auth.set(has_auth);
+            form_requires_auth.set(has_auth);
             // Mock credential ID (in real app this would come from credential management)
             if has_auth {
-                edit_cred_id.set("existing-credential".to_string());
+                form_cred_id.set("existing-credential".to_string());
             } else {
-                edit_cred_id.set(String::new());
+                form_cred_id.set(String::new());
             }
-            edit_testing.set(None);
+            form_testing.set(None);
             
             // Load environment assignments
             let cache_id = dest.id;
             spawn(async move {
                 if let Ok(env_ids) = client::get_cache_environments(cache_id).await {
-                    edit_environment_ids.set(env_ids);
+                    form_environment_ids.set(env_ids);
                 }
             });
+        } else if show_add_modal() {
+            // Add mode - reset to defaults
+            form_name.set(String::new());
+            form_type.set("s3".to_string());
+            form_url.set(String::new());
+            form_requires_auth.set(true);
+            form_cred_id.set(String::new());
+            form_environment_ids.set(Vec::new());
+            form_testing.set(None);
         }
     });
     let mut add_name = use_signal(String::new);
@@ -552,7 +562,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
             }
 
             // Add modal
-            if show_add_modal() {
+            if false && show_add_modal() {
                 div {
                     class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
                     tabindex: "0",
@@ -1218,6 +1228,129 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                 }
             }
             
+            // Add modal - matching JSX mockup CacheFormModal (add mode)
+            if show_add_modal() {
+                div {
+                    class: "modal-backdrop",
+                    onclick: move |_| show_add_modal.set(false),
+                    div {
+                        class: "modal",
+                        onclick: move |e| e.stop_propagation(),
+                        style: "width:min(620px,96vw); max-height:92vh;",
+                        div {
+                            class: "modal-head",
+                            h2 {
+                                svg {
+                                    width: "14", height: "14", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2",
+                                    style: "margin-right:6px; vertical-align:text-bottom; display:inline-block;",
+                                    line { x1: "12", y1: "5", x2: "12", y2: "19" }
+                                    line { x1: "5", y1: "12", x2: "19", y2: "12" }
+                                }
+                                "Add cache destination"
+                            }
+                            p { "Register a new binary cache destination." }
+                        }
+                        div {
+                            class: "modal-body",
+                            style: "overflow-y:auto;",
+                            div { class: "field", label { "Name" }
+                                input { class: "input focus-ring", value: form_name(), oninput: move |evt| form_name.set(evt.value()), placeholder: "e.g. crystal-forge-prod-cache" }
+                            }
+                            div { class: "field", label { "Type" }
+                                div { class: "seg",
+                                    for (val, label) in [("s3", "S3-compatible"), ("attic", "Attic"), ("nix", "Nix HTTPS")] {
+                                        button { class: if form_type() == val { "active" } else { "" }, onclick: move |_| form_type.set(val.to_string()), "{label}" }
+                                    }
+                                }
+                            }
+                            div { class: "field", label { "URL" }
+                                input {
+                                    class: "input focus-ring mono", style: "font-size:12px;", value: form_url(), oninput: move |evt| form_url.set(evt.value()),
+                                    placeholder: match form_type().as_str() { "s3" => "s3://bucket?region=us-east-1", "attic" => "attic://host/cache", _ => "https://cache.nixos.org" }
+                                }
+                            }
+                            label {
+                                style: "display:flex; gap:8px; align-items:center; font-size:13px; cursor:pointer;",
+                                input { r#type: "checkbox", checked: form_requires_auth(), onchange: move |evt| form_requires_auth.set(evt.checked()), style: "accent-color:var(--cf-brand-purple);" }
+                                span { "Requires authentication" }
+                            }
+                            if form_requires_auth() {
+                                div { class: "field", label { "Credential" }
+                                    div { style: "display:flex; gap:8px;",
+                                        select {
+                                            class: "input focus-ring", style: "flex:1;", value: form_cred_id(),
+                                            onchange: move |evt| { let v = evt.value(); if v == "__new__" { form_show_cred_modal.set(true); } else { form_cred_id.set(v); } },
+                                            option { value: "", "Select a credential…" }
+                                            option { value: "aws-prod-role", "aws-prod-role (IAM role)" }
+                                            option { value: "aws-staging-role", "aws-staging-role (IAM role)" }
+                                            option { value: "attic-token-dev", "attic-token-dev (Attic token)" }
+                                            option { value: "__new__", "+ Add new credential…" }
+                                        }
+                                        button {
+                                            class: "btn btn-ghost focus-ring xs", disabled: form_cred_id().is_empty(),
+                                            onclick: move |_| {
+                                                form_testing.set(Some("running".to_string()));
+                                                spawn(async move { gloo_timers::future::TimeoutFuture::new(700).await; form_testing.set(Some("ok".to_string())); });
+                                            },
+                                            match form_testing().as_deref() { Some("running") => "Testing…", Some("ok") => "✓ Connected", Some("fail") => "✗ Failed", _ => "Test" }
+                                        }
+                                    }
+                                }
+                            }
+                            div { class: "field", label { "Assigned environments" }
+                                if let Some(Ok(envs)) = environments.read().as_ref() {
+                                    div { style: "display:flex; flex-wrap:wrap; gap:6px;",
+                                        for env in envs {
+                                            {
+                                                let env_id = env.id;
+                                                let env_name = env.name.clone();
+                                                let is_selected = form_environment_ids().contains(&env_id);
+                                                let color = match env_name.to_lowercase().as_str() { "production" => "#f43f5e", "staging" => "#f59e0b", "dev" | "development" => "#3b82f6", "edge" => "#8b5cf6", _ => "#6b7280" };
+                                                rsx! {
+                                                    button {
+                                                        class: "focus-ring",
+                                                        onclick: move |_| { let mut ids = form_environment_ids(); if is_selected { ids.retain(|&id| id != env_id); } else { ids.push(env_id); } form_environment_ids.set(ids); },
+                                                        style: if is_selected { format!("padding: 4px 10px; border-radius: 99px; font-size: 11px; border: 1px solid {}; background: color-mix(in oklab, {} 14%, var(--cf-card-bg)); color: {}; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; font-family: inherit;", color, color, color) } else { "padding: 4px 10px; border-radius: 99px; font-size: 11px; border: 1px solid var(--cf-card-border); background: transparent; color: var(--cf-text-secondary); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; font-family: inherit;".to_string() },
+                                                        span { style: "width:6px; height:6px; border-radius:50%; background:{color};" }
+                                                        "{env_name}"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    div { class: "help", "Crystal Forge will push builds for systems in these environments to this cache." }
+                                }
+                            }
+                        }
+                        div {
+                            class: "modal-foot",
+                            button { class: "btn btn-ghost focus-ring", onclick: move |_| show_add_modal.set(false), "Cancel" }
+                            button {
+                                class: "btn btn-primary focus-ring",
+                                onclick: move |_| {
+                                    let req = CreateCacheDestination {
+                                        name: form_name(),
+                                        cache_type: form_type(),
+                                        push_to: if form_url().trim().is_empty() { None } else { Some(form_url()) },
+                                        enabled: Some(true),
+                                        environment_ids: if form_environment_ids().is_empty() { None } else { Some(form_environment_ids()) },
+                                        ..Default::default()
+                                    };
+                                    spawn(async move {
+                                        if client::create_cache_destination(&req).await.is_ok() {
+                                            show_add_modal.set(false);
+                                            refresh_nonce.set(refresh_nonce() + 1);
+                                        }
+                                    });
+                                },
+                                svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", style: "display:inline-block; vertical-align:text-bottom;", polyline { points: "20 6 9 17 4 12" } }
+                                " Add cache"
+                            }
+                        }
+                    }
+                }
+            }
+
             // Edit modal - matching JSX mockup (lines 155-284)
             if let Some(dest) = edit_destination() {
                 div {
@@ -1260,8 +1393,8 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                 label { "Name" }
                                 input {
                                     class: "input focus-ring",
-                                    value: edit_name(),
-                                    oninput: move |evt| edit_name.set(evt.value()),
+                                    value: form_name(),
+                                    oninput: move |evt| form_name.set(evt.value()),
                                     placeholder: "e.g. crystal-forge-prod-cache"
                                 }
                             }
@@ -1274,8 +1407,8 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                     class: "seg",
                                     for (val, label) in [("s3", "S3-compatible"), ("attic", "Attic"), ("nix", "Nix HTTPS")] {
                                         button {
-                                            class: if edit_type() == val { "active" } else { "" },
-                                            onclick: move |_| edit_type.set(val.to_string()),
+                                            class: if form_type() == val { "active" } else { "" },
+                                            onclick: move |_| form_type.set(val.to_string()),
                                             "{label}"
                                         }
                                     }
@@ -1289,9 +1422,9 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                 input {
                                     class: "input focus-ring mono",
                                     style: "font-size:12px;",
-                                    value: edit_url(),
-                                    oninput: move |evt| edit_url.set(evt.value()),
-                                    placeholder: match edit_type().as_str() {
+                                    value: form_url(),
+                                    oninput: move |evt| form_url.set(evt.value()),
+                                    placeholder: match form_type().as_str() {
                                         "s3" => "s3://bucket?region=us-east-1",
                                         "attic" => "attic://host/cache",
                                         _ => "https://cache.nixos.org"
@@ -1304,15 +1437,15 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                 style: "display:flex; gap:8px; align-items:center; font-size:13px; cursor:pointer;",
                                 input {
                                     r#type: "checkbox",
-                                    checked: edit_requires_auth(),
-                                    onchange: move |evt| edit_requires_auth.set(evt.checked()),
+                                    checked: form_requires_auth(),
+                                    onchange: move |evt| form_requires_auth.set(evt.checked()),
                                     style: "accent-color:var(--cf-brand-purple);"
                                 }
                                 span { "Requires authentication" }
                             }
                             
                             // Credential dropdown (if auth required)
-                            if edit_requires_auth() {
+                            if form_requires_auth() {
                                 div {
                                     class: "field",
                                     label { "Credential" }
@@ -1321,13 +1454,13 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                         select {
                                             class: "input focus-ring",
                                             style: "flex:1;",
-                                            value: edit_cred_id(),
+                                            value: form_cred_id(),
                                             onchange: move |evt| {
                                                 let val = evt.value();
                                                 if val == "__new__" {
-                                                    edit_show_cred_modal.set(true);
+                                                    form_show_cred_modal.set(true);
                                                 } else {
-                                                    edit_cred_id.set(val);
+                                                    form_cred_id.set(val);
                                                 }
                                             },
                                             option { value: "", "Select a credential…" }
@@ -1338,15 +1471,15 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                         }
                                         button {
                                             class: "btn btn-ghost focus-ring xs",
-                                            disabled: edit_cred_id().is_empty(),
+                                            disabled: form_cred_id().is_empty(),
                                             onclick: move |_| {
-                                                edit_testing.set(Some("running".to_string()));
+                                                form_testing.set(Some("running".to_string()));
                                                 spawn(async move {
                                                     gloo_timers::future::TimeoutFuture::new(700).await;
-                                                    edit_testing.set(Some("ok".to_string()));
+                                                    form_testing.set(Some("ok".to_string()));
                                                 });
                                             },
-                                            match edit_testing().as_deref() {
+                                            match form_testing().as_deref() {
                                                 Some("running") => "Testing…",
                                                 Some("ok") => "✓ Connected",
                                                 Some("fail") => "✗ Failed",
@@ -1368,7 +1501,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                             {
                                                 let env_id = env.id;
                                                 let env_name = env.name.clone();
-                                                let is_selected = edit_environment_ids().contains(&env_id);
+                                                let is_selected = form_environment_ids().contains(&env_id);
                                                 // Environment color
                                                 let color = match env_name.to_lowercase().as_str() {
                                                     "production" => "#f43f5e",
@@ -1382,13 +1515,13 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                                     button {
                                                         class: "focus-ring",
                                                         onclick: move |_| {
-                                                            let mut ids = edit_environment_ids();
+                                                            let mut ids = form_environment_ids();
                                                             if is_selected {
                                                                 ids.retain(|&id| id != env_id);
                                                             } else {
                                                                 ids.push(env_id);
                                                             }
-                                                            edit_environment_ids.set(ids);
+                                                            form_environment_ids.set(ids);
                                                         },
                                                         style: if is_selected {
                                                             format!("padding: 4px 10px; border-radius: 99px; font-size: 11px; border: 1px solid {}; background: color-mix(in oklab, {} 14%, var(--cf-card-bg)); color: {}; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; font-family: inherit;", color, color, color)
@@ -1427,16 +1560,16 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                     spawn(async move {
                                         // Update basic cache fields
                                         let req = UpdateCacheDestination {
-                                            name: Some(edit_name()),
-                                            cache_type: Some(edit_type()),
-                                            push_to: Some(edit_url()),
+                                            name: Some(form_name()),
+                                            cache_type: Some(form_type()),
+                                            push_to: Some(form_url()),
                                             ..Default::default()
                                         };
                                         
                                         match client::update_cache_destination(cache_id, &req).await {
                                             Ok(_) => {
                                                 // Update environment assignments
-                                                let _ = client::assign_cache_environments(cache_id, edit_environment_ids()).await;
+                                                let _ = client::assign_cache_environments(cache_id, form_environment_ids()).await;
                                                 edit_destination.set(None);
                                                 refresh_nonce.set(refresh_nonce() + 1);
                                             }
@@ -1464,13 +1597,13 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                     }
                     
                     // Nested credential modal (mockup lines 273-283, 286-359)
-                    if edit_show_cred_modal() {
+                    if form_show_cred_modal() {
                         CacheCredModal {
-                            cache_type: edit_type(),
+                            cache_type: form_type(),
                             on_close: move |new_cred_id: Option<String>| {
-                                edit_show_cred_modal.set(false);
+                                form_show_cred_modal.set(false);
                                 if let Some(cred_id) = new_cred_id {
-                                    edit_cred_id.set(cred_id);
+                                    form_cred_id.set(cred_id);
                                 }
                             }
                         }
