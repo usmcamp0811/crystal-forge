@@ -783,7 +783,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                                 let env_id = env.id;
                                                 let env_name = env.name.clone();
                                                 let is_selected = form_environment_ids().contains(&env_id);
-                                                let color = match env_name.to_lowercase().as_str() { "production" => "#f43f5e", "staging" => "#f59e0b", "dev" | "development" => "#3b82f6", "edge" => "#8b5cf6", _ => "#6b7280" };
+                                                let color = normalize_env_color(&env.color_hex);
                                                 rsx! {
                                                     button {
                                                         class: "focus-ring",
@@ -1057,14 +1057,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                                 let env_id = env.id;
                                                 let env_name = env.name.clone();
                                                 let is_selected = form_environment_ids().contains(&env_id);
-                                                // Environment color
-                                                let color = match env_name.to_lowercase().as_str() {
-                                                    "production" => "#f43f5e",
-                                                    "staging" => "#f59e0b",
-                                                    "dev" | "development" => "#3b82f6",
-                                                    "edge" => "#8b5cf6",
-                                                    _ => "#6b7280",
-                                                };
+                                                let color = normalize_env_color(&env.color_hex);
                                                 
                                                 rsx! {
                                                     button {
@@ -1583,7 +1576,7 @@ fn CacheDestinationRow(destination: CacheDestination, on_edit: EventHandler<Cach
                             
                             rsx! {
                                 for env in matching_envs {
-                                    EnvBadge { env_name: env.name.clone() }
+                                    EnvBadge { env_name: env.name.clone(), color_hex: env.color_hex.clone() }
                                 }
                                 if ids.len() > 3 {
                                     span {
@@ -1639,14 +1632,8 @@ fn CacheDestinationRow(destination: CacheDestination, on_edit: EventHandler<Cach
 
 /// Environment badge component
 #[component]
-fn EnvBadge(env_name: String) -> Element {
-    let color = match env_name.to_lowercase().as_str() {
-        "production" => "#f43f5e",
-        "staging" => "#f59e0b",
-        "dev" | "development" => "#3b82f6",
-        "edge" => "#8b5cf6",
-        _ => "#6b7280",
-    };
+fn EnvBadge(env_name: String, color_hex: String) -> Element {
+    let color = normalize_env_color(&color_hex);
     
     rsx! {
         span {
@@ -2171,14 +2158,16 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                             for env in envs {
                                                 {
                                                     let env_id = env.id;
+                                                    let env_name = env.name.clone();
+                                                    let color = normalize_env_color(&env.color_hex);
                                                     let is_selected = edit_selected_environments().contains(&env_id);
                                                     rsx! {
                                                         button {
                                                             r#type: "button",
-                                                            class: if is_selected {
-                                                                "px-2 py-1 text-xs rounded border cf-chip-blue {theme::text::PRIMARY}"
+                                                            style: if is_selected {
+                                                                format!("padding: 3px 7px; border-radius: 999px; font-size: 10px; border: 1px solid {}; background: color-mix(in oklab, {} 14%, var(--cf-card-bg)); color: {}; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; font-family: inherit; font-weight: 400;", color, color, color)
                                                             } else {
-                                                                "px-2 py-1 text-xs rounded border {theme::surface::CARD_BORDER} {theme::text::MUTED} hover:{theme::text::SECONDARY}"
+                                                                "padding: 3px 7px; border-radius: 999px; font-size: 10px; border: 1px solid var(--cf-card-border); background: transparent; color: var(--cf-text-secondary); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; font-family: inherit; font-weight: 400;".to_string()
                                                             },
                                                             onclick: move |_| {
                                                                 let mut selected = edit_selected_environments();
@@ -2189,7 +2178,8 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                                                 }
                                                                 edit_selected_environments.set(selected);
                                                             },
-                                                            "{env.name}"
+                                                            span { style: "width:6px; height:6px; border-radius:50%; background:{color};" }
+                                                            "{env_name}"
                                                         }
                                                     }
                                                 }
@@ -2382,6 +2372,15 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                 }
             }
         }
+    }
+}
+
+fn normalize_env_color(color_hex: &str) -> &str {
+    let trimmed = color_hex.trim();
+    if trimmed.is_empty() {
+        "#6b7280"
+    } else {
+        trimmed
     }
 }
 
