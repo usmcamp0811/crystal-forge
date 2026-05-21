@@ -539,15 +539,14 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                 },
             }
 
-            if false && show_add_modal() {
-                // Legacy add modal retired. Keep block disabled to avoid accidental drift.
-            }
-            
             // Add modal - matching JSX mockup CacheFormModal (add mode)
             if show_add_modal() {
                 div {
                     class: "modal-backdrop",
-                    onclick: move |_| show_add_modal.set(false),
+                    onclick: move |_| {
+                        form_show_cred_modal.set(false);
+                        show_add_modal.set(false)
+                    },
                     div {
                         class: "modal",
                         onclick: move |e| e.stop_propagation(),
@@ -643,7 +642,14 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                         }
                         div {
                             class: "modal-foot",
-                            button { class: "btn btn-ghost focus-ring", onclick: move |_| show_add_modal.set(false), "Cancel" }
+                            button {
+                                class: "btn btn-ghost focus-ring",
+                                onclick: move |_| {
+                                    form_show_cred_modal.set(false);
+                                    show_add_modal.set(false)
+                                },
+                                "Cancel"
+                            }
                             button {
                                 class: "btn btn-primary focus-ring",
                                 onclick: move |_| {
@@ -657,6 +663,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                     };
                                     spawn(async move {
                                         if client::create_cache_destination(&req).await.is_ok() {
+                                            form_show_cred_modal.set(false);
                                             show_add_modal.set(false);
                                             refresh_nonce.set(refresh_nonce() + 1);
                                         }
