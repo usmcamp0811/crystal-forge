@@ -47,9 +47,12 @@ fn normalize_test_url(cache_type: &str, push_to: Option<&str>, s3_endpoint_url: 
 }
 
 async fn run_cache_destination_test(create: &CreateCacheDestination) -> Result<(), String> {
-    create
-        .validate()
-        .map_err(|e| format!("Validation failed: {e}"))?;
+    let cache_type = create.cache_type.trim();
+    if !matches!(cache_type, "S3" | "Attic" | "Http" | "Nix" | "s3" | "attic" | "http" | "nix") {
+        return Err(format!(
+            "Validation failed: Invalid cache_type: {cache_type}. Must be one of: S3, Attic, Http, Nix"
+        ));
+    }
 
     let Some(test_url) = normalize_test_url(
         &create.cache_type,
