@@ -4,7 +4,7 @@ title: Refactor Caches view UI/UX to match latest design mockup
 status: In Progress
 assignee: []
 created_date: '2026-05-19 13:21'
-updated_date: '2026-05-20 19:01'
+updated_date: '2026-05-21 03:12'
 labels:
   - ui
   - ux
@@ -358,4 +358,23 @@ Successfully completed with screenshots generated:
 ✅ 6 web-ui check succeeds (ci_fast profile)
 
 Task COMPLETE. Ready for merge after MR review.
+
+## Critical Issue Found - Add Modal Mismatch (2026-05-20 19:45)
+
+The add modal does NOT match the mockup structure. 
+
+**Current state:**
+- Edit modal: Uses simplified structure (Name, Type, URL, Auth checkbox, Credential dropdown, Environments) ✓
+- Add modal: Uses OLD detailed implementation (~667 lines with all S3/Attic fields) ✗
+
+**Required:**
+Both add and edit modals should use THE SAME simplified structure from the mockup (lines 155-284).
+
+The add modal needs complete rewrite to:
+1. Remove all detailed S3/Attic credential fields  
+2. Use Name + Type (seg) + URL + Auth checkbox + Credential dropdown + Environments
+3. Match exact structure/styling of edit modal
+4. Open credential modal for '+ Add new credential...'
+
+This is a ~600 line replacement needed.
 <!-- SECTION:NOTES:END -->
