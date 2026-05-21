@@ -788,7 +788,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                                     button {
                                                         class: "focus-ring",
                                                         onclick: move |_| { let mut ids = form_environment_ids(); if is_selected { ids.retain(|&id| id != env_id); } else { ids.push(env_id); } form_environment_ids.set(ids); },
-                                                        style: if is_selected { format!("padding: 5px 10px; border-radius: 999px; font-size: 11px; border: 1px solid {}; background: color-mix(in oklab, {} 16%, var(--cf-card-bg)); color: {}; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; font-family: inherit; font-weight: 600;", color, color, color) } else { "padding: 5px 10px; border-radius: 999px; font-size: 11px; border: 1px solid var(--cf-card-border); background: transparent; color: var(--cf-text-secondary); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; font-family: inherit; font-weight: 500;".to_string() },
+                                                        style: if is_selected { format!("padding: 3px 7px; border-radius: 999px; font-size: 10px; border: 1px solid {}; background: color-mix(in oklab, {} 14%, var(--cf-card-bg)); color: {}; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; font-family: inherit; font-weight: 400;", color, color, color) } else { "padding: 3px 7px; border-radius: 999px; font-size: 10px; border: 1px solid var(--cf-card-border); background: transparent; color: var(--cf-text-secondary); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; font-family: inherit; font-weight: 400;".to_string() },
                                                         span { style: "width:6px; height:6px; border-radius:50%; background:{color};" }
                                                         "{env_name}"
                                                     }
@@ -1079,9 +1079,9 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                                             form_environment_ids.set(ids);
                                                         },
                                                         style: if is_selected {
-                                                            format!("padding: 5px 10px; border-radius: 999px; font-size: 11px; border: 1px solid {}; background: color-mix(in oklab, {} 16%, var(--cf-card-bg)); color: {}; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; font-family: inherit; font-weight: 600;", color, color, color)
+                                                            format!("padding: 3px 7px; border-radius: 999px; font-size: 10px; border: 1px solid {}; background: color-mix(in oklab, {} 14%, var(--cf-card-bg)); color: {}; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; font-family: inherit; font-weight: 400;", color, color, color)
                                                         } else {
-                                                            format!("padding: 5px 10px; border-radius: 999px; font-size: 11px; border: 1px solid var(--cf-card-border); background: transparent; color: var(--cf-text-secondary); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; font-family: inherit; font-weight: 500;")
+                                                            format!("padding: 3px 7px; border-radius: 999px; font-size: 10px; border: 1px solid var(--cf-card-border); background: transparent; color: var(--cf-text-secondary); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; font-family: inherit; font-weight: 400;")
                                                         },
                                                         span {
                                                             style: "width:6px; height:6px; border-radius:50%; background:{color};"
@@ -1434,13 +1434,8 @@ fn CacheDestinationRow(destination: CacheDestination, on_edit: EventHandler<Cach
         ("chip-critical", "#f87171", "error")
     };
     
-    // Type icon
-    let type_icon = match destination.cache_type.as_str() {
-        "S3" => "download",
-        "Attic" => "download",
-        "Nix" | "Http" => "link",
-        _ => "download",
-    };
+    // Type icon glyph family
+    let is_link_icon = matches!(destination.cache_type.as_str(), "Nix" | "Http");
     
     // Fetch environment assignments
     let cache_id = destination.id;
@@ -1461,8 +1456,37 @@ fn CacheDestinationRow(destination: CacheDestination, on_edit: EventHandler<Cach
             td {
                 div {
                     style: "font-weight:600; font-size:13px; display:flex; align-items:center; gap:6px;",
-                    // Icon (inline SVG simplified)
-                    span { style: "opacity:0.6;", {type_icon} }
+                    // Icon (inline SVG)
+                    if is_link_icon {
+                        svg {
+                            width: "12",
+                            height: "12",
+                            view_box: "0 0 24 24",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "1.75",
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            style: "opacity:0.6;",
+                            path { d: "M10 13a5 5 0 0 0 7.07 0l2.83-2.83a5 5 0 0 0-7.07-7.07L10 5" }
+                            path { d: "M14 11a5 5 0 0 0-7.07 0L4.1 13.83a5 5 0 0 0 7.07 7.07L14 19" }
+                        }
+                    } else {
+                        svg {
+                            width: "12",
+                            height: "12",
+                            view_box: "0 0 24 24",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "1.75",
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            style: "opacity:0.6;",
+                            path { d: "M12 3v12" }
+                            path { d: "m7 10 5 5 5-5" }
+                            path { d: "M5 21h14" }
+                        }
+                    }
                     "{destination.name}"
                 }
                 if let Some(ref url) = destination.push_to {
