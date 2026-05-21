@@ -4619,6 +4619,12 @@ const CI_FAST_STEP_NAMES = new Set([
   // TASK-17: CVE dashboard evidence
   "16-cves",
   "16b-cves-severity-filter",
+  // TASK-303: Caches view and modal evidence
+  "21-caches",
+  "22-caches-modal-nix",
+  "23-caches-modal-http",
+  "24-caches-modal-s3",
+  "25-caches-modal-attic",
   // TASK-273: Evaluation cancellation + history evidence
   "26-evaluations",
   "26b-evaluations-history",
