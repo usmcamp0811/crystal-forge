@@ -377,7 +377,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                 || dest.attic_token.is_some()
                 || dest.s3_profile.as_ref().is_some_and(|v| !v.trim().is_empty())
                 || dest.attic_cache_name.as_ref().is_some_and(|v| !v.trim().is_empty())
-                || matches!(dest.cache_type.as_str(), "S3" | "Attic");
+                || matches!(dest.cache_type.as_str(), "S3" | "Attic" | "s3" | "attic");
             form_requires_auth.set(has_auth);
             // We do not expose plaintext credentials; only indicate configured state.
             if has_auth {
@@ -386,9 +386,11 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                 form_cred_id.set(String::new());
             }
             form_testing.set(None);
+            form_show_cred_modal.set(false);
             
             // Load environment assignments
             let cache_id = dest.id;
+            form_environment_ids.set(Vec::new());
             spawn(async move {
                 if let Ok(env_ids) = client::get_cache_environments(cache_id).await {
                     form_environment_ids.set(env_ids);
@@ -579,19 +581,26 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                             div { class: "field", label { "Type" }
                                 div { class: "seg",
                                     for (val, label) in [("s3", "S3-compatible"), ("attic", "Attic"), ("nix", "Nix HTTPS")] {
-                                        button { class: if form_type() == val { "active" } else { "" }, onclick: move |_| form_type.set(val.to_string()), "{label}" }
+                                        button {
+                                            class: if form_type() == val { "active" } else { "" },
+                                            onclick: move |_| {
+                                                form_testing.set(None);
+                                                form_type.set(val.to_string())
+                                            },
+                                            "{label}"
+                                        }
                                     }
                                 }
                             }
                             div { class: "field", label { "URL" }
                                 input {
-                                    class: "input focus-ring mono", style: "font-size:12px;", value: form_url(), oninput: move |evt| form_url.set(evt.value()),
+                                    class: "input focus-ring mono", style: "font-size:12px;", value: form_url(), oninput: move |evt| { form_testing.set(None); form_url.set(evt.value()) },
                                     placeholder: match form_type().as_str() { "s3" => "s3://bucket?region=us-east-1", "attic" => "attic://host/cache", _ => "https://cache.nixos.org" }
                                 }
                             }
                             label {
                                 style: "display:flex; gap:8px; align-items:center; font-size:13px; cursor:pointer;",
-                                input { r#type: "checkbox", checked: form_requires_auth(), onchange: move |evt| form_requires_auth.set(evt.checked()), style: "accent-color:var(--cf-brand-purple);" }
+                                input { r#type: "checkbox", checked: form_requires_auth(), onchange: move |evt| { form_testing.set(None); form_requires_auth.set(evt.checked()) }, style: "accent-color:var(--cf-brand-purple);" }
                                 span { "Requires authentication" }
                             }
                             if form_requires_auth() {
@@ -599,7 +608,11 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                     div { style: "display:flex; gap:8px;",
                                         select {
                                             class: "input focus-ring", style: "flex:1;", value: form_cred_id(),
-                                            onchange: move |evt| { let v = evt.value(); if v == "__new__" { form_show_cred_modal.set(true); } else { form_cred_id.set(v); } },
+                                            onchange: move |evt| {
+                                                form_testing.set(None);
+                                                let v = evt.value();
+                                                if v == "__new__" { form_show_cred_modal.set(true); } else { form_cred_id.set(v); }
+                                            },
                                             option { value: "", "Select a credential…" }
                                             option { value: "configured-credential", "Configured credential" }
                                             option { value: "aws-prod-role", "aws-prod-role (IAM role)" }
@@ -764,7 +777,10 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                     for (val, label) in [("s3", "S3-compatible"), ("attic", "Attic"), ("nix", "Nix HTTPS")] {
                                         button {
                                             class: if form_type() == val { "active" } else { "" },
-                                            onclick: move |_| form_type.set(val.to_string()),
+                                            onclick: move |_| {
+                                                form_testing.set(None);
+                                                form_type.set(val.to_string())
+                                            },
                                             "{label}"
                                         }
                                     }
@@ -779,7 +795,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                     class: "input focus-ring mono",
                                     style: "font-size:12px;",
                                     value: form_url(),
-                                    oninput: move |evt| form_url.set(evt.value()),
+                                    oninput: move |evt| { form_testing.set(None); form_url.set(evt.value()) },
                                     placeholder: match form_type().as_str() {
                                         "s3" => "s3://bucket?region=us-east-1",
                                         "attic" => "attic://host/cache",
@@ -794,7 +810,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                 input {
                                     r#type: "checkbox",
                                     checked: form_requires_auth(),
-                                    onchange: move |evt| form_requires_auth.set(evt.checked()),
+                                    onchange: move |evt| { form_testing.set(None); form_requires_auth.set(evt.checked()) },
                                     style: "accent-color:var(--cf-brand-purple);"
                                 }
                                 span { "Requires authentication" }
@@ -812,6 +828,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                             style: "flex:1;",
                                             value: form_cred_id(),
                                             onchange: move |evt| {
+                                                form_testing.set(None);
                                                 let val = evt.value();
                                                 if val == "__new__" {
                                                     form_show_cred_modal.set(true);
@@ -999,7 +1016,13 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
 #[component]
 fn CacheCredModal(cache_type: String, on_close: EventHandler<Option<String>>) -> Element {
     let mut cred_kind = use_signal(|| {
-        if cache_type == "s3" { "aws-key" } else { "token" }
+        if cache_type == "s3" {
+            "aws-key"
+        } else if cache_type == "attic" {
+            "attic-token"
+        } else {
+            "nix-token"
+        }
     });
     let mut cred_name = use_signal(String::new);
     let mut cred_access_key = use_signal(String::new);
@@ -1035,7 +1058,15 @@ fn CacheCredModal(cache_type: String, on_close: EventHandler<Option<String>>) ->
                         }
                         "Add credential"
                     }
-                    p { "Saved credentials can be reused across caches. Secrets are encrypted at rest." }
+                    p {
+                        if cache_type == "s3" {
+                            "Saved credentials can be reused across S3 caches. Secrets are encrypted at rest."
+                        } else if cache_type == "attic" {
+                            "Saved credentials can be reused across Attic caches. Secrets are encrypted at rest."
+                        } else {
+                            "Saved credentials can be reused across Nix HTTPS caches. Secrets are encrypted at rest."
+                        }
+                    }
                 }
                 
                 div {
@@ -1068,10 +1099,15 @@ fn CacheCredModal(cache_type: String, on_close: EventHandler<Option<String>>) ->
                                     onclick: move |_| cred_kind.set("aws-role"),
                                     "IAM role (IRSA)"
                                 }
+                            } else if cache_type == "attic" {
+                                button {
+                                    class: "active",
+                                    "Attic token"
+                                }
                             } else {
                                 button {
                                     class: "active",
-                                    "API token"
+                                    "Nix HTTPS token"
                                 }
                             }
                         }
@@ -1121,7 +1157,7 @@ fn CacheCredModal(cache_type: String, on_close: EventHandler<Option<String>>) ->
                         }
                     }
                     
-                    if cred_kind() == "token" {
+                    if cred_kind() == "attic-token" || cred_kind() == "nix-token" {
                         div {
                             class: "field",
                             label { "Token" }
@@ -1135,7 +1171,11 @@ fn CacheCredModal(cache_type: String, on_close: EventHandler<Option<String>>) ->
                             }
                             div {
                                 class: "help",
-                                "Attic / cache-server bearer token with push permission."
+                                if cred_kind() == "attic-token" {
+                                    "Attic / cache-server bearer token with push permission."
+                                } else {
+                                    "HTTPS cache bearer token or equivalent secret."
+                                }
                             }
                         }
                     }
