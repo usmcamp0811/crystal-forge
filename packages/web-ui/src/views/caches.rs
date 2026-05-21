@@ -1396,7 +1396,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                                             format!("padding: 4px 10px; border-radius: 99px; font-size: 11px; border: 1px solid var(--cf-card-border); background: transparent; color: var(--cf-text-secondary); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; font-family: inherit;")
                                                         },
                                                         span {
-                                                            style: "width:6px; height:6px; border-radius:50%; background:{color}; display:inline-block;"
+                                                            style: "width:6px; height:6px; border-radius:50%; background:{color};"
                                                         }
                                                         "{env_name}"
                                                     }
