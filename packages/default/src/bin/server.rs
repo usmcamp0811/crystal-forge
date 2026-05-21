@@ -505,6 +505,10 @@ async fn main() -> anyhow::Result<()> {
             get(caches::list_cache_destinations).post(caches::create_cache_destination),
         )
         .route(
+            "/api/v1/caches/test-credentials",
+            post(caches::test_cache_destination_credentials),
+        )
+        .route(
             "/api/v1/caches/:id",
             get(caches::get_cache_destination)
                 .put(caches::update_cache_destination)

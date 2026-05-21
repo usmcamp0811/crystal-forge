@@ -370,12 +370,18 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
             form_name.set(dest.name.clone());
             form_type.set(dest.cache_type.to_lowercase());
             form_url.set(dest.push_to.clone().unwrap_or_default());
-            // Infer requires auth from presence of credentials
-            let has_auth = dest.s3_secret_access_key.is_some() || dest.s3_access_key_id.is_some() || dest.attic_token.is_some();
+            // Infer requires auth from any credential/config indicator.
+            // Secrets are redacted by API, so rely on durable config fields too.
+            let has_auth = dest.s3_secret_access_key.is_some()
+                || dest.s3_access_key_id.is_some()
+                || dest.attic_token.is_some()
+                || dest.s3_profile.as_ref().is_some_and(|v| !v.trim().is_empty())
+                || dest.attic_cache_name.as_ref().is_some_and(|v| !v.trim().is_empty())
+                || matches!(dest.cache_type.as_str(), "S3" | "Attic");
             form_requires_auth.set(has_auth);
-            // Mock credential ID (in real app this would come from credential management)
+            // We do not expose plaintext credentials; only indicate configured state.
             if has_auth {
-                form_cred_id.set("existing-credential".to_string());
+                form_cred_id.set("configured-credential".to_string());
             } else {
                 form_cred_id.set(String::new());
             }
@@ -595,6 +601,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                             class: "input focus-ring", style: "flex:1;", value: form_cred_id(),
                                             onchange: move |evt| { let v = evt.value(); if v == "__new__" { form_show_cred_modal.set(true); } else { form_cred_id.set(v); } },
                                             option { value: "", "Select a credential…" }
+                                            option { value: "configured-credential", "Configured credential" }
                                             option { value: "aws-prod-role", "aws-prod-role (IAM role)" }
                                             option { value: "aws-staging-role", "aws-staging-role (IAM role)" }
                                             option { value: "attic-token-dev", "attic-token-dev (Attic token)" }
@@ -604,10 +611,33 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                             class: "btn btn-ghost focus-ring xs", disabled: form_cred_id().is_empty(),
                                             onclick: move |_| {
                                                 form_testing.set(Some("running".to_string()));
+                                                let req = CreateCacheDestination {
+                                                    name: form_name(),
+                                                    cache_type: form_type(),
+                                                    push_to: if form_url().trim().is_empty() {
+                                                        None
+                                                    } else {
+                                                        Some(form_url())
+                                                    },
+                                                    enabled: Some(true),
+                                                    // We only indicate configured credential state in UI, never plaintext.
+                                                    s3_profile: if form_cred_id().is_empty() {
+                                                        None
+                                                    } else {
+                                                        Some(form_cred_id())
+                                                    },
+                                                    attic_cache_name: if form_type() == "attic" {
+                                                        Some("configured".to_string())
+                                                    } else {
+                                                        None
+                                                    },
+                                                    ..Default::default()
+                                                };
                                                 spawn(async move {
-                                                    gloo_timers::future::TimeoutFuture::new(700).await;
-                                                    let status = if js_sys::Math::random() > 0.2 { "ok" } else { "fail" };
-                                                    form_testing.set(Some(status.to_string()));
+                                                    match client::test_cache_destination_credentials(&req).await {
+                                                        Ok(_) => form_testing.set(Some("ok".to_string())),
+                                                        Err(_) => form_testing.set(Some("fail".to_string())),
+                                                    }
                                                 });
                                             },
                                             match form_testing().as_deref() { Some("running") => "Testing…", Some("ok") => "✓ Connected", Some("fail") => "✗ Failed", _ => "Test" }
@@ -790,6 +820,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                                 }
                                             },
                                             option { value: "", "Select a credential…" }
+                                            option { value: "configured-credential", "Configured credential" }
                                             option { value: "aws-prod-role", "aws-prod-role (IAM role)" }
                                             option { value: "aws-staging-role", "aws-staging-role (IAM role)" }
                                             option { value: "attic-token-dev", "attic-token-dev (Attic token)" }
@@ -800,10 +831,32 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                             disabled: form_cred_id().is_empty(),
                                             onclick: move |_| {
                                                 form_testing.set(Some("running".to_string()));
+                                                let req = CreateCacheDestination {
+                                                    name: form_name(),
+                                                    cache_type: form_type(),
+                                                    push_to: if form_url().trim().is_empty() {
+                                                        None
+                                                    } else {
+                                                        Some(form_url())
+                                                    },
+                                                    enabled: Some(true),
+                                                    s3_profile: if form_cred_id().is_empty() {
+                                                        None
+                                                    } else {
+                                                        Some(form_cred_id())
+                                                    },
+                                                    attic_cache_name: if form_type() == "attic" {
+                                                        Some("configured".to_string())
+                                                    } else {
+                                                        None
+                                                    },
+                                                    ..Default::default()
+                                                };
                                                 spawn(async move {
-                                                    gloo_timers::future::TimeoutFuture::new(700).await;
-                                                    let status = if js_sys::Math::random() > 0.2 { "ok" } else { "fail" };
-                                                    form_testing.set(Some(status.to_string()));
+                                                    match client::test_cache_destination_credentials(&req).await {
+                                                        Ok(_) => form_testing.set(Some("ok".to_string())),
+                                                        Err(_) => form_testing.set(Some("fail".to_string())),
+                                                    }
                                                 });
                                             },
                                             match form_testing().as_deref() {

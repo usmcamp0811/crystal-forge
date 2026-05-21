@@ -6,6 +6,7 @@ use axum::{
 };
 use serde::Deserialize;
 use sqlx::PgPool;
+use std::time::Duration;
 use url::Url;
 
 use crate::api::models::ApiError;
@@ -14,6 +15,74 @@ use crate::models::cache_destination::{
     CacheDestination, CreateCacheDestination, UpdateCacheDestination,
 };
 use crate::queries::{cache_destinations, cache_push};
+
+fn normalize_test_url(cache_type: &str, push_to: Option<&str>, s3_endpoint_url: Option<&str>) -> Option<String> {
+    let cache_type = cache_type.to_lowercase();
+
+    match cache_type.as_str() {
+        "s3" => s3_endpoint_url
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        "attic" => push_to.and_then(|raw| {
+            let raw = raw.trim();
+            if raw.is_empty() {
+                return None;
+            }
+            if raw.starts_with("http://") || raw.starts_with("https://") {
+                return Some(raw.to_string());
+            }
+            if let Some(rest) = raw.strip_prefix("attic://") {
+                let host = rest.split('/').next().unwrap_or_default().trim();
+                if host.is_empty() {
+                    return None;
+                }
+                return Some(format!("https://{host}"));
+            }
+            None
+        }),
+        _ => push_to
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+    }
+}
+
+async fn run_cache_destination_test(create: &CreateCacheDestination) -> Result<(), String> {
+    create
+        .validate()
+        .map_err(|e| format!("Validation failed: {e}"))?;
+
+    let Some(test_url) = normalize_test_url(
+        &create.cache_type,
+        create.push_to.as_deref(),
+        create.s3_endpoint_url.as_deref(),
+    ) else {
+        return Err("No testable endpoint URL derived from cache configuration".to_string());
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .build()
+        .map_err(|e| format!("Failed to initialize HTTP client: {e}"))?;
+
+    let mut request = client.get(&test_url);
+    if let Some(token) = create.attic_token.as_ref().filter(|t| !t.trim().is_empty()) {
+        request = request.bearer_auth(token.trim());
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|e| format!("Connectivity test failed: {e}"))?;
+
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Endpoint responded with status {}",
+            response.status()
+        ))
+    }
+}
 
 fn redact_cache_secrets(mut destination: CacheDestination) -> CacheDestination {
     destination.push_to = destination
@@ -194,6 +263,38 @@ pub async fn create_cache_destination(
             )
                 .into_response()
         }
+    }
+}
+
+/// POST /api/caches/test-credentials - Test cache destination configuration (admin only)
+pub async fn test_cache_destination_credentials(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Json(create): Json<CreateCacheDestination>,
+) -> impl IntoResponse {
+    if require_admin_user(&pool, &headers).await.is_none() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ApiError {
+                error: "forbidden".to_string(),
+                message: "Admin role required".to_string(),
+                details: None,
+            }),
+        )
+            .into_response();
+    }
+
+    match run_cache_destination_test(&create).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(message) => (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "test_failed".to_string(),
+                message,
+                details: None,
+            }),
+        )
+            .into_response(),
     }
 }
 
