@@ -1119,9 +1119,9 @@ pub async fn create_cache_destination(
 /// Test cache destination credentials/configuration
 pub async fn test_cache_destination_credentials(
     data: &CreateCacheDestination,
-) -> Result<(), ApiClientError> {
+) -> Result<CacheCredentialTestResult, ApiClientError> {
     let url = format!("{}/caches/test-credentials", base_url());
-    send_empty_with_csrf("POST", &url, Some(data)).await
+    send_json_with_csrf("POST", &url, Some(data)).await
 }
 
 /// Update an existing cache destination

@@ -1801,6 +1801,14 @@ pub struct UpdateCacheDestination {
     pub environment_ids: Option<Vec<Uuid>>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CacheCredentialTestResult {
+    pub ok: bool,
+    pub status_code: Option<u16>,
+    pub message: String,
+    pub tested_url: Option<String>,
+}
+
 /// Cache push job status and details
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CachePushJob {

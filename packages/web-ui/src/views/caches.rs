@@ -232,7 +232,6 @@ fn api_cache_type(cache_type: &str) -> String {
 
 fn credential_fields_for_request(
     selected_credential: Option<&LocalCredential>,
-    form_type: &str,
 ) -> (Option<String>, Option<String>, Option<String>, Option<String>) {
     let s3_profile = selected_credential.and_then(|cred| match cred.kind {
         LocalCredentialKind::AwsRole => cred.role_arn.clone(),
@@ -245,17 +244,7 @@ fn credential_fields_for_request(
         _ => None,
     });
 
-    // Keep existing mockup-compatible fallback for test payload shape.
-    if form_type == "attic" && attic_token.is_none() {
-        (
-            s3_profile,
-            s3_access_key_id,
-            s3_secret_access_key,
-            Some("configured".to_string()),
-        )
-    } else {
-        (s3_profile, s3_access_key_id, s3_secret_access_key, attic_token)
-    }
+    (s3_profile, s3_access_key_id, s3_secret_access_key, attic_token)
 }
 
 /// Cache management page
@@ -437,37 +426,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
     let mut form_testing = use_signal(|| None::<String>);
     let mut form_test_error = use_signal(|| None::<String>);
     let mut form_show_cred_modal = use_signal(|| false);
-    let mut local_credentials = use_signal(|| {
-        vec![
-            LocalCredential {
-                id: "aws-prod-role".to_string(),
-                name: "aws-prod-role".to_string(),
-                kind: LocalCredentialKind::AwsRole,
-                access_key_id: None,
-                secret_access_key: None,
-                role_arn: Some("arn:aws:iam::123456789012:role/cache-pusher".to_string()),
-                token: None,
-            },
-            LocalCredential {
-                id: "aws-staging-role".to_string(),
-                name: "aws-staging-role".to_string(),
-                kind: LocalCredentialKind::AwsRole,
-                access_key_id: None,
-                secret_access_key: None,
-                role_arn: Some("arn:aws:iam::123456789012:role/cache-staging".to_string()),
-                token: None,
-            },
-            LocalCredential {
-                id: "attic-token-dev".to_string(),
-                name: "attic-token-dev".to_string(),
-                kind: LocalCredentialKind::AtticToken,
-                access_key_id: None,
-                secret_access_key: None,
-                role_arn: None,
-                token: Some("configured".to_string()),
-            },
-        ]
-    });
+    let mut local_credentials = use_signal(Vec::<LocalCredential>::new);
     
     // Pre-populate form when switching between add/edit
     use_effect(move || {
@@ -485,12 +444,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                 || dest.attic_cache_name.as_ref().is_some_and(|v| !v.trim().is_empty())
                 || matches!(dest.cache_type.as_str(), "S3" | "Attic" | "s3" | "attic");
             form_requires_auth.set(has_auth);
-            // We do not expose plaintext credentials; only indicate configured state.
-            if has_auth {
-                form_cred_id.set("configured-credential".to_string());
-            } else {
-                form_cred_id.set(String::new());
-            }
+            form_cred_id.set(String::new());
             form_testing.set(None);
             form_test_error.set(None);
             form_show_cred_modal.set(false);
@@ -723,16 +677,13 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                                 if v == "__new__" { form_show_cred_modal.set(true); } else { form_cred_id.set(v); }
                                             },
                                             option { value: "", "Select a credential…" }
-                                            if form_cred_id() == "configured-credential" {
-                                                option { value: "configured-credential", "Configured on destination" }
-                                            }
                                             for cred in local_credentials().into_iter().filter(|cred| credential_matches_cache_type(cred, &form_type())) {
                                                 option { value: "{cred.id}", "{credential_label(&cred)}" }
                                             }
                                             option { value: "__new__", "+ Add new credential…" }
                                         }
                                         button {
-                                            class: "btn btn-ghost focus-ring xs", disabled: form_cred_id().is_empty() || form_cred_id() == "configured-credential",
+                                            class: "btn btn-ghost focus-ring xs", disabled: form_cred_id().is_empty(),
                                             onclick: move |_| {
                                                 form_testing.set(Some("running".to_string()));
                                                 form_test_error.set(None);
@@ -740,7 +691,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                                     .into_iter()
                                                     .find(|cred| cred.id == form_cred_id());
                                                 let (s3_profile, s3_access_key_id, s3_secret_access_key, attic_token) =
-                                                    credential_fields_for_request(selected_credential.as_ref(), &form_type());
+                                                    credential_fields_for_request(selected_credential.as_ref());
                                                 let req = CreateCacheDestination {
                                                     name: form_name(),
                                                     cache_type: api_cache_type(&form_type()),
@@ -754,12 +705,16 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                                     s3_access_key_id,
                                                     s3_secret_access_key,
                                                     attic_token,
-                                                    attic_cache_name: if form_type() == "attic" { Some("configured".to_string()) } else { None },
+                                                    attic_cache_name: None,
                                                     ..Default::default()
                                                 };
                                                 spawn(async move {
                                                     match client::test_cache_destination_credentials(&req).await {
-                                                        Ok(_) => form_testing.set(Some("ok".to_string())),
+                                                        Ok(result) if result.ok => form_testing.set(Some("ok".to_string())),
+                                                        Ok(result) => {
+                                                            form_testing.set(Some("fail".to_string()));
+                                                            form_test_error.set(Some(result.message));
+                                                        }
                                                         Err(e) => {
                                                             form_testing.set(Some("fail".to_string()));
                                                             form_test_error.set(Some(e.to_string()));
@@ -769,6 +724,9 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                             },
                                             match form_testing().as_deref() { Some("running") => "Testing…", Some("ok") => "✓ Connected", Some("fail") => "✗ Failed", _ => "Test" }
                                         }
+                                    }
+                                    if local_credentials().is_empty() {
+                                        div { class: "help", "Saved credentials are not available yet. Add one to test with this flow." }
                                     }
                                     if let Some(err) = form_test_error() {
                                         div { class: "help", style: "color: var(--cf-danger);", "Test failed: {err}" }
@@ -823,31 +781,31 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                             let selected_credential = local_credentials()
                                                 .into_iter()
                                                 .find(|cred| cred.id == form_cred_id());
-                                            let (s3_profile, _, _, _) = credential_fields_for_request(selected_credential.as_ref(), &form_type());
+                                            let (s3_profile, _, _, _) = credential_fields_for_request(selected_credential.as_ref());
                                             s3_profile
                                         },
                                         s3_access_key_id: {
                                             let selected_credential = local_credentials()
                                                 .into_iter()
                                                 .find(|cred| cred.id == form_cred_id());
-                                            let (_, s3_access_key_id, _, _) = credential_fields_for_request(selected_credential.as_ref(), &form_type());
+                                            let (_, s3_access_key_id, _, _) = credential_fields_for_request(selected_credential.as_ref());
                                             s3_access_key_id
                                         },
                                         s3_secret_access_key: {
                                             let selected_credential = local_credentials()
                                                 .into_iter()
                                                 .find(|cred| cred.id == form_cred_id());
-                                            let (_, _, s3_secret_access_key, _) = credential_fields_for_request(selected_credential.as_ref(), &form_type());
+                                            let (_, _, s3_secret_access_key, _) = credential_fields_for_request(selected_credential.as_ref());
                                             s3_secret_access_key
                                         },
                                         attic_token: {
                                             let selected_credential = local_credentials()
                                                 .into_iter()
                                                 .find(|cred| cred.id == form_cred_id());
-                                            let (_, _, _, attic_token) = credential_fields_for_request(selected_credential.as_ref(), &form_type());
+                                            let (_, _, _, attic_token) = credential_fields_for_request(selected_credential.as_ref());
                                             attic_token
                                         },
-                                        attic_cache_name: if form_type() == "attic" { Some("configured".to_string()) } else { None },
+                                        attic_cache_name: None,
                                         ..Default::default()
                                     };
                                     spawn(async move {
@@ -986,9 +944,6 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                                 }
                                             },
                                             option { value: "", "Select a credential…" }
-                                            if form_cred_id() == "configured-credential" {
-                                                option { value: "configured-credential", "Configured on destination" }
-                                            }
                                             for cred in local_credentials().into_iter().filter(|cred| credential_matches_cache_type(cred, &form_type())) {
                                                 option { value: "{cred.id}", "{credential_label(&cred)}" }
                                             }
@@ -996,7 +951,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                         }
                                         button {
                                             class: "btn btn-ghost focus-ring xs",
-                                            disabled: form_cred_id().is_empty() || form_cred_id() == "configured-credential",
+                                            disabled: form_cred_id().is_empty(),
                                             onclick: move |_| {
                                                 form_testing.set(Some("running".to_string()));
                                                 form_test_error.set(None);
@@ -1004,7 +959,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                                     .into_iter()
                                                     .find(|cred| cred.id == form_cred_id());
                                                 let (s3_profile, s3_access_key_id, s3_secret_access_key, attic_token) =
-                                                    credential_fields_for_request(selected_credential.as_ref(), &form_type());
+                                                    credential_fields_for_request(selected_credential.as_ref());
                                                 let req = CreateCacheDestination {
                                                     name: form_name(),
                                                     cache_type: api_cache_type(&form_type()),
@@ -1018,12 +973,16 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                                     s3_access_key_id,
                                                     s3_secret_access_key,
                                                     attic_token,
-                                                    attic_cache_name: if form_type() == "attic" { Some("configured".to_string()) } else { None },
+                                                    attic_cache_name: None,
                                                     ..Default::default()
                                                 };
                                                 spawn(async move {
                                                     match client::test_cache_destination_credentials(&req).await {
-                                                        Ok(_) => form_testing.set(Some("ok".to_string())),
+                                                        Ok(result) if result.ok => form_testing.set(Some("ok".to_string())),
+                                                        Ok(result) => {
+                                                            form_testing.set(Some("fail".to_string()));
+                                                            form_test_error.set(Some(result.message));
+                                                        }
                                                         Err(e) => {
                                                             form_testing.set(Some("fail".to_string()));
                                                             form_test_error.set(Some(e.to_string()));
@@ -1038,6 +997,9 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                                 _ => "Test"
                                             }
                                         }
+                                    }
+                                    if local_credentials().is_empty() {
+                                        div { class: "help", "Saved credentials are not available yet. Add one to test with this flow." }
                                     }
                                     if let Some(err) = form_test_error() {
                                         div { class: "help", style: "color: var(--cf-danger);", "Test failed: {err}" }
@@ -1115,31 +1077,31 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                                 let selected_credential = local_credentials()
                                                     .into_iter()
                                                     .find(|cred| cred.id == form_cred_id());
-                                                let (s3_profile, _, _, _) = credential_fields_for_request(selected_credential.as_ref(), &form_type());
+                                                let (s3_profile, _, _, _) = credential_fields_for_request(selected_credential.as_ref());
                                                 s3_profile
                                             },
                                             s3_access_key_id: {
                                                 let selected_credential = local_credentials()
                                                     .into_iter()
                                                     .find(|cred| cred.id == form_cred_id());
-                                                let (_, s3_access_key_id, _, _) = credential_fields_for_request(selected_credential.as_ref(), &form_type());
+                                                let (_, s3_access_key_id, _, _) = credential_fields_for_request(selected_credential.as_ref());
                                                 s3_access_key_id
                                             },
                                             s3_secret_access_key: {
                                                 let selected_credential = local_credentials()
                                                     .into_iter()
                                                     .find(|cred| cred.id == form_cred_id());
-                                                let (_, _, s3_secret_access_key, _) = credential_fields_for_request(selected_credential.as_ref(), &form_type());
+                                                let (_, _, s3_secret_access_key, _) = credential_fields_for_request(selected_credential.as_ref());
                                                 s3_secret_access_key
                                             },
                                             attic_token: {
                                                 let selected_credential = local_credentials()
                                                     .into_iter()
                                                     .find(|cred| cred.id == form_cred_id());
-                                                let (_, _, _, attic_token) = credential_fields_for_request(selected_credential.as_ref(), &form_type());
+                                                let (_, _, _, attic_token) = credential_fields_for_request(selected_credential.as_ref());
                                                 attic_token
                                             },
-                                            attic_cache_name: if form_type() == "attic" { Some("configured".to_string()) } else { None },
+                                            attic_cache_name: None,
                                             ..Default::default()
                                         };
                                         

@@ -6,6 +6,7 @@ use axum::{
 };
 use serde::Deserialize;
 use sqlx::PgPool;
+use std::net::IpAddr;
 use std::time::Duration;
 use url::Url;
 
@@ -46,7 +47,75 @@ fn normalize_test_url(cache_type: &str, push_to: Option<&str>, s3_endpoint_url: 
     }
 }
 
-async fn run_cache_destination_test(create: &CreateCacheDestination) -> Result<(), String> {
+#[derive(Debug, serde::Serialize)]
+struct CacheCredentialTestResult {
+    ok: bool,
+    status_code: Option<u16>,
+    message: String,
+    tested_url: Option<String>,
+}
+
+fn validate_cache_test_url(url: &Url) -> Result<(), String> {
+    match url.scheme() {
+        "https" => {}
+        other => {
+            return Err(format!(
+                "Unsupported cache test URL scheme: {other}. Only https is allowed"
+            ));
+        }
+    }
+
+    let host = url
+        .host_str()
+        .ok_or_else(|| "Cache test URL must include a host".to_string())?;
+
+    let blocked_host = host.eq_ignore_ascii_case("localhost")
+        || host.ends_with(".localhost")
+        || host.ends_with(".local")
+        || host.ends_with(".internal");
+
+    if blocked_host {
+        return Err("Refusing to test localhost or internal cache endpoint".to_string());
+    }
+
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        reject_non_public_ip(ip)?;
+    }
+
+    Ok(())
+}
+
+fn reject_non_public_ip(ip: IpAddr) -> Result<(), String> {
+    match ip {
+        IpAddr::V4(v4) => {
+            if v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || v4.is_unspecified()
+            {
+                return Err("Refusing to test private, loopback, or non-routable IP".to_string());
+            }
+        }
+        IpAddr::V6(v6) => {
+            if v6.is_loopback() || v6.is_unspecified() || v6.is_unique_local() || v6.is_unicast_link_local() {
+                return Err("Refusing to test private, loopback, or non-routable IP".to_string());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn sanitize_test_url_for_response(url: &Url) -> String {
+    let mut sanitized = url.clone();
+    let _ = sanitized.set_username("");
+    let _ = sanitized.set_password(None);
+    sanitized.to_string()
+}
+
+async fn run_cache_destination_test(create: &CreateCacheDestination) -> Result<CacheCredentialTestResult, String> {
     let cache_type = create.cache_type.trim();
     if !matches!(cache_type, "S3" | "Attic" | "Http" | "Nix" | "s3" | "attic" | "http" | "nix") {
         return Err(format!(
@@ -62,12 +131,17 @@ async fn run_cache_destination_test(create: &CreateCacheDestination) -> Result<(
         return Err("No testable endpoint URL derived from cache configuration".to_string());
     };
 
+    let parsed_url = Url::parse(&test_url).map_err(|e| format!("Invalid cache test URL: {e}"))?;
+    validate_cache_test_url(&parsed_url)?;
+    let tested_url = sanitize_test_url_for_response(&parsed_url);
+
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(8))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| format!("Failed to initialize HTTP client: {e}"))?;
 
-    let mut request = client.get(&test_url);
+    let mut request = client.get(parsed_url.clone());
     if let Some(token) = create.attic_token.as_ref().filter(|t| !t.trim().is_empty()) {
         request = request.bearer_auth(token.trim());
     }
@@ -78,12 +152,19 @@ async fn run_cache_destination_test(create: &CreateCacheDestination) -> Result<(
         .map_err(|e| format!("Connectivity test failed: {e}"))?;
 
     if response.status().is_success() {
-        Ok(())
+        Ok(CacheCredentialTestResult {
+            ok: true,
+            status_code: Some(response.status().as_u16()),
+            message: "Connection successful".to_string(),
+            tested_url: Some(tested_url),
+        })
     } else {
-        Err(format!(
-            "Endpoint responded with status {}",
-            response.status()
-        ))
+        Ok(CacheCredentialTestResult {
+            ok: false,
+            status_code: Some(response.status().as_u16()),
+            message: format!("Endpoint responded with status {}", response.status()),
+            tested_url: Some(tested_url),
+        })
     }
 }
 
@@ -288,16 +369,55 @@ pub async fn test_cache_destination_credentials(
     }
 
     match run_cache_destination_test(&create).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(result) => (StatusCode::OK, Json(result)).into_response(),
         Err(message) => (
             StatusCode::BAD_REQUEST,
             Json(ApiError {
-                error: "test_failed".to_string(),
+                error: "invalid_cache_test_config".to_string(),
                 message,
                 details: None,
             }),
         )
             .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_test_url, validate_cache_test_url};
+    use url::Url;
+
+    #[test]
+    fn normalize_test_url_handles_attic_scheme() {
+        let normalized = normalize_test_url("Attic", Some("attic://cache.example.com/team"), None);
+        assert_eq!(normalized.as_deref(), Some("https://cache.example.com"));
+    }
+
+    #[test]
+    fn validate_cache_test_url_rejects_http() {
+        let url = Url::parse("http://cache.example.com").unwrap();
+        let err = validate_cache_test_url(&url).unwrap_err();
+        assert!(err.contains("Only https is allowed"));
+    }
+
+    #[test]
+    fn validate_cache_test_url_rejects_localhost() {
+        let url = Url::parse("https://localhost/cache").unwrap();
+        let err = validate_cache_test_url(&url).unwrap_err();
+        assert!(err.contains("localhost or internal"));
+    }
+
+    #[test]
+    fn validate_cache_test_url_rejects_private_ip() {
+        let url = Url::parse("https://10.0.0.8/cache").unwrap();
+        let err = validate_cache_test_url(&url).unwrap_err();
+        assert!(err.contains("private, loopback, or non-routable IP"));
+    }
+
+    #[test]
+    fn validate_cache_test_url_allows_public_https_host() {
+        let url = Url::parse("https://cache.nixos.org").unwrap();
+        assert!(validate_cache_test_url(&url).is_ok());
     }
 }
 
