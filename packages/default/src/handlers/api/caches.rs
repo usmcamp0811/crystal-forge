@@ -7,6 +7,7 @@ use axum::{
 use serde::Deserialize;
 use sqlx::PgPool;
 use std::net::IpAddr;
+use std::net::SocketAddr;
 use std::time::Duration;
 use url::Url;
 
@@ -78,8 +79,41 @@ fn validate_cache_test_url(url: &Url) -> Result<(), String> {
         return Err("Refusing to test localhost or internal cache endpoint".to_string());
     }
 
-    if let Ok(ip) = host.parse::<IpAddr>() {
+    let host_for_ip_parse = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = host_for_ip_parse.parse::<IpAddr>() {
         reject_non_public_ip(ip)?;
+    }
+
+    Ok(())
+}
+
+async fn validate_cache_test_url_resolves_publicly(url: &Url) -> Result<(), String> {
+    validate_cache_test_url(url)?;
+
+    let host = url
+        .host_str()
+        .ok_or_else(|| "Cache test URL must include a host".to_string())?;
+
+    if host.parse::<IpAddr>().is_ok() {
+        return Ok(());
+    }
+
+    let port = url.port_or_known_default().unwrap_or(443);
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|e| format!("Failed to resolve cache test host: {e}"))?
+        .collect();
+
+    validate_resolved_addrs_public(&addrs)
+}
+
+fn validate_resolved_addrs_public(addrs: &[SocketAddr]) -> Result<(), String> {
+    if addrs.is_empty() {
+        return Err("Cache test host did not resolve to any addresses".to_string());
+    }
+
+    for addr in addrs {
+        reject_non_public_ip(addr.ip())?;
     }
 
     Ok(())
@@ -132,7 +166,7 @@ async fn run_cache_destination_test(create: &CreateCacheDestination) -> Result<C
     };
 
     let parsed_url = Url::parse(&test_url).map_err(|e| format!("Invalid cache test URL: {e}"))?;
-    validate_cache_test_url(&parsed_url)?;
+    validate_cache_test_url_resolves_publicly(&parsed_url).await?;
     let tested_url = sanitize_test_url_for_response(&parsed_url);
 
     let client = reqwest::Client::builder()
@@ -384,7 +418,11 @@ pub async fn test_cache_destination_credentials(
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_test_url, validate_cache_test_url};
+    use super::{
+        normalize_test_url, sanitize_test_url_for_response, validate_cache_test_url,
+        validate_cache_test_url_resolves_publicly, validate_resolved_addrs_public,
+    };
+    use std::net::{Ipv4Addr, SocketAddr};
     use url::Url;
 
     #[test]
@@ -415,9 +453,49 @@ mod tests {
     }
 
     #[test]
+    fn validate_cache_test_url_rejects_local_suffixes() {
+        let internal = Url::parse("https://cache.internal").unwrap();
+        let local = Url::parse("https://cache.local").unwrap();
+        assert!(validate_cache_test_url(&internal).is_err());
+        assert!(validate_cache_test_url(&local).is_err());
+    }
+
+    #[test]
+    fn validate_cache_test_url_rejects_loopback_and_link_local_ips() {
+        let ipv4_loopback = Url::parse("https://127.0.0.1/cache").unwrap();
+        let link_local = Url::parse("https://169.254.169.254/latest").unwrap();
+        let ipv6_loopback = Url::parse("https://[::1]/cache").unwrap();
+
+        assert!(validate_cache_test_url(&ipv4_loopback).is_err());
+        assert!(validate_cache_test_url(&link_local).is_err());
+        assert!(validate_cache_test_url(&ipv6_loopback).is_err());
+    }
+
+    #[test]
     fn validate_cache_test_url_allows_public_https_host() {
         let url = Url::parse("https://cache.nixos.org").unwrap();
         assert!(validate_cache_test_url(&url).is_ok());
+    }
+
+    #[tokio::test]
+    async fn validate_cache_test_url_dns_rejects_localhost_resolution() {
+        let url = Url::parse("https://localhost").unwrap();
+        assert!(validate_cache_test_url_resolves_publicly(&url)
+            .await
+            .is_err());
+    }
+
+    #[test]
+    fn validate_resolved_addrs_public_rejects_private_resolution() {
+        let addrs = vec![SocketAddr::from((Ipv4Addr::new(10, 0, 0, 8), 443))];
+        assert!(validate_resolved_addrs_public(&addrs).is_err());
+    }
+
+    #[test]
+    fn sanitize_test_url_strips_embedded_credentials() {
+        let url = Url::parse("https://user:secret@example.com/cache").unwrap();
+        let sanitized = sanitize_test_url_for_response(&url);
+        assert_eq!(sanitized, "https://example.com/cache");
     }
 }
 

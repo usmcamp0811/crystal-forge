@@ -282,14 +282,12 @@ pub fn CachesView() -> Element {
                     h1 { class: "page-title", "Caches" }
                     p {
                         class: "page-subtitle",
-                        // Show totals: X destinations · Y healthy · Z paths cached
+                        // Show totals: X destinations · Y healthy
                         match &*destinations.peek() {
                             Some(Ok(dests)) => {
                                 let total = dests.len();
                                 let healthy = dests.iter().filter(|d| d.enabled).count();
-                                // TODO: Get actual paths count from API when available
-                                let paths = 0;
-                                rsx! { "{total} destinations · {healthy} healthy · {paths} paths cached" }
+                                rsx! { "{total} destinations · {healthy} healthy" }
                             },
                             _ => rsx! { "Loading…" }
                         }
@@ -325,8 +323,6 @@ pub fn CachesView() -> Element {
                         let total = dests.len();
                         let healthy = dests.iter().filter(|d| d.enabled).count();
                         let issues = total - healthy;
-                        // TODO: Get actual paths count from API when available
-                        let paths = 0;
                         rsx! {
                             div {
                                 class: "stat",
@@ -350,7 +346,7 @@ pub fn CachesView() -> Element {
                                 class: "stat",
                                 span { class: "stat-accent", style: "--stat-color: #60a5fa;" }
                                 div { class: "stat-label", "Paths cached" }
-                                div { class: "stat-value", "{paths}" }
+                                div { class: "stat-value", "—" }
                             }
                         }
                     },
@@ -683,7 +679,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                             option { value: "__new__", "+ Add new credential…" }
                                         }
                                         button {
-                                            class: "btn btn-ghost focus-ring xs", disabled: form_cred_id().is_empty(),
+                                            class: "btn btn-ghost focus-ring xs", disabled: form_requires_auth() && form_cred_id().is_empty(),
                                             onclick: move |_| {
                                                 form_testing.set(Some("running".to_string()));
                                                 form_test_error.set(None);
@@ -726,7 +722,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                         }
                                     }
                                     if local_credentials().is_empty() {
-                                        div { class: "help", "Saved credentials are not available yet. Add one to test with this flow." }
+                                        div { class: "help", "Saved credentials are not available yet. Disable authentication to test public connectivity, or add a credential in this form." }
                                     }
                                     if let Some(err) = form_test_error() {
                                         div { class: "help", style: "color: var(--cf-danger);", "Test failed: {err}" }
@@ -951,7 +947,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                         }
                                         button {
                                             class: "btn btn-ghost focus-ring xs",
-                                            disabled: form_cred_id().is_empty(),
+                                            disabled: form_requires_auth() && form_cred_id().is_empty(),
                                             onclick: move |_| {
                                                 form_testing.set(Some("running".to_string()));
                                                 form_test_error.set(None);
@@ -999,7 +995,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                         }
                                     }
                                     if local_credentials().is_empty() {
-                                        div { class: "help", "Saved credentials are not available yet. Add one to test with this flow." }
+                                        div { class: "help", "Saved credentials are not available yet. Disable authentication to test public connectivity, or add a credential in this form." }
                                     }
                                     if let Some(err) = form_test_error() {
                                         div { class: "help", style: "color: var(--cf-danger);", "Test failed: {err}" }
@@ -1508,11 +1504,7 @@ fn CacheDestinationRow(destination: CacheDestination, on_edit: EventHandler<Cach
             td {
                 class: "mono",
                 style: "font-size:12px;",
-                // Mock paths count (TODO: replace with real API data when available)
-                {
-                    let paths = ((destination.id as i64 * 1234) % 50000 + 5000) as i64;
-                    format!("{}", paths.to_string().as_bytes().rchunks(3).rev().map(|chunk| std::str::from_utf8(chunk).unwrap()).collect::<Vec<_>>().join(","))
-                }
+                "—"
             }
             
             // Last push column
