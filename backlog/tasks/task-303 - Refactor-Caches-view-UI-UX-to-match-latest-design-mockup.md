@@ -14,6 +14,7 @@ updated_date: '2026-05-20 17:41'
 updated_date: '2026-05-20 19:01'
 updated_date: '2026-05-21 03:12'
 updated_date: '2026-05-22 02:28'
+updated_date: '2026-05-22 03:13'
 labels:
   - ui
   - ux
@@ -116,12 +117,11 @@ MR #257 is already merged.
 Task worktree cleaned: git worktree remove ../TASK-303-refactor-caches-view && git worktree prune.
 LOCK: agent on gray in ~/code/crystal-forge/TASK-303-refactor-caches-view
 Credential testing remains in this task and now uses backend-validated behavior rather than fake placeholder credential payloads.
+Added DNS-resolution SSRF guardrail for credential tests: hostname resolution is performed and every resolved address is rejected if non-public.
 
-Scope exception captured: this task includes a minimal backend endpoint behavior refinement for `/api/v1/caches/test-credentials` required to support secure UI parity.
+Removed remaining fake paths-cached values from subtitle, stat strip, and table row; now renders unknown placeholder instead of fabricated numbers.
 
-Added SSRF guardrails: https-only test URL policy, localhost/internal host rejection, non-public literal IP rejection, short timeout, and no redirects.
-
-Endpoint now returns typed operational result (`ok`, `status_code`, `message`, `tested_url`) with 200 for operational pass/fail and 400 for invalid test configuration.
+Adjusted credential test button UX so public connectivity tests are possible when authentication is unchecked even if no saved credentials exist.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
