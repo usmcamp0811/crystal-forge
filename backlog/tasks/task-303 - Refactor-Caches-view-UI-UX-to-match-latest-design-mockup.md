@@ -4,7 +4,7 @@ title: Refactor Caches view UI/UX to match latest design mockup
 status: In Progress
 assignee: []
 created_date: '2026-05-19 13:21'
-updated_date: '2026-05-22 02:28'
+updated_date: '2026-05-22 03:13'
 labels:
   - ui
   - ux
@@ -61,7 +61,7 @@ Refactor the Caches view implementation so layout, information hierarchy, visual
   - `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown`
   - `nix develop -c env SQLX_OFFLINE=true cargo check --manifest-path packages/default/Cargo.toml -p crystal-forge`
 - Targeted checks:
-  - `nix develop -c env SQLX_OFFLINE=true cargo test --manifest-path packages/default/Cargo.toml validate_cache_test_url`
+  - `nix develop -c env SQLX_OFFLINE=true cargo test --manifest-path packages/default/Cargo.toml --lib handlers::api::caches`
   - `nix build .#checks.x86_64-linux.web-ui`
 - Test evidence:
   - Update/add web-ui integration assertions for key Caches interactions from the mockup.
@@ -89,11 +89,9 @@ Medium: highly visible UI area; interaction/layout regressions are possible with
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Credential testing remains in this task and now uses backend-validated behavior rather than fake placeholder credential payloads.
+Added DNS-resolution SSRF guardrail for credential tests: hostname resolution is performed and every resolved address is rejected if non-public.
 
-Scope exception captured: this task includes a minimal backend endpoint behavior refinement for `/api/v1/caches/test-credentials` required to support secure UI parity.
+Removed remaining fake paths-cached values from subtitle, stat strip, and table row; now renders unknown placeholder instead of fabricated numbers.
 
-Added SSRF guardrails: https-only test URL policy, localhost/internal host rejection, non-public literal IP rejection, short timeout, and no redirects.
-
-Endpoint now returns typed operational result (`ok`, `status_code`, `message`, `tested_url`) with 200 for operational pass/fail and 400 for invalid test configuration.
+Adjusted credential test button UX so public connectivity tests are possible when authentication is unchecked even if no saved credentials exist.
 <!-- SECTION:NOTES:END -->
