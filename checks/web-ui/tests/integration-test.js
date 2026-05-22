@@ -3932,43 +3932,72 @@ const steps = [
   // ── End CVE/multi-rule policy checks ─────────────────────────────────────
   {
     name: "21-caches",
-    description: "Cache management view",
+    description: "Cache management view with stats and Push Jobs tab",
     action: async (page) => {
       await page.goto(`${baseUrl}/caches`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2500);
+
+      await assertVisible(page.getByRole("heading", { name: "Caches" }), "Expected Caches heading");
+      await assertVisible(page.getByText("Total caches").first(), "Expected Total caches stat");
+      await assertVisible(page.getByText("Healthy").first(), "Expected Healthy stat");
+      await assertVisible(page.getByText("Issues").first(), "Expected Issues stat");
+
+      await page.getByRole("button", { name: "Push Jobs" }).click();
+      await assertVisible(
+        page.getByRole("heading", { name: /Cache Push Jobs/i }).first(),
+        "Expected Cache Push Jobs heading after tab switch",
+      );
     },
   },
   {
     name: "22-caches-modal-nix",
-    description: "Add cache modal with Nix type selected",
+    description: "Add cache modal with Nix type selected and public test UX",
     action: async (page) => {
       await page.goto(`${baseUrl}/caches`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2500);
 
-      const addBtn = page.locator("button:has-text('Add Destination')").first();
+      const addBtn = page.locator("button:has-text('Add cache')").first();
       await addBtn.waitFor({ timeout: 5000 });
       await addBtn.click();
-      await page.getByRole("heading", { name: "Add Cache Destination" }).waitFor({ timeout: 5000 });
+      await page.locator("[role='dialog']").first().waitFor({ timeout: 5000 });
 
       const dialog = page.locator("[role='dialog']").first();
-      await dialog.locator("select").first().selectOption("Nix");
+      await dialog.getByRole("button", { name: "Nix" }).click();
+
+      const requiresAuth = dialog.locator("input[type='checkbox']").first();
+      await assertEnabled(dialog.getByRole("button", { name: "Test" }), "Expected Test enabled for public connectivity");
+      await requiresAuth.check();
+      await assertDisabled(dialog.getByRole("button", { name: "Test" }), "Expected Test disabled when auth is required without credential");
+      await requiresAuth.uncheck();
+      await assertEnabled(dialog.getByRole("button", { name: "Test" }), "Expected Test re-enabled after disabling auth");
+
       await page.waitForTimeout(1200);
     },
   },
   {
     name: "23-caches-modal-http",
-    description: "Add cache modal with Http type selected",
+    description: "Add cache modal save flow creates a destination row",
     action: async (page) => {
       await page.goto(`${baseUrl}/caches`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2500);
 
-      const addBtn = page.locator("button:has-text('Add Destination')").first();
+      const addBtn = page.locator("button:has-text('Add cache')").first();
       await addBtn.waitFor({ timeout: 5000 });
       await addBtn.click();
-      await page.getByRole("heading", { name: "Add Cache Destination" }).waitFor({ timeout: 5000 });
+      await page.locator("[role='dialog']").first().waitFor({ timeout: 5000 });
 
       const dialog = page.locator("[role='dialog']").first();
-      await dialog.locator("select").first().selectOption("Http");
+      await dialog.getByRole("button", { name: "Nix" }).click();
+      await dialog.locator("input").first().fill(`ci-cache-${Date.now()}`);
+      await dialog.locator("input").nth(1).fill("https://cache.nixos.org");
+      await dialog.locator("input[type='checkbox']").first().uncheck();
+      await dialog.getByRole("button", { name: "Save" }).click();
+      await assertHidden(dialog, "Expected add-cache modal to close after save");
+      await assertVisible(
+        page.getByText(/ci-cache-/).first(),
+        "Expected newly created cache row after save",
+        10000,
+      );
       await page.waitForTimeout(1200);
     },
   },
@@ -3979,13 +4008,13 @@ const steps = [
       await page.goto(`${baseUrl}/caches`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2500);
 
-      const addBtn = page.locator("button:has-text('Add Destination')").first();
+      const addBtn = page.locator("button:has-text('Add cache')").first();
       await addBtn.waitFor({ timeout: 5000 });
       await addBtn.click();
-      await page.getByRole("heading", { name: "Add Cache Destination" }).waitFor({ timeout: 5000 });
+      await page.locator("[role='dialog']").first().waitFor({ timeout: 5000 });
 
       const dialog = page.locator("[role='dialog']").first();
-      await dialog.locator("select").first().selectOption("S3");
+      await dialog.getByRole("button", { name: "S3" }).click();
       await page.waitForTimeout(1200);
     },
   },
@@ -3996,13 +4025,13 @@ const steps = [
       await page.goto(`${baseUrl}/caches`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2500);
 
-      const addBtn = page.locator("button:has-text('Add Destination')").first();
+      const addBtn = page.locator("button:has-text('Add cache')").first();
       await addBtn.waitFor({ timeout: 5000 });
       await addBtn.click();
-      await page.getByRole("heading", { name: "Add Cache Destination" }).waitFor({ timeout: 5000 });
+      await page.locator("[role='dialog']").first().waitFor({ timeout: 5000 });
 
       const dialog = page.locator("[role='dialog']").first();
-      await dialog.locator("select").first().selectOption("Attic");
+      await dialog.getByRole("button", { name: "Attic" }).click();
       await page.waitForTimeout(1200);
     },
   },
