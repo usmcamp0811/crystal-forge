@@ -283,7 +283,7 @@ pub fn CachesView() -> Element {
                     p {
                         class: "page-subtitle",
                         // Show totals: X destinations · Y healthy
-                        match &*destinations.peek() {
+                        match destinations.read().as_ref() {
                             Some(Ok(dests)) => {
                                 let total = dests.len();
                                 let healthy = dests.iter().filter(|d| d.enabled).count();
@@ -318,7 +318,7 @@ pub fn CachesView() -> Element {
             // Stat strip matching mockup (JSX lines 35-48)
             div {
                 class: "stat-strip",
-                match &*destinations.peek() {
+                match destinations.read().as_ref() {
                     Some(Ok(dests)) => {
                         let total = dests.len();
                         let healthy = dests.iter().filter(|d| d.enabled).count();
@@ -505,7 +505,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                 span {
                     class: "filter-count",
                     // Show filtered count
-                    match &*destinations.peek() {
+                    match destinations.read().as_ref() {
                         Some(Ok(dests)) => {
                             let query = search_query().to_lowercase();
                             let filtered = if query.is_empty() {
