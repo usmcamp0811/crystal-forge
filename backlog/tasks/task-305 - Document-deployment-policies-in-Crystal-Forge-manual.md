@@ -1,10 +1,10 @@
 ---
 id: TASK-305
 title: Implement deployment policy system for fleet management
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-05-23 14:12'
-updated_date: '2026-05-23 15:32'
+updated_date: '2026-05-23 16:09'
 labels:
   - feature
   - deployment
@@ -243,4 +243,6 @@ All 4 policy types fully implemented with:
 Commits: 6a4921f1, 15e58551, f9e402e3, c68389ac, b3ca98aa
 
 Next: Integration into deployment manager, comprehensive E2E testing.
+
+MR created: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/262
 <!-- SECTION:NOTES:END -->
