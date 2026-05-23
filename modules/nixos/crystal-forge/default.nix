@@ -26,15 +26,16 @@ let
       name = cfg.database.name;
     };
   } // lib.optionalAttrs cfg.server.enable {
-    server = {
-      host = cfg.server.host;
-      port = cfg.server.port;
-      eval_workers = cfg.server.eval_workers;
-      eval_max_memory_mb = cfg.server.eval_max_memory_mb;
-      eval_check_cache = cfg.server.eval_check_cache;
-    } // lib.optionalAttrs (cfg.server.role_mapping != { }) {
-      role_mapping = cfg.server.role_mapping;
-    };
+      server = {
+        host = cfg.server.host;
+        port = cfg.server.port;
+        eval_workers = cfg.server.eval_workers;
+        eval_max_memory_mb = cfg.server.eval_max_memory_mb;
+        eval_check_cache = cfg.server.eval_check_cache;
+        allow_private_cache_test_targets = cfg.server.allow_private_cache_test_targets;
+      } // lib.optionalAttrs (cfg.server.role_mapping != { }) {
+        role_mapping = cfg.server.role_mapping;
+      };
   } // lib.optionalAttrs cfg.client.enable {
     client = {
       server_host = cfg.client.server_host;
@@ -1301,6 +1302,18 @@ in {
           already built (in local store or binary cache) vs need building.
 
           Disable if cache checking is slow or causing issues.
+        '';
+      };
+
+      allow_private_cache_test_targets = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = lib.mdDoc ''
+          Allow `/api/v1/caches/test-credentials` to test private, loopback,
+          and other non-routable cache endpoints.
+
+          Keep disabled unless you explicitly need to test internal Attic/cache
+          hosts from the admin UI.
         '';
       };
 
