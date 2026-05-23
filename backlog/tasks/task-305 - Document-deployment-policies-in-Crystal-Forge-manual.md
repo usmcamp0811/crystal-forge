@@ -1,10 +1,10 @@
 ---
 id: TASK-305
 title: Implement deployment policy system for fleet management
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-05-23 14:12'
-updated_date: '2026-05-23 14:20'
+updated_date: '2026-05-23 14:21'
 labels:
   - feature
   - deployment
