@@ -14,8 +14,7 @@ let
       v;
 
   # Build the raw config first (your existing baseConfig logic, unchanged)
-  baseConfigRaw = lib.optionalAttrs
-    (cfg.server.enable || (cfg.build.enable && !cfg.build.api_mode)) {
+  baseConfigRaw = {
       database = {
         host = cfg.database.host;
         port = cfg.database.port;
@@ -175,8 +174,7 @@ let
       mkdir -p "$(dirname "$generatedConfigPath")"
       cp "${rawConfigFile}" "$generatedConfigPath"
 
-      ${lib.optionalString (cfg.database.passwordFile != null
-        && (cfg.server.enable || (cfg.build.enable && !cfg.build.api_mode))) ''
+      ${lib.optionalString (cfg.database.passwordFile != null) ''
         if [ -f "${cfg.database.passwordFile}" ]; then
           PASSWORD=$(cat "${cfg.database.passwordFile}")
           ${pkgs.gnused}/bin/sed -i "s|__PLACEHOLDER_PASSWORD__|$PASSWORD|" "$generatedConfigPath"
