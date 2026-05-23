@@ -3,13 +3,14 @@
 
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     Json,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::server::AppState;
+use crate::handlers::agent_request::CFState;
+use crate::handlers::api::rbac::authenticated_user_roles;
 use crate::services::{
     approval_policy::{self, DeploymentContext},
     canary_rollout::{self, RolloutContext},
@@ -61,11 +62,14 @@ pub struct RolloutStatusResponse {
 /// Submit approval for a commit deployment
 /// POST /api/v1/deployments/commit/:commit_id/approve
 pub async fn submit_commit_approval(
-    State(state): State<AppState>,
+    State(state): State<CFState>,
+    headers: HeaderMap,
     Path(commit_id): Path<String>,
-    user_id: Uuid, // TODO: Extract from session/auth
     Json(request): Json<SubmitApprovalRequest>,
 ) -> Result<Json<SubmitApprovalResponse>, (StatusCode, String)> {
+    let Some((user_id, _roles)) = authenticated_user_roles(&state.pool, &headers).await else {
+        return Err((StatusCode::UNAUTHORIZED, "Unauthorized".to_string()));
+    };
     // Get policy config to determine expiration
     let policy = crate::queries::deployment_policies::get_deployment_policy_by_id(&state.pool, &request.policy_id)
         .await
@@ -119,7 +123,7 @@ pub async fn submit_commit_approval(
 /// Get approval status for a commit deployment
 /// GET /api/v1/deployments/commit/:commit_id/approvals/:policy_id
 pub async fn get_commit_approval_status(
-    State(state): State<AppState>,
+    State(state): State<CFState>,
     Path((commit_id, policy_id)): Path<(String, Uuid)>,
 ) -> Result<Json<ApprovalStatusResponse>, (StatusCode, String)> {
     // Get policy config
@@ -186,7 +190,7 @@ pub async fn get_commit_approval_status(
 /// Get canary rollout status for a commit
 /// GET /api/v1/deployments/commit/:commit_id/rollout/:policy_id
 pub async fn get_commit_rollout_status(
-    State(state): State<AppState>,
+    State(state): State<CFState>,
     Path((commit_id, policy_id)): Path<(String, Uuid)>,
 ) -> Result<Json<RolloutStatusResponse>, (StatusCode, String)> {
     let rollout_state = canary_rollout::get_rollout_state(
