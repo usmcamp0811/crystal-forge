@@ -152,13 +152,25 @@ Require N approvals from operators with specific roles.
 3. Operators with required role submit approvals via API
 4. Once `count` approvals are collected, deployment proceeds
 
-**API Endpoint (to be implemented):**
+**Role Enforcement:**
+- Approver role is verified at submission time (handler checks user has required role)
+- Stored approvals are trusted; role changes do not retroactively invalidate approvals
+- For stricter enforcement, re-check roles during policy evaluation (future enhancement)
+
+**Current API Endpoints:**
 ```bash
-POST /api/v1/deployments/{context}/{context_id}/approve
+# Submit approval (requires authentication + role verification)
+POST /api/v1/deployments/commit/:commit_id/approve
 {
   "policy_id": "uuid",
   "comment": "Approved for production rollout"
 }
+
+# Check approval status (requires authentication)
+GET /api/v1/deployments/commit/:commit_id/approvals/:policy_id
+
+# Get rollout status (requires authentication)
+GET /api/v1/deployments/commit/:commit_id/rollout/:policy_id
 ```
 
 ---

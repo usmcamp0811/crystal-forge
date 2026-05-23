@@ -15,8 +15,14 @@ pub struct TimeWindowResult {
 
 /// Evaluate a time window policy against current time
 pub fn check_time_window(config: &TimeWindowConfig) -> TimeWindowResult {
-    let now_utc = Utc::now();
-    
+    check_time_window_at(config, Utc::now())
+}
+
+/// Evaluate a time window policy against a specific timestamp (testable)
+pub fn check_time_window_at(
+    config: &TimeWindowConfig,
+    now_utc: chrono::DateTime<Utc>,
+) -> TimeWindowResult {
     // Normalize action to lowercase for case-insensitive comparison
     let action = config.action.to_lowercase();
     
@@ -32,31 +38,6 @@ pub fn check_time_window(config: &TimeWindowConfig) -> TimeWindowResult {
     };
     
     let now_local = now_utc.with_timezone(&tz);
-    
-    // Check day of week
-    let current_day = match now_local.weekday() {
-        chrono::Weekday::Mon => "mon",
-        chrono::Weekday::Tue => "tue",
-        chrono::Weekday::Wed => "wed",
-        chrono::Weekday::Thu => "thu",
-        chrono::Weekday::Fri => "fri",
-        chrono::Weekday::Sat => "sat",
-        chrono::Weekday::Sun => "sun",
-    };
-    
-    let day_allowed = config.days.iter().any(|d| d.to_lowercase() == current_day);
-    
-    if !day_allowed {
-        let reason = format!(
-            "Current day {} not in allowed days: {}",
-            current_day,
-            config.days.join(", ")
-        );
-        return TimeWindowResult {
-            deployment_allowed: action == "warn",
-            reason: Some(reason),
-        };
-    }
     
     // Parse time range
     let start_time = match parse_time(&config.start_time) {
@@ -86,23 +67,74 @@ pub fn check_time_window(config: &TimeWindowConfig) -> TimeWindowResult {
     )
     .unwrap();
     
-    let time_in_range = if start_time <= end_time {
-        // Normal range: 09:00 - 17:00
-        current_time >= start_time && current_time <= end_time
-    } else {
-        // Wrap-around range: 22:00 - 02:00 (crosses midnight)
-        current_time >= start_time || current_time <= end_time
+    // Helper to get short weekday name
+    let weekday_name = |wd: chrono::Weekday| -> &str {
+        match wd {
+            chrono::Weekday::Mon => "mon",
+            chrono::Weekday::Tue => "tue",
+            chrono::Weekday::Wed => "wed",
+            chrono::Weekday::Thu => "thu",
+            chrono::Weekday::Fri => "fri",
+            chrono::Weekday::Sat => "sat",
+            chrono::Weekday::Sun => "sun",
+        }
     };
     
-    if !time_in_range {
-        let reason = format!(
-            "Current time {:02}:{:02} not in window {}-{} ({} timezone)",
-            now_local.hour(),
-            now_local.minute(),
-            config.start_time,
-            config.end_time,
-            config.timezone
-        );
+    let is_wrap_around = start_time > end_time;
+    
+    let (day_allowed, matched_day) = if !is_wrap_around {
+        // Normal window (e.g., 09:00 - 17:00): check current day and time
+        let current_day = weekday_name(now_local.weekday());
+        let day_matches = config.days.iter().any(|d| d.to_lowercase() == current_day);
+        let time_in_range = current_time >= start_time && current_time <= end_time;
+        (day_matches && time_in_range, current_day)
+    } else {
+        // Wrap-around window (e.g., 22:00 - 02:00): check both current and previous day
+        let current_day = weekday_name(now_local.weekday());
+        let previous_day = weekday_name(now_local.weekday().pred());
+        
+        // If current_time >= start_time, we're in the "late night" part (e.g., Mon 23:00)
+        // Check if current day is allowed
+        if current_time >= start_time {
+            let day_matches = config.days.iter().any(|d| d.to_lowercase() == current_day);
+            (day_matches, current_day)
+        }
+        // If current_time <= end_time, we're in the "early morning" part (e.g., Tue 01:00)
+        // Check if previous day is allowed (the window started yesterday)
+        else if current_time <= end_time {
+            let day_matches = config.days.iter().any(|d| d.to_lowercase() == previous_day);
+            (day_matches, previous_day)
+        }
+        // Outside the wrap-around window entirely
+        else {
+            (false, current_day)
+        }
+    };
+    
+    if !day_allowed {
+        let reason = if is_wrap_around {
+            format!(
+                "Current time {:02}:{:02} on {} not in wrap-around window {}-{} for days: {} ({} timezone)",
+                now_local.hour(),
+                now_local.minute(),
+                weekday_name(now_local.weekday()),
+                config.start_time,
+                config.end_time,
+                config.days.join(", "),
+                config.timezone
+            )
+        } else {
+            format!(
+                "Current time {:02}:{:02} on {} not in window {}-{} for days: {} ({} timezone)",
+                now_local.hour(),
+                now_local.minute(),
+                matched_day,
+                config.start_time,
+                config.end_time,
+                config.days.join(", "),
+                config.timezone
+            )
+        };
         return TimeWindowResult {
             deployment_allowed: action == "warn",
             reason: Some(reason),
@@ -136,6 +168,7 @@ fn parse_time(time_str: &str) -> Result<NaiveTime, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     
     #[test]
     fn test_parse_time_valid() {
@@ -155,5 +188,185 @@ mod tests {
     fn test_parse_time_out_of_range() {
         assert!(parse_time("25:00").is_err());
         assert!(parse_time("12:60").is_err());
+    }
+    
+    #[test]
+    fn test_normal_window_allowed() {
+        let config = TimeWindowConfig {
+            description: "Business hours".to_string(),
+            days: vec!["mon".to_string(), "tue".to_string(), "wed".to_string()],
+            start_time: "09:00".to_string(),
+            end_time: "17:00".to_string(),
+            timezone: "America/Chicago".to_string(),
+            action: "block".to_string(),
+        };
+        
+        // Monday 2024-01-08 12:00 CST (within window)
+        let chicago_tz: Tz = "America/Chicago".parse().unwrap();
+        let timestamp = chicago_tz.with_ymd_and_hms(2024, 1, 8, 12, 0, 0).unwrap();
+        let result = check_time_window_at(&config, timestamp.with_timezone(&Utc));
+        
+        assert!(result.deployment_allowed);
+        assert!(result.reason.is_none());
+    }
+    
+    #[test]
+    fn test_normal_window_blocked_wrong_day() {
+        let config = TimeWindowConfig {
+            description: "Weekdays only".to_string(),
+            days: vec!["mon".to_string(), "tue".to_string(), "wed".to_string()],
+            start_time: "09:00".to_string(),
+            end_time: "17:00".to_string(),
+            timezone: "America/Chicago".to_string(),
+            action: "block".to_string(),
+        };
+        
+        // Saturday 2024-01-06 12:00 CST (wrong day)
+        let chicago_tz: Tz = "America/Chicago".parse().unwrap();
+        let timestamp = chicago_tz.with_ymd_and_hms(2024, 1, 6, 12, 0, 0).unwrap();
+        let result = check_time_window_at(&config, timestamp.with_timezone(&Utc));
+        
+        assert!(!result.deployment_allowed);
+        assert!(result.reason.is_some());
+    }
+    
+    #[test]
+    fn test_normal_window_blocked_outside_time() {
+        let config = TimeWindowConfig {
+            description: "Business hours".to_string(),
+            days: vec!["mon".to_string()],
+            start_time: "09:00".to_string(),
+            end_time: "17:00".to_string(),
+            timezone: "America/Chicago".to_string(),
+            action: "block".to_string(),
+        };
+        
+        // Monday 2024-01-08 20:00 CST (outside time range)
+        let chicago_tz: Tz = "America/Chicago".parse().unwrap();
+        let timestamp = chicago_tz.with_ymd_and_hms(2024, 1, 8, 20, 0, 0).unwrap();
+        let result = check_time_window_at(&config, timestamp.with_timezone(&Utc));
+        
+        assert!(!result.deployment_allowed);
+        assert!(result.reason.is_some());
+    }
+    
+    #[test]
+    fn test_overnight_window_monday_late_night_allowed() {
+        let config = TimeWindowConfig {
+            description: "Monday night maintenance".to_string(),
+            days: vec!["mon".to_string()],
+            start_time: "22:00".to_string(),
+            end_time: "02:00".to_string(),
+            timezone: "America/Chicago".to_string(),
+            action: "block".to_string(),
+        };
+        
+        // Monday 2024-01-08 23:00 CST (late night part of window)
+        let chicago_tz: Tz = "America/Chicago".parse().unwrap();
+        let timestamp = chicago_tz.with_ymd_and_hms(2024, 1, 8, 23, 0, 0).unwrap();
+        let result = check_time_window_at(&config, timestamp.with_timezone(&Utc));
+        
+        assert!(result.deployment_allowed, "Monday 23:00 should be allowed in Mon 22:00-02:00 window");
+        assert!(result.reason.is_none());
+    }
+    
+    #[test]
+    fn test_overnight_window_tuesday_early_morning_allowed() {
+        let config = TimeWindowConfig {
+            description: "Monday night maintenance".to_string(),
+            days: vec!["mon".to_string()],
+            start_time: "22:00".to_string(),
+            end_time: "02:00".to_string(),
+            timezone: "America/Chicago".to_string(),
+            action: "block".to_string(),
+        };
+        
+        // Tuesday 2024-01-09 01:00 CST (early morning part of Monday night window)
+        let chicago_tz: Tz = "America/Chicago".parse().unwrap();
+        let timestamp = chicago_tz.with_ymd_and_hms(2024, 1, 9, 1, 0, 0).unwrap();
+        let result = check_time_window_at(&config, timestamp.with_timezone(&Utc));
+        
+        assert!(result.deployment_allowed, "Tuesday 01:00 should be allowed as part of Monday night window");
+        assert!(result.reason.is_none());
+    }
+    
+    #[test]
+    fn test_overnight_window_tuesday_late_morning_blocked() {
+        let config = TimeWindowConfig {
+            description: "Monday night maintenance".to_string(),
+            days: vec!["mon".to_string()],
+            start_time: "22:00".to_string(),
+            end_time: "02:00".to_string(),
+            timezone: "America/Chicago".to_string(),
+            action: "block".to_string(),
+        };
+        
+        // Tuesday 2024-01-09 03:00 CST (outside window)
+        let chicago_tz: Tz = "America/Chicago".parse().unwrap();
+        let timestamp = chicago_tz.with_ymd_and_hms(2024, 1, 9, 3, 0, 0).unwrap();
+        let result = check_time_window_at(&config, timestamp.with_timezone(&Utc));
+        
+        assert!(!result.deployment_allowed, "Tuesday 03:00 should be blocked");
+        assert!(result.reason.is_some());
+    }
+    
+    #[test]
+    fn test_overnight_window_monday_afternoon_blocked() {
+        let config = TimeWindowConfig {
+            description: "Monday night maintenance".to_string(),
+            days: vec!["mon".to_string()],
+            start_time: "22:00".to_string(),
+            end_time: "02:00".to_string(),
+            timezone: "America/Chicago".to_string(),
+            action: "block".to_string(),
+        };
+        
+        // Monday 2024-01-08 21:00 CST (before window starts)
+        let chicago_tz: Tz = "America/Chicago".parse().unwrap();
+        let timestamp = chicago_tz.with_ymd_and_hms(2024, 1, 8, 21, 0, 0).unwrap();
+        let result = check_time_window_at(&config, timestamp.with_timezone(&Utc));
+        
+        assert!(!result.deployment_allowed, "Monday 21:00 should be blocked");
+        assert!(result.reason.is_some());
+    }
+    
+    #[test]
+    fn test_action_warn_allows_with_reason() {
+        let config = TimeWindowConfig {
+            description: "Preferred hours".to_string(),
+            days: vec!["mon".to_string()],
+            start_time: "09:00".to_string(),
+            end_time: "17:00".to_string(),
+            timezone: "America/Chicago".to_string(),
+            action: "warn".to_string(),
+        };
+        
+        // Monday 2024-01-08 20:00 CST (outside window, but action=warn)
+        let chicago_tz: Tz = "America/Chicago".parse().unwrap();
+        let timestamp = chicago_tz.with_ymd_and_hms(2024, 1, 8, 20, 0, 0).unwrap();
+        let result = check_time_window_at(&config, timestamp.with_timezone(&Utc));
+        
+        assert!(result.deployment_allowed, "action=warn should allow deployment");
+        assert!(result.reason.is_some(), "reason should explain the warning");
+    }
+    
+    #[test]
+    fn test_action_warn_overnight_window() {
+        let config = TimeWindowConfig {
+            description: "Preferred maintenance window".to_string(),
+            days: vec!["mon".to_string()],
+            start_time: "22:00".to_string(),
+            end_time: "02:00".to_string(),
+            timezone: "America/Chicago".to_string(),
+            action: "warn".to_string(),
+        };
+        
+        // Tuesday 2024-01-09 10:00 CST (outside window, action=warn)
+        let chicago_tz: Tz = "America/Chicago".parse().unwrap();
+        let timestamp = chicago_tz.with_ymd_and_hms(2024, 1, 9, 10, 0, 0).unwrap();
+        let result = check_time_window_at(&config, timestamp.with_timezone(&Utc));
+        
+        assert!(result.deployment_allowed, "action=warn should allow deployment");
+        assert!(result.reason.is_some(), "reason should explain the warning");
     }
 }

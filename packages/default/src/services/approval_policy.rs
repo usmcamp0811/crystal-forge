@@ -1,5 +1,12 @@
 // Approval policy evaluation service
 // Tracks and verifies operator approvals for deployment policies
+//
+// ROLE ENFORCEMENT SEMANTICS:
+// - Approver role is verified at approval submission time (see handlers/api/deployments.rs)
+// - check_approvals() trusts that stored approvals were submitted by users with the required role
+// - Approvals remain valid even if the approving user's role is later removed
+// - This is intentional: role changes should not retroactively invalidate past approval decisions
+// - For stricter enforcement, re-check approver roles during check_approvals() (future enhancement)
 
 use chrono::{DateTime, Duration, Utc};
 use sqlx::PgPool;
@@ -35,6 +42,8 @@ impl DeploymentContext {
 }
 
 /// Check if deployment has required approvals
+/// NOTE: This function trusts that approvals were created by users with the required role.
+/// Role verification happens at submission time (see handlers/api/deployments.rs).
 pub async fn check_approvals(
     pool: &PgPool,
     context: DeploymentContext,
