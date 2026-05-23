@@ -4,7 +4,7 @@ title: Refactor Caches view UI/UX to match latest design mockup
 status: In Progress
 assignee: []
 created_date: '2026-05-19 13:21'
-updated_date: '2026-05-23 03:23'
+updated_date: '2026-05-23 03:29'
 labels:
   - ui
   - ux
@@ -23,6 +23,8 @@ modified_files:
   - packages/default/src/handlers/api/caches.rs
   - packages/web-ui/src/api/client.rs
   - packages/web-ui/src/api/models.rs
+  - packages/default/src/config/server.rs
+  - modules/nixos/crystal-forge/default.nix
 priority: medium
 ordinal: 4800
 ---
@@ -89,5 +91,7 @@ Medium: highly visible UI area; interaction/layout regressions are possible with
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-LOCK: gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-303-refactor-caches-view
+Added opt-in private target override for cache credential tests via server.allow_private_cache_test_targets (default false), wired through NixOS module config generation.
+
+Commit: 5def2c2e
 <!-- SECTION:NOTES:END -->
