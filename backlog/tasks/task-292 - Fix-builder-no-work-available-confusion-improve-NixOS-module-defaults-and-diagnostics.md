@@ -4,7 +4,7 @@ title: Deprecate legacy database mode and implement builder API mode in NixOS mo
 status: Review
 assignee: []
 created_date: '2026-05-08 02:59'
-updated_date: '2026-05-23 15:31'
+updated_date: '2026-05-23 16:10'
 labels:
   - bug
   - dx
@@ -245,4 +245,11 @@ LOCK: claude-agent on gray in ~/code/crystal-forge/dev
 NOTE: TASK-293 completed - cf-keygen now supports -y flag for non-interactive use
 
 MR created: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/261
+
+Review feedback addressed in commit 862f7989:
+1. BLOCKER FIXED: Database config only included when server.enable OR (build.enable AND !build.api_mode)
+2. Default changed to api_mode = false for backward compatibility
+3. Builder API key permissions always normalized (not just on first generation)
+
+All three issues from review fixed and tested. Ready for re-review.
 <!-- SECTION:NOTES:END -->
