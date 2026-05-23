@@ -127,7 +127,7 @@ Adjusted credential test button UX so public connectivity tests are possible whe
 LOCK: gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-303-refactor-caches-view
 Added opt-in private target override for cache credential tests via server.allow_private_cache_test_targets (default false), wired through NixOS module config generation.
 
-Commit: 5def2c2e
+Task worktree cleaned: git worktree remove ../TASK-303-refactor-caches-view && git worktree prune.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
