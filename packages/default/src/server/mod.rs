@@ -259,6 +259,62 @@ fn parse_deployment_policy_record(
                 }
             }
         }
+        "time_window" => {
+            match serde_json::from_value::<crate::models::deployment_policies::TimeWindowConfig>(
+                cfg.clone(),
+            ) {
+                Ok(config) => Some(DeploymentPolicy::TimeWindow { config }),
+                Err(err) => {
+                    warn!(
+                        "Skipping time_window policy '{}' ({}): invalid config: {}",
+                        record.name, record.id, err
+                    );
+                    None
+                }
+            }
+        }
+        "require_approvals" => {
+            match serde_json::from_value::<crate::models::deployment_policies::ApprovalConfig>(
+                cfg.clone(),
+            ) {
+                Ok(config) => Some(DeploymentPolicy::RequireApprovals { config }),
+                Err(err) => {
+                    warn!(
+                        "Skipping require_approvals policy '{}' ({}): invalid config: {}",
+                        record.name, record.id, err
+                    );
+                    None
+                }
+            }
+        }
+        "canary_rollout" => {
+            match serde_json::from_value::<crate::models::deployment_policies::CanaryConfig>(
+                cfg.clone(),
+            ) {
+                Ok(config) => Some(DeploymentPolicy::CanaryRollout { config }),
+                Err(err) => {
+                    warn!(
+                        "Skipping canary_rollout policy '{}' ({}): invalid config: {}",
+                        record.name, record.id, err
+                    );
+                    None
+                }
+            }
+        }
+        "cve_threshold" => {
+            match serde_json::from_value::<crate::models::deployment_policies::CveThresholdConfig>(
+                cfg.clone(),
+            ) {
+                Ok(config) => Some(DeploymentPolicy::CveThreshold { config }),
+                Err(err) => {
+                    warn!(
+                        "Skipping cve_threshold policy '{}' ({}): invalid config: {}",
+                        record.name, record.id, err
+                    );
+                    None
+                }
+            }
+        }
         other => {
             warn!(
                 "Skipping unsupported deployment policy type '{}' for policy '{}' ({})",
