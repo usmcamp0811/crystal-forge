@@ -1,10 +1,10 @@
 ---
 id: TASK-292
 title: Deprecate legacy database mode and implement builder API mode in NixOS module
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-05-08 02:59'
-updated_date: '2026-05-11 12:48'
+updated_date: '2026-05-23 15:31'
 labels:
   - bug
   - dx
@@ -243,4 +243,6 @@ See cf-keygen.rs lines 84-92 for the blocking prompt code.
 LOCK: claude-agent on gray in ~/code/crystal-forge/dev
 
 NOTE: TASK-293 completed - cf-keygen now supports -y flag for non-interactive use
+
+MR created: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/261
 <!-- SECTION:NOTES:END -->
