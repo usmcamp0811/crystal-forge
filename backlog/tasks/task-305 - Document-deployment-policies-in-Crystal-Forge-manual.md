@@ -1,14 +1,16 @@
 ---
 id: TASK-305
-title: Document deployment policies in Crystal Forge manual
+title: Implement deployment policy system for fleet management
 status: Backlog
 assignee: []
 created_date: '2026-05-23 14:12'
+updated_date: '2026-05-23 14:15'
 labels:
-  - documentation
+  - feature
   - deployment
   - policies
-  - manual
+  - fleet-management
+  - architecture
 dependencies: []
 priority: medium
 ordinal: 252000
@@ -17,38 +19,70 @@ ordinal: 252000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Add comprehensive documentation for Crystal Forge deployment policies to the user manual. This should cover all built-in and example policies including manual approval, auto-deploy strategies, pinning, CVE gating, time-based restrictions, multi-approver workflows, and canary deployments.
+Design and implement a deployment policy system for Crystal Forge that controls how and when systems are deployed across the fleet. Currently, CF evaluates NixOS sources but lacks formal policy enforcement for deployment decisions.
 
-The documentation should explain:
-- How deployment policies work in Crystal Forge
-- The policy rule system and composition
-- Each built-in policy type with examples
-- How to create and customize policies
-- How policies are assigned to systems
-- Policy evaluation flow and approval processes
+## Goals
 
-Built-in policies to document:
-1. **manual** - Operator must explicitly approve every deploy (built-in, no rules)
-2. **auto_latest** - Auto-deploy newest passing commit on assigned flake/branch (built-in, evaluation + build rules)
-3. **pinned** - Stay on specific commit until manually changed (built-in, pinned commit rule)
+Build a policy engine that enables:
+- **Rule-based deployment gating** - Block/allow deployments based on configurable rules
+- **Fleet-aware orchestration** - Canary deployments, phased rollouts, subset targeting
+- **Multiple policy types** - Manual approval, auto-deploy, pinning, CVE gates, time windows, multi-approver
+- **Policy assignment** - Attach policies to systems or groups of systems
 
-Example/custom policies to document:
-4. **cve-gated** - Block deploys with critical CVEs (max 0 critical, max 2 high, evaluation + build)
-5. **business-hours** - Auto-deploy only 09:00-17:00 weekdays US-East (time window + evaluation + build)
-6. **two-approver** - Requires 2 admin approvers (2 approvers with admin role + evaluation + build)
-7. **canary-25** - Roll out to 25% of systems, observe 30min, continue (canary rule + evaluation + build)
+## Policy Types to Support
 
-The documentation should be user-friendly, include practical examples, and help operators understand when to use each policy type.
+**Built-in policies (MVP):**
+1. **manual** - Operator must explicitly approve every deploy (no automatic rules)
+2. **auto_latest** - Auto-deploy newest passing commit on assigned flake/branch
+3. **pinned** - Stay on specific commit until manually changed
+
+**Extended policies (post-MVP or stretch):**
+4. **cve-gated** - Block deploys introducing critical CVEs (max 0 critical, max 2 high)
+5. **business-hours** - Auto-deploy only during time windows (e.g., 09:00-17:00 weekdays)
+6. **two-approver** - Require N approvers with specific roles
+7. **canary-25** - Roll out to X% of systems, observe for duration, continue or halt
+
+## Architecture Questions to Resolve
+
+- Where should policies be stored? (database, Nix config, policy files)
+- When/where are policies evaluated? (pre-queue, during orchestration, per-system)
+- How does fleet state tracking work? (which systems on which commits)
+- How are systems grouped/labeled for canary selection?
+- What's the policy definition format? (custom DSL, structured data, code)
+
+## Deliverables
+
+- Policy engine design and implementation
+- At minimum: 3 built-in policies (manual, auto_latest, pinned)
+- Policy assignment mechanism (UI and/or API)
+- Policy evaluation integration into deployment workflow
+- Documentation covering:
+  - How the policy system works
+  - How to assign policies to systems
+  - Policy rule reference for each type
+  - Examples of creating custom policies (if extensible)
+  - Policy evaluation flow
+
+## Non-Goals
+
+- Full observability/audit trail (separate task if needed)
+- Advanced policy composition/inheritance (keep simple for MVP)
+- External policy engine integration (OPA/etc) - unless clearly beneficial
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Documentation covers all 3 built-in policies (manual, auto_latest, pinned)
-- [ ] #2 Documentation includes all 4 example custom policies (cve-gated, business-hours, two-approver, canary-25)
-- [ ] #3 Each policy entry explains its purpose, rules, and use cases
-- [ ] #4 Documentation explains the policy rule system and how rules compose
-- [ ] #5 Documentation includes examples of assigning policies to systems
-- [ ] #6 Documentation explains policy evaluation flow and approval processes
-- [ ] #7 Content is integrated into the Crystal Forge manual structure
-- [ ] #8 Examples are clear and actionable for operators
+- [ ] #1 Policy data model is defined (schema/types for policies and rules)
+- [ ] #2 At least 3 built-in policies are implemented: manual, auto_latest, pinned
+- [ ] #3 Policies can be assigned to systems (UI or API)
+- [ ] #4 Policy evaluation is integrated into deployment workflow
+- [ ] #5 Policy rules are checked before allowing deployments
+- [ ] #6 Manual approval policy requires explicit operator action
+- [ ] #7 Auto_latest policy automatically deploys passing commits
+- [ ] #8 Pinned policy prevents automatic updates until unpinned
+- [ ] #9 Documentation explains policy system architecture
+- [ ] #10 Documentation includes policy rule reference
+- [ ] #11 Documentation shows how to assign policies to systems
+- [ ] #12 Tests verify policy evaluation logic
+- [ ] #13 Tests verify each built-in policy behavior
 <!-- AC:END -->
