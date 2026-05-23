@@ -14,18 +14,19 @@ let
       v;
 
   # Build the raw config first (your existing baseConfig logic, unchanged)
-  baseConfigRaw = {
-    database = {
-      host = cfg.database.host;
-      port = cfg.database.port;
-      user = cfg.database.user;
-      password = if cfg.database.passwordFile != null then
-        "__PLACEHOLDER_PASSWORD__"
-      else
-        cfg.database.password;
-      name = cfg.database.name;
-    };
-  } // lib.optionalAttrs cfg.server.enable {
+  baseConfigRaw = lib.optionalAttrs
+    (cfg.server.enable || (cfg.build.enable && !cfg.build.api_mode)) {
+      database = {
+        host = cfg.database.host;
+        port = cfg.database.port;
+        user = cfg.database.user;
+        password = if cfg.database.passwordFile != null then
+          "__PLACEHOLDER_PASSWORD__"
+        else
+          cfg.database.password;
+        name = cfg.database.name;
+      };
+    } // lib.optionalAttrs cfg.server.enable {
     server = {
       host = cfg.server.host;
       port = cfg.server.port;
@@ -174,7 +175,8 @@ let
       mkdir -p "$(dirname "$generatedConfigPath")"
       cp "${rawConfigFile}" "$generatedConfigPath"
 
-      ${lib.optionalString (cfg.database.passwordFile != null) ''
+      ${lib.optionalString (cfg.database.passwordFile != null
+        && (cfg.server.enable || (cfg.build.enable && !cfg.build.api_mode))) ''
         if [ -f "${cfg.database.passwordFile}" ]; then
           PASSWORD=$(cat "${cfg.database.passwordFile}")
           ${pkgs.gnused}/bin/sed -i "s|__PLACEHOLDER_PASSWORD__|$PASSWORD|" "$generatedConfigPath"
@@ -230,12 +232,10 @@ let
 
       ${lib.optionalString (cfg.build.enable && cfg.build.api_mode && cfg.build.api_key_file == null) ''
           BUILDER_API_KEY_PATH="/var/lib/crystal-forge/builder-api.key"
+          
           if [ ! -f "$BUILDER_API_KEY_PATH" ]; then
             echo "Generating builder API key for Crystal Forge API mode..."
             ${pkgs.crystal-forge.default.server}/bin/cf-keygen -y -f "$BUILDER_API_KEY_PATH"
-            chown crystal-forge:crystal-forge "$BUILDER_API_KEY_PATH" "$BUILDER_API_KEY_PATH.pub"
-            chmod 600 "$BUILDER_API_KEY_PATH"
-            chmod 644 "$BUILDER_API_KEY_PATH.pub"
             echo "Builder API key generated at $BUILDER_API_KEY_PATH"
             echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             echo "📋 BUILDER REGISTRATION REQUIRED"
@@ -246,6 +246,15 @@ let
             cat "$BUILDER_API_KEY_PATH.pub"
             echo ""
             echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          fi
+          
+          # Always normalize permissions (even if key already existed)
+          chown crystal-forge:crystal-forge "$BUILDER_API_KEY_PATH"
+          chmod 600 "$BUILDER_API_KEY_PATH"
+          
+          if [ -f "$BUILDER_API_KEY_PATH.pub" ]; then
+            chown crystal-forge:crystal-forge "$BUILDER_API_KEY_PATH.pub"
+            chmod 644 "$BUILDER_API_KEY_PATH.pub"
           fi
         ''}
 
@@ -884,7 +893,7 @@ in {
 
       api_mode = lib.mkOption {
         type = lib.types.bool;
-        default = true;
+        default = false;
         description = lib.mdDoc ''
           Use builder API mode (recommended).
 
@@ -898,10 +907,15 @@ in {
           - Supports distributed builds across networks
           - Builder registration via server UI
 
-          **Default**: true (API mode)
+          **Default**: false (legacy mode for backward compatibility)
 
-          **Legacy mode**: Set to false to use direct database access
-          (deprecated, will be removed in future release)
+          **Migration**: Set to true to use API mode. After enabling, the
+          builder API key will be auto-generated and displayed in systemd
+          logs. Register the builder using the public key in the UI.
+
+          **Deprecation**: Legacy database mode (false) is deprecated and
+          will be removed in a future release. New deployments should use
+          API mode (true).
         '';
       };
 
@@ -2148,16 +2162,20 @@ in {
     };
 
     warnings = lib.optional (cfg.build.enable && !cfg.build.api_mode) ''
-      Crystal Forge legacy database mode is deprecated and will be removed in a future release.
+      Crystal Forge builder is using legacy database mode, which is deprecated.
       
-      The builder is configured to use direct database access (api_mode = false), which:
+      Current configuration (api_mode = false) uses direct database access:
       - Requires database credentials on builder machines
       - Has weaker security isolation
       - Does not support distributed builds across networks
       
-      Please migrate to builder API mode by setting:
-        services.crystal-forge.build.api_mode = true;
+      Recommended migration to API mode:
+        1. Set: services.crystal-forge.build.api_mode = true;
+        2. Deploy the configuration (builder API key will be auto-generated)
+        3. Check systemd logs for the builder public key
+        4. Register the builder in Crystal Forge UI using the public key
       
+      Legacy database mode will be removed in a future release.
       For more information, see the deployment documentation.
     '';
 
