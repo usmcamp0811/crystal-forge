@@ -14,6 +14,7 @@ use super::helpers::{
 pub fn BuildQueuePane(
     builds: Vec<BuildItem>,
     selected_id: Signal<Option<i32>>,
+    can_requeue: bool,
     on_build_action: EventHandler<(i32, BuildAction)>,
     on_log: EventHandler<i32>,
 ) -> Element {
@@ -23,6 +24,7 @@ pub fn BuildQueuePane(
         BuildQueueTable {
             builds: filtered,
             selected_id: selected_id,
+            can_requeue,
             on_build_action: on_build_action,
             on_log: on_log,
         }
@@ -34,6 +36,7 @@ pub fn BuildQueuePane(
 fn BuildQueueCards(
     builds: Vec<BuildItem>,
     selected_id: Signal<Option<i32>>,
+    can_requeue: bool,
     on_build_action: EventHandler<(i32, BuildAction)>,
 ) -> Element {
     rsx! {
@@ -136,14 +139,21 @@ fn BuildQueueCards(
                                 }
                             }
                             // Restart only valid for terminal statuses
-                            if matches!(build.status, BuildStatus::Failed | BuildStatus::Complete | BuildStatus::Cancelled) {
+                            if can_requeue
+                                && matches!(
+                                    build.status,
+                                    BuildStatus::Failed
+                                        | BuildStatus::Complete
+                                        | BuildStatus::Cancelled
+                                )
+                            {
                                 button {
                                     class: "text-xs px-3 py-1.5 rounded transition-colors cf-action-link min-h-[44px]",
                                     onclick: move |evt| {
                                         evt.stop_propagation();
                                         on_build_action.call((build.id, BuildAction::Restart));
                                     },
-                                    "Restart"
+                                    "Requeue"
                                 }
                             }
                             if build.status == BuildStatus::Queued {
@@ -169,6 +179,7 @@ fn BuildQueueCards(
 fn BuildQueueTable(
     builds: Vec<BuildItem>,
     selected_id: Signal<Option<i32>>,
+    can_requeue: bool,
     on_build_action: EventHandler<(i32, BuildAction)>,
     on_log: EventHandler<i32>,
 ) -> Element {
@@ -319,6 +330,37 @@ fn BuildQueueTable(
                                                         stroke_linejoin: "round",
                                                         line { x1: "18", y1: "6", x2: "6", y2: "18" }
                                                         line { x1: "6", y1: "6", x2: "18", y2: "18" }
+                                                    }
+                                                }
+                                            }
+                                            if can_requeue
+                                                && matches!(
+                                                    build.status,
+                                                    BuildStatus::Failed
+                                                        | BuildStatus::Complete
+                                                        | BuildStatus::Cancelled
+                                                )
+                                            {
+                                                button {
+                                                    class: "btn-icon focus-ring",
+                                                    title: "Requeue",
+                                                    onclick: move |evt| {
+                                                        evt.stop_propagation();
+                                                        on_build_action.call((build.id, BuildAction::Restart));
+                                                    },
+                                                    svg {
+                                                        width: "14",
+                                                        height: "14",
+                                                        view_box: "0 0 24 24",
+                                                        fill: "none",
+                                                        stroke: "currentColor",
+                                                        stroke_width: "2",
+                                                        stroke_linecap: "round",
+                                                        stroke_linejoin: "round",
+                                                        path { d: "M3 12a9 9 0 0 0 9 9 9 9 0 0 0 6.2-2.5" }
+                                                        path { d: "M21 12a9 9 0 0 0-9-9 9 9 0 0 0-6.2 2.5" }
+                                                        polyline { points: "3 3 3 9 9 9" }
+                                                        polyline { points: "21 21 21 15 15 15" }
                                                     }
                                                 }
                                             }

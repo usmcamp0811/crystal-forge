@@ -82,8 +82,8 @@ pub async fn fetch_cve_scan_freshness() -> Result<Vec<CveScanFreshnessRow>, ApiC
     fetch_json(&url).await
 }
 
-pub async fn fetch_hardening_fleet_summary(
-) -> Result<HardeningFleetSummaryResponse, ApiClientError> {
+pub async fn fetch_hardening_fleet_summary() -> Result<HardeningFleetSummaryResponse, ApiClientError>
+{
     let url = format!("{}/hardening/summary", base_url());
     fetch_json(&url).await
 }
@@ -98,8 +98,8 @@ pub async fn fetch_hardening_top_services(
     fetch_json(&url).await
 }
 
-pub async fn fetch_hardening_system_postures(
-) -> Result<Vec<HardeningSystemPostureResponse>, ApiClientError> {
+pub async fn fetch_hardening_system_postures()
+-> Result<Vec<HardeningSystemPostureResponse>, ApiClientError> {
     let url = format!("{}/hardening/systems", base_url());
     fetch_json(&url).await
 }
@@ -343,6 +343,13 @@ pub async fn fetch_system_commits(
     fetch_json(&url).await
 }
 
+pub async fn fetch_system_generations(
+    id: &uuid::Uuid,
+) -> Result<crate::api::models::SystemGenerationsResponse, ApiClientError> {
+    let url = format!("{}/systems/{}/generations", base_url(), id);
+    fetch_json(&url).await
+}
+
 pub async fn fetch_system_history(
     id: &uuid::Uuid,
 ) -> Result<Vec<crate::api::models::SystemHistoryEntry>, ApiClientError> {
@@ -415,6 +422,30 @@ pub async fn force_cancel_commit_evaluation(commit_id: i32) -> Result<(), ApiCli
 pub async fn fetch_eval_logs(commit_id: i32) -> Result<Vec<EvalLogEntry>, ApiClientError> {
     let url = format!(
         "{}/commits/{}/eval/logs?_ts={}",
+        base_url(),
+        commit_id,
+        js_sys::Date::now()
+    );
+    fetch_json(&url).await
+}
+
+pub async fn fetch_eval_policy_matrix(
+    commit_id: i32,
+) -> Result<EvalPolicyMatrixResponse, ApiClientError> {
+    let url = format!(
+        "{}/commits/{}/eval/policy-matrix?_ts={}",
+        base_url(),
+        commit_id,
+        js_sys::Date::now()
+    );
+    fetch_json(&url).await
+}
+
+pub async fn fetch_eval_dependency_graph(
+    commit_id: i32,
+) -> Result<EvalDependencyGraphResponse, ApiClientError> {
+    let url = format!(
+        "{}/commits/{}/eval/dependency-graph?_ts={}",
         base_url(),
         commit_id,
         js_sys::Date::now()
@@ -524,10 +555,10 @@ pub async fn cancel_build_job(job_id: &uuid::Uuid) -> Result<(), ApiClientError>
     send_empty_with_csrf("POST", &url, None::<&()>).await
 }
 
-/// Re-enqueue a cancelled or failed job (admin).
+/// Re-enqueue a terminal job (operator/admin).
 ///
-/// Resets the existing `build_jobs` row to `queued` in-place. Does not trigger
-/// a flake re-evaluation; the derivation is already known.
+/// Creates a new queued build attempt row for the same derivation/context while
+/// preserving immutable history on prior attempts.
 pub async fn requeue_build_job(job_id: &uuid::Uuid) -> Result<(), ApiClientError> {
     let url = format!("{}/build-jobs/{}/requeue", base_url(), job_id);
     send_empty_with_csrf("POST", &url, None::<&()>).await
@@ -554,6 +585,22 @@ pub async fn request_system_rollback(
     request: &SystemRollbackRequest,
 ) -> Result<SystemMutationResponse, ApiClientError> {
     let url = format!("{}/systems/{}/rollback", base_url(), id);
+    send_json_with_csrf("POST", &url, Some(request)).await
+}
+
+pub async fn request_system_generation_rollback(
+    id: &uuid::Uuid,
+    request: &SystemRollbackGenerationRequest,
+) -> Result<SystemMutationResponse, ApiClientError> {
+    let url = format!("{}/systems/{}/rollback-generation", base_url(), id);
+    send_json_with_csrf("POST", &url, Some(request)).await
+}
+
+pub async fn verify_generation_closure(
+    id: &uuid::Uuid,
+    request: &VerifyGenerationClosureRequest,
+) -> Result<VerifyGenerationClosureResponse, ApiClientError> {
+    let url = format!("{}/systems/{}/verify-generation-closure", base_url(), id);
     send_json_with_csrf("POST", &url, Some(request)).await
 }
 
@@ -733,6 +780,15 @@ pub async fn delete_flake_credentials(id: i32) -> Result<(), ApiClientError> {
     send_empty_with_csrf::<()>("DELETE", &url, None).await
 }
 
+/// Test flake credentials against remote repository access.
+pub async fn test_flake_credentials(
+    id: i32,
+    request: &TestFlakeCredentialRequest,
+) -> Result<TestFlakeCredentialResponse, ApiClientError> {
+    let url = format!("{}/flakes/{id}/credentials/test", base_url());
+    send_json_with_csrf("POST", &url, Some(request)).await
+}
+
 /// Remove a flake by id.
 pub async fn delete_flake(id: i32, hard: bool, cascade: bool) -> Result<(), ApiClientError> {
     let mut url = format!("{}/flakes/{id}", base_url());
@@ -782,6 +838,14 @@ pub async fn fetch_flake_timelines_for_ids(
         .collect::<Vec<_>>()
         .join(",");
     let url = format!("{}/flakes/timelines?ids={}", base_url(), ids);
+    fetch_json(&url).await
+}
+
+/// Fetch flake timeline for a single flake with extended commit limit (for tray view).
+pub async fn fetch_flake_timeline_for_tray(
+    flake_id: i32,
+) -> Result<Vec<FlakeTimeline>, ApiClientError> {
+    let url = format!("{}/flakes/timelines?ids={}&limit=200", base_url(), flake_id);
     fetch_json(&url).await
 }
 
@@ -1049,6 +1113,14 @@ pub async fn create_cache_destination(
     data: &CreateCacheDestination,
 ) -> Result<CacheDestination, ApiClientError> {
     let url = format!("{}/caches", base_url());
+    send_json_with_csrf("POST", &url, Some(data)).await
+}
+
+/// Test cache destination credentials/configuration
+pub async fn test_cache_destination_credentials(
+    data: &CreateCacheDestination,
+) -> Result<CacheCredentialTestResult, ApiClientError> {
+    let url = format!("{}/caches/test-credentials", base_url());
     send_json_with_csrf("POST", &url, Some(data)).await
 }
 

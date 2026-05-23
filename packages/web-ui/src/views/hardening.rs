@@ -14,7 +14,8 @@ use crate::theme;
 #[component]
 pub fn HardeningView() -> Element {
     let summary = use_resource(move || async move { fetch_hardening_fleet_summary().await });
-    let top_services = use_resource(move || async move { fetch_hardening_top_services(Some(10)).await });
+    let top_services =
+        use_resource(move || async move { fetch_hardening_top_services(Some(10)).await });
     let postures = use_resource(move || async move { fetch_hardening_system_postures().await });
 
     let content = match &*summary.read_unchecked() {
@@ -326,7 +327,10 @@ pub fn render_environment_posture_compact(rows: &[HardeningSystemPostureResponse
 
     let grouped_rows = group_posture_rows(rows);
     let environments = aggregate_environments(&grouped_rows);
-    let vulnerable_total: i32 = environments.iter().map(|group| group.vulnerable_services).sum();
+    let vulnerable_total: i32 = environments
+        .iter()
+        .map(|group| group.vulnerable_services)
+        .sum();
     let weak_total: i32 = environments
         .iter()
         .map(|group| group.poorly_hardened_services)
@@ -607,7 +611,8 @@ fn systems_needing_review(group: &EnvironmentPostureGroup) -> usize {
 }
 
 fn score_label(score: Option<i32>) -> String {
-    score.map(|v| v.to_string())
+    score
+        .map(|v| v.to_string())
         .unwrap_or_else(|| "n/a".to_string())
 }
 
@@ -623,10 +628,30 @@ fn risk_label(level: Option<&str>) -> &'static str {
 
 fn risk_chip_class(level: Option<&str>) -> String {
     match level.unwrap_or("unknown") {
-        "well_hardened" => format!("{} {} {}", theme::health::HEALTHY_BORDER, theme::health::HEALTHY_BG, theme::health::HEALTHY_TEXT),
-        "moderately_hardened" => format!("{} {} {}", theme::health::WARNING_BORDER, theme::health::WARNING_BG, theme::health::WARNING_TEXT),
-        "poorly_hardened" | "vulnerable" => format!("{} {} {}", theme::health::CRITICAL_BORDER, theme::health::CRITICAL_BG, theme::health::CRITICAL_TEXT),
-        _ => format!("{} {} {}", theme::surface::CARD_BORDER, theme::surface::SUBTLE_BG, theme::text::SECONDARY),
+        "well_hardened" => format!(
+            "{} {} {}",
+            theme::health::HEALTHY_BORDER,
+            theme::health::HEALTHY_BG,
+            theme::health::HEALTHY_TEXT
+        ),
+        "moderately_hardened" => format!(
+            "{} {} {}",
+            theme::health::WARNING_BORDER,
+            theme::health::WARNING_BG,
+            theme::health::WARNING_TEXT
+        ),
+        "poorly_hardened" | "vulnerable" => format!(
+            "{} {} {}",
+            theme::health::CRITICAL_BORDER,
+            theme::health::CRITICAL_BG,
+            theme::health::CRITICAL_TEXT
+        ),
+        _ => format!(
+            "{} {} {}",
+            theme::surface::CARD_BORDER,
+            theme::surface::SUBTLE_BG,
+            theme::text::SECONDARY
+        ),
     }
 }
 
@@ -659,7 +684,6 @@ fn compact_risk_chip_class(level: &str) -> String {
         ),
     }
 }
-
 
 fn is_forbidden_error(error: &ApiClientError) -> bool {
     matches!(error, ApiClientError::Status { code: 403, .. })

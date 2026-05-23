@@ -1,10 +1,10 @@
 ---
 id: TASK-288
 title: Rebuild Evaluations View to Match JSX Mockup Design Exactly
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-05-04 01:18'
-updated_date: '2026-05-04 01:28'
+updated_date: '2026-05-13 02:48'
 labels:
   - ui
   - web-ui
@@ -22,6 +22,7 @@ references:
     /home/mcamp/code/crystal-forge/dev/packages/web-ui/src/components/eval_log_modal.rs
   - backlog/docs/doc-6 - TASK-288-Complete-Implementation-Checklist.md
 priority: high
+ordinal: 4595
 ---
 
 ## Description
@@ -156,4 +157,8 @@ This is a **complete rewrite**, not an incremental update. The existing card-bas
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: agent on gray in ~/code/crystal-forge/TASK-288-rebuild-evaluations-view
+
+Branch merged into dev at commit 6e2262e5
+
+Worktree cleanup pending
 <!-- SECTION:NOTES:END -->

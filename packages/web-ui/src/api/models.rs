@@ -479,6 +479,24 @@ pub struct UpdateFlakeCredentialRequest {
     pub ssh_username: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TestFlakeCredentialRequest {
+    pub repo_url: Option<String>,
+    pub branch: Option<String>,
+    pub auth_type: String,
+    pub username: Option<String>,
+    pub secret: Option<String>,
+    pub ssh_username: Option<String>,
+    pub use_stored_secret_if_empty: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TestFlakeCredentialResponse {
+    pub ok: bool,
+    pub message: String,
+    pub branch: String,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Environment DTOs — GET /api/v1/environments, GET /api/v1/environments/:id
 // ─────────────────────────────────────────────────────────────────────────────
@@ -872,6 +890,37 @@ pub struct EvalLogEntry {
     pub message: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvalPolicyMatrixResponse {
+    pub commit_id: i32,
+    pub policies: Vec<String>,
+    pub systems: Vec<EvalPolicySystemRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvalPolicySystemRow {
+    pub system_name: String,
+    pub results: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvalDependencyGraphResponse {
+    pub commit_id: i32,
+    pub total_packages: i64,
+    pub packages: Vec<EvalDependencyPackageRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvalDependencyPackageRow {
+    pub package_name: String,
+    /// Built (store_path present / BuildComplete).
+    pub ready_count: i64,
+    /// Evaluated but not yet built.
+    pub pending_count: i64,
+    /// Eval or build failed.
+    pub failed_count: i64,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Pagination
 // ─────────────────────────────────────────────────────────────────────────────
@@ -913,6 +962,11 @@ pub struct SystemRollbackRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemRollbackGenerationRequest {
+    pub store_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeploySystemRequest {
     pub commit_sha: String,
 }
@@ -930,6 +984,33 @@ pub struct CommitInfo {
     pub message: String,
     pub author: String,
     pub timestamp: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemGenerationsResponse {
+    pub generations: Vec<SystemGeneration>,
+    pub current_generation: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemGeneration {
+    pub generation: i32,
+    pub store_path: Option<String>,
+    pub commit_hash: Option<String>,
+    pub timestamp: DateTime<Utc>,
+    pub is_current: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VerifyGenerationClosureRequest {
+    pub store_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VerifyGenerationClosureResponse {
+    pub available: bool,
+    pub message: String,
+    pub last_seen_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1718,6 +1799,14 @@ pub struct UpdateCacheDestination {
     pub force_repush: Option<bool>,
     pub require_sigs: Option<bool>,
     pub environment_ids: Option<Vec<Uuid>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CacheCredentialTestResult {
+    pub ok: bool,
+    pub status_code: Option<u16>,
+    pub message: String,
+    pub tested_url: Option<String>,
 }
 
 /// Cache push job status and details

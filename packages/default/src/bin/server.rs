@@ -241,6 +241,10 @@ async fn main() -> anyhow::Result<()> {
             post(systems::rollback_system),
         )
         .route(
+            "/api/v1/systems/:id/rollback-generation",
+            post(systems::rollback_system_generation),
+        )
+        .route(
             "/api/v1/systems/:id/public-key",
             put(systems::update_system_public_key),
         )
@@ -252,6 +256,14 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/systems/:id/commits",
             get(systems::get_system_commits),
+        )
+        .route(
+            "/api/v1/systems/:id/generations",
+            get(systems::get_system_generations),
+        )
+        .route(
+            "/api/v1/systems/:id/verify-generation-closure",
+            post(systems::verify_generation_closure),
         )
         .route(
             "/api/v1/systems/:id/history",
@@ -311,6 +323,10 @@ async fn main() -> anyhow::Result<()> {
                 .put(flakes::put_flake_credentials)
                 .patch(flakes::patch_flake_credentials)
                 .delete(flakes::delete_flake_credentials_handler),
+        )
+        .route(
+            "/api/v1/flakes/:id/credentials/test",
+            post(flakes::test_flake_credentials),
         )
         .route("/api/v1/flakes/:id/refresh", post(flakes::refresh_flake))
         .route(
@@ -431,6 +447,14 @@ async fn main() -> anyhow::Result<()> {
             get(commits::get_eval_logs_history),
         )
         .route(
+            "/api/v1/commits/:commit_id/eval/policy-matrix",
+            get(commits::get_eval_policy_matrix),
+        )
+        .route(
+            "/api/v1/commits/:commit_id/eval/dependency-graph",
+            get(commits::get_eval_dependency_graph),
+        )
+        .route(
             "/api/v1/commits/:commit_id/re-evaluate",
             post(commits::re_evaluate_commit),
         )
@@ -479,6 +503,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/caches",
             get(caches::list_cache_destinations).post(caches::create_cache_destination),
+        )
+        .route(
+            "/api/v1/caches/test-credentials",
+            post(caches::test_cache_destination_credentials),
         )
         .route(
             "/api/v1/caches/:id",

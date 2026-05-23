@@ -122,6 +122,10 @@ Medium:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
+Sprint-ready refinement completed with explicit goal, non-goals, constraints, verification plan, and risk profile.
+
+Execution decisions captured: statuses=cancelled|failed|success; new attempt model; row action; no retry cap; Operator/Admin; append to tail; full-stack scope.
+
 MR !252 created: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/252
 
 Implemented backend requeue as new attempt row with immutable history and operator/admin RBAC

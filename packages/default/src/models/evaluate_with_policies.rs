@@ -5,11 +5,13 @@ use std::collections::HashMap;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use tokio::time::Duration;
+use tokio::time::{Duration, Instant};
 
 const MOCK_EVAL_TOTAL_DURATION_MS: u64 = 30_000;
 const MOCK_EVAL_MIN_PER_SYSTEM_MS: u64 = 5_000;
 const MOCK_EVAL_STAGE_COUNT: u64 = 5;
+const EVAL_OUTPUT_IDLE_TIMEOUT_SECS: u64 = 300;
+const EVAL_PROGRESS_HEARTBEAT_SECS: u64 = 30;
 use tracing::{debug, error, info, warn};
 
 use crate::config::{BuildConfig, ServerConfig};
@@ -307,6 +309,9 @@ pub async fn evaluate_with_nix_eval_jobs(
     // Cancellation poll interval: check the DB every 2 seconds while eval runs.
     let mut cancel_ticker = tokio::time::interval(Duration::from_secs(2));
     cancel_ticker.tick().await; // consume the immediate first tick
+    let mut progress_ticker = tokio::time::interval(Duration::from_secs(EVAL_PROGRESS_HEARTBEAT_SECS));
+    progress_ticker.tick().await; // consume immediate first tick
+    let mut last_output_at = Instant::now();
 
     loop {
         tokio::select! {
@@ -330,9 +335,37 @@ pub async fn evaluate_with_nix_eval_jobs(
                     }
                 }
             }
+            _ = progress_ticker.tick() => {
+                let idle_for = Instant::now().duration_since(last_output_at);
+                if idle_for >= Duration::from_secs(EVAL_OUTPUT_IDLE_TIMEOUT_SECS) {
+                    let timeout_msg = format!(
+                        "❌ Evaluation produced no output for {}s; terminating nix-eval-jobs",
+                        EVAL_OUTPUT_IDLE_TIMEOUT_SECS
+                    );
+                    error!("{} (commit_id={})", timeout_msg, commit.id);
+
+                    if let Some(state) = cf_state {
+                        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, timeout_msg)
+                            .await;
+                    }
+
+                    let _ = child.kill().await;
+                    bail!(
+                        "evaluation timed out after {}s without nix-eval-jobs output",
+                        EVAL_OUTPUT_IDLE_TIMEOUT_SECS
+                    );
+                }
+
+                debug!(
+                    "nix-eval-jobs still running for commit {} (idle {}s)",
+                    commit.id,
+                    idle_for.as_secs()
+                );
+            }
             line_result = stdout_reader.next_line(), if !stdout_done => {
                 match line_result? {
                     Some(line) if !line.trim().is_empty() => {
+                        last_output_at = Instant::now();
                         match serde_json::from_str::<NixEvalJobResult>(&line) {
                             Ok(result) => {
                                 let system_name = result.attr.clone();
@@ -658,6 +691,7 @@ pub async fn evaluate_with_nix_eval_jobs(
             line_result = stderr_reader.next_line(), if !stderr_done => {
                 match line_result? {
                     Some(line) => {
+                        last_output_at = Instant::now();
                         if line.contains("error:") {
                             error!("nix-eval-jobs stderr: {}", line);
                         } else {

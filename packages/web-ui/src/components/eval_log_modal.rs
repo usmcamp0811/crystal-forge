@@ -162,10 +162,10 @@ fn download_text_file(content: &str, filename: &str) {
             // Create blob
             let array = js_sys::Array::new();
             array.push(&wasm_bindgen::JsValue::from_str(content));
-            
+
             let mut props = BlobPropertyBag::new();
             props.type_("text/plain");
-            
+
             if let Ok(blob) = Blob::new_with_str_sequence_and_options(&array, &props) {
                 // Create object URL
                 if let Ok(url) = Url::create_object_url_with_blob(&blob) {
@@ -175,7 +175,7 @@ fn download_text_file(content: &str, filename: &str) {
                             anchor.set_href(&url);
                             anchor.set_download(filename);
                             anchor.click();
-                            
+
                             // Clean up object URL
                             let _ = Url::revoke_object_url(&url);
                         }

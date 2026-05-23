@@ -18,14 +18,15 @@ use uuid::Uuid;
 use crate::api::client::{
     ApiClientError, create_system, deactivate_system, deploy_system, fetch_flake_timelines,
     fetch_flakes, fetch_system, fetch_system_agent_events, fetch_system_commits,
-    fetch_system_history, fetch_systems, update_system, update_system_public_key,
+    fetch_system_generations, fetch_system_history, fetch_systems, update_system,
+    update_system_public_key,
 };
 use crate::api::models::{
     CommitInfo, CreateSystemRequest, CveSummary, DeploySystemRequest, DeploymentStatus,
     FlakeRegistryItem, HealthStatus, PaginatedResponse, PipelineStage, SystemAgentEvent,
-    SystemCommitsResponse, SystemDetail, SystemHardwareInfo, SystemHistoryEntry, SystemNetworkInfo,
-    SystemSecurityInfo, SystemSummary, SystemsListParams, UpdateSystemPublicKeyRequest,
-    UpdateSystemRequest,
+    SystemCommitsResponse, SystemDetail, SystemGeneration, SystemGenerationsResponse,
+    SystemHardwareInfo, SystemHistoryEntry, SystemNetworkInfo, SystemSecurityInfo, SystemSummary,
+    SystemsListParams, UpdateSystemPublicKeyRequest, UpdateSystemRequest,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -80,6 +81,14 @@ pub struct SystemHistoryLoadResult {
 #[derive(Debug, Clone)]
 pub struct SystemAgentEventsLoadResult {
     pub entries: Vec<SystemAgentEvent>,
+    pub notice: Option<String>,
+    pub redirect_to_login: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct SystemGenerationsLoadResult {
+    pub generations: Vec<SystemGeneration>,
+    pub current_generation: Option<i32>,
     pub notice: Option<String>,
     pub redirect_to_login: bool,
 }
@@ -359,6 +368,29 @@ pub async fn load_system_agent_events_with_fallback(
         Err(error) => SystemAgentEventsLoadResult {
             entries: vec![],
             notice: Some(format!("Agent events API unavailable: {error}")),
+            redirect_to_login: false,
+        },
+    }
+}
+
+pub async fn load_system_generations_with_fallback(system_id: Uuid) -> SystemGenerationsLoadResult {
+    match fetch_system_generations(&system_id).await {
+        Ok(response) => SystemGenerationsLoadResult {
+            generations: response.generations,
+            current_generation: response.current_generation,
+            notice: None,
+            redirect_to_login: false,
+        },
+        Err(error) if should_redirect_to_login(&error) => SystemGenerationsLoadResult {
+            generations: vec![],
+            current_generation: None,
+            notice: None,
+            redirect_to_login: true,
+        },
+        Err(error) => SystemGenerationsLoadResult {
+            generations: vec![],
+            current_generation: None,
+            notice: Some(format!("Generations API unavailable: {error}")),
             redirect_to_login: false,
         },
     }

@@ -4,7 +4,7 @@ title: Fix builder concurrency limit bug and ensure full UI configurability
 status: In Progress
 assignee: []
 created_date: '2026-05-08 02:46'
-updated_date: '2026-05-08 02:55'
+updated_date: '2026-05-11 12:48'
 labels:
   - bug
   - builders
@@ -13,6 +13,7 @@ labels:
   - high-priority
 dependencies: []
 priority: high
+ordinal: 5595
 ---
 
 ## Description
@@ -233,6 +234,14 @@ API already supports all update operations via UpdateBuilderRequest.
 
 Requires database running for full verification.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: agent on gray in ~/code/crystal-forge/TASK-291-fix-builder-concurrency
+<!-- SECTION:NOTES:END -->
+
+<!-- AC:END -->
 
 ## Implementation Notes
 

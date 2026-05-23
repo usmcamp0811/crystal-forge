@@ -11,6 +11,7 @@
  */
 const { chromium } = require("playwright");
 const fs = require("fs");
+const { execSync } = require("child_process");
 
 const baseUrl = process.argv[2] || "http://127.0.0.1:3000";
 const outputDir = process.argv[3] || "/tmp/screenshots";
@@ -48,8 +49,59 @@ async function assertHidden(locator, message) {
   }
 }
 
+async function assertDisabled(locator, message) {
+  const disabled = await locator.isDisabled().catch(() => false);
+  if (!disabled) {
+    throw new Error(message);
+  }
+}
+
+async function assertEnabled(locator, message) {
+  const disabled = await locator.isDisabled().catch(() => true);
+  if (disabled) {
+    throw new Error(message);
+  }
+}
+
 function nowIso() {
   return new Date().toISOString();
+}
+
+function run(cmd, cwd = undefined) {
+  return execSync(cmd, {
+    cwd,
+    stdio: ["ignore", "pipe", "pipe"],
+    encoding: "utf8",
+  }).trim();
+}
+
+function forceRewriteGitServerMain() {
+  const repoUrl = process.env.CF_TEST_GIT_SERVER_URL || "http://gitserver/crystal-forge";
+  const workDir = `/tmp/cf-rewrite-${Date.now()}`;
+
+  run(`rm -rf ${workDir}`);
+  run(`mkdir -p ${workDir}`);
+  run(`git clone ${repoUrl} ${workDir}/repo`);
+
+  const repoDir = `${workDir}/repo`;
+  run('git config user.email "cf-test@example.com"', repoDir);
+  run('git config user.name "Crystal Forge Test"', repoDir);
+  run("git checkout main", repoDir);
+
+  // Create a true history rewrite while preserving the working tree content.
+  run("git checkout --orphan rewrite-main", repoDir);
+  run("git add -A", repoDir);
+  const marker = `rewrite-${Date.now()}`;
+  run(
+    `git commit -m \"test: rewrite main history (${marker})\" --allow-empty`,
+    repoDir,
+  );
+  run("git push --force origin rewrite-main:main", repoDir);
+
+  // Return current main HEAD for debug/assert logs.
+  const newHead = run("git rev-parse HEAD", repoDir);
+  run(`rm -rf ${workDir}`);
+  return newHead;
 }
 
 function mockBuildsDashboardSummary() {
@@ -2826,6 +2878,61 @@ const steps = [
     },
   },
   {
+    name: "13g-flakes-edit-modal-ssh-save-persist",
+    description: "Flakes edit modal persists SSH auth settings after save/reopen",
+    action: async (page) => {
+      await page.goto(`${baseUrl}/flakes`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1800);
+
+      const editButton = page.locator("button:has-text('Edit')").first();
+      await editButton.waitFor({ timeout: 7000 });
+      await editButton.click();
+
+      await page.getByRole("heading", { name: "Edit Flake" }).waitFor({ timeout: 7000 });
+
+      await page.locator("button", { hasText: "SSH key" }).first().click();
+      await page.locator("input[placeholder='git']").first().fill("git");
+
+      const privateKey = [
+        "-----BEGIN OPENSSH PRIVATE KEY-----",
+        "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAAAAAABAAAABwAAAAdzc2gtZWQyNTUxOQ==",
+        "-----END OPENSSH PRIVATE KEY-----",
+      ].join("\n");
+      await page.locator("textarea.input").first().fill(privateKey);
+
+      const saveResponsePromise = page.waitForResponse(
+        (response) =>
+          response.request().method() === "PUT" &&
+          /\/api\/v1\/flakes\/\d+\/credentials$/.test(new URL(response.url()).pathname),
+        { timeout: 15000 },
+      );
+
+      await page.getByRole("button", { name: "Save changes" }).first().click();
+
+      const saveResponse = await saveResponsePromise;
+      if (!saveResponse.ok()) {
+        const body = await saveResponse.text().catch(() => "<unreadable>");
+        throw new Error(`Expected SSH credential save to succeed, got ${saveResponse.status()}: ${body}`);
+      }
+
+      await page.waitForTimeout(1400);
+
+      // Reopen and verify persisted auth mode + username.
+      const reopenEdit = page.locator("button:has-text('Edit')").first();
+      await reopenEdit.waitFor({ timeout: 7000 });
+      await reopenEdit.click();
+      await page.getByRole("heading", { name: "Edit Flake" }).waitFor({ timeout: 7000 });
+
+      const sshToggle = page.locator("button.active", { hasText: "SSH key" }).first();
+      await assertVisible(sshToggle, "Expected SSH key auth mode to remain selected after reopen", 7000);
+
+      const sshUserValue = await page.locator("input[placeholder='git']").first().inputValue();
+      if (sshUserValue.trim() !== "git") {
+        throw new Error(`Expected persisted SSH username 'git', got '${sshUserValue}'`);
+      }
+    },
+  },
+  {
     name: "13d-flakes-stress-dataset",
     description: "Flakes view remains responsive with production-shaped timeline payload",
     action: async (page) => {
@@ -2942,6 +3049,63 @@ const steps = [
         .waitFor({ timeout: 5000 });
 
       await page.unroute(/\/api\/v1\/flakes\/\d+\/sync$/);
+    },
+  },
+  {
+    name: "13h-flakes-force-push-rewrite-recovery",
+    description: "Real git force-push rewrite + sync updates flake timeline state",
+    action: async (page) => {
+      await page.goto(`${baseUrl}/flakes`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1800);
+
+      // Open tray so we can validate commit list behavior after rewrite/sync.
+      const flakeCell = page.locator("text=test-flake").first();
+      await flakeCell.waitFor({ timeout: 10000 });
+      await flakeCell.click();
+      await page.waitForTimeout(1200);
+
+      const beforeCountText = await page
+        .locator(".fl-tray-commits-search span")
+        .first()
+        .textContent()
+        .catch(() => null);
+
+      const rewrittenHead = forceRewriteGitServerMain();
+      console.log(`Rewrote gitserver main branch to new HEAD: ${rewrittenHead}`);
+
+      const syncButton = page.locator("button:has-text('Sync from Source')").first();
+      await syncButton.waitFor({ timeout: 7000 });
+      await syncButton.click();
+
+      // Wait for timeline refresh polling to settle.
+      await page.waitForTimeout(6000);
+
+      const afterCountText = await page
+        .locator(".fl-tray-commits-search span")
+        .first()
+        .textContent()
+        .catch(() => null);
+
+      if (!afterCountText) {
+        throw new Error("Expected tray commits counter to remain visible after force-push sync");
+      }
+
+      // The UI must remain functional and not get stuck in rewrite modal loop/cycle.
+      const rewriteModalVisible = await page
+        .locator("text=History Rewrite Detected")
+        .first()
+        .isVisible({ timeout: 1500 })
+        .catch(() => false);
+
+      if (rewriteModalVisible) {
+        throw new Error("Unexpected persistent history rewrite modal after sync recovery");
+      }
+
+      if (beforeCountText && beforeCountText === afterCountText) {
+        console.log(
+          `Timeline counter unchanged across rewrite sync (${beforeCountText}); this is allowed if commit window size is stable.`,
+        );
+      }
     },
   },
   {
@@ -3768,43 +3932,72 @@ const steps = [
   // ── End CVE/multi-rule policy checks ─────────────────────────────────────
   {
     name: "21-caches",
-    description: "Cache management view",
+    description: "Cache management view with stats and Push Jobs tab",
     action: async (page) => {
       await page.goto(`${baseUrl}/caches`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2500);
+
+      await assertVisible(page.getByRole("heading", { name: "Caches" }), "Expected Caches heading");
+      await assertVisible(page.getByText("Total caches").first(), "Expected Total caches stat");
+      await assertVisible(page.getByText("Healthy").first(), "Expected Healthy stat");
+      await assertVisible(page.getByText("Issues").first(), "Expected Issues stat");
+
+      await page.getByRole("button", { name: "Push Jobs" }).click();
+      await assertVisible(
+        page.getByRole("heading", { name: /Cache Push Jobs/i }).first(),
+        "Expected Cache Push Jobs heading after tab switch",
+      );
     },
   },
   {
     name: "22-caches-modal-nix",
-    description: "Add cache modal with Nix type selected",
+    description: "Add cache modal with Nix type selected and public test UX",
     action: async (page) => {
       await page.goto(`${baseUrl}/caches`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2500);
 
-      const addBtn = page.locator("button:has-text('Add Destination')").first();
+      const addBtn = page.locator("button:has-text('Add cache')").first();
       await addBtn.waitFor({ timeout: 5000 });
       await addBtn.click();
-      await page.getByRole("heading", { name: "Add Cache Destination" }).waitFor({ timeout: 5000 });
+      await page.locator("[role='dialog']").first().waitFor({ timeout: 5000 });
 
       const dialog = page.locator("[role='dialog']").first();
-      await dialog.locator("select").first().selectOption("Nix");
+      await dialog.getByRole("button", { name: "Nix" }).click();
+
+      const requiresAuth = dialog.locator("input[type='checkbox']").first();
+      await assertEnabled(dialog.getByRole("button", { name: "Test" }), "Expected Test enabled for public connectivity");
+      await requiresAuth.check();
+      await assertDisabled(dialog.getByRole("button", { name: "Test" }), "Expected Test disabled when auth is required without credential");
+      await requiresAuth.uncheck();
+      await assertEnabled(dialog.getByRole("button", { name: "Test" }), "Expected Test re-enabled after disabling auth");
+
       await page.waitForTimeout(1200);
     },
   },
   {
     name: "23-caches-modal-http",
-    description: "Add cache modal with Http type selected",
+    description: "Add cache modal save flow creates a destination row",
     action: async (page) => {
       await page.goto(`${baseUrl}/caches`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2500);
 
-      const addBtn = page.locator("button:has-text('Add Destination')").first();
+      const addBtn = page.locator("button:has-text('Add cache')").first();
       await addBtn.waitFor({ timeout: 5000 });
       await addBtn.click();
-      await page.getByRole("heading", { name: "Add Cache Destination" }).waitFor({ timeout: 5000 });
+      await page.locator("[role='dialog']").first().waitFor({ timeout: 5000 });
 
       const dialog = page.locator("[role='dialog']").first();
-      await dialog.locator("select").first().selectOption("Http");
+      await dialog.getByRole("button", { name: "Nix" }).click();
+      await dialog.locator("input").first().fill(`ci-cache-${Date.now()}`);
+      await dialog.locator("input").nth(1).fill("https://cache.nixos.org");
+      await dialog.locator("input[type='checkbox']").first().uncheck();
+      await dialog.getByRole("button", { name: "Save" }).click();
+      await assertHidden(dialog, "Expected add-cache modal to close after save");
+      await assertVisible(
+        page.getByText(/ci-cache-/).first(),
+        "Expected newly created cache row after save",
+        10000,
+      );
       await page.waitForTimeout(1200);
     },
   },
@@ -3815,13 +4008,13 @@ const steps = [
       await page.goto(`${baseUrl}/caches`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2500);
 
-      const addBtn = page.locator("button:has-text('Add Destination')").first();
+      const addBtn = page.locator("button:has-text('Add cache')").first();
       await addBtn.waitFor({ timeout: 5000 });
       await addBtn.click();
-      await page.getByRole("heading", { name: "Add Cache Destination" }).waitFor({ timeout: 5000 });
+      await page.locator("[role='dialog']").first().waitFor({ timeout: 5000 });
 
       const dialog = page.locator("[role='dialog']").first();
-      await dialog.locator("select").first().selectOption("S3");
+      await dialog.getByRole("button", { name: "S3" }).click();
       await page.waitForTimeout(1200);
     },
   },
@@ -3832,13 +4025,13 @@ const steps = [
       await page.goto(`${baseUrl}/caches`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2500);
 
-      const addBtn = page.locator("button:has-text('Add Destination')").first();
+      const addBtn = page.locator("button:has-text('Add cache')").first();
       await addBtn.waitFor({ timeout: 5000 });
       await addBtn.click();
-      await page.getByRole("heading", { name: "Add Cache Destination" }).waitFor({ timeout: 5000 });
+      await page.locator("[role='dialog']").first().waitFor({ timeout: 5000 });
 
       const dialog = page.locator("[role='dialog']").first();
-      await dialog.locator("select").first().selectOption("Attic");
+      await dialog.getByRole("button", { name: "Attic" }).click();
       await page.waitForTimeout(1200);
     },
   },
@@ -4040,6 +4233,31 @@ const steps = [
       const reEvalBtn = page.getByRole("button", { name: /Re-evaluate/i }).first();
       await reEvalBtn.waitFor({ timeout: 5000 });
 
+      // Select one history row and verify bulk action bar appears
+      const firstRowCheckbox = page.locator(".sys-table tbody .ed-checkbox").first();
+      await firstRowCheckbox.waitFor({ timeout: 5000 });
+      await firstRowCheckbox.click();
+
+      const bulkSelected = page.getByText(/1 selected/i).first();
+      await bulkSelected.waitFor({ timeout: 5000 });
+      await page.getByRole("button", { name: /Download logs/i }).first().waitFor({ timeout: 5000 });
+
+      const compareBtn = page.getByRole("button", { name: /^Compare$/i }).first();
+      await compareBtn.waitFor({ timeout: 5000 });
+      await assertDisabled(compareBtn, "Expected Compare to stay disabled with only one selected history row");
+
+      // Select a second row from the same flake and verify Compare is enabled
+      const thirdRowCheckbox = page.locator(".sys-table tbody .ed-checkbox").nth(2);
+      await thirdRowCheckbox.waitFor({ timeout: 5000 });
+      await thirdRowCheckbox.click();
+      await page.getByText(/2 selected/i).first().waitFor({ timeout: 5000 });
+      await assertEnabled(compareBtn, "Expected Compare to be enabled for two selected rows from the same flake");
+
+      // Clicking a history row opens the evaluation detail drawer
+      const historyRow = page.locator(".sys-table tbody tr").first();
+      await historyRow.click();
+      await page.locator("aside.side-panel[role='dialog']").first().waitFor({ timeout: 5000 });
+
       await page.unroute("**/api/v1/commits/eval-queue**");
       await page.unroute("**/api/v1/commits/eval-history**");
     },
@@ -4064,6 +4282,81 @@ const steps = [
         "Expected API-provided generation value to render in system detail",
       );
 
+      await unrouteSystemsWarningData(page);
+    },
+  },
+  {
+    name: "12j-system-detail-deploy-generation-list",
+    description: "Deploy tab generation selector matches generation row text styling expectations",
+    action: async (page) => {
+      await routeSystemsWarningData(page);
+
+      await page.route("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/generations", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            current_generation: 74,
+            generations: [
+              {
+                generation: 74,
+                store_path: "/nix/store/11111111111111111111111111111111-system",
+                commit_hash: "1111111111111111111111111111111111111111",
+                timestamp: "2026-04-07T08:10:00Z",
+                is_current: true,
+              },
+              {
+                generation: 73,
+                store_path: "/nix/store/22222222222222222222222222222222-system",
+                commit_hash: "2222222222222222222222222222222222222222",
+                timestamp: "2026-04-06T22:00:00Z",
+                is_current: false,
+              },
+            ],
+          }),
+        });
+      });
+
+      await page.goto(`${baseUrl}/systems/00000000-0000-0000-0000-0000000000a1`, {
+        timeout: LOAD_TIMEOUT,
+      });
+      await page.waitForTimeout(1600);
+
+      await page.getByRole("button", { name: "Deploy" }).first().click();
+      await page.waitForTimeout(600);
+
+      await assertVisible(
+        page.getByRole("button", { name: "Generation" }).first(),
+        "Expected generation mode selector in deploy tab",
+      );
+      await page.getByRole("button", { name: "Generation" }).first().click();
+      await page.waitForTimeout(600);
+
+      const firstGenerationRow = page.locator(".sd-commit-list .sd-commit-item").first();
+      await assertVisible(firstGenerationRow, "Expected at least one generation row in deploy selector");
+
+      const firstGenerationRowText = (await firstGenerationRow.innerText()).trim();
+      if (firstGenerationRowText.includes("/nix/store/")) {
+        throw new Error("Expected generation selector row to omit store-path text");
+      }
+
+      if (firstGenerationRowText.includes("-system")) {
+        throw new Error("Expected generation selector row to omit store-path hash suffix");
+      }
+
+      if (/\bgen\b/i.test(firstGenerationRowText)) {
+        throw new Error("Expected generation selector row to omit 'gen' prefix text");
+      }
+
+      if (!firstGenerationRowText.includes("#74")) {
+        throw new Error("Expected generation selector row to show '#<number>' generation label");
+      }
+
+      if (!/\b[0-9a-f]{7}\b/i.test(firstGenerationRowText)) {
+        throw new Error("Expected generation selector row to include short commit hash text");
+      }
+
+      await page.unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/generations");
       await unrouteSystemsWarningData(page);
     },
   },
@@ -4338,11 +4631,14 @@ const CI_FAST_STEP_NAMES = new Set([
   "12g-system-detail-history-logs-edit",
   "12h-system-detail-cves-grouped-justification",
   "12i-system-detail-generation-metric",
+  "12j-system-detail-deploy-generation-list",
   "12d-systems-api-error-no-mock-fallback",
   "12g-systems-warning-clears-after-link",
   "13d-flakes-stress-dataset",
   "13e-flakes-add-modal-credentials",
   "13f-flakes-edit-modal-credentials",
+  "13g-flakes-edit-modal-ssh-save-persist",
+  "13h-flakes-force-push-rewrite-recovery",
   // TASK-237: builds queue controls evidence
   "15d-builds-queue-table-view",
   "15e-builds-cancelling-state",
@@ -4352,6 +4648,12 @@ const CI_FAST_STEP_NAMES = new Set([
   // TASK-17: CVE dashboard evidence
   "16-cves",
   "16b-cves-severity-filter",
+  // TASK-303: Caches view and modal evidence
+  "21-caches",
+  "22-caches-modal-nix",
+  "23-caches-modal-http",
+  "24-caches-modal-s3",
+  "25-caches-modal-attic",
   // TASK-273: Evaluation cancellation + history evidence
   "26-evaluations",
   "26b-evaluations-history",

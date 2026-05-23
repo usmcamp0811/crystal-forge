@@ -15,23 +15,25 @@ let
 
   # Build the raw config first (your existing baseConfig logic, unchanged)
   baseConfigRaw = {
-      database = {
-        host = cfg.database.host;
-        port = cfg.database.port;
-        user = cfg.database.user;
-        password = if cfg.database.passwordFile != null then
-          "__PLACEHOLDER_PASSWORD__"
-        else
-          cfg.database.password;
-        name = cfg.database.name;
-      };
-    } // lib.optionalAttrs cfg.server.enable {
+    database = {
+      host = cfg.database.host;
+      port = cfg.database.port;
+      user = cfg.database.user;
+      password = if cfg.database.passwordFile != null then
+        "__PLACEHOLDER_PASSWORD__"
+      else
+        cfg.database.password;
+      name = cfg.database.name;
+    };
+  } // lib.optionalAttrs cfg.server.enable {
     server = {
       host = cfg.server.host;
       port = cfg.server.port;
       eval_workers = cfg.server.eval_workers;
       eval_max_memory_mb = cfg.server.eval_max_memory_mb;
       eval_check_cache = cfg.server.eval_check_cache;
+      allow_private_cache_test_targets =
+        cfg.server.allow_private_cache_test_targets;
     } // lib.optionalAttrs (cfg.server.role_mapping != { }) {
       role_mapping = cfg.server.role_mapping;
     };
@@ -1413,6 +1415,18 @@ in {
         '';
       };
 
+      allow_private_cache_test_targets = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = lib.mdDoc ''
+          Allow `/api/v1/caches/test-credentials` to test private, loopback,
+          and other non-routable cache endpoints.
+
+          Keep disabled unless you explicitly need to test internal Attic/cache
+          hosts from the admin UI.
+        '';
+      };
+
       role_mapping = lib.mkOption {
         type = lib.types.attrsOf lib.types.str;
         default = { };
@@ -1951,6 +1965,7 @@ in {
       path = with pkgs; [
         nix
         git
+        openssh
         nix-fast-build
         nix-eval-jobs
         vulnix
