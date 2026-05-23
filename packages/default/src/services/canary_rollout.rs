@@ -182,16 +182,17 @@ pub async fn check_rollout(
                     // Check if observation period has ended
                     if let Some(end_time) = state.phase_observation_end {
                         if Utc::now() >= end_time {
-                            // Observation period complete - can proceed to next phase
+                            // Observation period complete - advance to next phase
+                            let next_state = advance_to_next_phase(pool, state.id, all_systems, config).await?;
                             Ok(CanaryResult {
                                 deployment_allowed: true,
-                                systems_to_deploy: state.systems_in_current_phase.clone(),
+                                systems_to_deploy: next_state.systems_in_current_phase.clone(),
                                 reason: Some(format!(
-                                    "Observation period complete, proceeding to phase {}/{}",
-                                    state.current_phase,
-                                    state.total_phases
+                                    "Observation complete, advanced to phase {}/{}",
+                                    next_state.current_phase,
+                                    next_state.total_phases
                                 )),
-                                rollout_state: Some(state),
+                                rollout_state: Some(next_state),
                             })
                         } else {
                             // Still observing

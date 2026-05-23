@@ -17,6 +17,9 @@ pub struct TimeWindowResult {
 pub fn check_time_window(config: &TimeWindowConfig) -> TimeWindowResult {
     let now_utc = Utc::now();
     
+    // Normalize action to lowercase for case-insensitive comparison
+    let action = config.action.to_lowercase();
+    
     // Parse timezone
     let tz: Tz = match config.timezone.parse() {
         Ok(tz) => tz,
@@ -44,13 +47,14 @@ pub fn check_time_window(config: &TimeWindowConfig) -> TimeWindowResult {
     let day_allowed = config.days.iter().any(|d| d.to_lowercase() == current_day);
     
     if !day_allowed {
+        let reason = format!(
+            "Current day {} not in allowed days: {}",
+            current_day,
+            config.days.join(", ")
+        );
         return TimeWindowResult {
-            deployment_allowed: false,
-            reason: Some(format!(
-                "Current day {} not in allowed days: {}",
-                current_day,
-                config.days.join(", ")
-            )),
+            deployment_allowed: action == "warn",
+            reason: Some(reason),
         };
     }
     
@@ -91,16 +95,17 @@ pub fn check_time_window(config: &TimeWindowConfig) -> TimeWindowResult {
     };
     
     if !time_in_range {
+        let reason = format!(
+            "Current time {:02}:{:02} not in window {}-{} ({} timezone)",
+            now_local.hour(),
+            now_local.minute(),
+            config.start_time,
+            config.end_time,
+            config.timezone
+        );
         return TimeWindowResult {
-            deployment_allowed: false,
-            reason: Some(format!(
-                "Current time {:02}:{:02} not in window {}-{} ({} timezone)",
-                now_local.hour(),
-                now_local.minute(),
-                config.start_time,
-                config.end_time,
-                config.timezone
-            )),
+            deployment_allowed: action == "warn",
+            reason: Some(reason),
         };
     }
     
