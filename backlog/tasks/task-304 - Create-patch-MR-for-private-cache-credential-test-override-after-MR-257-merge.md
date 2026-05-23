@@ -1,9 +1,10 @@
 ---
 id: TASK-304
 title: Create patch MR for private cache credential-test override after MR 257 merge
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-05-23 03:44'
+updated_date: '2026-05-23 03:44'
 labels:
   - patch
   - caches
@@ -46,3 +47,9 @@ A new merge request is opened with only the missing patch changes:
 - [ ] #3 `nix develop -c env SQLX_OFFLINE=true cargo test --manifest-path packages/default/Cargo.toml --lib handlers::api::caches` passes.
 - [ ] #4 A new MR is opened in GitLab with task reference and verification results.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Moved to To Do with explicit human authorization in chat.
+<!-- SECTION:NOTES:END -->
