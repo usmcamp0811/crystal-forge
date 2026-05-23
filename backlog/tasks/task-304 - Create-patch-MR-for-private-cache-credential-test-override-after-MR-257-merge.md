@@ -1,7 +1,7 @@
 ---
 id: TASK-304
 title: Create patch MR for private cache credential-test override after MR 257 merge
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-05-23 03:44'
 updated_date: '2026-05-23 03:44'
@@ -9,6 +9,7 @@ status: Backlog
 assignee: []
 created_date: '2026-05-23 03:44'
 updated_date: '2026-05-23 03:44'
+updated_date: '2026-05-23 03:45'
 labels:
   - patch
   - caches
@@ -55,5 +56,5 @@ A new merge request is opened with only the missing patch changes:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Moved to To Do with explicit human authorization in chat.
+LOCK: gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-304-private-cache-test-patch
 <!-- SECTION:NOTES:END -->
