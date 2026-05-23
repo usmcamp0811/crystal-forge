@@ -11,6 +11,7 @@ pub mod commits;
 pub mod config_health;
 pub mod dashboard;
 pub mod deployment_policies;
+pub mod deployments;
 pub mod environments;
 pub mod flakes;
 pub mod hardening;

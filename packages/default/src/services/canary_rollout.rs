@@ -359,7 +359,7 @@ pub async fn advance_to_next_phase(
 }
 
 /// Get rollout state for a deployment context
-async fn get_rollout_state(
+pub async fn get_rollout_state(
     pool: &PgPool,
     context: RolloutContext,
     context_id: &str,
