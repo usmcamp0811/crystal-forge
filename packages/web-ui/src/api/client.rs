@@ -1116,6 +1116,14 @@ pub async fn create_cache_destination(
     send_json_with_csrf("POST", &url, Some(data)).await
 }
 
+/// Test cache destination credentials/configuration
+pub async fn test_cache_destination_credentials(
+    data: &CreateCacheDestination,
+) -> Result<CacheCredentialTestResult, ApiClientError> {
+    let url = format!("{}/caches/test-credentials", base_url());
+    send_json_with_csrf("POST", &url, Some(data)).await
+}
+
 /// Update an existing cache destination
 pub async fn update_cache_destination(
     id: i32,
