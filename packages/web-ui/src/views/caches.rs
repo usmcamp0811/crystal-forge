@@ -421,6 +421,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
     let mut form_environment_ids = use_signal(|| Vec::<Uuid>::new());
     let mut form_testing = use_signal(|| None::<String>);
     let mut form_test_error = use_signal(|| None::<String>);
+    let mut form_save_error = use_signal(|| None::<String>);
     let mut form_show_cred_modal = use_signal(|| false);
     let mut local_credentials = use_signal(Vec::<LocalCredential>::new);
     
@@ -443,6 +444,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
             form_cred_id.set(String::new());
             form_testing.set(None);
             form_test_error.set(None);
+            form_save_error.set(None);
             form_show_cred_modal.set(false);
             
             // Load environment assignments
@@ -463,6 +465,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
             form_environment_ids.set(Vec::new());
             form_testing.set(None);
             form_test_error.set(None);
+            form_save_error.set(None);
         }
     });
     let mut dismiss_add_target_callout = use_signal(|| false);
@@ -683,6 +686,13 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                             onclick: move |_| {
                                                 form_testing.set(Some("running".to_string()));
                                                 form_test_error.set(None);
+                                                let cache_type = form_type();
+                                                let url_value = form_url();
+                                                if cache_type == "s3" && s3_endpoint_url_from_form(&cache_type, &url_value).is_none() {
+                                                    form_testing.set(Some("fail".to_string()));
+                                                    form_test_error.set(Some("S3 test requires an HTTPS endpoint URL (e.g. https://s3.us-east-1.amazonaws.com).".to_string()));
+                                                    return;
+                                                }
                                                 let selected_credential = local_credentials()
                                                     .into_iter()
                                                     .find(|cred| cred.id == form_cred_id());
@@ -696,6 +706,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                                     } else {
                                                         Some(form_url())
                                                     },
+                                                    s3_endpoint_url: s3_endpoint_url_from_form(&cache_type, &url_value),
                                                     enabled: Some(true),
                                                     s3_profile,
                                                     s3_access_key_id,
@@ -767,10 +778,14 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                             button {
                                 class: "btn btn-primary focus-ring",
                                 onclick: move |_| {
+                                    form_save_error.set(None);
+                                    let cache_type = form_type();
+                                    let url_value = form_url();
                                     let req = CreateCacheDestination {
                                         name: form_name(),
-                                        cache_type: api_cache_type(&form_type()),
+                                        cache_type: api_cache_type(&cache_type),
                                         push_to: if form_url().trim().is_empty() { None } else { Some(form_url()) },
+                                        s3_endpoint_url: s3_endpoint_url_from_form(&cache_type, &url_value),
                                         enabled: Some(true),
                                         environment_ids: if form_environment_ids().is_empty() { None } else { Some(form_environment_ids()) },
                                         s3_profile: {
@@ -805,15 +820,23 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                         ..Default::default()
                                     };
                                     spawn(async move {
-                                        if client::create_cache_destination(&req).await.is_ok() {
-                                            form_show_cred_modal.set(false);
-                                            show_add_modal.set(false);
-                                            refresh_nonce.set(refresh_nonce() + 1);
+                                        match client::create_cache_destination(&req).await {
+                                            Ok(_) => {
+                                                form_show_cred_modal.set(false);
+                                                show_add_modal.set(false);
+                                                refresh_nonce.set(refresh_nonce() + 1);
+                                            }
+                                            Err(e) => {
+                                                form_save_error.set(Some(format!("Failed to create destination: {e}")));
+                                            }
                                         }
                                     });
                                 },
                                 svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", style: "display:inline-block; vertical-align:text-bottom;", polyline { points: "20 6 9 17 4 12" } }
                                 " Add cache"
+                            }
+                            if let Some(err) = form_save_error() {
+                                div { class: "help", style: "color: var(--cf-danger); margin-left:auto;", "{err}" }
                             }
                         }
                     }
@@ -951,6 +974,13 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                             onclick: move |_| {
                                                 form_testing.set(Some("running".to_string()));
                                                 form_test_error.set(None);
+                                                let cache_type = form_type();
+                                                let url_value = form_url();
+                                                if cache_type == "s3" && s3_endpoint_url_from_form(&cache_type, &url_value).is_none() {
+                                                    form_testing.set(Some("fail".to_string()));
+                                                    form_test_error.set(Some("S3 test requires an HTTPS endpoint URL (e.g. https://s3.us-east-1.amazonaws.com).".to_string()));
+                                                    return;
+                                                }
                                                 let selected_credential = local_credentials()
                                                     .into_iter()
                                                     .find(|cred| cred.id == form_cred_id());
@@ -964,6 +994,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                                     } else {
                                                         Some(form_url())
                                                     },
+                                                    s3_endpoint_url: s3_endpoint_url_from_form(&cache_type, &url_value),
                                                     enabled: Some(true),
                                                     s3_profile,
                                                     s3_access_key_id,
@@ -1063,12 +1094,16 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                 class: "btn btn-primary focus-ring",
                                 onclick: move |_| {
                                     let cache_id = dest.id;
+                                    form_save_error.set(None);
                                     spawn(async move {
+                                        let cache_type = form_type();
+                                        let url_value = form_url();
                                         // Update basic cache fields
                                         let req = UpdateCacheDestination {
                                             name: Some(form_name()),
-                                            cache_type: Some(api_cache_type(&form_type())),
+                                            cache_type: Some(api_cache_type(&cache_type)),
                                             push_to: if form_url().trim().is_empty() { None } else { Some(form_url()) },
+                                            s3_endpoint_url: s3_endpoint_url_from_form(&cache_type, &url_value),
                                             s3_profile: {
                                                 let selected_credential = local_credentials()
                                                     .into_iter()
@@ -1104,13 +1139,18 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                         match client::update_cache_destination(cache_id, &req).await {
                                             Ok(_) => {
                                                 // Update environment assignments
-                                                let _ = client::assign_cache_environments(cache_id, form_environment_ids()).await;
-                                                edit_destination.set(None);
-                                                refresh_nonce.set(refresh_nonce() + 1);
+                                                match client::assign_cache_environments(cache_id, form_environment_ids()).await {
+                                                    Ok(_) => {
+                                                        edit_destination.set(None);
+                                                        refresh_nonce.set(refresh_nonce() + 1);
+                                                    }
+                                                    Err(e) => {
+                                                        form_save_error.set(Some(format!("Failed to assign environments: {e}")));
+                                                    }
+                                                }
                                             }
                                             Err(e) => {
-                                                // TODO: Show error
-                                                web_sys::console::error_1(&format!("Failed to update cache: {}", e).into());
+                                                form_save_error.set(Some(format!("Failed to update destination: {e}")));
                                             }
                                         }
                                     });
@@ -1127,6 +1167,9 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                     polyline { points: "20 6 9 17 4 12" }
                                 }
                                 " Save changes"
+                            }
+                            if let Some(err) = form_save_error() {
+                                div { class: "help", style: "color: var(--cf-danger); margin-left:auto;", "{err}" }
                             }
                         }
                     }
@@ -2335,6 +2378,15 @@ fn normalize_env_color(color_hex: &str) -> &str {
         "#6b7280"
     } else {
         trimmed
+    }
+}
+
+fn s3_endpoint_url_from_form(cache_type: &str, url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    if cache_type == "s3" && is_http_url(trimmed) {
+        Some(trimmed.to_string())
+    } else {
+        None
     }
 }
 
