@@ -1,10 +1,10 @@
 ---
 id: TASK-305
 title: Implement deployment policy system for fleet management
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-05-23 14:12'
-updated_date: '2026-05-23 14:21'
+updated_date: '2026-05-23 14:22'
 labels:
   - feature
   - deployment
@@ -220,3 +220,9 @@ These should remain **declarative** - stored as JSON/TOML, sharable, version-con
 - [ ] #21 Tests verify canary phase progression
 - [ ] #22 Tests verify CVE threshold evaluation
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: agent on gray in ~/code/crystal-forge/TASK-305-deployment-policies
+<!-- SECTION:NOTES:END -->
