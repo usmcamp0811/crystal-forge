@@ -1,10 +1,10 @@
 ---
 id: TASK-303
 title: Refactor Caches view UI/UX to match latest design mockup
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-05-19 13:21'
-updated_date: '2026-05-23 03:29'
+updated_date: '2026-05-23 03:42'
 labels:
   - ui
   - ux
@@ -17,6 +17,7 @@ references:
   - >-
     https://gitlab.com/crystal-forge/crystal-forge/-/blob/dev/packages/web-ui/src/views/caches.rs
   - /home/mcamp/code/crystal-forge/CrystalForgelatest/components/CachesView.jsx
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/257'
 modified_files:
   - packages/web-ui/src/views/caches.rs
   - checks/web-ui/tests/integration-test.js
@@ -80,18 +81,24 @@ Medium: highly visible UI area; interaction/layout regressions are possible with
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Caches view layout and styling match the latest local design mockup across desktop and mobile breakpoints.
-- [ ] #2 Primary Caches workflows and controls reflect the mockup's wording, hierarchy, and interaction behavior.
-- [ ] #3 Any new/changed Caches-specific UI components keep presentation separated from state/data mapping.
-- [ ] #4 No backend/API contract changes are introduced by this task except the reviewed and scoped `/api/v1/caches/test-credentials` credential-test response hardening required for UI parity.
-- [ ] #5 `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` succeeds after implementation.
-- [ ] #6 `nix build .#checks.x86_64-linux.web-ui` succeeds and includes Caches-view screenshot/assertion coverage proving intended behavior.
+- [x] #1 Caches view layout and styling match the latest local design mockup across desktop and mobile breakpoints.
+- [x] #2 Primary Caches workflows and controls reflect the mockup's wording, hierarchy, and interaction behavior.
+- [x] #3 Any new/changed Caches-specific UI components keep presentation separated from state/data mapping.
+- [x] #4 No backend/API contract changes are introduced by this task except the reviewed and scoped `/api/v1/caches/test-credentials` credential-test response hardening required for UI parity.
+- [x] #5 `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` succeeds after implementation.
+- [x] #6 `nix build .#checks.x86_64-linux.web-ui` succeeds and includes Caches-view screenshot/assertion coverage proving intended behavior.
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Added opt-in private target override for cache credential tests via server.allow_private_cache_test_targets (default false), wired through NixOS module config generation.
+MR #257 is already merged.
 
-Commit: 5def2c2e
+Task worktree cleaned: git worktree remove ../TASK-303-refactor-caches-view && git worktree prune.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Implemented Caches UI parity and credential-test hardening with secure-by-default SSRF controls, explicit opt-in private-target testing support, and strengthened integration checks. MR merged: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/257
+<!-- SECTION:FINAL_SUMMARY:END -->
