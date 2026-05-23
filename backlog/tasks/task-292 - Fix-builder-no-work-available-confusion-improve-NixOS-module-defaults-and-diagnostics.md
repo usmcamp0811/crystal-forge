@@ -1,10 +1,10 @@
 ---
 id: TASK-292
 title: Deprecate legacy database mode and implement builder API mode in NixOS module
-status: Review
+status: Done
 assignee: []
 created_date: '2026-05-08 02:59'
-updated_date: '2026-05-23 16:10'
+updated_date: '2026-05-23 19:58'
 labels:
   - bug
   - dx
@@ -252,4 +252,6 @@ Review feedback addressed in commit 862f7989:
 3. Builder API key permissions always normalized (not just on first generation)
 
 All three issues from review fixed and tested. Ready for re-review.
+
+MR !261 merged into dev on 2026-05-23
 <!-- SECTION:NOTES:END -->
