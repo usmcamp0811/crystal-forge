@@ -15,6 +15,7 @@ updated_date: '2026-05-20 19:01'
 updated_date: '2026-05-21 03:12'
 updated_date: '2026-05-22 02:28'
 updated_date: '2026-05-22 03:13'
+updated_date: '2026-05-23 03:23'
 labels:
   - ui
   - ux
@@ -122,6 +123,7 @@ Added DNS-resolution SSRF guardrail for credential tests: hostname resolution is
 Removed remaining fake paths-cached values from subtitle, stat strip, and table row; now renders unknown placeholder instead of fabricated numbers.
 
 Adjusted credential test button UX so public connectivity tests are possible when authentication is unchecked even if no saved credentials exist.
+LOCK: gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-303-refactor-caches-view
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
