@@ -4,7 +4,7 @@ title: Implement deployment policy system for fleet management
 status: Backlog
 assignee: []
 created_date: '2026-05-23 14:12'
-updated_date: '2026-05-23 14:17'
+updated_date: '2026-05-23 14:20'
 labels:
   - feature
   - deployment
@@ -19,103 +19,204 @@ ordinal: 252000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Design and implement advanced deployment policies for Crystal Forge's existing policy system. The basic policies (manual, auto_latest, pinned) already exist. This task adds sophisticated policies for CVE gating, time-based restrictions, multi-approver workflows, and canary deployments.
+Extend Crystal Forge's existing policy engine with new policy types for time-based restrictions, approval workflows, and fleet orchestration. Policies are already represented as JSON/TOML structures with different `policy_type` values. This task adds new policy types beyond the existing `custom_check`, `cve_gate`, and `require_packages` types.
 
 ## Current State
 
-Crystal Forge has a deployment policy system with 3 built-in policies:
-1. **manual** - Operator explicitly approves every deploy
-2. **auto_latest** - Auto-deploy newest passing commit
-3. **pinned** - Stay on specific commit until manually changed
+Crystal Forge has a policy-as-data system. Policies are JSON/TOML structures with:
+- `policy_type`: defines the policy behavior
+- `config`: type-specific configuration
+- `enabled`: whether policy is active
+
+**Existing policy types:**
+- `custom_check` - Evaluate Nix expressions against system config (e.g., `config.services.auditd.enable`)
+- `cve_gate` - CVE-based blocking with thresholds and no-scan behavior
+  - Example: `require_no_critical_cves` (critical ≤ 0, no-scan → block)
+  - Example: `require_high_cve_justification` (high requires justification, no-scan → skip)
+- `require_packages` - Guarantee package set is installed
+- **Core policies** (always-on, like `require_crystal_forge_agent`)
 
 ## Goals
 
-Extend the policy system to support:
-- **CVE-based gating** - Block deployments introducing vulnerabilities
-- **Time-window restrictions** - Limit deployments to specific times/days
-- **Multi-approver workflows** - Require N approvers with specific roles
-- **Canary/phased rollouts** - Deploy to subsets of fleet, observe, then continue
+Add new policy types that layer orchestration and workflow logic around the existing evaluation engine:
 
-## Policies to Implement
+1. **Time-windowed deployment** - Only allow deployments during specific time windows
+2. **Multi-approver workflow** - Require N approvals from operators with specific roles
+3. **Canary/phased rollout** - Deploy to fleet subsets with observation periods between phases
+4. **Enhanced CVE policies** - More sophisticated CVE gating with configurable thresholds
 
-1. **cve-gated** - Block deploys introducing CVEs
-   - Rule: max 0 critical CVEs
-   - Rule: max 2 high CVEs  
-   - Rule: evaluation must pass
-   - Rule: build must succeed (and be cached)
-   - Requires: CVE scanning integration (Nix vulnerability scanner or other)
+These should remain **declarative** - stored as JSON/TOML, sharable, version-controllable.
 
-2. **business-hours** - Time-windowed auto-deploy
-   - Rule: deploy window (e.g., mon-fri 09:00-17:00 America/New_York)
-   - Rule: evaluation must pass
-   - Rule: build must succeed (and be cached)
-   - Requires: Time zone handling, schedule evaluation
+## New Policy Types to Implement
 
-3. **two-approver** - Multi-operator approval
-   - Rule: 2 approvers required with admin role
-   - Rule: evaluation must pass
-   - Rule: build must succeed (and be cached)
-   - Requires: Approval tracking, role verification
+### 1. `time_window` - Time-based deployment restrictions
 
-4. **canary-25** - Phased rollout with observation
-   - Rule: canary 25% at a time, observe 30min between phases
-   - Rule: evaluation must pass
-   - Rule: build must succeed (and be cached)
-   - Requires: Fleet grouping/selection, rollout state tracking, time-based progression
+```json
+{
+  "policy_type": "time_window",
+  "enabled": true,
+  "config": {
+    "description": "Deploy only during business hours",
+    "days": ["mon", "tue", "wed", "thu", "fri"],
+    "start_time": "09:00",
+    "end_time": "17:00",
+    "timezone": "America/New_York",
+    "action": "block"  // or "warn"
+  }
+}
+```
+
+**Behavior:**
+- Evaluate current time against configured window
+- Block or warn when outside window
+- Support multiple windows (e.g., weekday + weekend maintenance windows)
+
+### 2. `require_approvals` - Multi-operator approval workflow
+
+```json
+{
+  "policy_type": "require_approvals",
+  "enabled": true,
+  "config": {
+    "description": "Require 2 admin approvals",
+    "count": 2,
+    "role": "admin",
+    "distinct": true,  // must be different operators
+    "expires_after_hours": 24  // approval window
+  }
+}
+```
+
+**Behavior:**
+- Track approval state per deployment/commit
+- Verify approver has required role
+- Enforce distinct approvers (can't approve own deployment twice)
+- Expire approvals after time window
+
+### 3. `canary_rollout` - Phased fleet deployment
+
+```json
+{
+  "policy_type": "canary_rollout",
+  "enabled": true,
+  "config": {
+    "description": "Deploy to 25% at a time, observe 30min",
+    "percentage": 25,
+    "observe_duration_minutes": 30,
+    "selection_strategy": "random",  // or "labeled", "hash-based"
+    "health_check": {
+      "type": "systemd",  // or "custom_check", "none"
+      "fail_threshold": 0  // halt rollout if N systems fail
+    }
+  }
+}
+```
+
+**Behavior:**
+- Select subset of fleet (25% of systems matching policy)
+- Deploy to subset, mark as "canary phase 1"
+- Wait observation period
+- Check health (systemd status, custom checks, etc.)
+- If healthy, continue to next 25%; if unhealthy, halt
+- Track rollout state (which systems deployed, which phase)
+
+### 4. `cve_threshold` - Enhanced CVE gating
+
+```json
+{
+  "policy_type": "cve_threshold",
+  "enabled": true,
+  "config": {
+    "description": "Block critical, limit high CVEs",
+    "thresholds": {
+      "critical": {"max": 0, "action": "block"},
+      "high": {"max": 2, "action": "block"},
+      "medium": {"max": 10, "action": "warn"}
+    },
+    "no_scan_behavior": "block",  // or "skip", "warn"
+    "allow_justifications": true,
+    "require_acknowledgment": false
+  }
+}
+```
+
+**Behavior:**
+- More flexible than binary cve_gate
+- Configurable per-severity thresholds
+- Different actions per severity (block vs warn)
+- Optional justification/acknowledgment workflow
 
 ## Architecture Considerations
 
-- **CVE scanning**: How to integrate vulnerability data? Nix built-in scanner? External service?
-- **Fleet state tracking**: Does CF currently track which systems run which commits?
-- **Canary selection**: How to select 25% of systems? Random? By label/group? Deterministic?
-- **Approval persistence**: Where to store approval records? Database? Event log?
-- **Time-based triggers**: Background job to re-evaluate policies during allowed windows?
-- **Rollout orchestration**: How to pause between canary phases and monitor for issues?
+**Policy evaluation engine:**
+- Where do policies get evaluated? (orchestrator, per-system agent, separate policy service)
+- How to compose multiple policies? (all must pass, priority order, fail-fast vs collect all violations)
+
+**State persistence:**
+- Approval records → database table
+- Canary rollout state → deployment tracking table
+- Time window evaluation → stateless (evaluate on-demand)
+
+**Fleet awareness:**
+- Does CF track system inventory with labels/tags?
+- How to query "all systems in group X"?
+- How to persist "these systems are in canary phase 1"?
+
+**Scheduler/background jobs:**
+- Time-based re-evaluation (check if now in allowed window)
+- Canary phase progression (wait 30min, then continue)
+- Approval expiration cleanup
 
 ## Deliverables
 
-- Design document or RFC for advanced policy architecture
-- Implementation of all 4 advanced policies
-- CVE scanning integration (if not already present)
-- Approval workflow UI/API for multi-approver
-- Fleet grouping/selection mechanism for canary
-- Time-based policy evaluation (scheduler or cron-like)
-- Policy rule extension framework (if needed for new rule types)
-- Documentation updates:
-  - How each advanced policy works
-  - Configuration examples for each policy
-  - CVE threshold tuning guidance
-  - Time window configuration syntax
-  - Approver role requirements
-  - Canary deployment behavior and rollback
+- **New policy type implementations** (4 types: time_window, require_approvals, canary_rollout, cve_threshold)
+- **Policy evaluation integration** - Extend engine to handle new types
+- **State tracking** - Database schema for approvals, rollout state
+- **API endpoints** - Submit approvals, query rollout status, configure policies
+- **UI components** (if applicable) - Approval button, rollout status view, policy editor
+- **Documentation**:
+  - JSON/TOML schema for each new policy type
+  - Configuration examples for common scenarios
+  - Policy composition behavior (how multiple policies interact)
+  - Approval workflow for operators
+  - Canary rollout behavior and health checks
+- **Tests**:
+  - Time window evaluation (TZ handling, day-of-week, time ranges)
+  - Approval counting, role checking, expiration
+  - Canary subset selection, phase progression, health checks
+  - CVE threshold evaluation with multiple severities
 
 ## Non-Goals
 
-- Changing existing MVP policies (manual, auto_latest, pinned)
-- Full observability dashboard (separate task)
-- Automated rollback on canary failures (could be follow-up task)
-- Policy composition/inheritance (keep policies independent for now)
+- Changing existing policy types (custom_check, cve_gate, require_packages)
+- Policy inheritance or composition DSL (keep flat for now)
+- Full policy audit log / history (could be follow-up)
+- Automated rollback on canary health check failure (halt only for MVP)
+- External policy engine integration (OPA, Cedar, etc.)
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 CVE-gated policy blocks deployments exceeding vulnerability thresholds
-- [ ] #2 CVE-gated policy integrates with vulnerability scanning (Nix or other)
-- [ ] #3 Business-hours policy only allows deployments within configured time windows
-- [ ] #4 Business-hours policy correctly handles time zones
-- [ ] #5 Two-approver policy requires 2 distinct approvals from admin-role operators
-- [ ] #6 Two-approver policy tracks and persists approval state
-- [ ] #7 Canary-25 policy deploys to 25% of systems initially
-- [ ] #8 Canary-25 policy observes for configured duration before next phase
-- [ ] #9 Canary-25 policy can select system subsets deterministically
-- [ ] #10 All 4 policies integrate with existing policy assignment mechanism
-- [ ] #11 All 4 policies respect evaluation and build success rules
-- [ ] #12 Documentation explains CVE threshold configuration
-- [ ] #13 Documentation explains time window syntax and examples
-- [ ] #14 Documentation explains approver workflow
-- [ ] #15 Documentation explains canary rollout behavior
-- [ ] #16 Tests verify CVE blocking logic
-- [ ] #17 Tests verify time window enforcement
-- [ ] #18 Tests verify approval counting and role checks
-- [ ] #19 Tests verify canary phase progression
+- [ ] #1 time_window policy type blocks deployments outside configured time windows
+- [ ] #2 time_window policy correctly handles multiple time zones
+- [ ] #3 require_approvals policy tracks approval state per deployment
+- [ ] #4 require_approvals policy enforces distinct approvers when configured
+- [ ] #5 require_approvals policy verifies approver roles
+- [ ] #6 require_approvals policy expires approvals after configured duration
+- [ ] #7 canary_rollout policy selects correct percentage of fleet
+- [ ] #8 canary_rollout policy waits for observation period between phases
+- [ ] #9 canary_rollout policy tracks rollout state across phases
+- [ ] #10 canary_rollout policy can halt on health check failures
+- [ ] #11 cve_threshold policy blocks deployments exceeding configured severity limits
+- [ ] #12 cve_threshold policy supports different actions per severity (block/warn)
+- [ ] #13 All 4 new policy types can be represented as JSON/TOML
+- [ ] #14 Policy evaluation engine integrates new policy types
+- [ ] #15 Database schema supports approval and rollout state persistence
+- [ ] #16 API endpoints exist for submitting approvals and querying rollout status
+- [ ] #17 Documentation includes JSON/TOML schema for each new policy type
+- [ ] #18 Documentation includes configuration examples for common scenarios
+- [ ] #19 Tests verify time window evaluation logic
+- [ ] #20 Tests verify approval workflow and expiration
+- [ ] #21 Tests verify canary phase progression
+- [ ] #22 Tests verify CVE threshold evaluation
 <!-- AC:END -->
