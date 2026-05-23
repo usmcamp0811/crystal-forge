@@ -227,4 +227,6 @@ These should remain **declarative** - stored as JSON/TOML, sharable, version-con
 LOCK: agent on gray in ~/code/crystal-forge/TASK-305-deployment-policies
 
 Phase 1-3 completed: Database migrations, type definitions, time window and approval services implemented. Documentation added. Remaining: canary rollout service, CVE threshold service, deployment integration, API endpoints, tests.
+
+## Implementation Strategy Recommendation: This task is large and should be split into focused sub-tasks. Current commit provides foundation (types, schemas, services). Suggest creating follow-up tasks for: 1) Canary rollout orchestration, 2) Deployment integration, 3) API endpoints, 4) Comprehensive testing.
 <!-- SECTION:NOTES:END -->
