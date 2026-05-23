@@ -95,6 +95,11 @@ pub struct ServerConfig {
     /// Default: 30 days.
     #[serde(default = "default_commit_cache_retention_days")]
     pub commit_cache_retention_days: i32,
+
+    /// Allow cache credential-test endpoint to probe private/non-routable targets.
+    /// Default: false (secure-by-default SSRF posture).
+    #[serde(default)]
+    pub allow_private_cache_test_targets: bool,
 }
 
 // Default value functions for serde
@@ -150,6 +155,7 @@ impl Default for ServerConfig {
             build_log_retention_days: default_build_log_retention_days(),
             failed_build_log_retention_days: default_failed_build_log_retention_days(),
             commit_cache_retention_days: default_commit_cache_retention_days(),
+            allow_private_cache_test_targets: false,
         }
     }
 }

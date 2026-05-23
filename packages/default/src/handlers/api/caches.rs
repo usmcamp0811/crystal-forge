@@ -12,6 +12,7 @@ use std::time::Duration;
 use url::Url;
 
 use crate::api::models::ApiError;
+use crate::config::ServerConfig;
 use crate::handlers::api::rbac::{authenticated_user_roles, require_admin as require_admin_user};
 use crate::models::cache_destination::{
     CacheDestination, CreateCacheDestination, UpdateCacheDestination,
@@ -56,7 +57,7 @@ struct CacheCredentialTestResult {
     tested_url: Option<String>,
 }
 
-fn validate_cache_test_url(url: &Url) -> Result<(), String> {
+fn validate_cache_test_url(url: &Url, allow_private_targets: bool) -> Result<(), String> {
     match url.scheme() {
         "https" => {}
         other => {
@@ -70,25 +71,31 @@ fn validate_cache_test_url(url: &Url) -> Result<(), String> {
         .host_str()
         .ok_or_else(|| "Cache test URL must include a host".to_string())?;
 
-    let blocked_host = host.eq_ignore_ascii_case("localhost")
-        || host.ends_with(".localhost")
-        || host.ends_with(".local")
-        || host.ends_with(".internal");
+    let blocked_host = !allow_private_targets
+        && (host.eq_ignore_ascii_case("localhost")
+            || host.ends_with(".localhost")
+            || host.ends_with(".local")
+            || host.ends_with(".internal"));
 
     if blocked_host {
         return Err("Refusing to test localhost or internal cache endpoint".to_string());
     }
 
     let host_for_ip_parse = host.trim_start_matches('[').trim_end_matches(']');
-    if let Ok(ip) = host_for_ip_parse.parse::<IpAddr>() {
-        reject_non_public_ip(ip)?;
+    if !allow_private_targets {
+        if let Ok(ip) = host_for_ip_parse.parse::<IpAddr>() {
+            reject_non_public_ip(ip)?;
+        }
     }
 
     Ok(())
 }
 
-async fn validate_cache_test_url_resolves_publicly(url: &Url) -> Result<(), String> {
-    validate_cache_test_url(url)?;
+async fn validate_cache_test_url_resolves_publicly(
+    url: &Url,
+    allow_private_targets: bool,
+) -> Result<(), String> {
+    validate_cache_test_url(url, allow_private_targets)?;
 
     let host = url
         .host_str()
@@ -104,7 +111,14 @@ async fn validate_cache_test_url_resolves_publicly(url: &Url) -> Result<(), Stri
         .map_err(|e| format!("Failed to resolve cache test host: {e}"))?
         .collect();
 
-    validate_resolved_addrs_public(&addrs)
+    if allow_private_targets {
+        if addrs.is_empty() {
+            return Err("Cache test host did not resolve to any addresses".to_string());
+        }
+        Ok(())
+    } else {
+        validate_resolved_addrs_public(&addrs)
+    }
 }
 
 fn validate_resolved_addrs_public(addrs: &[SocketAddr]) -> Result<(), String> {
@@ -149,7 +163,10 @@ fn sanitize_test_url_for_response(url: &Url) -> String {
     sanitized.to_string()
 }
 
-async fn run_cache_destination_test(create: &CreateCacheDestination) -> Result<CacheCredentialTestResult, String> {
+async fn run_cache_destination_test(
+    create: &CreateCacheDestination,
+    allow_private_targets: bool,
+) -> Result<CacheCredentialTestResult, String> {
     let cache_type = create.cache_type.trim();
     if !matches!(cache_type, "S3" | "Attic" | "Http" | "Nix" | "s3" | "attic" | "http" | "nix") {
         return Err(format!(
@@ -166,7 +183,7 @@ async fn run_cache_destination_test(create: &CreateCacheDestination) -> Result<C
     };
 
     let parsed_url = Url::parse(&test_url).map_err(|e| format!("Invalid cache test URL: {e}"))?;
-    validate_cache_test_url_resolves_publicly(&parsed_url).await?;
+    validate_cache_test_url_resolves_publicly(&parsed_url, allow_private_targets).await?;
     let tested_url = sanitize_test_url_for_response(&parsed_url);
 
     let client = reqwest::Client::builder()
@@ -387,6 +404,7 @@ pub async fn create_cache_destination(
 /// POST /api/caches/test-credentials - Test cache destination configuration (admin only)
 pub async fn test_cache_destination_credentials(
     State(pool): State<PgPool>,
+    State(server_config): State<ServerConfig>,
     headers: HeaderMap,
     Json(create): Json<CreateCacheDestination>,
 ) -> impl IntoResponse {
@@ -402,7 +420,7 @@ pub async fn test_cache_destination_credentials(
             .into_response();
     }
 
-    match run_cache_destination_test(&create).await {
+    match run_cache_destination_test(&create, server_config.allow_private_cache_test_targets).await {
         Ok(result) => (StatusCode::OK, Json(result)).into_response(),
         Err(message) => (
             StatusCode::BAD_REQUEST,
@@ -434,21 +452,21 @@ mod tests {
     #[test]
     fn validate_cache_test_url_rejects_http() {
         let url = Url::parse("http://cache.example.com").unwrap();
-        let err = validate_cache_test_url(&url).unwrap_err();
+        let err = validate_cache_test_url(&url, false).unwrap_err();
         assert!(err.contains("Only https is allowed"));
     }
 
     #[test]
     fn validate_cache_test_url_rejects_localhost() {
         let url = Url::parse("https://localhost/cache").unwrap();
-        let err = validate_cache_test_url(&url).unwrap_err();
+        let err = validate_cache_test_url(&url, false).unwrap_err();
         assert!(err.contains("localhost or internal"));
     }
 
     #[test]
     fn validate_cache_test_url_rejects_private_ip() {
         let url = Url::parse("https://10.0.0.8/cache").unwrap();
-        let err = validate_cache_test_url(&url).unwrap_err();
+        let err = validate_cache_test_url(&url, false).unwrap_err();
         assert!(err.contains("private, loopback, or non-routable IP"));
     }
 
@@ -456,8 +474,8 @@ mod tests {
     fn validate_cache_test_url_rejects_local_suffixes() {
         let internal = Url::parse("https://cache.internal").unwrap();
         let local = Url::parse("https://cache.local").unwrap();
-        assert!(validate_cache_test_url(&internal).is_err());
-        assert!(validate_cache_test_url(&local).is_err());
+        assert!(validate_cache_test_url(&internal, false).is_err());
+        assert!(validate_cache_test_url(&local, false).is_err());
     }
 
     #[test]
@@ -466,23 +484,37 @@ mod tests {
         let link_local = Url::parse("https://169.254.169.254/latest").unwrap();
         let ipv6_loopback = Url::parse("https://[::1]/cache").unwrap();
 
-        assert!(validate_cache_test_url(&ipv4_loopback).is_err());
-        assert!(validate_cache_test_url(&link_local).is_err());
-        assert!(validate_cache_test_url(&ipv6_loopback).is_err());
+        assert!(validate_cache_test_url(&ipv4_loopback, false).is_err());
+        assert!(validate_cache_test_url(&link_local, false).is_err());
+        assert!(validate_cache_test_url(&ipv6_loopback, false).is_err());
     }
 
     #[test]
     fn validate_cache_test_url_allows_public_https_host() {
         let url = Url::parse("https://cache.nixos.org").unwrap();
-        assert!(validate_cache_test_url(&url).is_ok());
+        assert!(validate_cache_test_url(&url, false).is_ok());
+    }
+
+    #[test]
+    fn validate_cache_test_url_allows_private_when_enabled() {
+        let loopback = Url::parse("https://127.0.0.1/cache").unwrap();
+        assert!(validate_cache_test_url(&loopback, true).is_ok());
     }
 
     #[tokio::test]
     async fn validate_cache_test_url_dns_rejects_localhost_resolution() {
         let url = Url::parse("https://localhost").unwrap();
-        assert!(validate_cache_test_url_resolves_publicly(&url)
+        assert!(validate_cache_test_url_resolves_publicly(&url, false)
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn validate_cache_test_url_dns_allows_localhost_when_enabled() {
+        let url = Url::parse("https://localhost").unwrap();
+        assert!(validate_cache_test_url_resolves_publicly(&url, true)
+            .await
+            .is_ok());
     }
 
     #[test]
