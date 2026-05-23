@@ -4,7 +4,7 @@ title: Refactor Caches view UI/UX to match latest design mockup
 status: In Progress
 assignee: []
 created_date: '2026-05-19 13:21'
-updated_date: '2026-05-22 03:13'
+updated_date: '2026-05-23 03:23'
 labels:
   - ui
   - ux
@@ -89,9 +89,5 @@ Medium: highly visible UI area; interaction/layout regressions are possible with
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Added DNS-resolution SSRF guardrail for credential tests: hostname resolution is performed and every resolved address is rejected if non-public.
-
-Removed remaining fake paths-cached values from subtitle, stat strip, and table row; now renders unknown placeholder instead of fabricated numbers.
-
-Adjusted credential test button UX so public connectivity tests are possible when authentication is unchecked even if no saved credentials exist.
+LOCK: gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-303-refactor-caches-view
 <!-- SECTION:NOTES:END -->
