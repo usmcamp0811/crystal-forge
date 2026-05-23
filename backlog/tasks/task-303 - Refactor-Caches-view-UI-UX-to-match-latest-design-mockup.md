@@ -16,6 +16,7 @@ updated_date: '2026-05-21 03:12'
 updated_date: '2026-05-22 02:28'
 updated_date: '2026-05-22 03:13'
 updated_date: '2026-05-23 03:23'
+updated_date: '2026-05-23 03:29'
 labels:
   - ui
   - ux
@@ -124,6 +125,9 @@ Removed remaining fake paths-cached values from subtitle, stat strip, and table 
 
 Adjusted credential test button UX so public connectivity tests are possible when authentication is unchecked even if no saved credentials exist.
 LOCK: gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-303-refactor-caches-view
+Added opt-in private target override for cache credential tests via server.allow_private_cache_test_targets (default false), wired through NixOS module config generation.
+
+Commit: 5def2c2e
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
