@@ -210,10 +210,14 @@ let
       ${lib.optionalString (cfg.auth.ssh_key_path == null
         && (cfg.build.enable || cfg.server.enable)) ''
           SSH_KEY_PATH="/var/lib/crystal-forge/.ssh/id_ed25519"
-          
+
           # Fix SSH key permissions before any operations (if key exists)
           if [ -f "$SSH_KEY_PATH" ]; then
-            chmod 600 "$SSH_KEY_PATH"
+            if [ -w "$SSH_KEY_PATH" ]; then
+              chmod 600 "$SSH_KEY_PATH"
+            else
+              echo "Skipping SSH key permission fix for read-only key: $SSH_KEY_PATH"
+            fi
           fi
           
           if [ ! -f "$SSH_KEY_PATH" ]; then
