@@ -4,11 +4,12 @@ title: Create first-class Compliance Bundle and Control domain model
 status: Backlog
 assignee: []
 created_date: '2026-05-24 02:32'
+updated_date: '2026-05-24 02:38'
 labels:
   - compliance
   - domain-model
   - backend
-milestone: Compliance Foundations
+milestone: m-16
 dependencies: []
 priority: high
 ordinal: 3110
@@ -56,3 +57,15 @@ Medium (new schema/domain objects with future dependency surface)
 - [ ] #4 Data model supports linking controls to bundles without duplicating control metadata.
 - [ ] #5 Unit tests cover model validation and primary query behavior.
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Sprint sequencing: execute in Sprint 1 with TASK-313. Do not proceed to layered evaluator work until this gate passes.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Risk-First Gate (Sprint 1 / Model Integrity): verify bundle/control CRUD, stable identifiers/version fields, and strict validation for missing/invalid framework metadata before promoting dependent tasks.
+<!-- SECTION:NOTES:END -->
