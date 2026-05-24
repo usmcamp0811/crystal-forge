@@ -3,9 +3,10 @@ id: TASK-321
 title: >-
   Refactor Dashboard View to match latest design reference and upgrade loading
   spinner UX
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-05-24 14:36'
+updated_date: '2026-05-24 14:37'
 labels:
   - ui
   - dashboard
@@ -69,3 +70,9 @@ Medium
 - [ ] #4 Existing dashboard functionality/data rendering remains intact after visual and loading UX changes.
 - [ ] #5 Web UI check captures updated dashboard visuals and includes evidence of the loading spinner state.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-321-dashboard-view-refresh-loading-spinner
+<!-- SECTION:NOTES:END -->
