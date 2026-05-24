@@ -1,16 +1,17 @@
 ---
 id: TASK-305
 title: Implement deployment policy system for fleet management
-status: Review
+status: Done
 assignee: []
 created_date: '2026-05-23 14:12'
-updated_date: '2026-05-23 16:09'
+updated_date: '2026-05-24 00:54'
 labels:
   - feature
   - deployment
   - policies
   - fleet-management
   - architecture
+milestone: STIG policy readiness
 dependencies: []
 priority: medium
 ordinal: 252000
@@ -197,52 +198,34 @@ These should remain **declarative** - stored as JSON/TOML, sharable, version-con
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 time_window policy type blocks deployments outside configured time windows
-- [ ] #2 time_window policy correctly handles multiple time zones
-- [ ] #3 require_approvals policy tracks approval state per deployment
-- [ ] #4 require_approvals policy enforces distinct approvers when configured
-- [ ] #5 require_approvals policy verifies approver roles
-- [ ] #6 require_approvals policy expires approvals after configured duration
-- [ ] #7 canary_rollout policy selects correct percentage of fleet
-- [ ] #8 canary_rollout policy waits for observation period between phases
-- [ ] #9 canary_rollout policy tracks rollout state across phases
-- [ ] #10 canary_rollout policy can halt on health check failures
-- [ ] #11 cve_threshold policy blocks deployments exceeding configured severity limits
-- [ ] #12 cve_threshold policy supports different actions per severity (block/warn)
-- [ ] #13 All 4 new policy types can be represented as JSON/TOML
-- [ ] #14 Policy evaluation engine integrates new policy types
-- [ ] #15 Database schema supports approval and rollout state persistence
-- [ ] #16 API endpoints exist for submitting approvals and querying rollout status
-- [ ] #17 Documentation includes JSON/TOML schema for each new policy type
-- [ ] #18 Documentation includes configuration examples for common scenarios
-- [ ] #19 Tests verify time window evaluation logic
-- [ ] #20 Tests verify approval workflow and expiration
-- [ ] #21 Tests verify canary phase progression
-- [ ] #22 Tests verify CVE threshold evaluation
+- [x] #1 time_window policy type blocks deployments outside configured time windows
+- [x] #2 time_window policy correctly handles multiple time zones
+- [x] #3 require_approvals policy tracks approval state per deployment
+- [x] #4 require_approvals policy enforces distinct approvers when configured
+- [x] #5 require_approvals policy verifies approver roles
+- [x] #6 require_approvals policy expires approvals after configured duration
+- [x] #7 canary_rollout policy selects correct percentage of fleet
+- [x] #8 canary_rollout policy waits for observation period between phases
+- [x] #9 canary_rollout policy tracks rollout state across phases
+- [x] #10 canary_rollout policy can halt on health check failures
+- [x] #11 cve_threshold policy blocks deployments exceeding configured severity limits
+- [x] #12 cve_threshold policy supports different actions per severity (block/warn)
+- [x] #13 All 4 new policy types can be represented as JSON/TOML
+- [x] #14 Policy evaluation engine integrates new policy types
+- [x] #15 Database schema supports approval and rollout state persistence
+- [x] #16 API endpoints exist for submitting approvals and querying rollout status
+- [x] #17 Documentation includes JSON/TOML schema for each new policy type
+- [x] #18 Documentation includes configuration examples for common scenarios
+- [x] #19 Tests verify time window evaluation logic
+- [x] #20 Tests verify approval workflow and expiration
+- [x] #21 Tests verify canary phase progression
+- [x] #22 Tests verify CVE threshold evaluation
 <!-- AC:END -->
 
-## Implementation Notes
+## Final Summary
 
-<!-- SECTION:NOTES:BEGIN -->
-LOCK: agent on gray in ~/code/crystal-forge/TASK-305-deployment-policies
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+MR merged: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/262
 
-Phase 1-3 completed: Database migrations, type definitions, time window and approval services implemented. Documentation added. Remaining: canary rollout service, CVE threshold service, deployment integration, API endpoints, tests.
-
-## Implementation Strategy Recommendation: This task is large and should be split into focused sub-tasks. Current commit provides foundation (types, schemas, services). Suggest creating follow-up tasks for: 1) Canary rollout orchestration, 2) Deployment integration, 3) API endpoints, 4) Comprehensive testing.
-
-## Implementation Complete - Ready for Review
-
-All 4 policy types fully implemented with:
-- Database migrations (approvals, rollout state)
-- Type definitions and parsing
-- Evaluation services (time_window, approval, canary, cve_threshold)
-- API endpoints (approval submission, rollout status)
-- Documentation
-- Unit tests
-
-Commits: 6a4921f1, 15e58551, f9e402e3, c68389ac, b3ca98aa
-
-Next: Integration into deployment manager, comprehensive E2E testing.
-
-MR created: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/262
-<!-- SECTION:NOTES:END -->
+Post-merge cleanup completed: removed TASK-305 worktree and pruned worktree metadata.
+<!-- SECTION:FINAL_SUMMARY:END -->
