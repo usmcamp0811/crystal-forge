@@ -1,10 +1,10 @@
 ---
 id: TASK-285
 title: 'UI/UX refresh umbrella: Builds and Evaluations views'
-status: Done
+status: To Do
 assignee: []
 created_date: '2026-04-30 21:35'
-updated_date: '2026-05-24 01:16'
+updated_date: '2026-05-24 01:17'
 labels:
   - ui
   - ux
