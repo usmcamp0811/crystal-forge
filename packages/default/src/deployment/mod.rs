@@ -9,8 +9,10 @@ use crate::queries::derivations::{
 };
 use crate::queries::deployment_policies::get_deployment_policy_by_id;
 use crate::queries::environments::get_system_effective_policy_ids;
+use crate::server::load_cve_policies;
 use crate::services::approval_policy::{self, DeploymentContext};
 use crate::services::canary_rollout::{self, RolloutContext};
+use crate::services::cve_policy_gate::check_cve_policies;
 use crate::services::cve_threshold_policy;
 use crate::services::time_window_policy;
 use anyhow::{Context, Result};
@@ -212,9 +214,17 @@ impl DeploymentPolicyManager {
             HashMap::new();
         let mut all_policy_ids: HashSet<uuid::Uuid> = HashSet::new();
         for system in &systems {
-            let policy_ids = get_system_effective_policy_ids(&self.pool, system.id)
-                .await
-                .unwrap_or_default();
+            let policy_ids = match get_system_effective_policy_ids(&self.pool, system.id).await {
+                Ok(ids) => ids,
+                Err(err) => {
+                    warn!(
+                        "Failed to load effective deployment policies for {} ({}): {:#}; skipping deployment update",
+                        system.hostname, system.id, err
+                    );
+                    effective_policy_ids_by_system.insert(system.id, vec![]);
+                    continue;
+                }
+            };
             for policy_id in &policy_ids {
                 all_policy_ids.insert(*policy_id);
             }
@@ -222,6 +232,7 @@ impl DeploymentPolicyManager {
         }
 
         let mut policies_by_id: HashMap<uuid::Uuid, DeploymentPolicyRecord> = HashMap::new();
+        let mut failed_policy_loads: HashSet<uuid::Uuid> = HashSet::new();
         for policy_id in all_policy_ids {
             match get_deployment_policy_by_id(&self.pool, &policy_id).await {
                 Ok(Some(policy)) if policy.enabled => {
@@ -230,6 +241,7 @@ impl DeploymentPolicyManager {
                 Ok(_) => {}
                 Err(err) => {
                     warn!("Failed to load deployment policy {}: {:#}", policy_id, err);
+                    failed_policy_loads.insert(policy_id);
                 }
             }
         }
@@ -283,6 +295,7 @@ impl DeploymentPolicyManager {
                     &systems,
                     &effective_policy_ids_by_system,
                     &policies_by_id,
+                    &failed_policy_loads,
                 )
                 .await;
 
@@ -315,6 +328,32 @@ impl DeploymentPolicyManager {
                 }
             }
 
+            // Preserve legacy CVE gate behavior for require_cve_check policies.
+            let cve_policies = load_cve_policies(&self.pool).await;
+            if !cve_policies.is_empty() {
+                match check_cve_policies(&self.pool, latest_target_for_host.derivation_id, &cve_policies).await {
+                    Ok(gate) if !gate.deployment_allowed => {
+                        warn!(
+                            "🛑 Legacy CVE gate blocked deployment for {} -> {}: {}",
+                            system.hostname,
+                            store_path,
+                            gate.block_reason.as_deref().unwrap_or("policy violation")
+                        );
+                        continue;
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        warn!(
+                            "Legacy CVE gate evaluation failed for {} -> {}: {:#}; skipping deployment update",
+                            system.hostname,
+                            store_path,
+                            err
+                        );
+                        continue;
+                    }
+                }
+            }
+
             if let Err(e) = update_desired_target(&self.pool, &system.hostname, Some(store_path)).await
             {
                 error!(
@@ -342,20 +381,37 @@ impl DeploymentPolicyManager {
         all_systems_for_flake: &[crate::models::systems::System],
         effective_policy_ids_by_system: &HashMap<uuid::Uuid, Vec<uuid::Uuid>>,
         policies_by_id: &HashMap<uuid::Uuid, DeploymentPolicyRecord>,
+        failed_policy_loads: &HashSet<uuid::Uuid>,
     ) -> AdvancedGateDecision {
         let Some(policy_ids) = effective_policy_ids_by_system.get(&system.id) else {
             return AdvancedGateDecision::Allow;
         };
 
         for policy_id in policy_ids {
+            if failed_policy_loads.contains(policy_id) {
+                return AdvancedGateDecision::Block(format!(
+                    "Failed to load enabled deployment policy {}",
+                    policy_id
+                ));
+            }
+
             let Some(policy) = policies_by_id.get(policy_id) else {
-                continue;
+                return AdvancedGateDecision::Block(format!(
+                    "Enabled deployment policy {} was not found",
+                    policy_id
+                ));
             };
 
             match policy.policy_type.as_str() {
                 "time_window" => {
-                    let Ok(config) = serde_json::from_value::<TimeWindowConfig>(policy.config.clone()) else {
-                        continue;
+                    let config = match serde_json::from_value::<TimeWindowConfig>(policy.config.clone()) {
+                        Ok(config) => config,
+                        Err(err) => {
+                            return AdvancedGateDecision::Block(format!(
+                                "Invalid time_window policy config for policy {}: {}",
+                                policy.id, err
+                            ));
+                        }
                     };
                     let decision = map_time_window_decision(time_window_policy::check_time_window(&config));
                     if !matches!(decision, AdvancedGateDecision::Allow) {
@@ -363,8 +419,14 @@ impl DeploymentPolicyManager {
                     }
                 }
                 "require_approvals" => {
-                    let Ok(config) = serde_json::from_value::<ApprovalConfig>(policy.config.clone()) else {
-                        continue;
+                    let config = match serde_json::from_value::<ApprovalConfig>(policy.config.clone()) {
+                        Ok(config) => config,
+                        Err(err) => {
+                            return AdvancedGateDecision::Block(format!(
+                                "Invalid require_approvals policy config for policy {}: {}",
+                                policy.id, err
+                            ));
+                        }
                     };
                     match approval_policy::check_approvals(
                         &self.pool,
@@ -390,8 +452,14 @@ impl DeploymentPolicyManager {
                     }
                 }
                 "canary_rollout" => {
-                    let Ok(config) = serde_json::from_value::<CanaryConfig>(policy.config.clone()) else {
-                        continue;
+                    let config = match serde_json::from_value::<CanaryConfig>(policy.config.clone()) {
+                        Ok(config) => config,
+                        Err(err) => {
+                            return AdvancedGateDecision::Block(format!(
+                                "Invalid canary_rollout policy config for policy {}: {}",
+                                policy.id, err
+                            ));
+                        }
                     };
 
                     let rollout_group: Vec<uuid::Uuid> = all_systems_for_flake
@@ -434,8 +502,14 @@ impl DeploymentPolicyManager {
                     }
                 }
                 "cve_threshold" => {
-                    let Ok(config) = serde_json::from_value::<CveThresholdConfig>(policy.config.clone()) else {
-                        continue;
+                    let config = match serde_json::from_value::<CveThresholdConfig>(policy.config.clone()) {
+                        Ok(config) => config,
+                        Err(err) => {
+                            return AdvancedGateDecision::Block(format!(
+                                "Invalid cve_threshold policy config for policy {}: {}",
+                                policy.id, err
+                            ));
+                        }
                     };
                     match cve_threshold_policy::check_cve_thresholds(
                         &self.pool,
