@@ -3,10 +3,10 @@ id: TASK-323
 title: >-
   Systems view add/edit modal parity with SystemDetail reference and prefilled
   edit form
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-05-24 16:28'
-updated_date: '2026-05-24 16:29'
+updated_date: '2026-05-24 16:30'
 labels:
   - ui
   - ux
@@ -81,3 +81,9 @@ High — user-facing configuration workflow with high chance of regression if ed
 - [ ] #10 `nix develop -c cargo check -p web-ui` passes.
 - [ ] #11 `nix build .#checks.x86_64-linux.web-ui` passes and includes screenshot evidence showing: add modal, edit modal prefilled, and post-save state.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: reckless on reckless in /home/mcamp/code/crystal-forge/TASK-323-systems-modal-prefill
+<!-- SECTION:NOTES:END -->
