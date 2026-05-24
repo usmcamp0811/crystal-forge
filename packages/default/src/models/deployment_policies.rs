@@ -60,6 +60,132 @@ impl Default for CveCheckConfig {
 }
 
 // ============================================================================
+// Time Window Config
+// ============================================================================
+
+/// Configuration for a `time_window` deployment policy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimeWindowConfig {
+    /// Human-readable description of this time window.
+    pub description: String,
+    /// Days of the week when deployment is allowed (e.g., ["mon", "tue", "wed", "thu", "fri"]).
+    pub days: Vec<String>,
+    /// Start time in HH:MM format (24-hour, e.g., "09:00").
+    pub start_time: String,
+    /// End time in HH:MM format (24-hour, e.g., "17:00").
+    pub end_time: String,
+    /// IANA timezone (e.g., "America/New_York").
+    pub timezone: String,
+    /// Action when outside window: "block" or "warn".
+    #[serde(default = "default_action_block")]
+    pub action: String,
+}
+
+fn default_action_block() -> String {
+    "block".to_string()
+}
+
+// ============================================================================
+// Approval Config
+// ============================================================================
+
+/// Configuration for a `require_approvals` deployment policy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalConfig {
+    /// Human-readable description.
+    pub description: String,
+    /// Number of approvals required.
+    pub count: u32,
+    /// Role required for approvers (e.g., "admin", "operator").
+    pub role: String,
+    /// If true, approvers must be distinct users.
+    #[serde(default = "default_true")]
+    pub distinct: bool,
+    /// Approval expiration in hours. None = never expires.
+    #[serde(default)]
+    pub expires_after_hours: Option<u32>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+// ============================================================================
+// Canary Rollout Config
+// ============================================================================
+
+/// Health check configuration for canary rollout.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthCheckConfig {
+    /// Health check type: "systemd", "custom_check", or "none".
+    #[serde(rename = "type")]
+    pub health_check_type: String,
+    /// Number of system failures before halting rollout.
+    #[serde(default)]
+    pub fail_threshold: u32,
+}
+
+/// Configuration for a `canary_rollout` deployment policy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CanaryConfig {
+    /// Human-readable description.
+    pub description: String,
+    /// Percentage of fleet to deploy per phase (e.g., 25 = 25%).
+    pub percentage: u32,
+    /// Observation duration in minutes before proceeding to next phase.
+    pub observe_duration_minutes: u32,
+    /// System selection strategy: "random", "labeled", or "hash-based".
+    pub selection_strategy: String,
+    /// Health check configuration.
+    pub health_check: HealthCheckConfig,
+}
+
+// ============================================================================
+// CVE Threshold Config
+// ============================================================================
+
+/// Action for a specific severity level.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SeverityAction {
+    /// Block deployment.
+    Block,
+    /// Log a warning but allow deployment.
+    Warn,
+}
+
+/// Threshold configuration for a specific severity level.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SeverityThreshold {
+    /// Maximum allowed CVEs of this severity.
+    pub max: u32,
+    /// Action when threshold is exceeded.
+    pub action: SeverityAction,
+}
+
+/// Configuration for a `cve_threshold` deployment policy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CveThresholdConfig {
+    /// Human-readable description.
+    pub description: String,
+    /// Thresholds per severity level.
+    pub thresholds: HashMap<String, SeverityThreshold>,
+    /// What to do when no scan exists: "block", "skip", or "warn".
+    #[serde(default = "default_no_scan_block")]
+    pub no_scan_behavior: String,
+    /// If true, allow operators to provide justifications for CVEs.
+    #[serde(default)]
+    pub allow_justifications: bool,
+    /// If true, require acknowledgment even for warned CVEs.
+    #[serde(default)]
+    pub require_acknowledgment: bool,
+}
+
+fn default_no_scan_block() -> String {
+    "block".to_string()
+}
+
+// ============================================================================
 // Multi-rule CustomCheck support
 // ============================================================================
 
@@ -132,6 +258,26 @@ pub enum DeploymentPolicy {
     /// CVE-count gate evaluated against the database after build-complete.
     /// This policy type is NOT Nix-evaluated; it runs in the deployment manager.
     RequireCveCheck { config: CveCheckConfig },
+    
+    /// Time-windowed deployment restriction.
+    /// Deployment only allowed during specified time windows.
+    /// NOT Nix-evaluated; checked at deployment time.
+    TimeWindow { config: TimeWindowConfig },
+    
+    /// Multi-operator approval requirement.
+    /// Requires N approvals from operators with specific roles.
+    /// NOT Nix-evaluated; checked at deployment time.
+    RequireApprovals { config: ApprovalConfig },
+    
+    /// Canary/phased rollout orchestration.
+    /// Deploys to subsets of fleet with observation periods.
+    /// NOT Nix-evaluated; controls deployment orchestration.
+    CanaryRollout { config: CanaryConfig },
+    
+    /// Enhanced CVE threshold policy with per-severity actions.
+    /// More flexible than RequireCveCheck.
+    /// NOT Nix-evaluated; checked at deployment time.
+    CveThreshold { config: CveThresholdConfig },
 }
 
 impl DeploymentPolicy {
@@ -141,6 +287,11 @@ impl DeploymentPolicy {
             | DeploymentPolicy::RequirePackages { strict, .. }
             | DeploymentPolicy::CustomCheck { strict, .. } => *strict,
             DeploymentPolicy::RequireCveCheck { config } => config.strict,
+            // New policy types are always strict (they block deployment when conditions not met)
+            DeploymentPolicy::TimeWindow { config } => config.action == "block",
+            DeploymentPolicy::RequireApprovals { .. } => true,
+            DeploymentPolicy::CanaryRollout { .. } => true,
+            DeploymentPolicy::CveThreshold { .. } => true,
         }
     }
 
@@ -172,13 +323,24 @@ impl DeploymentPolicy {
                 }
                 format!("CVE gate: {}", parts.join(", "))
             }
+            DeploymentPolicy::TimeWindow { config } => config.description.clone(),
+            DeploymentPolicy::RequireApprovals { config } => config.description.clone(),
+            DeploymentPolicy::CanaryRollout { config } => config.description.clone(),
+            DeploymentPolicy::CveThreshold { config } => config.description.clone(),
         }
     }
 
     /// Returns true if this policy is evaluated via Nix (nix-eval-jobs path).
-    /// RequireCveCheck is DB-evaluated and must be excluded from the Nix expression.
+    /// RequireCveCheck and new policy types are DB/deployment-time evaluated.
     pub fn is_nix_evaluated(&self) -> bool {
-        !matches!(self, DeploymentPolicy::RequireCveCheck { .. })
+        !matches!(
+            self,
+            DeploymentPolicy::RequireCveCheck { .. }
+                | DeploymentPolicy::TimeWindow { .. }
+                | DeploymentPolicy::RequireApprovals { .. }
+                | DeploymentPolicy::CanaryRollout { .. }
+                | DeploymentPolicy::CveThreshold { .. }
+        )
     }
 
     /// Generate the Nix expression fragment for this policy.
@@ -226,6 +388,18 @@ impl DeploymentPolicy {
             DeploymentPolicy::RequireCveCheck { .. } => {
                 panic!("RequireCveCheck is not a Nix-evaluated policy")
             }
+            DeploymentPolicy::TimeWindow { .. } => {
+                panic!("TimeWindow is not a Nix-evaluated policy")
+            }
+            DeploymentPolicy::RequireApprovals { .. } => {
+                panic!("RequireApprovals is not a Nix-evaluated policy")
+            }
+            DeploymentPolicy::CanaryRollout { .. } => {
+                panic!("CanaryRollout is not a Nix-evaluated policy")
+            }
+            DeploymentPolicy::CveThreshold { .. } => {
+                panic!("CveThreshold is not a Nix-evaluated policy")
+            }
         }
     }
 
@@ -245,6 +419,10 @@ impl DeploymentPolicy {
                 }
             }
             DeploymentPolicy::RequireCveCheck { .. } => "cveCheck".to_string(),
+            DeploymentPolicy::TimeWindow { .. } => "timeWindow".to_string(),
+            DeploymentPolicy::RequireApprovals { .. } => "requireApprovals".to_string(),
+            DeploymentPolicy::CanaryRollout { .. } => "canaryRollout".to_string(),
+            DeploymentPolicy::CveThreshold { .. } => "cveThreshold".to_string(),
         }
     }
 }
@@ -406,6 +584,18 @@ impl PolicyCheckResult {
                 }
                 DeploymentPolicy::RequireCveCheck { .. } => {
                     // Handled separately in check_cve_policies()
+                }
+                DeploymentPolicy::TimeWindow { .. } => {
+                    // Deployment-time policy, not Nix-evaluated
+                }
+                DeploymentPolicy::RequireApprovals { .. } => {
+                    // Deployment-time policy, not Nix-evaluated
+                }
+                DeploymentPolicy::CanaryRollout { .. } => {
+                    // Deployment-time policy, not Nix-evaluated
+                }
+                DeploymentPolicy::CveThreshold { .. } => {
+                    // Deployment-time policy, not Nix-evaluated
                 }
             }
         }
