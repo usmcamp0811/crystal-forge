@@ -1,10 +1,10 @@
 ---
 id: TASK-284
 title: Refactor Evaluations view UI/UX to match latest design mockup
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-04-30 21:32'
-updated_date: '2026-04-30 21:39'
+updated_date: '2026-05-24 01:16'
 labels:
   - ui
   - ux
