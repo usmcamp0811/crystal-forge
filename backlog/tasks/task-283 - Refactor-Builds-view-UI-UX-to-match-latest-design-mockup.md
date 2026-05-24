@@ -1,11 +1,11 @@
 ---
 id: TASK-283
 title: Refactor Builds view UI/UX to match latest design mockup
-status: Review
+status: Done
 assignee:
   - '@ai-agent'
 created_date: '2026-04-30 21:32'
-updated_date: '2026-05-03 03:26'
+updated_date: '2026-05-24 01:16'
 labels:
   - ui
   - ux
