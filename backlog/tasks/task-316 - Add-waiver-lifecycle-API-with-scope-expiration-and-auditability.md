@@ -4,12 +4,13 @@ title: 'Add waiver lifecycle API with scope, expiration, and auditability'
 status: Backlog
 assignee: []
 created_date: '2026-05-24 02:33'
+updated_date: '2026-05-24 02:39'
 labels:
   - compliance
   - waiver
   - backend
   - api
-milestone: Compliance Foundations
+milestone: m-16
 dependencies:
   - TASK-309
   - TASK-314
@@ -59,3 +60,15 @@ Medium
 - [ ] #4 Expired/revoked waivers no longer alter effective status.
 - [ ] #5 Tests cover scope validation, expiration behavior, and revocation semantics.
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Sprint sequencing: execute in Sprint 3 with TASK-317. Add boundary tests for expiration and scoped targeting.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Risk-First Gate (Sprint 3 / Governance): waiver behavior must be explicit and auditable; expired/revoked waivers must not affect effective status.
+<!-- SECTION:NOTES:END -->
