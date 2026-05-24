@@ -1,10 +1,10 @@
 ---
 id: TASK-310
 title: Wire advanced deployment policies into deployment-manager enforcement path
-status: Review
+status: Done
 assignee: []
 created_date: '2026-05-24 00:52'
-updated_date: '2026-05-24 01:35'
+updated_date: '2026-05-24 02:28'
 labels:
   - deployment-manager
   - deployment-policies
@@ -21,6 +21,7 @@ dependencies:
 modified_files:
   - packages/default/src/deployment/mod.rs
   - packages/default/src/queries/derivations.rs
+  - packages/default/src/services/cve_threshold_policy.rs
   - docs/deployment-policies.md
 priority: high
 ordinal: 257000
@@ -89,11 +90,15 @@ High: direct impact on runtime deployment execution and gating correctness.
 - [x] #6 Targeted unit/integration tests cover each advanced policy affecting deployment-manager behavior
 <!-- AC:END -->
 
-## Implementation Notes
+## Final Summary
 
-<!-- SECTION:NOTES:BEGIN -->
-MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/263
-<!-- SECTION:NOTES:END -->
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Merged MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/263
+
+Enforced advanced deployment policies in auto-latest manager with allow/warn/block/pending semantics.
+
+Preserved legacy CVE gate compatibility and fixed fail-open enforcement gaps.
+<!-- SECTION:FINAL_SUMMARY:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
