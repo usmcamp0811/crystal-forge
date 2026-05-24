@@ -272,7 +272,7 @@ pub fn BuildersView() -> Element {
                                 div {
                                     class: "filter-search",
                                     style: "max-width: 320px;",
-                                    span { "🔍" }
+                                    Icon { name: IconName::Search }
                                     input {
                                         class: "input focus-ring",
                                         placeholder: "Search builders…",
@@ -324,12 +324,14 @@ pub fn BuildersView() -> Element {
                                     button {
                                         class: if view_mode() == ViewMode::Cards { "active" } else { "" },
                                         onclick: move |_| view_mode.set(ViewMode::Cards),
-                                        "⊞ Cards"
+                                        Icon { name: IconName::Grid, size: 12 }
+                                        " Cards"
                                     }
                                     button {
                                         class: if view_mode() == ViewMode::Table { "active" } else { "" },
                                         onclick: move |_| view_mode.set(ViewMode::Table),
-                                        "☰ Table"
+                                        Icon { name: IconName::Rows, size: 12 }
+                                        " Table"
                                     }
                                 }
 

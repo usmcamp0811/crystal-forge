@@ -167,7 +167,7 @@ pub fn BuilderRow(builder: BuilderSummary, on_edit: EventHandler<()>) -> Element
                             e.stop_propagation();
                             on_edit.call(())
                         },
-                        span { "⚙" }
+                        Icon { name: IconName::Gear, size: 14 }
                     }
                 }
             }

@@ -14,6 +14,8 @@ pub fn AddBuilderModal(
     show_onboarding_callouts: bool,
 ) -> Element {
     let mut name = use_signal(|| String::new());
+    let mut host = use_signal(|| String::new());
+    let mut arch = use_signal(|| String::from("x86_64-linux"));
     let mut public_key = use_signal(|| String::new());
     let mut private_key = use_signal(|| String::new());
     let mut max_cpu_cores = use_signal(|| String::new());
@@ -58,8 +60,12 @@ pub fn AddBuilderModal(
 
         let request = CreateBuilderRequest {
             name: name().trim().to_string(),
-            host: None,                       // TODO: Add host field to UI
-            arch: "x86_64-linux".to_string(), // TODO: Add arch selector to UI
+            host: if host().trim().is_empty() {
+                None
+            } else {
+                Some(host().trim().to_string())
+            },
+            arch: arch(),
             public_key: public_key().trim().to_string(),
             max_cpu_cores: max_cpu_cores()
                 .trim()
@@ -161,6 +167,46 @@ pub fn AddBuilderModal(
                                 }
                                 p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
                                 p { style: "margin:2px 0 0 0;", "Name this builder so operators can identify where builds run (for example: build-eu-west-1)." }
+                            }
+                        }
+                    }
+
+                    // Host and Architecture
+                    div {
+                        class: "grid grid-cols-2 gap-4",
+                        div {
+                            label {
+                                class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
+                                "Host (SSH endpoint)"
+                            }
+                            input {
+                                class: "w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 font-mono text-sm",
+                                r#type: "text",
+                                placeholder: "e.g., builder-01.lab.internal",
+                                value: "{host}",
+                                oninput: move |e| host.set(e.value()),
+                                disabled: is_submitting(),
+                            }
+                            p {
+                                class: "text-xs {theme::text::SECONDARY} mt-1",
+                                "Optional SSH endpoint for the builder"
+                            }
+                        }
+                        div {
+                            label {
+                                class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
+                                "Architecture"
+                                span { class: "text-red-400", " *" }
+                            }
+                            select {
+                                class: "w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded text-white focus:outline-none focus:border-blue-500",
+                                value: "{arch}",
+                                onchange: move |e| arch.set(e.value()),
+                                disabled: is_submitting(),
+                                option { value: "x86_64-linux", "x86_64-linux" }
+                                option { value: "aarch64-linux", "aarch64-linux" }
+                                option { value: "aarch64-darwin", "aarch64-darwin" }
+                                option { value: "x86_64-darwin", "x86_64-darwin" }
                             }
                         }
                     }

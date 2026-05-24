@@ -15,6 +15,12 @@ pub enum IconName {
     ChevronDown,
     ArrowRight,
     Check,
+    Search,
+    Grid,
+    Rows,
+    Cpu,
+    Gear,
+    Warn,
 }
 
 #[component]
@@ -107,6 +113,45 @@ pub fn Icon(name: IconName, #[props(default = 16)] size: u32) -> Element {
                 stroke_linecap: "round",
                 stroke_linejoin: "round"
             }
+        },
+        IconName::Search => rsx! {
+            circle { cx: "11", cy: "11", r: "8" }
+            path {
+                d: "m21 21-4.35-4.35",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+        },
+        IconName::Grid => rsx! {
+            rect { x: "3", y: "3", width: "7", height: "7", rx: "1" }
+            rect { x: "14", y: "3", width: "7", height: "7", rx: "1" }
+            rect { x: "14", y: "14", width: "7", height: "7", rx: "1" }
+            rect { x: "3", y: "14", width: "7", height: "7", rx: "1" }
+        },
+        IconName::Rows => rsx! {
+            rect { x: "3", y: "3", width: "18", height: "7", rx: "1" }
+            rect { x: "3", y: "14", width: "18", height: "7", rx: "1" }
+        },
+        IconName::Cpu => rsx! {
+            rect { x: "4", y: "4", width: "16", height: "16", rx: "2" }
+            rect { x: "9", y: "9", width: "6", height: "6" }
+            path { d: "M15 2v2M15 20v2M2 15h2M20 15h2M2 9h2M20 9h2M9 2v2M9 20v2" }
+        },
+        IconName::Gear => rsx! {
+            path {
+                d: "M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+            circle { cx: "12", cy: "12", r: "3" }
+        },
+        IconName::Warn => rsx! {
+            path {
+                d: "m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+            path { d: "M12 9v4M12 17h.01" }
         },
     };
 

@@ -86,8 +86,8 @@ pub fn BuilderCard(builder: BuilderSummary, on_edit: EventHandler<()>) -> Elemen
                     class: "sys-title",
                     div {
                         class: "sys-hostname",
-                        span { "🖥 " }
-                        "{builder.name}"
+                        Icon { name: IconName::Cpu, size: 13 }
+                        " {builder.name}"
                     }
                     div {
                         class: "sys-fqdn",
@@ -213,7 +213,8 @@ pub fn BuilderCard(builder: BuilderSummary, on_edit: EventHandler<()>) -> Elemen
                         e.stop_propagation();
                         on_edit.call(())
                     },
-                    "⚙ Edit"
+                    Icon { name: IconName::Gear, size: 12 }
+                    " Edit"
                 }
             }
         }
