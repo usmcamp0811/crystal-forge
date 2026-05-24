@@ -304,6 +304,94 @@ fn validate_policy_config(
                 }
             }
         }
+        "time_window" => {
+            // Validate by attempting deserialization
+            serde_json::from_value::<crate::models::deployment_policies::TimeWindowConfig>(
+                config.clone(),
+            )
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("Invalid time_window config: {}", e),
+                )
+            })?;
+
+            // Validate action value
+            if let Some(action) = obj.get("action").and_then(|v| v.as_str()) {
+                if action != "block" && action != "warn" {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        "config.action must be \"block\" or \"warn\"".to_string(),
+                    ));
+                }
+            }
+        }
+        "require_approvals" => {
+            // Validate by attempting deserialization
+            serde_json::from_value::<crate::models::deployment_policies::ApprovalConfig>(
+                config.clone(),
+            )
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("Invalid require_approvals config: {}", e),
+                )
+            })?;
+
+            // Validate count > 0
+            if let Some(count) = obj.get("count").and_then(|v| v.as_u64()) {
+                if count == 0 {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        "config.count must be greater than 0".to_string(),
+                    ));
+                }
+            }
+        }
+        "canary_rollout" => {
+            // Validate by attempting deserialization
+            serde_json::from_value::<crate::models::deployment_policies::CanaryConfig>(
+                config.clone(),
+            )
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("Invalid canary_rollout config: {}", e),
+                )
+            })?;
+
+            // Validate percentage is between 1-100
+            if let Some(pct) = obj.get("percentage").and_then(|v| v.as_u64()) {
+                if pct == 0 || pct > 100 {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        "config.percentage must be between 1 and 100".to_string(),
+                    ));
+                }
+            }
+        }
+        "cve_threshold" => {
+            // Validate by attempting deserialization
+            serde_json::from_value::<crate::models::deployment_policies::CveThresholdConfig>(
+                config.clone(),
+            )
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("Invalid cve_threshold config: {}", e),
+                )
+            })?;
+
+            // Validate no_scan_behavior
+            if let Some(nsb) = obj.get("no_scan_behavior").and_then(|v| v.as_str()) {
+                if nsb != "block" && nsb != "skip" && nsb != "warn" {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        "config.no_scan_behavior must be \"block\", \"skip\", or \"warn\"".to_string(),
+                    ));
+                }
+            }
+        }
         _ => {}
     }
 
@@ -456,6 +544,10 @@ pub async fn create_deployment_policy(
         "require_packages",
         "custom_check",
         "require_cve_check",
+        "time_window",
+        "require_approvals",
+        "canary_rollout",
+        "cve_threshold",
     ];
     if !valid_types.contains(&request.policy_type.as_str()) {
         return Err((
@@ -642,6 +734,10 @@ pub async fn update_deployment_policy(
             "require_packages",
             "custom_check",
             "require_cve_check",
+            "time_window",
+            "require_approvals",
+            "canary_rollout",
+            "cve_threshold",
         ];
         if !valid_types.contains(&policy_type.as_str()) {
             return Err((
