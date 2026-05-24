@@ -44,6 +44,7 @@ tokio-tungstenite = "0.24"
 bigdecimal = { version = "0.4", features = ["serde"] }
 sqlx = { version = "0.8.6", features = ["uuid", "postgres", "runtime-tokio", "chrono", "macros", "bigdecimal"] }
 chrono = { version = "0.4.41", features = ["serde"] }
+chrono-tz = "0.10"
 watch = "0.2.3"
 clap = { version = "4.0", features = ["derive"] }
 tokio-test = "0.4.4"
