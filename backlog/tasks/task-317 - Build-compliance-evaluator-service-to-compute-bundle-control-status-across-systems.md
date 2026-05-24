@@ -6,11 +6,12 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-05-24 02:33'
+updated_date: '2026-05-24 02:39'
 labels:
   - compliance
   - evaluation-engine
   - backend
-milestone: Compliance Foundations
+milestone: m-16
 dependencies:
   - TASK-313
   - TASK-314
@@ -60,3 +61,15 @@ High (core decision engine)
 - [ ] #4 Missing required policy/evidence inputs are handled with fail-closed behavior and explicit error reasoning.
 - [ ] #5 Integration tests cover mixed outcomes (pass/warn/fail/waived) across multiple systems.
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Sprint sequencing: execute after TASK-316 in Sprint 3. This task is the MVP readiness gate before any interop/UI work.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Risk-First Gate (Sprint 3 / Evaluator): deterministic replayable rollups, fail-closed handling for missing policy/evidence inputs, and explicit reason metadata are mandatory.
+<!-- SECTION:NOTES:END -->
