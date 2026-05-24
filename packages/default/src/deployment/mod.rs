@@ -1,14 +1,21 @@
 use crate::config::CrystalForgeConfig;
+use crate::models::deployment_policies::{
+    ApprovalConfig, CanaryConfig, CveThresholdConfig, DeploymentPolicyRecord, TimeWindowConfig,
+};
 use crate::models::systems::DeploymentPolicy;
 use crate::queries::deployment::{get_systems_with_auto_latest_policy, update_desired_target};
 use crate::queries::derivations::{
-    get_derivation_id_by_store_path, get_latest_deployable_targets_for_flake_hosts,
+    get_latest_deployable_targets_for_flake_hosts,
 };
-use crate::server::load_cve_policies;
-use crate::services::cve_policy_gate::check_cve_policies;
+use crate::queries::deployment_policies::get_deployment_policy_by_id;
+use crate::queries::environments::get_system_effective_policy_ids;
+use crate::services::approval_policy::{self, DeploymentContext};
+use crate::services::canary_rollout::{self, RolloutContext};
+use crate::services::cve_threshold_policy;
+use crate::services::time_window_policy;
 use anyhow::{Context, Result};
 use sqlx::PgPool;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tokio::time::{Instant, sleep};
 use tracing::{debug, error, info, warn};
 pub mod agent;
@@ -18,6 +25,81 @@ pub use agent::*;
 pub struct DeploymentPolicyManager {
     config: CrystalForgeConfig,
     pool: PgPool,
+}
+
+#[derive(Debug)]
+enum AdvancedGateDecision {
+    Allow,
+    Warn(String),
+    Block(String),
+    Pending(String),
+}
+
+fn map_time_window_decision(result: time_window_policy::TimeWindowResult) -> AdvancedGateDecision {
+    if !result.deployment_allowed {
+        return AdvancedGateDecision::Block(
+            result
+                .reason
+                .unwrap_or_else(|| "Blocked by time window policy".to_string()),
+        );
+    }
+
+    if let Some(reason) = result.reason {
+        AdvancedGateDecision::Warn(reason)
+    } else {
+        AdvancedGateDecision::Allow
+    }
+}
+
+fn map_approval_decision(result: approval_policy::ApprovalResult) -> AdvancedGateDecision {
+    if result.deployment_allowed {
+        AdvancedGateDecision::Allow
+    } else {
+        AdvancedGateDecision::Pending(result.reason.unwrap_or_else(|| {
+            format!(
+                "Approvals pending ({}/{})",
+                result.approvals_received, result.approvals_required
+            )
+        }))
+    }
+}
+
+fn map_canary_decision_for_system(
+    result: canary_rollout::CanaryResult,
+    system_id: uuid::Uuid,
+) -> AdvancedGateDecision {
+    if !result.deployment_allowed {
+        return AdvancedGateDecision::Pending(
+            result
+                .reason
+                .unwrap_or_else(|| "Canary rollout observation in progress".to_string()),
+        );
+    }
+
+    if result.systems_to_deploy.contains(&system_id) {
+        AdvancedGateDecision::Allow
+    } else {
+        AdvancedGateDecision::Pending(
+            result
+                .reason
+                .unwrap_or_else(|| "System not selected for current canary phase".to_string()),
+        )
+    }
+}
+
+fn map_cve_threshold_decision(result: cve_threshold_policy::CveThresholdResult) -> AdvancedGateDecision {
+    if !result.deployment_allowed {
+        let reason = if result.warnings.is_empty() {
+            "CVE threshold policy blocked deployment".to_string()
+        } else {
+            result.warnings.join("; ")
+        };
+        AdvancedGateDecision::Block(reason)
+    } else if !result.warnings.is_empty() {
+        AdvancedGateDecision::Warn(result.warnings.join("; "))
+    } else {
+        AdvancedGateDecision::Allow
+    }
 }
 
 impl DeploymentPolicyManager {
@@ -106,8 +188,6 @@ impl DeploymentPolicyManager {
         flake_id: i32,
         systems: Vec<crate::models::systems::System>,
     ) -> Result<usize> {
-        use std::collections::HashMap;
-
         if systems.is_empty() {
             return Ok(0);
         }
@@ -124,12 +204,39 @@ impl DeploymentPolicyManager {
                 .await?;
         let latest_by_host: HashMap<_, _> = per_host
             .into_iter()
-            .filter_map(|h| h.store_path.map(|t| (h.hostname, t)))
+            .map(|h| (h.hostname.clone(), h))
             .collect();
+
+        // Build effective policy map for all systems in this flake batch.
+        let mut effective_policy_ids_by_system: HashMap<uuid::Uuid, Vec<uuid::Uuid>> =
+            HashMap::new();
+        let mut all_policy_ids: HashSet<uuid::Uuid> = HashSet::new();
+        for system in &systems {
+            let policy_ids = get_system_effective_policy_ids(&self.pool, system.id)
+                .await
+                .unwrap_or_default();
+            for policy_id in &policy_ids {
+                all_policy_ids.insert(*policy_id);
+            }
+            effective_policy_ids_by_system.insert(system.id, policy_ids);
+        }
+
+        let mut policies_by_id: HashMap<uuid::Uuid, DeploymentPolicyRecord> = HashMap::new();
+        for policy_id in all_policy_ids {
+            match get_deployment_policy_by_id(&self.pool, &policy_id).await {
+                Ok(Some(policy)) if policy.enabled => {
+                    policies_by_id.insert(policy.id, policy);
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    warn!("Failed to load deployment policy {}: {:#}", policy_id, err);
+                }
+            }
+        }
 
         let mut updated_count = 0;
 
-        for system in systems {
+        for system in &systems {
             // Defensive: ensure auto-latest
             match system.get_deployment_policy() {
                 Ok(DeploymentPolicy::AutoLatest) => {}
@@ -156,77 +263,206 @@ impl DeploymentPolicyManager {
                 continue;
             };
 
-            if system.desired_target.as_deref() == Some(latest_target_for_host.as_str()) {
+            let Some(store_path) = latest_target_for_host.store_path.as_ref() else {
+                debug!(
+                    "No store path for host {}; skipping desired_target update",
+                    system.hostname
+                );
+                continue;
+            };
+
+            if system.desired_target.as_deref() == Some(store_path.as_str()) {
                 debug!("System {} already at latest target", system.hostname);
                 continue;
             }
 
-            // ── CVE gate: run before updating desired_target ──────────────
-            let cve_policies = load_cve_policies(&self.pool).await;
-            if !cve_policies.is_empty() {
-                match get_derivation_id_by_store_path(&self.pool, latest_target_for_host).await {
-                    Ok(Some(derivation_id)) => {
-                        match check_cve_policies(&self.pool, derivation_id, &cve_policies).await {
-                            Ok(gate) if !gate.deployment_allowed => {
-                                warn!(
-                                    "🛑 CVE gate blocked deployment for {} -> {}: {}",
-                                    system.hostname,
-                                    latest_target_for_host,
-                                    gate.block_reason.as_deref().unwrap_or("policy violation")
-                                );
-                                // Skip updating desired_target — deployment is blocked.
-                                continue;
-                            }
-                            Ok(_) => {
-                                debug!(
-                                    "✅ CVE gate passed for {} -> {}",
-                                    system.hostname, latest_target_for_host
-                                );
-                            }
-                            Err(e) => {
-                                error!(
-                                    "CVE gate evaluation error for {} -> {}: {:#}. Allowing deployment.",
-                                    system.hostname, latest_target_for_host, e
-                                );
-                                // Fail open on unexpected errors to avoid blocking all deployments.
-                            }
-                        }
-                    }
-                    Ok(None) => {
-                        debug!(
-                            "No derivation found for store path {}; skipping CVE gate for {}",
-                            latest_target_for_host, system.hostname
-                        );
-                    }
-                    Err(e) => {
-                        error!(
-                            "Failed to look up derivation for {}: {:#}. Allowing deployment.",
-                            latest_target_for_host, e
-                        );
-                    }
+            let decision = self
+                .evaluate_advanced_policy_gates(
+                    system,
+                    latest_target_for_host,
+                    &systems,
+                    &effective_policy_ids_by_system,
+                    &policies_by_id,
+                )
+                .await;
+
+            match decision {
+                AdvancedGateDecision::Allow => {
+                    debug!(
+                        "✅ Advanced policy gates passed for {} -> {}",
+                        system.hostname, store_path
+                    );
+                }
+                AdvancedGateDecision::Warn(reason) => {
+                    warn!(
+                        "⚠️ Advanced policy warning for {} -> {}: {}",
+                        system.hostname, store_path, reason
+                    );
+                }
+                AdvancedGateDecision::Pending(reason) => {
+                    info!(
+                        "⏳ Advanced policy pending for {} -> {}: {}",
+                        system.hostname, store_path, reason
+                    );
+                    continue;
+                }
+                AdvancedGateDecision::Block(reason) => {
+                    warn!(
+                        "🛑 Advanced policy blocked deployment for {} -> {}: {}",
+                        system.hostname, store_path, reason
+                    );
+                    continue;
                 }
             }
 
-            if let Err(e) =
-                update_desired_target(&self.pool, &system.hostname, Some(latest_target_for_host))
-                    .await
+            if let Err(e) = update_desired_target(&self.pool, &system.hostname, Some(store_path)).await
             {
                 error!(
                     "Failed to set desired_target for {} -> {}: {:#}",
-                    system.hostname, latest_target_for_host, e
+                    system.hostname, store_path, e
                 );
             } else {
                 info!(
                     "📋 Updated desired target for {}: {:?} -> {}",
                     system.hostname,
                     system.desired_target.as_deref(),
-                    latest_target_for_host
+                    store_path
                 );
                 updated_count += 1;
             }
         }
 
         Ok(updated_count)
+    }
+
+    async fn evaluate_advanced_policy_gates(
+        &self,
+        system: &crate::models::systems::System,
+        target: &crate::queries::derivations::HostLatestTarget,
+        all_systems_for_flake: &[crate::models::systems::System],
+        effective_policy_ids_by_system: &HashMap<uuid::Uuid, Vec<uuid::Uuid>>,
+        policies_by_id: &HashMap<uuid::Uuid, DeploymentPolicyRecord>,
+    ) -> AdvancedGateDecision {
+        let Some(policy_ids) = effective_policy_ids_by_system.get(&system.id) else {
+            return AdvancedGateDecision::Allow;
+        };
+
+        for policy_id in policy_ids {
+            let Some(policy) = policies_by_id.get(policy_id) else {
+                continue;
+            };
+
+            match policy.policy_type.as_str() {
+                "time_window" => {
+                    let Ok(config) = serde_json::from_value::<TimeWindowConfig>(policy.config.clone()) else {
+                        continue;
+                    };
+                    let decision = map_time_window_decision(time_window_policy::check_time_window(&config));
+                    if !matches!(decision, AdvancedGateDecision::Allow) {
+                        return decision;
+                    }
+                }
+                "require_approvals" => {
+                    let Ok(config) = serde_json::from_value::<ApprovalConfig>(policy.config.clone()) else {
+                        continue;
+                    };
+                    match approval_policy::check_approvals(
+                        &self.pool,
+                        DeploymentContext::Commit,
+                        &target.commit_hash,
+                        policy.id,
+                        &config,
+                    )
+                    .await
+                    {
+                        Ok(result) => {
+                            let decision = map_approval_decision(result);
+                            if !matches!(decision, AdvancedGateDecision::Allow) {
+                                return decision;
+                            }
+                        }
+                        Err(err) => {
+                            return AdvancedGateDecision::Block(format!(
+                                "Approval policy evaluation failed: {}",
+                                err
+                            ));
+                        }
+                    }
+                }
+                "canary_rollout" => {
+                    let Ok(config) = serde_json::from_value::<CanaryConfig>(policy.config.clone()) else {
+                        continue;
+                    };
+
+                    let rollout_group: Vec<uuid::Uuid> = all_systems_for_flake
+                        .iter()
+                        .filter(|candidate| {
+                            effective_policy_ids_by_system
+                                .get(&candidate.id)
+                                .map(|ids| ids.contains(policy_id))
+                                .unwrap_or(false)
+                        })
+                        .map(|s| s.id)
+                        .collect();
+
+                    if rollout_group.is_empty() {
+                        continue;
+                    }
+
+                    match canary_rollout::check_rollout(
+                        &self.pool,
+                        RolloutContext::Commit,
+                        &target.commit_hash,
+                        policy.id,
+                        &config,
+                        &rollout_group,
+                    )
+                    .await
+                    {
+                        Ok(result) => {
+                            let decision = map_canary_decision_for_system(result, system.id);
+                            if !matches!(decision, AdvancedGateDecision::Allow) {
+                                return decision;
+                            }
+                        }
+                        Err(err) => {
+                            return AdvancedGateDecision::Block(format!(
+                                "Canary rollout policy evaluation failed: {}",
+                                err
+                            ));
+                        }
+                    }
+                }
+                "cve_threshold" => {
+                    let Ok(config) = serde_json::from_value::<CveThresholdConfig>(policy.config.clone()) else {
+                        continue;
+                    };
+                    match cve_threshold_policy::check_cve_thresholds(
+                        &self.pool,
+                        target.derivation_id,
+                        &config,
+                    )
+                    .await
+                    {
+                        Ok(result) => {
+                            let decision = map_cve_threshold_decision(result);
+                            if !matches!(decision, AdvancedGateDecision::Allow) {
+                                return decision;
+                            }
+                        }
+                        Err(err) => {
+                            return AdvancedGateDecision::Block(format!(
+                                "CVE threshold policy evaluation failed: {}",
+                                err
+                            ));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        AdvancedGateDecision::Allow
     }
 }
 
@@ -250,4 +486,74 @@ pub async fn spawn_deployment_policy_manager(
     });
 
     Ok(handle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn time_window_block_maps_to_block() {
+        let decision = map_time_window_decision(time_window_policy::TimeWindowResult {
+            deployment_allowed: false,
+            reason: Some("outside window".to_string()),
+        });
+
+        match decision {
+            AdvancedGateDecision::Block(reason) => assert_eq!(reason, "outside window"),
+            _ => panic!("expected block decision"),
+        }
+    }
+
+    #[test]
+    fn approval_incomplete_maps_to_pending() {
+        let decision = map_approval_decision(approval_policy::ApprovalResult {
+            deployment_allowed: false,
+            approvals_received: 1,
+            approvals_required: 2,
+            reason: Some("Only 1/2 approvals received".to_string()),
+        });
+
+        match decision {
+            AdvancedGateDecision::Pending(reason) => {
+                assert!(reason.contains("1/2"));
+            }
+            _ => panic!("expected pending decision"),
+        }
+    }
+
+    #[test]
+    fn canary_unselected_system_maps_to_pending() {
+        let selected = uuid::Uuid::new_v4();
+        let unselected = uuid::Uuid::new_v4();
+
+        let decision = map_canary_decision_for_system(
+            canary_rollout::CanaryResult {
+                deployment_allowed: true,
+                systems_to_deploy: vec![selected],
+                reason: Some("phase 1".to_string()),
+                rollout_state: None,
+            },
+            unselected,
+        );
+
+        match decision {
+            AdvancedGateDecision::Pending(reason) => assert!(reason.contains("phase")),
+            _ => panic!("expected pending decision"),
+        }
+    }
+
+    #[test]
+    fn cve_threshold_violation_maps_to_block() {
+        let decision = map_cve_threshold_decision(cve_threshold_policy::CveThresholdResult {
+            deployment_allowed: false,
+            violations: vec![],
+            warnings: vec!["BLOCK: critical threshold exceeded".to_string()],
+        });
+
+        match decision {
+            AdvancedGateDecision::Block(reason) => assert!(reason.contains("critical")),
+            _ => panic!("expected block decision"),
+        }
+    }
 }
