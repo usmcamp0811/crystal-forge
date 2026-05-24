@@ -6,11 +6,12 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-05-24 02:33'
+updated_date: '2026-05-24 02:38'
 labels:
   - compliance
   - evidence
   - backend
-milestone: Compliance Foundations
+milestone: m-16
 dependencies:
   - TASK-308
   - TASK-314
@@ -59,3 +60,15 @@ Medium
 - [ ] #4 Validation enforces allowed evidence kinds/strength values.
 - [ ] #5 Automated tests verify persistence, retrieval filters, and taxonomy validation.
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Sprint sequencing: execute in Sprint 2 after TASK-314 model is stable. Validate retrieval by control/system/time window as sprint gate.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Risk-First Gate (Sprint 2 / Evidence): evidence must remain normalized with taxonomy enforcement and stable provenance IDs. No opaque blob-only records.
+<!-- SECTION:NOTES:END -->
