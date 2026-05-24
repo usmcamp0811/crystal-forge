@@ -4,11 +4,12 @@ title: Add control evaluation model with layered assertion statuses
 status: Backlog
 assignee: []
 created_date: '2026-05-24 02:33'
+updated_date: '2026-05-24 02:38'
 labels:
   - compliance
   - evaluation
   - backend
-milestone: Compliance Foundations
+milestone: m-16
 dependencies:
   - TASK-312
   - TASK-313
@@ -57,3 +58,15 @@ Medium-High
 - [ ] #4 Evaluation records include references to relevant build/deployment/eval identifiers when available.
 - [ ] #5 Unit tests cover edge cases for status aggregation and missing-layer behavior.
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Sprint sequencing: execute in Sprint 2 with TASK-315 sequencing. Add table-driven aggregation tests before TASK-317.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Risk-First Gate (Sprint 2 / Semantics): preserve layered statuses without lossy flattening. Aggregation must be deterministic with explicit mixed pass/warn/fail/waived tests.
+<!-- SECTION:NOTES:END -->
