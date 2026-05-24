@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 use crate::api::{self, models::BuilderStatus};
 use crate::components::builders::generate_ed25519_keypair;
+use crate::components::{Icon, IconName};
 use crate::components::loading::LoadingSpinner;
 use crate::components::modals::ConfirmDialog;
 use crate::theme;
@@ -198,16 +199,15 @@ pub fn EditBuilderModal(
                             style: "display:flex; align-items:center; justify-content:space-between;",
                             div {
                                 h2 {
-                                    class: "text-xl font-semibold text-white",
-                                    "Edit Builder"
+                                    Icon { name: IconName::Gear, size: 14 }
+                                    " Edit {builder_data.name}"
                                 }
                                 p {
-                                    class: "text-sm {theme::text::SECONDARY} mt-1",
-                                    "ID: {builder_data.id}"
+                                    "Update builder registration."
                                 }
                             }
                             button {
-                                class: "text-slate-400 hover:text-white transition-colors",
+                                class: "btn btn-ghost focus-ring",
                                 onclick: move |_| on_close.call(()),
                                 disabled: is_submitting(),
                                 "✕"
@@ -232,12 +232,13 @@ pub fn EditBuilderModal(
 
                             // Name
                             div {
+                                class: "field",
                                 label {
                                     class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
                                     "Builder Name"
                                 }
                                 input {
-                                    class: "w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded text-white placeholder-slate-500 focus:outline-none focus:border-blue-500",
+                                    class: "input focus-ring mono",
                                     r#type: "text",
                                     value: "{name}",
                                     oninput: move |e| name.set(e.value()),
@@ -247,12 +248,13 @@ pub fn EditBuilderModal(
 
                             // Status
                             div {
+                                class: "field",
                                 label {
                                     class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
                                     "Status"
                                 }
                                 select {
-                                    class: "w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded text-white focus:outline-none focus:border-blue-500",
+                                    class: "input focus-ring",
                                     value: "{status().label()}",
                                     onchange: move |e| {
                                         let new_status = match e.value().as_str() {
@@ -420,13 +422,13 @@ pub fn EditBuilderModal(
                             div {
                                 class: "flex gap-3",
                                 button {
-                                    class: "px-4 py-2 text-slate-400 hover:text-white transition-colors",
+                                    class: "btn btn-ghost focus-ring",
                                     onclick: move |_| on_close.call(()),
                                     disabled: is_submitting(),
                                     "Cancel"
                                 }
                                 button {
-                                    class: "px-4 py-2 rounded-lg text-sm font-medium text-white transition-colors {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING} disabled:opacity-50",
+                                    class: "btn btn-primary focus-ring",
                                     onclick: handle_submit,
                                     disabled: is_submitting(),
                                     if is_submitting() {

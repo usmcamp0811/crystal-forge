@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 use crate::api::{self, models::CreateBuilderRequest};
 use crate::components::builders::generate_ed25519_keypair;
+use crate::components::{Icon, IconName};
 use crate::theme;
 
 #[component]
@@ -115,12 +116,15 @@ pub fn AddBuilderModal(
                 div {
                     class: "modal-head",
                     style: "display:flex; align-items:center; justify-content:space-between;",
-                    h2 {
-                        class: "text-xl font-semibold text-white",
-                        "Add Builder"
+                    div {
+                        h2 {
+                            Icon { name: IconName::Plus, size: 14 }
+                            " Add builder"
+                        }
+                        p { "Register a new Nix build worker." }
                     }
                     button {
-                        class: "text-slate-400 hover:text-white transition-colors",
+                        class: "btn btn-ghost focus-ring",
                         onclick: move |_| on_close.call(()),
                         disabled: is_submitting(),
                         "✕"
@@ -146,14 +150,14 @@ pub fn AddBuilderModal(
 
                     // Name
                     div {
-                        class: "relative overflow-visible",
+                        class: "field relative overflow-visible",
                         label {
                             class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
                             "Builder Name"
                             span { class: "text-red-400", " *" }
                         }
                         input {
-                            class: "w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded text-white placeholder-slate-500 focus:outline-none focus:border-blue-500",
+                            class: "input focus-ring mono",
                             r#type: "text",
                             placeholder: "e.g., builder-01",
                             value: "{name}",
@@ -181,12 +185,13 @@ pub fn AddBuilderModal(
                     div {
                         class: "grid grid-cols-2 gap-4",
                         div {
+                            class: "field",
                             label {
                                 class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
                                 "Host (SSH endpoint)"
                             }
                             input {
-                                class: "w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 font-mono text-sm",
+                                class: "input focus-ring mono",
                                 r#type: "text",
                                 placeholder: "e.g., builder-01.lab.internal",
                                 value: "{host}",
@@ -199,13 +204,14 @@ pub fn AddBuilderModal(
                             }
                         }
                         div {
+                            class: "field",
                             label {
                                 class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
                                 "Architecture"
                                 span { class: "text-red-400", " *" }
                             }
                             select {
-                                class: "w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded text-white focus:outline-none focus:border-blue-500",
+                                class: "input focus-ring",
                                 value: "{arch}",
                                 onchange: move |e| arch.set(e.value()),
                                 disabled: is_submitting(),
@@ -228,10 +234,10 @@ pub fn AddBuilderModal(
                                 "Authentication Keypair"
                             }
                             button {
-                                class: "px-3 py-1 rounded-lg text-sm font-medium text-white transition-colors {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING}",
+                                class: "btn btn-primary focus-ring",
                                 onclick: generate_keypair,
                                 disabled: is_submitting(),
-                                "🔑 Generate Keypair"
+                                "Generate Keypair"
                             }
                         }
                         p {
@@ -489,13 +495,13 @@ pub fn AddBuilderModal(
                     class: "modal-foot",
                     style: "display:flex; justify-content:flex-end; gap:12px;",
                     button {
-                        class: "px-4 py-2 text-slate-400 hover:text-white transition-colors",
+                        class: "btn btn-ghost focus-ring",
                         onclick: move |_| on_close.call(()),
                         disabled: is_submitting(),
                         "Cancel"
                     }
                     button {
-                        class: "px-4 py-2 rounded-lg text-sm font-medium text-white transition-colors {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING} disabled:opacity-50 disabled:cursor-not-allowed",
+                        class: "btn btn-primary focus-ring",
                         onclick: handle_submit,
                         disabled: is_submitting() || name().trim().is_empty() || public_key().trim().is_empty(),
                         if is_submitting() {
