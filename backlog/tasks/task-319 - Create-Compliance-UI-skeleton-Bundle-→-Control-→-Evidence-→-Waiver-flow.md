@@ -4,11 +4,12 @@ title: 'Create Compliance UI skeleton: Bundle → Control → Evidence → Waive
 status: Backlog
 assignee: []
 created_date: '2026-05-24 02:34'
+updated_date: '2026-05-24 02:39'
 labels:
   - compliance
   - ui
   - dioxus
-milestone: Compliance Foundations
+milestone: m-17
 dependencies:
   - TASK-317
 priority: medium
@@ -56,3 +57,15 @@ Medium
 - [ ] #4 Waiver panel displays active/expired waiver state for the selected control/system context.
 - [ ] #5 Web UI verification includes screenshot(s) that capture the compliance flow and assertions.
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Sprint sequencing: execute in Sprint 4 after TASK-317 and pair with web-ui screenshot assertions for compliance flow.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Risk-First Gate (Sprint 4 / UX): UI must preserve layered assertion visibility and evidence context; avoid flattening into a single pass/fail badge.
+<!-- SECTION:NOTES:END -->
