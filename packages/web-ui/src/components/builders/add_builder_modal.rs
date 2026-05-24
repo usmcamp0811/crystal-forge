@@ -58,6 +58,8 @@ pub fn AddBuilderModal(
 
         let request = CreateBuilderRequest {
             name: name().trim().to_string(),
+            host: None,                       // TODO: Add host field to UI
+            arch: "x86_64-linux".to_string(), // TODO: Add arch selector to UI
             public_key: public_key().trim().to_string(),
             max_cpu_cores: max_cpu_cores()
                 .trim()
@@ -74,6 +76,7 @@ pub fn AddBuilderModal(
                 .parse::<i32>()
                 .ok()
                 .filter(|&n| n > 0),
+            enabled: true, // Default to enabled
             environment_ids: selected_environments(),
         };
 

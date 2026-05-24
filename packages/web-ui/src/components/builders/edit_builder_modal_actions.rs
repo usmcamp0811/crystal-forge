@@ -21,10 +21,13 @@ pub fn build_update_request(
         } else {
             Some(name.trim().to_string())
         },
+        host: None, // TODO: Add host field to edit UI
+        arch: None, // TODO: Add arch selector to edit UI
         status: Some(status),
         max_cpu_cores: max_cpu_cores.trim().parse::<i32>().ok(),
         max_memory_mb: max_memory_mb.trim().parse::<i32>().ok(),
         max_concurrent_jobs: max_concurrent_jobs.trim().parse::<i32>().ok(),
+        enabled: None, // TODO: Add enabled toggle to edit UI
     }
 }
 

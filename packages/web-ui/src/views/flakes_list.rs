@@ -1100,7 +1100,7 @@ fn FlakeCredentialFields(
                 }
             }
 
-            
+
         }
     }
 }
@@ -2484,8 +2484,7 @@ fn extract_history_rewrite_conflict(
 ) -> Option<(i32, String)> {
     let flake_id = selected_flake_id?;
     match error {
-        ApiClientError::Status { code, body } =>
-        {
+        ApiClientError::Status { code, body } => {
             let body_lower = body.to_ascii_lowercase();
             let rewrite_marker = body_lower.contains("history rewrite")
                 || body_lower.contains("history_rewrite_detected");
@@ -2753,7 +2752,7 @@ pub fn FlakesListViewNew() -> Element {
     // Auth state for gating admin-only mutation controls
     let app_state = use_context::<Signal<AppState>>();
     let is_admin_user = auth::is_admin(&app_state.read().auth);
-    
+
     let mut view_mode = use_signal(|| "table");
     let mut search_query = use_signal(String::new);
     let mut selected_flake = use_signal(|| None::<MockFlakeItem>);
@@ -2822,7 +2821,10 @@ pub fn FlakesListViewNew() -> Element {
                         || latest.build_status.as_deref() == Some("failed")
                     {
                         "error".to_string()
-                    } else if matches!(latest.build_status.as_deref(), Some("building") | Some("pending")) {
+                    } else if matches!(
+                        latest.build_status.as_deref(),
+                        Some("building") | Some("pending")
+                    ) {
                         "syncing".to_string()
                     } else {
                         "synced".to_string()
@@ -2832,7 +2834,7 @@ pub fn FlakesListViewNew() -> Element {
             mapped
         })
         .collect();
-    
+
     // Convert raw_flakes to FlakeListItem for duplicate validation
     let existing_flakes_for_validation: Vec<FlakeListItem> = raw_flakes
         .iter()
@@ -2902,11 +2904,11 @@ pub fn FlakesListViewNew() -> Element {
             }
         });
     }
-    
+
     rsx! {
         // JSX: <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
         div { style: "display: flex; flex-direction: column; gap: 16px;",
-            
+
             // Page head - JSX lines 24-39
             div { class: "page-head",
                 div {
@@ -2918,7 +2920,7 @@ pub fn FlakesListViewNew() -> Element {
                 // Admin-only mutation controls: Sync all, Add flake
                 if is_admin_user {
                     div { style: "display: flex; gap: 8px;",
-                        button { 
+                        button {
                             class: "btn btn-ghost focus-ring",
                             onclick: move |_| {
                                 let mut reload_nonce = reload_nonce.clone();
@@ -2949,7 +2951,7 @@ pub fn FlakesListViewNew() -> Element {
                             }
                             " Sync all"
                         }
-                        button { 
+                        button {
                             class: "btn btn-primary focus-ring",
                             onclick: move |_| {
                                 show_add_form.set(true);
@@ -2973,7 +2975,7 @@ pub fn FlakesListViewNew() -> Element {
                     }
                 }
             }
-            
+
             // Filter bar - JSX lines 42-52
             div { class: "filterbar",
                 div { class: "filter-search",
@@ -3021,7 +3023,7 @@ pub fn FlakesListViewNew() -> Element {
                     button {
                         class: if *view_mode.read() == "cards" { "active" } else { "" },
                         onclick: move |_| view_mode.set("cards"),
-                        // Inline grid icon SVG  
+                        // Inline grid icon SVG
                         svg {
                             width: "12",
                             height: "12",
@@ -3106,7 +3108,7 @@ pub fn FlakesListViewNew() -> Element {
                     },
                 }
             }
-            
+
             if loading {
                 div { class: "card", style: "padding: 18px; color: var(--cf-text-secondary);",
                     "Loading flakes..."
@@ -3124,7 +3126,7 @@ pub fn FlakesListViewNew() -> Element {
                 {
                     let mode: &str = &view_mode.read();
                     let selected_id = selected_flake.read().as_ref().map(|f| f.id);
-                    
+
                     if mode == "table" {
                         let all_flakes_for_edit = all_flakes.clone();
                         rsx! { FlakeTableNew { flakes: filtered_flakes.clone(), selected_id, is_admin: is_admin_user, on_select: move |f| selected_flake.set(Some(f)), on_sync: move |flake_id| {
@@ -3260,7 +3262,7 @@ pub fn FlakesListViewNew() -> Element {
                     }
                 }
             }
-            
+
             // Side tray (if flake selected)
             if let Some(flake) = selected_flake_value {
                 {
@@ -3589,7 +3591,9 @@ fn build_status_token(status: Option<ApiBuildStatus>) -> Option<String> {
     })
 }
 
-fn map_timeline_commits_to_view(commits: &[crate::api::models::FlakeCommit]) -> Vec<MockCommitItem> {
+fn map_timeline_commits_to_view(
+    commits: &[crate::api::models::FlakeCommit],
+) -> Vec<MockCommitItem> {
     let mut mapped = commits
         .iter()
         .map(|c| {
@@ -3702,7 +3706,7 @@ fn construct_git_file_url(repo_url: &str, commit_hash: &str, file_path: &str) ->
         .trim()
         .trim_end_matches('/')
         .trim_end_matches(".git");
-    
+
     // Convert SSH URLs to HTTPS
     let https_url = if normalized.starts_with("git@") {
         // git@gitlab.com:owner/repo -> https://gitlab.com/owner/repo
@@ -3712,7 +3716,7 @@ fn construct_git_file_url(repo_url: &str, commit_hash: &str, file_path: &str) ->
     } else {
         normalized.to_string()
     };
-    
+
     // Determine the URL pattern based on the host
     if https_url.contains("gitlab.com") || https_url.contains("gitlab.") {
         // GitLab: https://gitlab.com/owner/repo/-/blob/{commit}/{path}
@@ -3942,23 +3946,21 @@ fn mock_commits_for_flake(flake_id: i32) -> Vec<MockCommitItem> {
                 rollout_total: 12,
             },
         ],
-        _ => vec![
-            MockCommitItem {
-                sha: "abc1234".to_string(),
-                full_hash: "abc1234".to_string(),
-                msg: "Initial commit".to_string(),
-                author: "dev".to_string(),
-                at: "1d ago".to_string(),
-                committed_at: Utc::now() - Duration::days(1),
-                files: 1,
-                add: 10,
-                del: 0,
-                eval_status: Some("complete".to_string()),
-                build_status: Some("complete".to_string()),
-                rollout_on: 1,
-                rollout_total: 1,
-            },
-        ],
+        _ => vec![MockCommitItem {
+            sha: "abc1234".to_string(),
+            full_hash: "abc1234".to_string(),
+            msg: "Initial commit".to_string(),
+            author: "dev".to_string(),
+            at: "1d ago".to_string(),
+            committed_at: Utc::now() - Duration::days(1),
+            files: 1,
+            add: 10,
+            del: 0,
+            eval_status: Some("complete".to_string()),
+            build_status: Some("complete".to_string()),
+            rollout_on: 1,
+            rollout_total: 1,
+        }],
     }
 }
 
@@ -3992,7 +3994,8 @@ fn mock_pipeline_status_for_index(index: usize) -> MockPipelineStatus {
 #[allow(dead_code)]
 fn mock_diff_for_file(file_name: &str) -> String {
     // Return a realistic unified diff format
-    format!(r#"--- a/{}
+    format!(
+        r#"--- a/{}
 +++ b/{}
 @@ -14,8 +14,14 @@
  {{
@@ -4025,27 +4028,53 @@ fn mock_diff_for_file(file_name: &str) -> String {
 +    nameservers = [ "10.0.0.1" "10.0.0.2" ];
 +    defaultGateway = "10.0.0.1";
    }};
- }}"#, file_name, file_name)
+ }}"#,
+        file_name, file_name
+    )
 }
 
 #[allow(dead_code)]
 fn mock_files_for_commit(sha: &str) -> Vec<MockFileItem> {
     match sha {
         "a3f8c12" => vec![
-            MockFileItem { name: "modules/security/auditd.nix".to_string(), add: 18, del: 2 },
-            MockFileItem { name: "modules/security/sudo.nix".to_string(), add: 8, del: 1 },
-            MockFileItem { name: "hosts/atlas-01/configuration.nix".to_string(), add: 2, del: 1 },
+            MockFileItem {
+                name: "modules/security/auditd.nix".to_string(),
+                add: 18,
+                del: 2,
+            },
+            MockFileItem {
+                name: "modules/security/sudo.nix".to_string(),
+                add: 8,
+                del: 1,
+            },
+            MockFileItem {
+                name: "hosts/atlas-01/configuration.nix".to_string(),
+                add: 2,
+                del: 1,
+            },
         ],
         "f1d9022" => vec![
-            MockFileItem { name: "pkgs/openssl/default.nix".to_string(), add: 10, del: 6 },
-            MockFileItem { name: "flake.lock".to_string(), add: 2, del: 2 },
+            MockFileItem {
+                name: "pkgs/openssl/default.nix".to_string(),
+                add: 10,
+                del: 6,
+            },
+            MockFileItem {
+                name: "flake.lock".to_string(),
+                add: 2,
+                del: 2,
+            },
         ],
-        "8c4b311" => vec![
-            MockFileItem { name: "hosts/atlas-02/monitoring.nix".to_string(), add: 14, del: 0 },
-        ],
-        _ => vec![
-            MockFileItem { name: "README.md".to_string(), add: 5, del: 0 },
-        ],
+        "8c4b311" => vec![MockFileItem {
+            name: "hosts/atlas-02/monitoring.nix".to_string(),
+            add: 14,
+            del: 0,
+        }],
+        _ => vec![MockFileItem {
+            name: "README.md".to_string(),
+            add: 5,
+            del: 0,
+        }],
     }
 }
 
@@ -4087,56 +4116,56 @@ fn FlakeTableNew(
                             let flake_for_select = flake.clone();
                             let flake_id_for_sync = flake.id;
                             let flake_id_for_edit = flake.id;
-                            
+
                             rsx! {
                                 tr {
                                     key: "{flake.id}",
                                     class: "{row_class}",
                                     style: "cursor: pointer;",
                                     onclick: move |_| on_select.call(flake_for_select.clone()),
-                                    
+
                                     // Flake name and description
                                     td {
                                         div { style: "font-weight: 600; font-size: 13px;", "{flake.name}" }
                                         div { style: "font-size: 11px; color: var(--cf-text-muted);", "{flake.description}" }
                                     }
-                                    
+
                                     // Status chip
                                     td {
                                         FlakeSyncChipNew { status: flake.status.clone(), error_msg: flake.error_msg.clone() }
                                     }
-                                    
+
                                     // Branch
                                     td {
                                         span { class: "chip chip-unknown", "{flake.branch}" }
                                     }
-                                    
+
                                     // Systems count
                                     td { style: "font-size: 13px;", "{flake.system_count}" }
-                                    
+
                                     // Latest commit
                                     td {
-                                        span { 
-                                            class: "mono", 
-                                            style: "font-size: 12px; font-weight: 600;", 
-                                            "{flake.latest_commit}" 
+                                        span {
+                                            class: "mono",
+                                            style: "font-size: 12px; font-weight: 600;",
+                                            "{flake.latest_commit}"
                                         }
-                                        div { 
+                                        div {
                                             style: "font-size: 11px; color: var(--cf-text-muted); max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
                                             "{flake.latest_message}"
                                         }
                                     }
-                                    
+
                                     // Author
-                                    td { 
+                                    td {
                                         class: "mono",
                                         style: "font-size: 12px; color: var(--cf-text-secondary);",
                                         "{flake.latest_author}"
                                     }
-                                    
+
                                     // Last synced
                                     td { style: "font-size: 12px; color: var(--cf-text-muted);", "{flake.last_sync_at}" }
-                                    
+
                                     // Actions (admin-only)
                                     td {
                                         if is_admin {
@@ -4206,14 +4235,14 @@ fn FlakeSyncChipNew(status: String, error_msg: Option<String>) -> Element {
         "error" => ("chip-critical", "#f87171", "error"),
         _ => ("chip-unknown", "#6b7280", status.as_str()),
     };
-    
+
     let title = error_msg.as_deref().unwrap_or("");
-    
+
     rsx! {
-        span { 
+        span {
             class: "chip {chip_class}",
             title: "{title}",
-            span { 
+            span {
                 class: "chip-dot",
                 style: "background: {color};"
             }
@@ -4221,7 +4250,6 @@ fn FlakeSyncChipNew(status: String, error_msg: Option<String>) -> Element {
         }
     }
 }
-
 
 // ============================================================================
 // Phase 2: FlakeCards Component - Matching JSX lines 498-540
@@ -4258,7 +4286,7 @@ fn FlakeCardsNew(
                     } else {
                         ""
                     };
-                    
+
                     rsx! {
                         div {
                             key: "{flake.id}",
@@ -4267,13 +4295,13 @@ fn FlakeCardsNew(
                             onclick: move |_| {
                                 on_select.call(flake_for_select.clone());
                             },
-                            
+
                             // JSX: <div className="status-rail" style={{ "--status-color": statusColor }}/>
-                            div { 
+                            div {
                                 class: "status-rail",
                                 style: "--status-color: {status_color};"
                             }
-                            
+
                             // Card header
                             div { class: "sys-card-head",
                                 div { class: "sys-title",
@@ -4297,13 +4325,13 @@ fn FlakeCardsNew(
                                 }
                                 EnvBadgeNew { env: flake.environment.clone() }
                             }
-                            
+
                             // Description (limit to 2 lines)
-                            div { 
+                            div {
                                 style: "font-size: 12px; color: var(--cf-text-secondary); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;",
                                 "{flake.description}"
                             }
-                            
+
                             // Card body - key-value grid
                             div { class: "sys-card-body",
                                 div {
@@ -4312,7 +4340,7 @@ fn FlakeCardsNew(
                                 }
                                 div {
                                     div { class: "sys-kv-key", "Systems" }
-                                    div { 
+                                    div {
                                         class: "sys-kv-val",
                                         style: "font-family: inherit;",
                                         "{flake.system_count}"
@@ -4324,14 +4352,14 @@ fn FlakeCardsNew(
                                 }
                                 div {
                                     div { class: "sys-kv-key", "Synced" }
-                                    div { 
+                                    div {
                                         class: "sys-kv-val",
                                         style: "font-family: inherit;",
                                         "{flake.last_sync_at}"
                                     }
                                 }
                             }
-                            
+
                             // Error callout (if error)
                             if let Some(error_msg) = &flake.error_msg {
                                 div {
@@ -4355,15 +4383,15 @@ fn FlakeCardsNew(
                                     div { style: "font-size: 11px;", "{error_msg}" }
                                 }
                             }
-                            
+
                             // Card footer
                             div { class: "sys-card-foot",
                                 div { class: "chips-row",
-                                    FlakeSyncChipNew { 
+                                    FlakeSyncChipNew {
                                         status: flake.status.clone(),
                                         error_msg: flake.error_msg.clone()
                                     }
-                                    span { 
+                                    span {
                                         class: "chip chip-unknown",
                                         "{flake.total_commits} commits"
                                     }
@@ -4435,12 +4463,11 @@ fn EnvBadgeNew(env: String) -> Element {
         "edge" => "chip-info",
         _ => "chip-unknown",
     };
-    
+
     rsx! {
         span { class: "chip {chip_class}", "{env}" }
     }
 }
-
 
 // ============================================================================
 // Phase 3: FlakeTray - Side panel with backdrop and header
@@ -4509,7 +4536,8 @@ fn FlakeTrayNew(
                 if *visible_limit.read() >= total {
                     return;
                 }
-                let Some(element) = document.get_element_by_id(&commits_scroll_id_for_handler) else {
+                let Some(element) = document.get_element_by_id(&commits_scroll_id_for_handler)
+                else {
                     return;
                 };
                 let scroll_top = element.scroll_top();
@@ -4548,14 +4576,14 @@ fn FlakeTrayNew(
                 .find(|commit| !unavailable.iter().any(|hash| hash == &commit.full_hash))
                 .cloned()
         });
-    
+
     rsx! {
         // JSX: <div className="fl-tray-backdrop" onClick={onClose}/>
         div {
             class: "fl-tray-backdrop",
             onclick: move |_| on_close.call(())
         }
-        
+
         // JSX: <aside className="fl-tray" role="dialog" aria-label={...}>
         aside {
             class: "fl-tray",
@@ -4568,7 +4596,7 @@ fn FlakeTrayNew(
                     on_close.call(());
                 }
             },
-            
+
             // Tray header - JSX lines 118-134
             header { class: "fl-tray-head",
                 div { style: "display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1;",
@@ -4601,7 +4629,7 @@ fn FlakeTrayNew(
                 div { style: "display: flex; gap: 6px; align-items: center;",
                     // Admin-only Sync and Edit buttons
                     if is_admin {
-                        button { 
+                        button {
                             class: "btn btn-ghost focus-ring xs",
                             onclick: move |_| on_sync.call(flake.id),
                             // Inline sync icon (11px)
@@ -4664,7 +4692,7 @@ fn FlakeTrayNew(
                     "{msg}"
                 }
             }
-            
+
             // Body: Two-pane layout - JSX lines 136-192 (commit list)
             div { class: "fl-tray-body",
                 // Left pane: Commit list with timeline
@@ -4718,12 +4746,12 @@ fn FlakeTrayNew(
                             },
                             style: "background: transparent; border: none; padding: 4px 0; font-size: 12px; flex: 1;"
                         }
-                        span { 
+                        span {
                             style: "font-size: 10px; color: var(--cf-text-muted);",
                             "{filtered_commits.len()}/{commits.len()}"
                         }
                     }
-                    
+
                     // Commit items grouped by time bucket - JSX lines 151-185
                     if commits_loading {
                         div { class: "empty", style: "margin: 12px;", "Loading commits…" }
@@ -4744,7 +4772,7 @@ fn FlakeTrayNew(
                         }
                     }
                 }
-                
+
                 // Right pane: Commit detail - JSX lines 192-260
                 section { class: "fl-tray-detail",
                     if let Some(commit) = active_selected_commit.clone() {
@@ -4798,7 +4826,6 @@ fn FlakeTrayNew(
     }
 }
 
-
 // ============================================================================
 // CommitsList - Time-bucketed commits with timeline rail
 // Matching JSX lines 151-185
@@ -4809,13 +4836,13 @@ fn FlakeTrayNew(
 fn CommitsListNew(
     commits: Vec<MockCommitItem>,
     selected_commit: Option<MockCommitItem>,
-    on_select: EventHandler<MockCommitItem>
+    on_select: EventHandler<MockCommitItem>,
 ) -> Element {
     // Group commits by time bucket (Today, This week, Earlier)
     let mut today = Vec::new();
     let mut this_week = Vec::new();
     let mut earlier = Vec::new();
-    
+
     let now = Utc::now();
     for commit in &commits {
         let age = now.signed_duration_since(commit.committed_at);
@@ -4827,7 +4854,7 @@ fn CommitsListNew(
             earlier.push(commit.clone());
         }
     }
-    
+
     rsx! {
         // Today bucket
         if !today.is_empty() {
@@ -4839,7 +4866,7 @@ fn CommitsListNew(
                 is_last_bucket: this_week.is_empty() && earlier.is_empty()
             }
         }
-        
+
         // This week bucket
         if !this_week.is_empty() {
             CommitBucketNew {
@@ -4850,7 +4877,7 @@ fn CommitsListNew(
                 is_last_bucket: earlier.is_empty()
             }
         }
-        
+
         // Earlier bucket
         if !earlier.is_empty() {
             CommitBucketNew {
@@ -4861,7 +4888,7 @@ fn CommitsListNew(
                 is_last_bucket: true
             }
         }
-        
+
         // Empty state
         if commits.is_empty() {
             div { class: "empty", style: "margin: 24px;",
@@ -4882,15 +4909,15 @@ fn CommitBucketNew(
     commits: Vec<MockCommitItem>,
     selected_commit: Option<MockCommitItem>,
     on_select: EventHandler<MockCommitItem>,
-    is_last_bucket: bool
+    is_last_bucket: bool,
 ) -> Element {
     let total_commits = commits.len();
-    
+
     rsx! {
         div {
             // Bucket header - JSX line 153
             div { class: "fl-commits-bucket", "{bucket_name}" }
-            
+
             // Commit items - JSX lines 154-183
             for (i, commit) in commits.iter().enumerate() {
                 {
@@ -4900,7 +4927,7 @@ fn CommitBucketNew(
                         eval: commit.eval_status.clone(),
                         build: commit.build_status.clone(),
                     };
-                    
+
                     rsx! {
                         CommitItemNew {
                             commit: commit.clone(),
@@ -4928,31 +4955,27 @@ fn CommitItemNew(
     is_selected: bool,
     is_last: bool,
     pipeline_status: MockPipelineStatus,
-    on_select: EventHandler<MockCommitItem>
+    on_select: EventHandler<MockCommitItem>,
 ) -> Element {
     let item_class = if is_selected {
         "fl-commit-item active"
     } else {
         "fl-commit-item"
     };
-    
+
     let sha_color = if is_selected {
         "var(--cf-brand-purple)"
     } else {
         "var(--cf-text-primary)"
     };
-    
-    let dot_class = if is_selected {
-        "fl-dot sel"
-    } else {
-        "fl-dot"
-    };
-    
+
+    let dot_class = if is_selected { "fl-dot sel" } else { "fl-dot" };
+
     rsx! {
         div {
             class: "{item_class}",
             onclick: move |_| on_select.call(commit.clone()),
-            
+
             // Timeline rail - JSX lines 165-168
             div { class: "fl-rail",
                 div { class: "{dot_class}" }
@@ -4960,29 +4983,29 @@ fn CommitItemNew(
                     div { class: "fl-stem" }
                 }
             }
-            
+
             // Commit content - JSX lines 169-180
             div { style: "min-width: 0; flex: 1;",
                 // SHA and timestamp - JSX lines 170-173
                 div { style: "display: flex; align-items: baseline; gap: 6px;",
-                    span { 
+                    span {
                         class: "mono",
                         style: "font-size: 11px; font-weight: 700; color: {sha_color};",
                         "{commit.sha}"
                     }
-                    span { 
+                    span {
                         style: "font-size: 11px; color: var(--cf-text-muted); margin-left: auto;",
                         "{commit.at}"
                     }
                 }
-                
+
                 // Commit message - JSX line 174
                 div {
                     class: "truncate",
                     style: "font-size: 12px; margin-top: 3px; color: var(--cf-text-primary);",
                     "{commit.msg}"
                 }
-                
+
                 // Pipeline status and author - JSX lines 175-179
                 div { style: "display: flex; gap: 5px; margin-top: 6px; flex-wrap: wrap;",
                     if let Some(eval_status) = &pipeline_status.eval {
@@ -4991,7 +5014,7 @@ fn CommitItemNew(
                     if let Some(build_status) = &pipeline_status.build {
                         PipelineDotNew { kind: "build", val: build_status.clone() }
                     }
-                    span { 
+                    span {
                         class: "mono",
                         style: "font-size: 10px; color: var(--cf-text-muted); margin-left: auto;",
                         "{commit.author}"
@@ -5017,16 +5040,16 @@ fn PipelineDotNew(kind: &'static str, val: String) -> Element {
         "behind" => "#f59e0b",
         _ => "#6b7280",
     };
-    
+
     let label = match kind {
         "eval" => "E",
         "build" => "B",
         _ => &kind[0..1].to_uppercase(),
     };
-    
+
     let title = format!("{}: {}", kind, val);
     let background = format!("color-mix(in oklab, {} 15%, transparent)", color);
-    
+
     rsx! {
         span {
             title: "{title}",
@@ -5124,23 +5147,23 @@ fn CommitDetailNew(
         eval: commit.eval_status.clone(),
         build: commit.build_status.clone(),
     };
-    
+
     rsx! {
         // Commit header - JSX lines 196-217
         div { class: "fl-tray-commit-h",
             // SHA and message - JSX lines 197-200
             div { style: "display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;",
-                span { 
+                span {
                     class: "mono",
                     style: "font-size: 14px; font-weight: 700; color: var(--cf-brand-purple);",
                     "{commit.sha}"
                 }
-                span { 
+                span {
                     style: "font-size: 14px; font-weight: 600;",
                     "{commit.msg}"
                 }
             }
-            
+
             // Metadata row - JSX lines 201-207
             div { style: "display: flex; gap: 12px; margin-top: 6px; font-size: 11px; color: var(--cf-text-muted); flex-wrap: wrap;",
                 span {
@@ -5165,7 +5188,7 @@ fn CommitDetailNew(
                 span { style: "color: #f87171;", "-{total_deletions}" }
                 span { "{total_files_changed} files" }
             }
-            
+
             // Pipeline strip - JSX lines 209-216
             div { class: "fl-pipeline",
                 PipelinePillNew { stage: "eval", val: pipeline.eval.clone() }
@@ -5175,7 +5198,7 @@ fn CommitDetailNew(
                 RolloutPillNew { on: commit.rollout_on, total: commit.rollout_total.max(commit.rollout_on), failed: 0 }
             }
         }
-        
+
         // Files changed section - JSX lines 219-255
         div { class: "fl-files-section",
             // Section header - JSX lines 221-227
@@ -5187,7 +5210,7 @@ fn CommitDetailNew(
                     span { style: "color: #f87171;", "-{total_deletions}" }
                 }
             }
-            
+
             // Files grid - JSX lines 228-254
             div { class: "fl-files-grid",
                 if files_loading {
@@ -5253,7 +5276,7 @@ fn PipelinePillNew(stage: &'static str, val: Option<String>) -> Element {
     let Some(val_str) = val else {
         return rsx! { span { class: "chip chip-unknown", style: "font-weight: 600;", "N/A" } };
     };
-    
+
     let (chip_class, label) = match (stage, val_str.as_str()) {
         ("eval", "complete") => ("chip-healthy", "Eval ✓"),
         ("eval", "pending") => ("chip-info", "Eval…"),
@@ -5265,7 +5288,7 @@ fn PipelinePillNew(stage: &'static str, val: Option<String>) -> Element {
         ("build", "pending") => ("chip-unknown", "Queued"),
         _ => ("chip-unknown", val_str.as_str()),
     };
-    
+
     rsx! {
         span { class: "chip {chip_class}", style: "font-weight: 600;", "{label}" }
     }
@@ -5292,7 +5315,11 @@ fn PipelineArrowNew() -> Element {
 #[allow(dead_code)]
 #[component]
 fn RolloutPillNew(on: i32, total: i32, failed: i32) -> Element {
-    let pct = if total > 0 { (on as f32) / (total as f32) } else { 0.0 };
+    let pct = if total > 0 {
+        (on as f32) / (total as f32)
+    } else {
+        0.0
+    };
     let chip_class = if failed > 0 {
         "chip-critical"
     } else if pct == 1.0 {
@@ -5302,9 +5329,9 @@ fn RolloutPillNew(on: i32, total: i32, failed: i32) -> Element {
     } else {
         "chip-warning"
     };
-    
+
     rsx! {
-        span { 
+        span {
             class: "chip {chip_class}",
             style: "display: inline-flex; align-items: center; gap: 6px; font-weight: 600;",
             // Server icon
@@ -5337,21 +5364,25 @@ fn RolloutPillNew(on: i32, total: i32, failed: i32) -> Element {
 
 #[allow(dead_code)]
 #[component]
-fn FileCardNew(file: MockFileItem, is_selected: bool, on_select: EventHandler<MockFileItem>) -> Element {
+fn FileCardNew(
+    file: MockFileItem,
+    is_selected: bool,
+    on_select: EventHandler<MockFileItem>,
+) -> Element {
     let file_for_click = file.clone();
     let total = (file.add + file.del) as f32 + 0.001;
     let add_pct = ((file.add as f32 / total) * 100.0).round() as i32;
     let del_pct = ((file.del as f32 / total) * 100.0).round() as i32;
-    
+
     // Split path into filename and directory
     let parts: Vec<&str> = file.name.split('/').collect();
     let filename = parts.last().unwrap_or(&"");
     let directory = if parts.len() > 1 {
-        parts[..parts.len()-1].join("/")
+        parts[..parts.len() - 1].join("/")
     } else {
         ".".to_string()
     };
-    
+
     let card_class = if is_selected {
         "fl-file-card focus-ring active"
     } else {
@@ -5362,7 +5393,7 @@ fn FileCardNew(file: MockFileItem, is_selected: bool, on_select: EventHandler<Mo
         button {
             class: "{card_class}",
             onclick: move |_| on_select.call(file_for_click.clone()),
-            
+
             // File header - JSX lines 236-242
             div { class: "fl-file-card-head",
                 // File icon
@@ -5380,19 +5411,19 @@ fn FileCardNew(file: MockFileItem, is_selected: bool, on_select: EventHandler<Mo
                     polyline { points: "14 2 14 8 20 8" }
                 }
                 div { style: "min-width: 0; flex: 1;",
-                    div { 
+                    div {
                         class: "fl-file-name truncate",
                         title: "{file.name}",
                         "{filename}"
                     }
-                    div { 
+                    div {
                         class: "fl-file-path truncate",
                         title: "{file.name}",
                         "{directory}"
                     }
                 }
             }
-            
+
             // File stats - JSX lines 243-250
             div { class: "fl-file-stats",
                 span { class: "mono", style: "font-size: 11px; color: #34d399;", "+{file.add}" }
@@ -5466,7 +5497,7 @@ fn InlineFileDiffNew(file: MockFileItem, full_diff_text: String) -> Element {
 
 #[derive(Clone, Debug, PartialEq)]
 struct DiffLine {
-    line_type: String,  // "hunk", "meta", "add", "del", "ctx"
+    line_type: String, // "hunk", "meta", "add", "del", "ctx"
     text: String,
     old_no: Option<i32>,
     new_no: Option<i32>,
@@ -5479,7 +5510,7 @@ fn DiffModalNew(
     file: MockFileItem,
     commit: MockCommitItem,
     flake: MockFlakeItem,
-    on_close: EventHandler<()>
+    on_close: EventHandler<()>,
 ) -> Element {
     let diff_resource = use_resource({
         let flake_id = flake.id;
@@ -5509,13 +5540,13 @@ fn DiffModalNew(
     let diff_text = extract_diff_block_for_file_label(&full_diff_text, &file.name)
         .unwrap_or_else(|| full_diff_text.clone());
     let lines: Vec<&str> = diff_text.split('\n').collect();
-    
+
     // Parse diff into annotated lines
     let mut annotated = Vec::new();
     let mut old_no = 0;
     let mut new_no = 0;
     let mut hunk_idx = -1;
-    
+
     for line in lines {
         if line.starts_with("@@") {
             // Hunk header
@@ -5569,14 +5600,14 @@ fn DiffModalNew(
             });
         }
     }
-    
+
     let hunks: Vec<_> = annotated.iter().filter(|r| r.line_type == "hunk").collect();
     let total_add = annotated.iter().filter(|r| r.line_type == "add").count();
     let total_del = annotated.iter().filter(|r| r.line_type == "del").count();
     let total_lines = annotated.iter().filter(|r| r.line_type != "meta").count();
-    
+
     let mut wrap = use_signal(|| false);
-    
+
     rsx! {
         // Backdrop - JSX line 331
         div {
@@ -5590,12 +5621,12 @@ fn DiffModalNew(
                     on_close.call(());
                 }
             },
-            
+
             // Modal content - JSX line 332
             div {
                 class: "diff-modal",
                 onclick: move |evt| evt.stop_propagation(),
-                
+
                 // Header - JSX lines 333-368
                 header { class: "diff-modal-head",
                     div { style: "min-width: 0; flex: 1;",
@@ -5616,12 +5647,12 @@ fn DiffModalNew(
                             span { class: "mono", "{flake.name}" }
                             span { "·" }
                             span { class: "mono", "{commit.sha}" }
-                            span { 
+                            span {
                                 style: "overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
                                 "{commit.msg}"
                             }
                         }
-                        
+
                         // File info - JSX lines 342-348
                         div { style: "display: flex; align-items: center; gap: 10px; margin-top: 4px; flex-wrap: wrap;",
                             // File icon
@@ -5641,7 +5672,7 @@ fn DiffModalNew(
                             span { class: "mono", style: "font-size: 13px; font-weight: 600;", "{file.name}" }
                             span { class: "chip chip-healthy", style: "font-size: 10px;", "+{total_add}" }
                             span { class: "chip chip-critical", style: "font-size: 10px;", "-{total_del}" }
-                            span { 
+                            span {
                                 style: "font-size: 11px; color: var(--cf-text-muted);",
                                 "· {hunks.len()} hunk"
                                 if hunks.len() != 1 { "s" }
@@ -5649,7 +5680,7 @@ fn DiffModalNew(
                             }
                         }
                     }
-                    
+
                     // Action buttons - JSX lines 350-367
                     div { style: "display: flex; gap: 6px; align-items: center;",
                         // Wrap toggle button - JSX lines 362-364
@@ -5739,7 +5770,7 @@ fn DiffModalNew(
                         }
                     }
                 }
-                
+
                 // Diff body - JSX lines 369-389
                 div { class: "diff-modal-body",
                     if diff_loading {
@@ -5758,7 +5789,7 @@ fn DiffModalNew(
                                             rsx! { "" }
                                         } else if row.line_type == "hunk" {
                                             rsx! {
-                                                tr { 
+                                                tr {
                                                     key: "{i}",
                                                     class: "diff-hunk",
                                                     td { colspan: 3, "{row.text}" }
@@ -5767,7 +5798,7 @@ fn DiffModalNew(
                                         } else {
                                             let row_class = format!("diff-row diff-{}", row.line_type);
                                             rsx! {
-                                                tr { 
+                                                tr {
                                                     key: "{i}",
                                                     class: "{row_class}",
                                                     td { class: "diff-gutter mono", "{row.old_no.map(|n| n.to_string()).unwrap_or_default()}" }
