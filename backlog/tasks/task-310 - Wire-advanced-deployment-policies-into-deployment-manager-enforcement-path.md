@@ -1,9 +1,10 @@
 ---
 id: TASK-310
 title: Wire advanced deployment policies into deployment-manager enforcement path
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-05-24 00:52'
+updated_date: '2026-05-24 00:55'
 labels:
   - deployment-manager
   - deployment-policies
