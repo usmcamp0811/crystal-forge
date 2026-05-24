@@ -3,9 +3,10 @@ id: TASK-323
 title: >-
   Systems view add/edit modal parity with SystemDetail reference and prefilled
   edit form
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-05-24 16:28'
+updated_date: '2026-05-24 16:29'
 labels:
   - ui
   - ux
