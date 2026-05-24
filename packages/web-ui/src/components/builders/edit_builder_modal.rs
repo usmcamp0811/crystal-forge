@@ -178,7 +178,7 @@ pub fn EditBuilderModal(
 
     rsx! {
         div {
-            class: "fixed inset-0 z-[60] bg-black/60 flex items-center justify-center p-4 overflow-y-auto",
+            class: "modal-backdrop",
             onclick: move |_| {
                 if !is_submitting() {
                     on_close.call(())
@@ -186,14 +186,16 @@ pub fn EditBuilderModal(
             },
 
             div {
-                class: "{theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl p-6 w-full max-w-2xl max-h-[90vh] overflow-y-auto shadow-2xl my-auto",
+                class: "modal",
+                style: "width:min(620px,96vw); max-height:92vh;",
                 onclick: move |e| e.stop_propagation(),
 
                 match &*builder.read_unchecked() {
                     Some(Ok(builder_data)) => rsx! {
                         // Header
                         div {
-                            class: "flex items-center justify-between mb-6",
+                            class: "modal-head",
+                            style: "display:flex; align-items:center; justify-content:space-between;",
                             div {
                                 h2 {
                                     class: "text-xl font-semibold text-white",
@@ -222,7 +224,11 @@ pub fn EditBuilderModal(
 
                         // Form
                         div {
-                            class: "space-y-4",
+                            class: "modal-body",
+                            style: "overflow-y:auto;",
+
+                            div {
+                                class: "space-y-4",
 
                             // Name
                             div {
@@ -390,9 +396,12 @@ pub fn EditBuilderModal(
                             }
                         }
 
+                        }
+
                         // Footer buttons
                         div {
-                            class: "flex justify-between mt-6 pt-4 border-t border-slate-700",
+                            class: "modal-foot",
+                            style: "display:flex; justify-content:space-between;",
                             div {
                                 class: "flex gap-3",
                                 button {
