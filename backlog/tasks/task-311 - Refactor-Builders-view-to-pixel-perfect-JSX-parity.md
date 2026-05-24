@@ -4,7 +4,7 @@ title: Refactor Builders view to pixel-perfect JSX parity
 status: In Progress
 assignee: []
 created_date: '2026-05-24 01:24'
-updated_date: '2026-05-24 01:27'
+updated_date: '2026-05-24 03:16'
 labels:
   - ui
   - ux
