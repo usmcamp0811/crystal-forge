@@ -1,10 +1,10 @@
 ---
 id: TASK-311
 title: Refactor Builders view to pixel-perfect JSX parity
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-05-24 01:24'
-updated_date: '2026-05-24 03:16'
+updated_date: '2026-05-24 15:22'
 labels:
   - ui
   - ux
