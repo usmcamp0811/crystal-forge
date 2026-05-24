@@ -304,6 +304,11 @@ pub fn BuildersView() -> Element {
                                         onclick: move |_| status_filter.set("offline".to_string()),
                                         "offline"
                                     }
+                                    button {
+                                        class: if status_filter() == "draining" { "active" } else { "" },
+                                        onclick: move |_| status_filter.set("draining".to_string()),
+                                        "draining"
+                                    }
                                 }
 
                                 // Architecture dropdown

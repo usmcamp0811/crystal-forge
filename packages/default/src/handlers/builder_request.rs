@@ -181,7 +181,7 @@ async fn authenticate_builder_request_with_lookup_options<L: BuilderLookup>(
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
     let allowed = match builder.status {
-        crate::models::builders::BuilderStatus::Active => true,
+        crate::models::builders::BuilderStatus::Active => builder.enabled || allow_non_active,
         crate::models::builders::BuilderStatus::Inactive => allow_non_active,
         crate::models::builders::BuilderStatus::Offline => allow_non_active,
         crate::models::builders::BuilderStatus::Draining => allow_non_active,
@@ -553,6 +553,126 @@ mod tests {
             max_memory_mb: None,
             max_concurrent_jobs: 1,
             enabled: true,
+            last_heartbeat_at: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let lookup = StaticLookup {
+            builder: Arc::new(builder.clone()),
+        };
+
+        let body = Bytes::from("{}");
+        let timestamp = Utc::now().to_rfc3339();
+        let method = "POST";
+        let path = "/api/v1/builders/test/heartbeat";
+        let signature_payload = canonical_signature_payload(method, path, &timestamp, &body);
+        let signature = signing_key.sign(&signature_payload);
+        let signature_base64 = general_purpose::STANDARD.encode(signature.to_bytes());
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Builder-ID",
+            HeaderValue::from_str(&builder.id.to_string()).expect("valid builder id header"),
+        );
+        headers.insert(
+            "X-Signature",
+            HeaderValue::from_str(&signature_base64).expect("valid signature header"),
+        );
+        headers.insert(
+            "X-Timestamp",
+            HeaderValue::from_str(&timestamp).expect("valid timestamp header"),
+        );
+
+        let result = authenticate_builder_request_with_lookup_options(
+            &headers,
+            body,
+            method,
+            path,
+            &lookup,
+            true,
+        )
+        .await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_active_but_disabled_builder_rejected_for_active_only_auth() {
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+        let verifying_key = signing_key.verifying_key();
+
+        let builder = Builder {
+            id: Uuid::new_v4(),
+            name: "disabled-builder".to_string(),
+            host: Some("disabled-builder.test.local".to_string()),
+            arch: "x86_64-linux".to_string(),
+            public_key: PublicKey::from_verifying_key(verifying_key),
+            status: BuilderStatus::Active,
+            max_cpu_cores: None,
+            max_memory_mb: None,
+            max_concurrent_jobs: 1,
+            enabled: false,
+            last_heartbeat_at: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let lookup = StaticLookup {
+            builder: Arc::new(builder.clone()),
+        };
+
+        let body = Bytes::from("{}");
+        let timestamp = Utc::now().to_rfc3339();
+        let method = "GET";
+        let path = "/api/v1/builders/test/next-job";
+        let signature_payload = canonical_signature_payload(method, path, &timestamp, &body);
+        let signature = signing_key.sign(&signature_payload);
+        let signature_base64 = general_purpose::STANDARD.encode(signature.to_bytes());
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Builder-ID",
+            HeaderValue::from_str(&builder.id.to_string()).expect("valid builder id header"),
+        );
+        headers.insert(
+            "X-Signature",
+            HeaderValue::from_str(&signature_base64).expect("valid signature header"),
+        );
+        headers.insert(
+            "X-Timestamp",
+            HeaderValue::from_str(&timestamp).expect("valid timestamp header"),
+        );
+
+        let result = authenticate_builder_request_with_lookup_options(
+            &headers,
+            body,
+            method,
+            path,
+            &lookup,
+            false,
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_active_but_disabled_builder_allowed_for_allow_inactive_auth() {
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+        let verifying_key = signing_key.verifying_key();
+
+        let builder = Builder {
+            id: Uuid::new_v4(),
+            name: "disabled-heartbeat-builder".to_string(),
+            host: Some("disabled-heartbeat-builder.test.local".to_string()),
+            arch: "x86_64-linux".to_string(),
+            public_key: PublicKey::from_verifying_key(verifying_key),
+            status: BuilderStatus::Active,
+            max_cpu_cores: None,
+            max_memory_mb: None,
+            max_concurrent_jobs: 1,
+            enabled: false,
             last_heartbeat_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),

@@ -3,7 +3,7 @@
 use dioxus::prelude::*;
 
 use crate::api::models::BuilderSummary;
-use crate::components::{EnvBadge, Icon, IconName};
+use crate::components::{Icon, IconName};
 
 fn builder_status_chip(builder: &BuilderSummary) -> Element {
     let chip_class = builder.status.chip_class();
@@ -57,8 +57,11 @@ pub fn BuilderRow(builder: BuilderSummary, on_edit: EventHandler<()>) -> Element
         .map(|mb| format!("{} GiB", mb / 1024))
         .unwrap_or_else(|| "∞".to_string());
 
-    // TODO: Load actual environments when backend provides them
-    let environments: Vec<String> = vec![];
+    let environments_text = if builder.assigned_environment_count > 0 {
+        format!("{} assigned", builder.assigned_environment_count)
+    } else {
+        "All / wildcard".to_string()
+    };
 
     // TODO: Load actual completed/failed 24h when backend provides them
     let completed24h = 0;
@@ -95,10 +98,8 @@ pub fn BuilderRow(builder: BuilderSummary, on_edit: EventHandler<()>) -> Element
                     "{builder.arch}"
                 }
                 div {
-                    style: "font-size: 11px; display: flex; gap: 4px; flex-wrap: wrap; margin-top: 2px;",
-                    for env in environments {
-                        EnvBadge { name: env.clone() }
-                    }
+                    style: "font-size: 11px; margin-top: 2px; color: var(--cf-text-muted);",
+                    "{environments_text}"
                 }
             }
 

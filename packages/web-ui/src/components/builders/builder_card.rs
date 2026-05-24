@@ -3,7 +3,7 @@
 use dioxus::prelude::*;
 
 use crate::api::models::BuilderSummary;
-use crate::components::{EnvBadge, Icon, IconName};
+use crate::components::{Icon, IconName};
 
 fn builder_status_chip(builder: &BuilderSummary) -> Element {
     let chip_class = builder.status.chip_class();
@@ -63,8 +63,11 @@ pub fn BuilderCard(builder: BuilderSummary, on_edit: EventHandler<()>) -> Elemen
         .map(|mb| format!("{} GiB", mb / 1024))
         .unwrap_or_else(|| "∞".to_string());
 
-    // TODO: Load actual environments when backend provides them
-    let environments: Vec<String> = vec![];
+    let environments_text = if builder.assigned_environment_count > 0 {
+        format!("{} assigned", builder.assigned_environment_count)
+    } else {
+        "All / wildcard".to_string()
+    };
 
     // TODO: Load actual load metric when backend provides it
     let load: f64 = 0.0;
@@ -114,17 +117,8 @@ pub fn BuilderCard(builder: BuilderSummary, on_edit: EventHandler<()>) -> Elemen
                     div { class: "sys-kv-key", "Environments" }
                     div {
                         class: "sys-kv-val",
-                        style: "font-family: inherit; display: flex; gap: 4px; flex-wrap: wrap;",
-                        if environments.is_empty() {
-                            span {
-                                style: "color: var(--cf-text-muted); font-style: italic; font-size: 11px;",
-                                "none"
-                            }
-                        } else {
-                            for env in environments {
-                                EnvBadge { name: env.clone() }
-                            }
-                        }
+                        style: "font-family: inherit;",
+                        "{environments_text}"
                     }
                 }
                 div {
