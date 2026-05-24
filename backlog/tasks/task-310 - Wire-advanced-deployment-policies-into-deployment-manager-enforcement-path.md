@@ -1,7 +1,7 @@
 ---
 id: TASK-310
 title: Wire advanced deployment policies into deployment-manager enforcement path
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-05-24 00:52'
 updated_date: '2026-05-24 00:55'
@@ -84,6 +84,12 @@ High: direct impact on runtime deployment execution and gating correctness.
 - [ ] #5 `time_window` and `cve_threshold` outcomes are applied to runtime deployment gating decisions
 - [ ] #6 Targeted unit/integration tests cover each advanced policy affecting deployment-manager behavior
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-310-deployment-policy-enforcement
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
