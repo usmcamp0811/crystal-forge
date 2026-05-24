@@ -1,10 +1,10 @@
 ---
 id: TASK-285
 title: 'UI/UX refresh umbrella: Builds and Evaluations views'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-04-30 21:35'
-updated_date: '2026-04-30 21:39'
+updated_date: '2026-05-24 01:16'
 labels:
   - ui
   - ux
@@ -57,8 +57,28 @@ Medium: parallel UI refactors can diverge without explicit coordination.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 TASK-283 and TASK-284 are linked as child tasks of this umbrella task.
-- [ ] #2 Builds and Evaluations redesign work is coordinated under one milestone and consistent design direction.
-- [ ] #3 Both child tasks complete with passing web-ui compile/check targets and updated screenshot/assertion coverage.
-- [ ] #4 No out-of-scope backend/API changes are introduced without separate explicit tasks.
+- [x] #1 TASK-283 and TASK-284 are linked as child tasks of this umbrella task.
+- [x] #2 Builds and Evaluations redesign work is coordinated under one milestone and consistent design direction.
+- [x] #3 Both child tasks complete with passing web-ui compile/check targets and updated screenshot/assertion coverage.
+- [x] #4 No out-of-scope backend/API changes are introduced without separate explicit tasks.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+## Completion Summary
+
+Both child tasks have been successfully completed and merged:
+
+- **TASK-283** (Builds view): Merged via MR !248 on 2026-05-03
+  - Commit: 3c78ea35 "Merge branch 'TASK-283-refactor-builds-view-ui-ux' into 'dev'"
+  - Full JSX parity achieved with proper data mapping, icon system, and visual styling
+  - web-ui checks passed with screenshot evidence
+
+- **TASK-284** (Evaluations view): Merged via branch 'TASK-284-refactor-evaluations-view' on 2026-05-01
+  - Commit: 5357e90e "Merge branch 'TASK-284-refactor-evaluations-view' into 'dev'"
+  - Complete drawer UI with policy matrix, dependency graphs, and real log streaming
+  - web-ui checks passed with full tab coverage
+
+Both refactors maintain consistent design language, interaction patterns, and screenshot-based verification as required by the umbrella coordination goals.
+<!-- SECTION:NOTES:END -->
