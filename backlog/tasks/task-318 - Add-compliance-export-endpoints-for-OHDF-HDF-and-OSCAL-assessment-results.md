@@ -4,12 +4,13 @@ title: Add compliance export endpoints for OHDF/HDF and OSCAL assessment results
 status: Backlog
 assignee: []
 created_date: '2026-05-24 02:34'
+updated_date: '2026-05-24 02:39'
 labels:
   - compliance
   - interop
   - export
   - backend
-milestone: Compliance Foundations
+milestone: m-17
 dependencies:
   - TASK-317
 references:
@@ -59,3 +60,15 @@ Medium
 - [ ] #4 Export validation tests ensure required fields are present and consistent with stored evaluations.
 - [ ] #5 Documentation describes export scope and known mapping limitations.
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Sprint sequencing: execute in Sprint 4 after TASK-317. Validate contract with fixture-based export tests.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Risk-First Gate (Sprint 4 / Interop): export contracts must preserve identifiers, control outcomes, and evidence/waiver metadata with documented mapping limitations.
+<!-- SECTION:NOTES:END -->
