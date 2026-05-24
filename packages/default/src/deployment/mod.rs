@@ -213,6 +213,7 @@ impl DeploymentPolicyManager {
         let mut effective_policy_ids_by_system: HashMap<uuid::Uuid, Vec<uuid::Uuid>> =
             HashMap::new();
         let mut all_policy_ids: HashSet<uuid::Uuid> = HashSet::new();
+        let mut failed_policy_lookup_systems: HashSet<uuid::Uuid> = HashSet::new();
         for system in &systems {
             let policy_ids = match get_system_effective_policy_ids(&self.pool, system.id).await {
                 Ok(ids) => ids,
@@ -221,7 +222,7 @@ impl DeploymentPolicyManager {
                         "Failed to load effective deployment policies for {} ({}): {:#}; skipping deployment update",
                         system.hostname, system.id, err
                     );
-                    effective_policy_ids_by_system.insert(system.id, vec![]);
+                    failed_policy_lookup_systems.insert(system.id);
                     continue;
                 }
             };
@@ -235,10 +236,12 @@ impl DeploymentPolicyManager {
         let mut failed_policy_loads: HashSet<uuid::Uuid> = HashSet::new();
         for policy_id in all_policy_ids {
             match get_deployment_policy_by_id(&self.pool, &policy_id).await {
-                Ok(Some(policy)) if policy.enabled => {
+                Ok(Some(policy)) => {
                     policies_by_id.insert(policy.id, policy);
                 }
-                Ok(_) => {}
+                Ok(None) => {
+                    failed_policy_loads.insert(policy_id);
+                }
                 Err(err) => {
                     warn!("Failed to load deployment policy {}: {:#}", policy_id, err);
                     failed_policy_loads.insert(policy_id);
@@ -249,6 +252,14 @@ impl DeploymentPolicyManager {
         let mut updated_count = 0;
 
         for system in &systems {
+            if failed_policy_lookup_systems.contains(&system.id) {
+                warn!(
+                    "Skipping deployment update for {} because effective policy lookup failed",
+                    system.hostname
+                );
+                continue;
+            }
+
             // Defensive: ensure auto-latest
             match system.get_deployment_policy() {
                 Ok(DeploymentPolicy::AutoLatest) => {}
@@ -396,11 +407,12 @@ impl DeploymentPolicyManager {
             }
 
             let Some(policy) = policies_by_id.get(policy_id) else {
-                return AdvancedGateDecision::Block(format!(
-                    "Enabled deployment policy {} was not found",
-                    policy_id
-                ));
+                return AdvancedGateDecision::Block(format!("Deployment policy {} was not found", policy_id));
             };
+
+            if !policy.enabled {
+                continue;
+            }
 
             match policy.policy_type.as_str() {
                 "time_window" => {
