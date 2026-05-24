@@ -184,6 +184,7 @@ async fn authenticate_builder_request_with_lookup_options<L: BuilderLookup>(
         crate::models::builders::BuilderStatus::Active => true,
         crate::models::builders::BuilderStatus::Inactive => allow_non_active,
         crate::models::builders::BuilderStatus::Offline => allow_non_active,
+        crate::models::builders::BuilderStatus::Draining => allow_non_active,
     };
 
     if !allowed {
@@ -288,10 +289,13 @@ mod tests {
 
         let request = CreateBuilderRequest {
             name: "test-auth-builder".to_string(),
+            host: Some("test-auth-builder.test.local".to_string()),
+            arch: "x86_64-linux".to_string(),
             public_key: Some(public_key_base64),
             max_cpu_cores: None,
             max_memory_mb: None,
             max_concurrent_jobs: None,
+            enabled: Some(true),
             environment_ids: vec![],
         };
 
@@ -352,10 +356,13 @@ mod tests {
 
         let request = CreateBuilderRequest {
             name: "inactive-builder".to_string(),
+            host: Some("inactive-builder.test.local".to_string()),
+            arch: "x86_64-linux".to_string(),
             public_key: Some(public_key_base64),
             max_cpu_cores: None,
             max_memory_mb: None,
             max_concurrent_jobs: None,
+            enabled: Some(true),
             environment_ids: vec![],
         };
 
@@ -402,10 +409,13 @@ mod tests {
 
         let request = CreateBuilderRequest {
             name: "invalid-sig-builder".to_string(),
+            host: Some("invalid-sig-builder.test.local".to_string()),
+            arch: "x86_64-linux".to_string(),
             public_key: Some(public_key_base64),
             max_cpu_cores: None,
             max_memory_mb: None,
             max_concurrent_jobs: None,
+            enabled: Some(true),
             environment_ids: vec![],
         };
 
@@ -459,10 +469,13 @@ mod tests {
 
         let request = CreateBuilderRequest {
             name: "offline-builder".to_string(),
+            host: Some("offline-builder.test.local".to_string()),
+            arch: "x86_64-linux".to_string(),
             public_key: Some(public_key_base64),
             max_cpu_cores: None,
             max_memory_mb: None,
             max_concurrent_jobs: None,
+            enabled: Some(true),
             environment_ids: vec![],
         };
 
@@ -532,11 +545,14 @@ mod tests {
         let builder = Builder {
             id: Uuid::new_v4(),
             name: "offline-builder".to_string(),
+            host: Some("offline-builder.test.local".to_string()),
+            arch: "x86_64-linux".to_string(),
             public_key: PublicKey::from_verifying_key(verifying_key),
             status: BuilderStatus::Offline,
             max_cpu_cores: None,
             max_memory_mb: None,
             max_concurrent_jobs: 1,
+            enabled: true,
             last_heartbeat_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),

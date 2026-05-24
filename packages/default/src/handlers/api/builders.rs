@@ -67,6 +67,15 @@ pub async fn create_builder(
         ));
     }
 
+    // Validate architecture
+    let valid_arches = ["x86_64-linux", "aarch64-linux", "aarch64-darwin", "x86_64-darwin"];
+    if !valid_arches.contains(&request.arch.as_str()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("Invalid architecture. Must be one of: {}", valid_arches.join(", ")),
+        ));
+    }
+
     // Validate public key if provided (prevent DoS via oversized input)
     if let Some(ref pk) = request.public_key {
         if pk.is_empty() {
