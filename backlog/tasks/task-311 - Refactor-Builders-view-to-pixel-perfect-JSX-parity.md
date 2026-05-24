@@ -300,4 +300,31 @@ Execute each phase in order. Do NOT skip ahead. Do NOT mark complete until verif
 
 Commencing pixel-perfect JSX port of Builders view.
 Executing phases sequentially - no skipping allowed.
+
+## Worktree Created
+
+LOCK: AI agent on gray in /home/mcamp/code/crystal-forge/TASK-311-refactor-builders-view
+Branch: TASK-311-refactor-builders-view
+Base: dev (a8eac782)
+
+## Phase 1 Complete (2026-05-24 01:40)
+
+✅ All backend model fields verified/added
+✅ Migration 0124 created and applied
+✅ Builder model updated: host, arch, enabled, draining status
+✅ All DTOs updated: CreateBuilderRequest, UpdateBuilderRequest
+✅ Architecture validation added to handlers
+✅ All database queries updated
+✅ All test fixtures updated (10+ instances)
+✅ SQLX offline metadata regenerated
+✅ Compilation verified: `cargo check` passes
+✅ Committed: 8c2088f3
+
+Backend data structure ready for UI implementation.
+
+## MR Created
+
+Merge Request: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/264
+
+Created: 2026-05-24
 <!-- SECTION:NOTES:END -->

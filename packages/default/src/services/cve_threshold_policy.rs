@@ -138,6 +138,23 @@ async fn get_latest_cve_scan(
     pool: &PgPool,
     derivation_id: i32,
 ) -> Result<Option<CveCountBySeverity>, sqlx::Error> {
+    let latest_scan_id = sqlx::query_scalar::<_, i32>(
+        r#"
+        SELECT id
+        FROM cve_scans
+        WHERE derivation_id = $1
+        ORDER BY created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(derivation_id)
+    .fetch_optional(pool)
+    .await?;
+
+    let Some(scan_id) = latest_scan_id else {
+        return Ok(None);
+    };
+
     let result = sqlx::query_as::<_, (i64, i64, i64, i64)>(
         r#"
         SELECT
@@ -146,17 +163,10 @@ async fn get_latest_cve_scan(
             COALESCE(SUM(CASE WHEN severity = 'medium' THEN 1 ELSE 0 END), 0) as medium,
             COALESCE(SUM(CASE WHEN severity = 'low' THEN 1 ELSE 0 END), 0) as low
         FROM cve_scan_results csr
-        JOIN cve_scans cs ON csr.scan_id = cs.id
-        WHERE cs.derivation_id = $1
-          AND cs.id = (
-              SELECT id FROM cve_scans
-              WHERE derivation_id = $1
-              ORDER BY created_at DESC
-              LIMIT 1
-          )
+        WHERE csr.scan_id = $1
         "#,
     )
-    .bind(derivation_id)
+    .bind(scan_id)
     .fetch_optional(pool)
     .await?;
 

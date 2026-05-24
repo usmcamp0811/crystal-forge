@@ -1,10 +1,10 @@
 ---
 id: TASK-310
 title: Wire advanced deployment policies into deployment-manager enforcement path
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-05-24 00:52'
-updated_date: '2026-05-24 00:55'
+updated_date: '2026-05-24 02:28'
 labels:
   - deployment-manager
   - deployment-policies
@@ -18,6 +18,11 @@ milestone: STIG policy readiness
 dependencies:
   - TASK-305
   - TASK-306
+modified_files:
+  - packages/default/src/deployment/mod.rs
+  - packages/default/src/queries/derivations.rs
+  - packages/default/src/services/cve_threshold_policy.rs
+  - docs/deployment-policies.md
 priority: high
 ordinal: 257000
 ---
@@ -77,21 +82,25 @@ High: direct impact on runtime deployment execution and gating correctness.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Deployment-manager pre-deploy path evaluates configured advanced policies for target deployment context
-- [ ] #2 Policy outcomes are enforced consistently (allow/warn/block/pending) with explicit operator-facing reason messages
-- [ ] #3 `require_approvals` blocks/pauses deployment until required valid approvals are present
-- [ ] #4 `canary_rollout` execution uses evaluated phase/system subset decisions from policy state
-- [ ] #5 `time_window` and `cve_threshold` outcomes are applied to runtime deployment gating decisions
-- [ ] #6 Targeted unit/integration tests cover each advanced policy affecting deployment-manager behavior
+- [x] #1 Deployment-manager pre-deploy path evaluates configured advanced policies for target deployment context
+- [x] #2 Policy outcomes are enforced consistently (allow/warn/block/pending) with explicit operator-facing reason messages
+- [x] #3 `require_approvals` blocks/pauses deployment until required valid approvals are present
+- [x] #4 `canary_rollout` execution uses evaluated phase/system subset decisions from policy state
+- [x] #5 `time_window` and `cve_threshold` outcomes are applied to runtime deployment gating decisions
+- [x] #6 Targeted unit/integration tests cover each advanced policy affecting deployment-manager behavior
 <!-- AC:END -->
 
-## Implementation Notes
+## Final Summary
 
-<!-- SECTION:NOTES:BEGIN -->
-LOCK: gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-310-deployment-policy-enforcement
-<!-- SECTION:NOTES:END -->
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Merged MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/263
+
+Enforced advanced deployment policies in auto-latest manager with allow/warn/block/pending semantics.
+
+Preserved legacy CVE gate compatibility and fixed fail-open enforcement gaps.
+<!-- SECTION:FINAL_SUMMARY:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Document deployment-manager enforcement semantics for all advanced policy outcomes in deployment policy docs
+- [x] #1 Document deployment-manager enforcement semantics for all advanced policy outcomes in deployment policy docs
 <!-- DOD:END -->
