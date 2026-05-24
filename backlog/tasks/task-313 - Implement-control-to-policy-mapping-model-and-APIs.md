@@ -4,12 +4,13 @@ title: Implement control-to-policy mapping model and APIs
 status: Backlog
 assignee: []
 created_date: '2026-05-24 02:33'
+updated_date: '2026-05-24 02:38'
 labels:
   - compliance
   - policy-mapping
   - backend
   - api
-milestone: Compliance Foundations
+milestone: m-16
 dependencies:
   - TASK-307
   - TASK-312
@@ -58,3 +59,15 @@ Medium
 - [ ] #4 Validation prevents mapping to non-existent controls or policies.
 - [ ] #5 Automated tests cover mapping CRUD and validation behavior.
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Sprint sequencing: complete with TASK-312 in Sprint 1. Include integration test for bundle+control+mapping linkage.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Risk-First Gate (Sprint 1 / Model Integrity): mapping cardinality and referential integrity must be proven (control↔policy many-to-many, no orphan mappings). Hard gate before TASK-314.
+<!-- SECTION:NOTES:END -->
