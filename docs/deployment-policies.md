@@ -7,6 +7,35 @@ Crystal Forge supports declarative deployment policies that control how and when
 - **Nix-Evaluated Policies**: Evaluated during `nix-eval-jobs` at build time (e.g., `require_cf_agent`, `require_packages`, `custom_check`)
 - **Deployment-Time Policies**: Evaluated when deployment is requested (e.g., `time_window`, `require_approvals`, `canary_rollout`, `cve_threshold`)
 
+## Deployment-Manager Enforcement Semantics
+
+For systems with `deployment_policy = auto_latest`, Crystal Forge evaluates enabled effective advanced policies before updating `desired_target`.
+
+- `allow` → deployment manager proceeds
+- `warn` → deployment manager proceeds and logs a warning
+- `block` → deployment manager skips update and logs the blocking reason
+- `pending` → deployment manager skips update until condition is satisfied (e.g., approvals pending or canary observation window)
+
+### Advanced Policy Behavior in Deployment Manager
+
+- `time_window`:
+  - Evaluated against policy timezone/day/time window.
+  - Outside window with `action = block` blocks update.
+  - Outside window with `action = warn` allows update with warning log.
+
+- `require_approvals`:
+  - Evaluated in commit context (`commit_hash`) for the candidate deployment.
+  - Insufficient approvals returns a pending decision; update is deferred.
+
+- `canary_rollout`:
+  - Evaluated in commit context (`commit_hash`) across all flake systems governed by the same canary policy.
+  - Only systems selected for the current canary phase are allowed to advance.
+  - Non-selected systems remain pending for later phases.
+
+- `cve_threshold`:
+  - Evaluated against the target derivation's latest CVE scan summary.
+  - Threshold block actions prevent update; warn actions log and continue.
+
 ## Built-in Policy Types
 
 ### require_cf_agent (Core)
