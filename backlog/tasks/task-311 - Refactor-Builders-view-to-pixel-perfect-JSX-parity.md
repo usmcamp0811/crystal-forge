@@ -300,4 +300,10 @@ Execute each phase in order. Do NOT skip ahead. Do NOT mark complete until verif
 
 Commencing pixel-perfect JSX port of Builders view.
 Executing phases sequentially - no skipping allowed.
+
+## Worktree Created
+
+LOCK: AI agent on gray in /home/mcamp/code/crystal-forge/TASK-311-refactor-builders-view
+Branch: TASK-311-refactor-builders-view
+Base: dev (a8eac782)
 <!-- SECTION:NOTES:END -->
