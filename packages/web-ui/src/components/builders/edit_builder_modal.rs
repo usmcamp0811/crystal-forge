@@ -18,7 +18,6 @@ use edit_builder_modal_actions::{
     apply_builder_public_key, build_update_request, deactivate_builder, delete_builder_permanently,
     submit_builder_update,
 };
-use edit_builder_modal_sections::KeyRotationSection;
 
 #[component]
 pub fn EditBuilderModal(
@@ -32,6 +31,9 @@ pub fn EditBuilderModal(
     let environments = use_resource(|| async move { api::client::fetch_environments().await });
 
     let mut name = use_signal(|| String::new());
+    let mut host = use_signal(|| String::new());
+    let mut arch = use_signal(|| String::from("x86_64-linux"));
+    let mut enabled = use_signal(|| true);
     let mut status = use_signal(|| BuilderStatus::Active);
     let mut max_cpu_cores = use_signal(|| String::new());
     let mut max_memory_mb = use_signal(|| String::new());
@@ -52,6 +54,9 @@ pub fn EditBuilderModal(
         if let Some(Ok(builder_data)) = &*builder.read() {
             if !is_initialized() {
                 name.set(builder_data.name.clone());
+                host.set(builder_data.host.clone().unwrap_or_default());
+                arch.set(builder_data.arch.clone());
+                enabled.set(builder_data.enabled);
                 status.set(builder_data.status.clone());
                 max_cpu_cores.set(
                     builder_data
@@ -89,6 +94,9 @@ pub fn EditBuilderModal(
 
         let update_request = build_update_request(
             name().as_str(),
+            host().as_str(),
+            arch().as_str(),
+            enabled(),
             status(),
             max_cpu_cores().as_str(),
             max_memory_mb().as_str(),
@@ -116,7 +124,11 @@ pub fn EditBuilderModal(
         }
     };
 
-    let handle_update_public_key = move |_| async move {
+    let handle_toggle_private_key = move |_| {
+        show_rotated_private_key.set(!show_rotated_private_key());
+    };
+
+    let handle_update_public_key = move |_: Event<MouseData>| async move {
         if is_submitting() {
             return;
         }
@@ -141,7 +153,7 @@ pub fn EditBuilderModal(
         }
     };
 
-    let handle_deactivate = move |_| async move {
+    let handle_deactivate = move |_: Event<MouseData>| async move {
         if !is_submitting() {
             is_submitting.set(true);
             error_message.set(None);
@@ -246,28 +258,18 @@ pub fn EditBuilderModal(
                                 }
                             }
 
-                            // Status
                             div {
                                 class: "field",
                                 label {
                                     class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
-                                    "Status"
+                                    "Host (SSH endpoint)"
                                 }
-                                select {
-                                    class: "input focus-ring",
-                                    value: "{status().label()}",
-                                    onchange: move |e| {
-                                        let new_status = match e.value().as_str() {
-                                            "Active" => BuilderStatus::Active,
-                                            "Inactive" => BuilderStatus::Inactive,
-                                            _ => BuilderStatus::Offline,
-                                        };
-                                        status.set(new_status);
-                                    },
+                                input {
+                                    class: "input focus-ring mono",
+                                    r#type: "text",
+                                    value: "{host}",
+                                    oninput: move |e| host.set(e.value()),
                                     disabled: is_submitting(),
-                                    option { value: "Active", "Active" }
-                                    option { value: "Inactive", "Inactive" }
-                                    option { value: "Offline", "Offline" }
                                 }
                             }
 
@@ -277,14 +279,29 @@ pub fn EditBuilderModal(
                                 div {
                                     label {
                                         class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
-                                        "Max CPU Cores"
+                                        "Architecture"
+                                    }
+                                    select {
+                                        class: "input focus-ring",
+                                        value: "{arch}",
+                                        onchange: move |e| arch.set(e.value()),
+                                        disabled: is_submitting(),
+                                        option { value: "x86_64-linux", "x86_64-linux" }
+                                        option { value: "aarch64-linux", "aarch64-linux" }
+                                        option { value: "aarch64-darwin", "aarch64-darwin" }
+                                        option { value: "x86_64-darwin", "x86_64-darwin" }
+                                    }
+                                }
+                                div {
+                                    label {
+                                        class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
+                                        "Cores"
                                     }
                                     input {
-                                        class: "w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded text-white placeholder-slate-500 focus:outline-none focus:border-blue-500",
+                                        class: "input focus-ring",
                                         r#type: "number",
                                         min: "1",
-                                        placeholder: "Unlimited",
-                                        value: "{max_cpu_cores}",
+                                        value: "{max_memory_mb}",
                                         oninput: move |e| max_cpu_cores.set(e.value()),
                                         disabled: is_submitting(),
                                     }
@@ -292,31 +309,46 @@ pub fn EditBuilderModal(
                                 div {
                                     label {
                                         class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
-                                        "Max Memory (MB)"
+                                        "Memory (GiB)"
                                     }
                                     input {
-                                        class: "w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded text-white placeholder-slate-500 focus:outline-none focus:border-blue-500",
+                                        class: "input focus-ring",
                                         r#type: "number",
-                                        min: "1024",
-                                        step: "1024",
-                                        placeholder: "Unlimited",
-                                        value: "{max_memory_mb}",
+                                        min: "1",
+                                        step: "1",
+                                        value: "{max_concurrent_jobs}",
                                         oninput: move |e| max_memory_mb.set(e.value()),
                                         disabled: is_submitting(),
                                     }
                                 }
+                            }
+
+                            div {
+                                class: "grid grid-cols-2 gap-4",
                                 div {
-                                    label {
-                                        class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
-                                        "Max Concurrent Jobs"
-                                    }
+                                    class: "field",
+                                    label { "Max concurrent slots" }
                                     input {
-                                        class: "w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded text-white placeholder-slate-500 focus:outline-none focus:border-blue-500",
+                                        class: "input focus-ring",
                                         r#type: "number",
                                         min: "1",
                                         value: "{max_concurrent_jobs}",
                                         oninput: move |e| max_concurrent_jobs.set(e.value()),
                                         disabled: is_submitting(),
+                                    }
+                                    div { class: "help", "How many builds this worker may run in parallel." }
+                                }
+                                div {
+                                    class: "field",
+                                    label { "Status" }
+                                    label {
+                                        style: "display:flex; gap:8px; align-items:center; font-size:13px; padding:6px 0;",
+                                        input {
+                                            r#type: "checkbox",
+                                            checked: enabled(),
+                                            onchange: move |e| enabled.set(e.checked()),
+                                        }
+                                        span { "Enabled (accepts jobs)" }
                                     }
                                 }
                             }
@@ -387,14 +419,73 @@ pub fn EditBuilderModal(
                                 }
                             }
 
-                            KeyRotationSection {
-                                is_submitting: is_submitting(),
-                                rotated_public_key: rotated_public_key,
-                                rotated_private_key: rotated_private_key(),
-                                show_rotated_private_key: show_rotated_private_key(),
-                                on_generate_keypair: handle_generate_keypair,
-                                on_toggle_private_key: move |_: MouseEvent| show_rotated_private_key.set(!show_rotated_private_key()),
-                                on_apply_public_key: handle_update_public_key,
+                            div {
+                                class: "field",
+                                label { "SSH public key" }
+                                textarea {
+                                    class: "input focus-ring mono",
+                                    rows: "3",
+                                    value: "{rotated_public_key}",
+                                    oninput: move |e| rotated_public_key.set(e.value()),
+                                    style: "font-size:11px; resize:vertical; padding:10px;",
+                                }
+                                div { class: "help", "Crystal Forge uses this key to verify build result signatures." }
+                                div { style: "margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;",
+                                    button {
+                                        class: "btn btn-primary focus-ring",
+                                        onclick: handle_generate_keypair,
+                                        disabled: is_submitting(),
+                                        "Generate Keypair"
+                                    }
+                                    button {
+                                        class: "btn btn-ghost focus-ring",
+                                        onclick: move |e| {
+                                            spawn(handle_update_public_key(e));
+                                        },
+                                        disabled: is_submitting() || rotated_public_key().trim().is_empty(),
+                                        "Apply Public Key Update"
+                                    }
+                                }
+                                if !rotated_private_key().is_empty() {
+                                    div { style: "margin-top:10px;",
+                                        div { style: "display:flex; align-items:center; justify-content:space-between; margin-bottom:6px;",
+                                            span { class: "help", style: "margin:0;", "Generated private key (save securely)" }
+                                            button {
+                                                class: "btn btn-ghost focus-ring",
+                                                onclick: handle_toggle_private_key,
+                                                style: "padding:2px 8px; font-size:11px;",
+                                                if show_rotated_private_key() { "Hide" } else { "Show" }
+                                            }
+                                        }
+                                        if show_rotated_private_key() {
+                                            textarea {
+                                                class: "input focus-ring mono",
+                                                rows: "3",
+                                                readonly: true,
+                                                value: "{rotated_private_key()}",
+                                                style: "font-size:11px; resize:vertical; padding:10px;"
+                                            }
+                                        } else {
+                                            div {
+                                                class: "input mono",
+                                                style: "font-size:11px; padding:10px; color:var(--cf-text-muted);",
+                                                "••••••••••••••••••••••••••••••••"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            div { style: "margin-top:10px; padding-top:14px; border-top:1px solid var(--cf-divider);",
+                                div { style: "font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:0.08em; color:var(--cf-text-muted); margin-bottom:8px;", "Danger zone" }
+                                button {
+                                    class: "btn btn-ghost focus-ring",
+                                    onclick: handle_delete,
+                                    disabled: is_submitting(),
+                                    style: "color:#f87171; border-color: rgba(248,113,113,0.3);",
+                                    Icon { name: IconName::X, size: 12 }
+                                    " Remove builder"
+                                }
                             }
                         }
 
@@ -403,39 +494,21 @@ pub fn EditBuilderModal(
                         // Footer buttons
                         div {
                             class: "modal-foot",
-                            style: "display:flex; justify-content:space-between;",
-                            div {
-                                class: "flex gap-3",
-                                button {
-                                    class: "px-4 py-2 rounded-lg text-sm font-medium text-white transition-colors {theme::interactive::DANGER_BTN} {theme::interactive::FOCUS_RING} disabled:opacity-50",
-                                    onclick: handle_deactivate,
-                                    disabled: is_submitting(),
-                                    "Deactivate Builder"
-                                }
-                                button {
-                                    class: "px-4 py-2 rounded-lg text-sm font-medium text-white transition-colors {theme::interactive::DANGER_BTN} {theme::interactive::FOCUS_RING} disabled:opacity-50",
-                                    onclick: handle_delete,
-                                    disabled: is_submitting(),
-                                    "Delete Permanently"
-                                }
+                            button {
+                                class: "btn btn-ghost focus-ring",
+                                onclick: move |_| on_close.call(()),
+                                disabled: is_submitting(),
+                                "Cancel"
                             }
-                            div {
-                                class: "flex gap-3",
-                                button {
-                                    class: "btn btn-ghost focus-ring",
-                                    onclick: move |_| on_close.call(()),
-                                    disabled: is_submitting(),
-                                    "Cancel"
-                                }
-                                button {
-                                    class: "btn btn-primary focus-ring",
-                                    onclick: handle_submit,
-                                    disabled: is_submitting(),
-                                    if is_submitting() {
-                                        "Saving..."
-                                    } else {
-                                        "Save Changes"
-                                    }
+                            button {
+                                class: "btn btn-primary focus-ring",
+                                onclick: handle_submit,
+                                disabled: is_submitting(),
+                                Icon { name: IconName::Check, size: 13 }
+                                if is_submitting() {
+                                    " Saving..."
+                                } else {
+                                    " Save changes"
                                 }
                             }
                         }
