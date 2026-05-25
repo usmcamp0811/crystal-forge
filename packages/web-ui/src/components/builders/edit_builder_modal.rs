@@ -262,7 +262,7 @@ pub fn EditBuilderModal(
                                 class: "field",
                                 label {
                                     class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
-                                    "Host (SSH endpoint)"
+                                    "Host"
                                 }
                                 input {
                                     class: "input focus-ring mono",
@@ -271,6 +271,7 @@ pub fn EditBuilderModal(
                                     oninput: move |e| host.set(e.value()),
                                     disabled: is_submitting(),
                                 }
+                                div { class: "help", "SSH endpoint or hostname." }
                             }
 
                             // Resource Limits
@@ -310,7 +311,7 @@ pub fn EditBuilderModal(
                                 div {
                                     label {
                                         class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
-                                        "Memory (GiB)"
+                                        "Max Memory (MB)"
                                     }
                                     input {
                                         class: "input focus-ring",
@@ -342,7 +343,7 @@ pub fn EditBuilderModal(
                                 }
                                 div {
                                     class: "field",
-                                    label { "Status" }
+                                    label { "Enabled" }
                                     label {
                                         style: "display:flex; gap:8px; align-items:center; font-size:13px; padding:6px 0;",
                                         input {
@@ -357,6 +358,7 @@ pub fn EditBuilderModal(
 
                             // Environment assignments
                             div {
+                                class: "field",
                                 label {
                                     class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
                                     "Environment Assignments"
@@ -366,18 +368,42 @@ pub fn EditBuilderModal(
                                     "Leave empty for wildcard (builder handles all environments)"
                                 }
 
+                                div {
+                                    style: "display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;",
+                                    span {
+                                        class: "help",
+                                        style: "margin:0;",
+                                        if selected_environments().is_empty() {
+                                            "Wildcard (all environments)"
+                                        } else {
+                                            "{selected_environments().len()} selected"
+                                        }
+                                    }
+                                    if !selected_environments().is_empty() {
+                                        button {
+                                            class: "btn btn-ghost focus-ring",
+                                            style: "padding:2px 8px; font-size:11px;",
+                                            onclick: move |_| selected_environments.set(Vec::new()),
+                                            disabled: is_submitting(),
+                                            "Clear"
+                                        }
+                                    }
+                                }
+
                                 {
                                     let env_data = environments.read();
                                     match &*env_data {
                                         Some(Ok(env_list)) => rsx! {
                                             div {
-                                                class: "border border-slate-700 rounded p-3 space-y-2 max-h-48 overflow-y-auto",
+                                                class: "border border-slate-700 rounded p-3 max-h-56 overflow-y-auto",
                                                 if env_list.is_empty() {
                                                     p {
                                                         class: "text-sm {theme::text::SECONDARY}",
                                                         "No environments available"
                                                     }
                                                 } else {
+                                                    div { class: "grid grid-cols-2",
+                                                        style: "gap:8px 12px;",
                                                     for env in env_list {
                                                         {
                                                             let env_id = env.id;
@@ -385,6 +411,7 @@ pub fn EditBuilderModal(
                                                                 div {
                                                                     key: "{env.id}",
                                                                     class: "flex items-center gap-2",
+                                                                    style: "min-height:24px;",
                                                                     input {
                                                                         r#type: "checkbox",
                                                                         id: "env-edit-{env.id}",
@@ -401,6 +428,7 @@ pub fn EditBuilderModal(
                                                                 }
                                                             }
                                                         }
+                                                    }
                                                     }
                                                 }
                                             }
