@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-05-24 16:28'
-updated_date: '2026-05-24 16:30'
+updated_date: '2026-05-25 01:55'
 labels:
   - ui
   - ux
@@ -21,10 +21,9 @@ references:
   - >-
     /home/mcamp/code/crystal-forge/CrystalForgelatest/components/SystemDetail.jsx
 modified_files:
-  - packages/web-ui/src/views/systems.rs
-  - packages/web-ui/src/components
-  - packages/web-ui/src/api/models.rs
-  - packages/default/src/handlers/api
+  - packages/web-ui/src/views/systems_list.rs
+  - packages/web-ui/src/views/system_detail.rs
+  - packages/web-ui/src/components/system/edit_system_modal.rs
 priority: high
 ordinal: 2200
 ---
@@ -85,5 +84,9 @@ High — user-facing configuration workflow with high chance of regression if ed
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-LOCK: reckless on reckless in /home/mcamp/code/crystal-forge/TASK-323-systems-modal-prefill
+Implemented edit modal refactor to design-system modal classes (`modal-backdrop`, `modal`, `modal-head`, `modal-body`, `modal-foot`) with segmented deployment policy and improved form layout.
+
+Fixed edit-prefill behavior by introducing `EditSystemDraft::from_system` hydration and explicit remount keys in both systems list and system detail modal call sites.
+
+Verified with `nix develop -c cargo check` (run from `packages/web-ui`) and `nix build .#checks.x86_64-linux.web-ui`.
 <!-- SECTION:NOTES:END -->
