@@ -251,6 +251,138 @@ pub struct SaveSystemCveJustificationRequest {
     pub reason: String,
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Advanced CVE Dashboard DTOs (TASK-322)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Filter parameters for CVE list queries.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CveFilters {
+    pub severity: Option<String>,       // "critical", "high", "medium", "low"
+    pub fix_status: Option<String>,     // "available", "pending", "exploited"
+    pub triage_status: Option<String>,  // "outstanding", "scheduled", "accepted"
+    pub package: Option<String>,        // Package name substring match
+    pub search: Option<String>,         // Search across CVE ID, package, title
+    pub sort: Option<String>,           // "severity", "cvss", "age", "affected"
+    pub limit: Option<i64>,             // Max results (default 500, max 1000)
+}
+
+/// CVE list item for table views.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct CveListItem {
+    pub cve_id: String,
+    pub cvss_v3_score: Option<f32>,
+    pub severity: String,
+    pub title: String,
+    pub cvss_vector: Option<String>,
+    pub published_date: Option<chrono::NaiveDate>,
+    pub exploited: bool,
+    pub package_name: Option<String>,
+    pub installed_version: Option<String>,
+    pub fixed_version: Option<String>,
+    pub fix_status: String,
+    pub affected_count: i64,
+    pub affected_environments: Option<Vec<String>>,
+    pub first_seen: Option<DateTime<Utc>>,
+    pub last_seen: Option<DateTime<Utc>>,
+    pub age_days: i32,
+    pub triage_status: String,
+}
+
+/// CVE package group with aggregated statistics.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct CvePackageGroup {
+    pub package_name: String,
+    pub cve_count: i64,
+    pub critical_count: i64,
+    pub high_count: i64,
+    pub medium_count: i64,
+    pub low_count: i64,
+    pub environments_count: i64,
+    pub total_affected_systems: i64,
+    pub fixable_count: i64,
+    pub outstanding_count: i64,
+    pub exploited_count: i64,
+    pub max_cvss: Option<f32>,
+    pub severity_score: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[sqlx(skip)]
+    pub cves: Option<Vec<CveListItem>>,
+}
+
+/// Detailed CVE information for the drawer view.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct CveDetail {
+    pub cve_id: String,
+    pub cvss_v3_score: Option<f32>,
+    pub severity: String,
+    pub title: String,
+    pub cvss_vector: Option<String>,
+    pub cwe_id: Option<String>,
+    pub published_date: Option<chrono::NaiveDate>,
+    pub modified_date: Option<chrono::NaiveDate>,
+    pub exploited: bool,
+    pub package_name: Option<String>,
+    pub installed_version: Option<String>,
+    pub fixed_version: Option<String>,
+    pub detection_method: Option<String>,
+    pub fix_status: String,
+}
+
+/// System affected by a CVE (for drawer detail view).
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct CveAffectedSystemDetail {
+    pub system_id: Uuid,
+    pub hostname: String,
+    pub environment: Option<String>,
+    pub primary_ip_address: Option<String>,
+    pub flake_name: Option<String>,
+    pub flake_id: Option<i32>,
+    pub commit_hash: Option<String>,
+    pub deployment_policy: String,
+    pub current_package_version: Option<String>,
+}
+
+/// CVE justification (triage) record.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct CveJustification {
+    pub system_id: Option<Uuid>,
+    pub cve_id: String,
+    pub category: String,
+    pub reason: String,
+    pub updated_by: Option<Uuid>,
+    pub updated_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+    pub updated_by_username: Option<String>,
+}
+
+/// Input for creating/updating a CVE justification.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CveJustificationInput {
+    pub system_id: Option<Uuid>, // None = fleet-wide justification
+    pub cve_id: String,
+    pub category: String, // "mitigated", "false_positive", "accepted_risk", "patch_scheduled"
+    pub reason: String,   // 10-2000 characters
+    pub updated_by: Uuid, // User ID from auth context
+}
+
+/// Fleet-wide CVE statistics.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct CveFleetStats {
+    pub total_cves: i64,
+    pub critical: i64,
+    pub high: i64,
+    pub medium: i64,
+    pub low: i64,
+    pub exploited: i64,
+    pub fixable: i64,
+    pub environments_affected: i64,
+    pub systems_affected: i64,
+    pub outstanding: i64,
+    pub accepted: i64,
+    pub scheduled: i64,
+}
+
 /// A single recent deployment event for the dashboard timeline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecentDeployment {

@@ -20,7 +20,7 @@ use crystal_forge::{
         agent_request::CFState,
         api::{
             admin, auth_dev, auth_local, auth_oidc, auth_session, auth_status, auth_whoami,
-            builders, caches, commits, config_health, dashboard, deployment_policies, deployments,
+            builders, caches, commits, config_health, cves, dashboard, deployment_policies, deployments,
             environments, flakes, hardening, setup_wizard, systems,
         },
         status,
@@ -182,6 +182,17 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/cves/scan-freshness",
             get(dashboard::cve_scan_freshness),
         )
+        // Advanced CVE dashboard endpoints (TASK-322)
+        .route("/api/v1/cves", get(cves::list_cves))
+        .route("/api/v1/cves/grouped", get(cves::list_cves_grouped))
+        .route("/api/v1/cves/stats", get(cves::get_fleet_stats))
+        .route("/api/v1/cves/packages", get(cves::list_package_names))
+        .route("/api/v1/cves/rescan-fleet", post(cves::trigger_fleet_rescan))
+        .route("/api/v1/cves/export", get(cves::export_cves))
+        .route("/api/v1/cves/:cve_id", get(cves::get_cve_detail))
+        .route("/api/v1/cves/:cve_id/systems", get(cves::get_cve_systems))
+        .route("/api/v1/cves/:cve_id/justification", post(cves::save_justification))
+        .route("/api/v1/cves/:cve_id/justifications", get(cves::list_justifications))
         .route(
             "/api/v1/hardening/summary",
             get(hardening::hardening_fleet_summary),
