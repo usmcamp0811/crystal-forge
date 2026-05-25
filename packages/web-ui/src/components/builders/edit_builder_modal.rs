@@ -275,7 +275,8 @@ pub fn EditBuilderModal(
 
                             // Resource Limits
                             div {
-                                class: "grid grid-cols-3 gap-4",
+                                class: "grid grid-cols-3",
+                                style: "gap:14px;",
                                 div {
                                     label {
                                         class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
@@ -301,7 +302,7 @@ pub fn EditBuilderModal(
                                         class: "input focus-ring",
                                         r#type: "number",
                                         min: "1",
-                                        value: "{max_memory_mb}",
+                                        value: "{max_cpu_cores}",
                                         oninput: move |e| max_cpu_cores.set(e.value()),
                                         disabled: is_submitting(),
                                     }
@@ -316,7 +317,7 @@ pub fn EditBuilderModal(
                                         r#type: "number",
                                         min: "1",
                                         step: "1",
-                                        value: "{max_concurrent_jobs}",
+                                        value: "{max_memory_mb}",
                                         oninput: move |e| max_memory_mb.set(e.value()),
                                         disabled: is_submitting(),
                                     }
@@ -324,7 +325,8 @@ pub fn EditBuilderModal(
                             }
 
                             div {
-                                class: "grid grid-cols-2 gap-4",
+                                class: "grid grid-cols-2",
+                                style: "gap:14px;",
                                 div {
                                     class: "field",
                                     label { "Max concurrent slots" }
