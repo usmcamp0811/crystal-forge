@@ -33,7 +33,6 @@
       };
     in lib.mkFlake {
       channels-config = { allowUnfree = true; };
-
       outputs-builder = channels: {
         packages = {
           agent = channels.nixpkgs.crystal-forge.default.agent;
