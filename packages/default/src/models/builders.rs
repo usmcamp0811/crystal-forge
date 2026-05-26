@@ -27,6 +27,8 @@ pub enum BuilderStatus {
     Inactive,
     #[sqlx(rename = "offline")]
     Offline,
+    #[sqlx(rename = "draining")]
+    Draining,
 }
 
 impl ToString for BuilderStatus {
@@ -35,6 +37,7 @@ impl ToString for BuilderStatus {
             BuilderStatus::Active => "active".into(),
             BuilderStatus::Inactive => "inactive".into(),
             BuilderStatus::Offline => "offline".into(),
+            BuilderStatus::Draining => "draining".into(),
         }
     }
 }
@@ -45,6 +48,7 @@ impl From<String> for BuilderStatus {
             "active" => BuilderStatus::Active,
             "inactive" => BuilderStatus::Inactive,
             "offline" => BuilderStatus::Offline,
+            "draining" => BuilderStatus::Draining,
             _ => BuilderStatus::Inactive, // default to inactive for unknown values
         }
     }
@@ -55,11 +59,14 @@ impl From<String> for BuilderStatus {
 pub struct Builder {
     pub id: Uuid,
     pub name: String,
+    pub host: Option<String>,
+    pub arch: String,
     pub public_key: PublicKey,
     pub status: BuilderStatus,
     pub max_cpu_cores: Option<i32>,
     pub max_memory_mb: Option<i32>,
     pub max_concurrent_jobs: i32,
+    pub enabled: bool,
     pub last_heartbeat_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -70,10 +77,13 @@ pub struct Builder {
 pub struct BuilderSummary {
     pub id: Uuid,
     pub name: String,
+    pub host: Option<String>,
+    pub arch: String,
     pub status: BuilderStatus,
     pub max_cpu_cores: Option<i32>,
     pub max_memory_mb: Option<i32>,
     pub max_concurrent_jobs: i32,
+    pub enabled: bool,
     pub last_heartbeat_at: Option<DateTime<Utc>>,
     pub assigned_environment_count: i32,
     #[sqlx(default)]
@@ -103,12 +113,15 @@ pub struct BuilderEnvironmentAssignment {
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateBuilderRequest {
     pub name: String,
+    pub host: Option<String>,
+    pub arch: String,
     /// Optional base64-encoded Ed25519 public key
     /// If not provided, server will generate a proper Ed25519 keypair
     pub public_key: Option<String>,
     pub max_cpu_cores: Option<i32>,
     pub max_memory_mb: Option<i32>,
     pub max_concurrent_jobs: Option<i32>,
+    pub enabled: Option<bool>,
     pub environment_ids: Vec<Uuid>, // Optional environment assignments
 }
 
@@ -116,10 +129,13 @@ pub struct CreateBuilderRequest {
 #[derive(Debug, Clone, Deserialize)]
 pub struct UpdateBuilderRequest {
     pub name: Option<String>,
+    pub host: Option<String>,
+    pub arch: Option<String>,
     pub status: Option<BuilderStatus>,
     pub max_cpu_cores: Option<i32>,
     pub max_memory_mb: Option<i32>,
     pub max_concurrent_jobs: Option<i32>,
+    pub enabled: Option<bool>,
 }
 
 /// Request to update builder public key
@@ -166,6 +182,7 @@ mod tests {
         assert_eq!(BuilderStatus::Active.to_string(), "active");
         assert_eq!(BuilderStatus::Inactive.to_string(), "inactive");
         assert_eq!(BuilderStatus::Offline.to_string(), "offline");
+        assert_eq!(BuilderStatus::Draining.to_string(), "draining");
     }
 
     #[test]
@@ -181,6 +198,10 @@ mod tests {
         assert_eq!(
             BuilderStatus::from("offline".to_string()),
             BuilderStatus::Offline
+        );
+        assert_eq!(
+            BuilderStatus::from("draining".to_string()),
+            BuilderStatus::Draining
         );
         assert_eq!(
             BuilderStatus::from("unknown".to_string()),

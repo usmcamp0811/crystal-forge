@@ -279,7 +279,8 @@ pub fn BuildsView() -> Element {
                     status: match builder.status {
                         BuilderStatus::Active => WorkerStatus::Running,
                         BuilderStatus::Inactive => WorkerStatus::Paused,
-                        BuilderStatus::Offline => WorkerStatus::Draining,
+                        BuilderStatus::Offline => WorkerStatus::Paused, // Treat offline as paused in UI
+                        BuilderStatus::Draining => WorkerStatus::Draining,
                     },
                 })
                 .collect::<Vec<_>>();
@@ -676,10 +677,13 @@ pub fn BuildsView() -> Element {
                                         for worker in builders_snapshot {
                                             let request = crate::api::models::UpdateBuilderRequest {
                                                 name: None,
+                                                host: None,
+                                                arch: None,
                                                 status: Some(target_status.clone()),
                                                 max_cpu_cores: None,
                                                 max_memory_mb: None,
                                                 max_concurrent_jobs: None,
+                                                enabled: None,
                                             };
 
                                             let builder_id = match uuid::Uuid::parse_str(&worker.id) {
@@ -718,10 +722,13 @@ pub fn BuildsView() -> Element {
 
                                         let request = crate::api::models::UpdateBuilderRequest {
                                             name: None,
+                                            host: None,
+                                            arch: None,
                                             status: Some(target_status),
                                             max_cpu_cores: None,
                                             max_memory_mb: None,
                                             max_concurrent_jobs: None,
+                                            enabled: None,
                                         };
 
                                         match api::client::update_builder(&builder_id, &request).await {

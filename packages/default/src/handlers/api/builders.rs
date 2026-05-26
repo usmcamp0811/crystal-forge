@@ -67,6 +67,8 @@ pub async fn create_builder(
         ));
     }
 
+    validate_builder_arch(&request.arch)?;
+
     // Validate public key if provided (prevent DoS via oversized input)
     if let Some(ref pk) = request.public_key {
         if pk.is_empty() {
@@ -144,6 +146,18 @@ fn map_create_builder_error(error: &anyhow::Error) -> (StatusCode, String) {
     )
 }
 
+fn validate_builder_arch(arch: &str) -> Result<(), (StatusCode, String)> {
+    let valid_arches = ["x86_64-linux", "aarch64-linux", "aarch64-darwin", "x86_64-darwin"];
+    if !valid_arches.contains(&arch) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("Invalid architecture. Must be one of: {}", valid_arches.join(", ")),
+        ));
+    }
+
+    Ok(())
+}
+
 /// GET /api/v1/builders - List all builders (admin-only)
 pub async fn list_builders(
     State(state): State<CFState>,
@@ -188,16 +202,25 @@ pub async fn update_builder(
     Path(builder_id): Path<Uuid>,
     headers: axum::http::HeaderMap,
     Json(request): Json<UpdateBuilderRequest>,
-) -> Result<Json<Builder>, StatusCode> {
+) -> Result<Json<Builder>, (StatusCode, String)> {
     // Verify admin authorization
     let Some(_admin_user) = require_admin(&state.pool, &headers).await else {
-        return Err(StatusCode::FORBIDDEN);
+        return Err((StatusCode::FORBIDDEN, "Admin access required".to_string()));
     };
+
+    if let Some(ref arch) = request.arch {
+        validate_builder_arch(arch)?;
+    }
 
     // Update builder
     let builder = builders::update_builder(&state.pool, &builder_id, &request)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to update builder".to_string(),
+            )
+        })?;
 
     Ok(Json(builder))
 }

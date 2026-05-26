@@ -60,16 +60,41 @@ pub fn Chip(
     }
 }
 
-/// Environment badge with custom color styling.
+/// Get environment color matching JSX data.js ENVIRONMENTS
+fn env_color(env: &str) -> &'static str {
+    match env {
+        "production" => "#dc2626",
+        "staging" => "#d97706",
+        "dev" => "#2563eb",
+        "edge" => "#0f766e",
+        "lab" => "#7c3aed",
+        _ => "#6b7280", // unknown/default gray
+    }
+}
+
+/// Environment badge with auto-color or custom styling.
 ///
-/// # Example
+/// Supports two modes:
+/// 1. Auto-color: Pass only `name` and colors are derived from env name
+/// 2. Custom: Pass `name`, `fg`, `bg`, `border` for full control
+///
+/// # Example (auto-color)
 /// ```
 /// rsx! {
 ///     EnvBadge {
-///         name: "production",
-///         fg: "#f87171",
-///         bg: "rgba(220,38,38,0.10)",
-///         border: "rgba(248,113,113,0.25)",
+///         name: "production".to_string(),
+///     }
+/// }
+/// ```
+///
+/// # Example (custom)
+/// ```
+/// rsx! {
+///     EnvBadge {
+///         name: "production".to_string(),
+///         fg: "#f87171".to_string(),
+///         bg: "rgba(220,38,38,0.10)".to_string(),
+///         border: "rgba(248,113,113,0.25)".to_string(),
 ///     }
 /// }
 /// ```
@@ -77,23 +102,47 @@ pub fn Chip(
 pub fn EnvBadge(
     /// The environment name to display
     name: String,
-    /// Foreground color (CSS color value)
-    fg: String,
-    /// Background color (CSS color value)  
-    bg: String,
-    /// Border color (CSS color value)
-    border: String,
+    /// Optional foreground color (auto-derived if not provided)
+    #[props(default)]
+    fg: Option<String>,
+    /// Optional background color (auto-derived if not provided)
+    #[props(default)]
+    bg: Option<String>,
+    /// Optional border color (auto-derived if not provided)
+    #[props(default)]
+    border: Option<String>,
 ) -> Element {
-    let style = format!(
-        "--env-fg: {}; --env-bg: {}; --env-border: {}",
-        fg, bg, border
-    );
+    let (fg_color, bg_color, border_color) =
+        if let (Some(fg), Some(bg), Some(border)) = (&fg, &bg, &border) {
+            // Custom colors provided
+            (fg.clone(), bg.clone(), border.clone())
+        } else {
+            // Auto-derive colors from env name
+            let color = env_color(&name);
+            (
+                color.to_string(),
+                format!("color-mix(in oklab, {} 14%, var(--cf-card-bg))", color),
+                color.to_string(),
+            )
+        };
 
     rsx! {
         span {
-            class: "env-badge",
-            style: "{style}",
-            span { class: "chip-dot" }
+            style: "
+                padding: 2px 6px;
+                border-radius: 99px;
+                font-size: 10px;
+                border: 1px solid {border_color};
+                background: {bg_color};
+                color: {fg_color};
+                display: inline-flex;
+                align-items: center;
+                gap: 4px;
+                font-family: inherit;
+            ",
+            span {
+                style: "width: 4px; height: 4px; border-radius: 50%; background: {fg_color};"
+            }
             "{name}"
         }
     }

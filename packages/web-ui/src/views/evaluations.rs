@@ -153,319 +153,319 @@ fn EvaluationsPage() -> Element {
     };
 
     rsx! {
-        div {
-            style: "display: flex; flex-direction: column; gap: 16px; outline: none;",
-            tabindex: 0,
-            onkeydown: move |evt| {
-                // No keyboard nav while drawer is open
-                if drawer_target.read().is_some() {
-                    if evt.key() == Key::Escape {
-                        drawer_target.set(None);
-                    }
-                    return;
-                }
-
-                let list_len = if active_tab() == EvaluationsTab::ActiveQueue {
-                    active_items.len()
-                } else {
-                    history_resource
-                        .read()
-                        .as_ref()
-                        .and_then(|r| r.as_ref().ok())
-                        .map(|p| p.items.len())
-                        .unwrap_or(0)
-                };
-
-                match evt.key() {
-                    Key::Character(ref c) if c == "j" || c == "ArrowDown" => {
-                        let next = match focused_index() {
-                            None => 0,
-                            Some(i) => (i + 1).min(list_len.saturating_sub(1)),
-                        };
-                        focused_index.set(Some(next));
-                    }
-                    Key::ArrowDown => {
-                        let next = match focused_index() {
-                            None => 0,
-                            Some(i) => (i + 1).min(list_len.saturating_sub(1)),
-                        };
-                        focused_index.set(Some(next));
-                    }
-                    Key::Character(ref c) if c == "k" => {
-                        let next = match focused_index() {
-                            None => 0,
-                            Some(0) => 0,
-                            Some(i) => i - 1,
-                        };
-                        focused_index.set(Some(next));
-                    }
-                    Key::ArrowUp => {
-                        let next = match focused_index() {
-                            None => 0,
-                            Some(0) => 0,
-                            Some(i) => i - 1,
-                        };
-                        focused_index.set(Some(next));
-                    }
-                    Key::Enter => {
-                        if let Some(idx) = focused_index() {
-                            if active_tab() == EvaluationsTab::ActiveQueue {
-                                if let Some(ev) = active_items.get(idx) {
-                                    drawer_target.set(Some(EvalDrawerTarget::Queue(ev.clone())));
-                                }
-                            } else {
-                                let item = history_resource
-                                    .read()
-                                    .as_ref()
-                                    .and_then(|r| r.as_ref().ok())
-                                    .and_then(|p| p.items.get(idx).cloned());
-                                if let Some(ev) = item {
-                                    drawer_target.set(Some(EvalDrawerTarget::History(ev)));
-                                }
-                            }
+            div {
+                style: "display: flex; flex-direction: column; gap: 16px; outline: none;",
+                tabindex: 0,
+                onkeydown: move |evt| {
+                    // No keyboard nav while drawer is open
+                    if drawer_target.read().is_some() {
+                        if evt.key() == Key::Escape {
+                            drawer_target.set(None);
                         }
+                        return;
                     }
-                    Key::Character(ref c) if c == "c" => {
-                        if active_tab() == EvaluationsTab::ActiveQueue {
+
+                    let list_len = if active_tab() == EvaluationsTab::ActiveQueue {
+                        active_items.len()
+                    } else {
+                        history_resource
+                            .read()
+                            .as_ref()
+                            .and_then(|r| r.as_ref().ok())
+                            .map(|p| p.items.len())
+                            .unwrap_or(0)
+                    };
+
+                    match evt.key() {
+                        Key::Character(ref c) if c == "j" || c == "ArrowDown" => {
+                            let next = match focused_index() {
+                                None => 0,
+                                Some(i) => (i + 1).min(list_len.saturating_sub(1)),
+                            };
+                            focused_index.set(Some(next));
+                        }
+                        Key::ArrowDown => {
+                            let next = match focused_index() {
+                                None => 0,
+                                Some(i) => (i + 1).min(list_len.saturating_sub(1)),
+                            };
+                            focused_index.set(Some(next));
+                        }
+                        Key::Character(ref c) if c == "k" => {
+                            let next = match focused_index() {
+                                None => 0,
+                                Some(0) => 0,
+                                Some(i) => i - 1,
+                            };
+                            focused_index.set(Some(next));
+                        }
+                        Key::ArrowUp => {
+                            let next = match focused_index() {
+                                None => 0,
+                                Some(0) => 0,
+                                Some(i) => i - 1,
+                            };
+                            focused_index.set(Some(next));
+                        }
+                        Key::Enter => {
                             if let Some(idx) = focused_index() {
-                                if let Some(ev) = active_items.get(idx) {
-                                    let commit_id = ev.commit_id;
-                                    let can_cancel = matches!(
-                                        ev.evaluation_status.as_str(),
-                                        "pending" | "in_progress"
-                                    );
-                                    if can_cancel {
-                                        let mut refresh_sig = refresh;
-                                        spawn(async move {
-                                            let _ = cancel_commit_evaluation(commit_id).await;
-                                            refresh_sig.set(refresh_sig() + 1);
-                                        });
+                                if active_tab() == EvaluationsTab::ActiveQueue {
+                                    if let Some(ev) = active_items.get(idx) {
+                                        drawer_target.set(Some(EvalDrawerTarget::Queue(ev.clone())));
+                                    }
+                                } else {
+                                    let item = history_resource
+                                        .read()
+                                        .as_ref()
+                                        .and_then(|r| r.as_ref().ok())
+                                        .and_then(|p| p.items.get(idx).cloned());
+                                    if let Some(ev) = item {
+                                        drawer_target.set(Some(EvalDrawerTarget::History(ev)));
                                     }
                                 }
                             }
                         }
-                    }
-                    Key::Escape => {
-                        focused_index.set(None);
-                    }
-                    _ => {}
-                }
-            },
-
-            // Page head
-            div {
-                class: "page-head",
-                div {
-                    h1 { class: "page-title", "Evaluations" }
-                    p {
-                        class: "page-subtitle",
-                        "{active_count} active · {completed_count} completed · {failed_count} failed"
-                    }
-                }
-                div {
-                    style: "display: flex; gap: 8px;",
-                    button {
-                        class: "btn btn-ghost focus-ring",
-                        title: "Sync flakes",
-                        Icon { name: IconName::Sync, size: 14 }
-                        " Sync flakes"
-                    }
-                    button {
-                        class: "btn btn-primary focus-ring",
-                        onclick: move |_| refresh.set(refresh() + 1),
-                        title: "Queue eval",
-                        Icon { name: IconName::Plus, size: 14 }
-                        " Queue eval"
-                    }
-                }
-            }
-
-            // Stat strip
-            div {
-                class: "stat-strip",
-                div {
-                    class: "stat",
-                    span {
-                        class: "stat-accent",
-                        style: "--stat-color: #60a5fa;"
-                    }
-                    div { class: "stat-label", "Active" }
-                    div {
-                        class: "stat-value",
-                        style: "color: #60a5fa;",
-                        "{active_count}"
-                    }
-                }
-                div {
-                    class: "stat",
-                    span {
-                        class: "stat-accent",
-                        style: "--stat-color: #34d399;"
-                    }
-                    div { class: "stat-label", "Completed" }
-                    div {
-                        class: "stat-value",
-                        style: "color: #34d399;",
-                        "{completed_count}"
-                    }
-                }
-                div {
-                    class: "stat",
-                    span {
-                        class: "stat-accent",
-                        style: "--stat-color: #f87171;"
-                    }
-                    div { class: "stat-label", "Failed" }
-                    div {
-                        class: "stat-value",
-                        style: "color: #f87171;",
-                        "{failed_count}"
-                    }
-                }
-                div {
-                    class: "stat",
-                    span {
-                        class: "stat-accent",
-                        style: "--stat-color: var(--cf-text-secondary);"
-                    }
-                    div { class: "stat-label", "Total" }
-                    div { class: "stat-value", "{total_count}" }
-                }
-            }
-
-            // Tabs
-            div {
-                class: "card",
-                style: "overflow: hidden;",
-
-                div {
-                    class: "sd-tabs",
-                    style: "padding: 0 16px; border-bottom: 1px solid var(--cf-card-border);",
-                    button {
-                        class: if active_tab() == EvaluationsTab::ActiveQueue {
-                            "sd-tab focus-ring active"
-                        } else {
-                            "sd-tab focus-ring"
-                        },
-                        onclick: move |_| active_tab.set(EvaluationsTab::ActiveQueue),
-                        "Active Queue "
-                        span { class: "sd-tab-badge", "{active_count}" }
-                    }
-                    button {
-                        class: if active_tab() == EvaluationsTab::History {
-                            "sd-tab focus-ring active"
-                        } else {
-                            "sd-tab focus-ring"
-                        },
-                        onclick: move |_| active_tab.set(EvaluationsTab::History),
-                        "History"
-                    }
-                }
-
-                if active_tab() == EvaluationsTab::ActiveQueue {
-                    EvalActiveQueue {
-                        evals: active_items.clone(),
-                        refresh: refresh,
-                        queue_items: queue_items,
-                        drawer_target: drawer_target,
-                        focused_index: focused_index,
-                    }
-                }
-
-                if active_tab() == EvaluationsTab::History {
-                    if !history_selected_ids.read().is_empty() {
-                        div {
-                            class: "ed-bulkbar",
-                            span {
-                                style: "font-size: 13px; font-weight: 600;",
-                                "{selected_count} selected"
-                            }
-                            button {
-                                class: "btn btn-ghost focus-ring xs",
-                                onclick: move |_| {
-                                    let selected_ids: Vec<i32> = history_selected_ids.read().iter().copied().collect();
-                                    let mut refresh_sig = refresh.clone();
-                                    let mut selected_sig = history_selected_ids.clone();
-                                    spawn(async move {
-                                        for commit_id in selected_ids {
-                                            let _ = re_evaluate_commit(commit_id).await;
+                        Key::Character(ref c) if c == "c" => {
+                            if active_tab() == EvaluationsTab::ActiveQueue {
+                                if let Some(idx) = focused_index() {
+                                    if let Some(ev) = active_items.get(idx) {
+                                        let commit_id = ev.commit_id;
+                                        let can_cancel = matches!(
+                                            ev.evaluation_status.as_str(),
+                                            "pending" | "in_progress"
+                                        );
+                                        if can_cancel {
+                                            let mut refresh_sig = refresh;
+                                            spawn(async move {
+                                                let _ = cancel_commit_evaluation(commit_id).await;
+                                                refresh_sig.set(refresh_sig() + 1);
+                                            });
                                         }
-                                        selected_sig.write().clear();
-                                        refresh_sig.set(refresh_sig() + 1);
-                                    });
-                                },
-                                Icon { name: IconName::Sync, size: 11 }
-                                " Re-evaluate"
+                                    }
+                                }
                             }
-                            button {
-                                class: "btn btn-ghost focus-ring xs",
-                                disabled: compare_disabled,
-                                title: "{compare_title}",
-                                style: if compare_disabled {
-                                    "opacity: 0.4; cursor: not-allowed;"
-                                } else {
-                                    ""
-                                },
-                                "Compare"
-                            }
-                            button {
-                                class: "btn btn-ghost focus-ring xs",
-                                Icon { name: IconName::Download, size: 11 }
-                                " Download logs"
-                            }
-                            div { style: "flex: 1;" }
-                            button {
-                                class: "btn-icon focus-ring",
-                                onclick: move |_| {
-                                    history_selected_ids.write().clear();
-                                },
-                                title: "Clear",
-                                Icon { name: IconName::X, size: 14 }
-                            }
+                        }
+                        Key::Escape => {
+                            focused_index.set(None);
+                        }
+                        _ => {}
+                    }
+                },
+
+                // Page head
+                div {
+                    class: "page-head",
+                    div {
+                        h1 { class: "page-title", "Evaluations" }
+                        p {
+                            class: "page-subtitle",
+                            "{active_count} active · {completed_count} completed · {failed_count} failed"
+                        }
+                    }
+                    div {
+                        style: "display: flex; gap: 8px;",
+                        button {
+                            class: "btn btn-ghost focus-ring",
+                            title: "Sync flakes",
+                            Icon { name: IconName::Sync, size: 14 }
+                            " Sync flakes"
+                        }
+                        button {
+                            class: "btn btn-primary focus-ring",
+                            onclick: move |_| refresh.set(refresh() + 1),
+                            title: "Queue eval",
+                            Icon { name: IconName::Plus, size: 14 }
+                            " Queue eval"
+                        }
+                    }
+                }
+
+                // Stat strip
+                div {
+                    class: "stat-strip",
+                    div {
+                        class: "stat",
+                        span {
+                            class: "stat-accent",
+                            style: "--stat-color: #60a5fa;"
+                        }
+                        div { class: "stat-label", "Active" }
+                        div {
+                            class: "stat-value",
+                            style: "color: #60a5fa;",
+                            "{active_count}"
+                        }
+                    }
+                    div {
+                        class: "stat",
+                        span {
+                            class: "stat-accent",
+                            style: "--stat-color: #34d399;"
+                        }
+                        div { class: "stat-label", "Completed" }
+                        div {
+                            class: "stat-value",
+                            style: "color: #34d399;",
+                            "{completed_count}"
+                        }
+                    }
+                    div {
+                        class: "stat",
+                        span {
+                            class: "stat-accent",
+                            style: "--stat-color: #f87171;"
+                        }
+                        div { class: "stat-label", "Failed" }
+                        div {
+                            class: "stat-value",
+                            style: "color: #f87171;",
+                            "{failed_count}"
+                        }
+                    }
+                    div {
+                        class: "stat",
+                        span {
+                            class: "stat-accent",
+                            style: "--stat-color: var(--cf-text-secondary);"
+                        }
+                        div { class: "stat-label", "Total" }
+                        div { class: "stat-value", "{total_count}" }
+                    }
+                }
+
+                // Tabs
+                div {
+                    class: "card",
+                    style: "overflow: hidden;",
+
+                    div {
+                        class: "sd-tabs",
+                        style: "padding: 0 16px; border-bottom: 1px solid var(--cf-card-border);",
+                        button {
+                            class: if active_tab() == EvaluationsTab::ActiveQueue {
+                                "sd-tab focus-ring active"
+                            } else {
+                                "sd-tab focus-ring"
+                            },
+                            onclick: move |_| active_tab.set(EvaluationsTab::ActiveQueue),
+                            "Active Queue "
+                            span { class: "sd-tab-badge", "{active_count}" }
+                        }
+                        button {
+                            class: if active_tab() == EvaluationsTab::History {
+                                "sd-tab focus-ring active"
+                            } else {
+                                "sd-tab focus-ring"
+                            },
+                            onclick: move |_| active_tab.set(EvaluationsTab::History),
+                            "History"
                         }
                     }
 
-                    EvalHistory {
-                        history_resource: history_resource,
-                        history_status_filter: history_status_filter,
-                        history_flake_filter: history_flake_filter,
-                        history_page: history_page,
+                    if active_tab() == EvaluationsTab::ActiveQueue {
+                        EvalActiveQueue {
+                            evals: active_items.clone(),
+                            refresh: refresh,
+                            queue_items: queue_items,
+                            drawer_target: drawer_target,
+                            focused_index: focused_index,
+                        }
+                    }
+
+                    if active_tab() == EvaluationsTab::History {
+                        if !history_selected_ids.read().is_empty() {
+                            div {
+                                class: "ed-bulkbar",
+                                span {
+                                    style: "font-size: 13px; font-weight: 600;",
+                                    "{selected_count} selected"
+                                }
+                                button {
+                                    class: "btn btn-ghost focus-ring xs",
+                                    onclick: move |_| {
+                                        let selected_ids: Vec<i32> = history_selected_ids.read().iter().copied().collect();
+                                        let mut refresh_sig = refresh.clone();
+                                        let mut selected_sig = history_selected_ids.clone();
+                                        spawn(async move {
+                                            for commit_id in selected_ids {
+                                                let _ = re_evaluate_commit(commit_id).await;
+                                            }
+                                            selected_sig.write().clear();
+                                            refresh_sig.set(refresh_sig() + 1);
+                                        });
+                                    },
+                                    Icon { name: IconName::Sync, size: 11 }
+                                    " Re-evaluate"
+                                }
+                                button {
+                                    class: "btn btn-ghost focus-ring xs",
+                                    disabled: compare_disabled,
+                                    title: "{compare_title}",
+                                    style: if compare_disabled {
+                                        "opacity: 0.4; cursor: not-allowed;"
+                                    } else {
+                                        ""
+                                    },
+                                    "Compare"
+                                }
+                                button {
+                                    class: "btn btn-ghost focus-ring xs",
+                                    Icon { name: IconName::Download, size: 11 }
+                                    " Download logs"
+                                }
+                                div { style: "flex: 1;" }
+                                button {
+                                    class: "btn-icon focus-ring",
+                                    onclick: move |_| {
+                                        history_selected_ids.write().clear();
+                                    },
+                                    title: "Clear",
+                                    Icon { name: IconName::X, size: 14 }
+                                }
+                            }
+                        }
+
+                        EvalHistory {
+                            history_resource: history_resource,
+                            history_status_filter: history_status_filter,
+                            history_flake_filter: history_flake_filter,
+                            history_page: history_page,
+                            refresh: refresh,
+                            history_selected_ids: history_selected_ids,
+                            drawer_target: drawer_target,
+                            focused_index: focused_index,
+                        }
+                    }
+                }
+
+                if let Some(target) = drawer_target.read().clone() {
+                    EvalDrawer {
+                        target: target,
                         refresh: refresh,
-                        history_selected_ids: history_selected_ids,
-                        drawer_target: drawer_target,
-                        focused_index: focused_index,
+                        on_close: move |_| drawer_target.set(None),
                     }
                 }
-            }
 
-            if let Some(target) = drawer_target.read().clone() {
-                EvalDrawer {
-                    target: target,
-                    refresh: refresh,
-                    on_close: move |_| drawer_target.set(None),
-                }
-            }
-
-            div {
-                class: "ed-kbd-hint",
-                span {
-                    kbd { "j" }
-                    kbd { "k" }
-                    " navigate"
-                }
-                span {
-                    kbd { "↵" }
-                    " open"
-                }
-                if active_tab() == EvaluationsTab::ActiveQueue {
+                div {
+                    class: "ed-kbd-hint",
                     span {
-                        kbd { "c" }
-                        " cancel"
+                        kbd { "j" }
+                        kbd { "k" }
+                        " navigate"
+                    }
+                    span {
+                        kbd { "↵" }
+                        " open"
+                    }
+                    if active_tab() == EvaluationsTab::ActiveQueue {
+                        span {
+                            kbd { "c" }
+                            " cancel"
+                        }
                     }
                 }
-            }
+        }
     }
-}
 }
 
 #[component]
@@ -1085,7 +1085,10 @@ fn EvalDrawer(
         }
         EvalDrawerTarget::History(ev) => {
             let status_meta = eval_status_meta(&ev.evaluation_status);
-            let is_live = matches!(ev.evaluation_status.as_str(), "pending" | "in_progress" | "cancelling");
+            let is_live = matches!(
+                ev.evaluation_status.as_str(),
+                "pending" | "in_progress" | "cancelling"
+            );
             let close_click = move |evt: MouseEvent| on_close.call(evt);
 
             rsx! {
@@ -1436,7 +1439,8 @@ fn EvalDrawerLogTabHistory(ev: EvalHistoryItem, live: bool) -> Element {
 
 #[component]
 fn EvalDrawerPolicyTab(commit_id: i32) -> Element {
-    let policy_resource = use_resource(move || async move { fetch_eval_policy_matrix(commit_id).await });
+    let policy_resource =
+        use_resource(move || async move { fetch_eval_policy_matrix(commit_id).await });
     let policy_snapshot = policy_resource.read();
 
     rsx! {
@@ -1738,7 +1742,11 @@ fn log_line_color(line: &str) -> &'static str {
         "#f87171"
     } else if lower.contains("warn") || lower.contains("skip") {
         "#f59e0b"
-    } else if lower.contains("ok") || lower.contains("pass") || lower.contains("✓") || lower.contains("complete") {
+    } else if lower.contains("ok")
+        || lower.contains("pass")
+        || lower.contains("✓")
+        || lower.contains("complete")
+    {
         "#34d399"
     } else {
         "inherit"
