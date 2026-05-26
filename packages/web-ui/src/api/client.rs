@@ -305,7 +305,7 @@ pub async fn save_cve_justification(
         base_url(),
         encode_uri_component(cve_id)
     );
-    post_json(&url, input).await?;
+    let _: () = post_json(&url, input).await?;
     Ok(())
 }
 
@@ -664,6 +664,11 @@ pub async fn fetch_eval_history(
 /// This ensures characters like spaces, &, #, %, +, and other reserved characters
 /// are safely encoded before being interpolated into a URL query string.
 fn encode_query_value(value: &str) -> String {
+    js_sys::encode_uri_component(value).into()
+}
+
+/// URL-encode a path component (e.g., CVE ID) for safe interpolation into URL paths.
+fn encode_uri_component(value: &str) -> String {
     js_sys::encode_uri_component(value).into()
 }
 
