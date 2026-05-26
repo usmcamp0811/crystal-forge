@@ -242,19 +242,114 @@ pub fn EditBuilderModal(
                             div {
                                 class: "space-y-4",
 
-                            // Name
                             div {
-                                class: "field",
-                                label {
-                                    class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
-                                    "Builder Name"
+                                style: "display:grid; grid-template-columns:1fr 1fr; gap:14px;",
+
+                                // Name
+                                div {
+                                    class: "field",
+                                    label {
+                                        class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
+                                        "Name"
+                                    }
+                                    input {
+                                        class: "input focus-ring mono",
+                                        r#type: "text",
+                                        value: "{name}",
+                                        oninput: move |e| name.set(e.value()),
+                                        disabled: is_submitting(),
+                                        placeholder: "e.g. hydra-03",
+                                    }
                                 }
-                                input {
-                                    class: "input focus-ring mono",
-                                    r#type: "text",
-                                    value: "{name}",
-                                    oninput: move |e| name.set(e.value()),
-                                    disabled: is_submitting(),
+
+                                // Environment assignments
+                                div {
+                                    class: "field",
+                                    label {
+                                        class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
+                                        "Environments served"
+                                    }
+
+                                    {
+                                        let env_data = environments.read();
+                                        match &*env_data {
+                                            Some(Ok(env_list)) => rsx! {
+                                                if env_list.is_empty() {
+                                                    p {
+                                                        class: "text-sm {theme::text::SECONDARY}",
+                                                        "No environments available"
+                                                    }
+                                                } else {
+                                                    div {
+                                                        style: "display:flex; flex-wrap:wrap; gap:6px;",
+                                                        for env in env_list {
+                                                            {
+                                                                let env_id = env.id;
+                                                                let env_name = env.name.clone();
+                                                                let env_color = match env_name.to_ascii_lowercase().as_str() {
+                                                                    "production" => "#dc2626",
+                                                                    "staging" => "#d97706",
+                                                                    "dev" => "#2563eb",
+                                                                    "edge" => "#0f766e",
+                                                                    "lab" => "#7c3aed",
+                                                                    _ => "#6b7280",
+                                                                };
+                                                                let is_selected = selected_environments().contains(&env_id);
+                                                                let border = if is_selected {
+                                                                    format!("1px solid {}", env_color)
+                                                                } else {
+                                                                    "1px solid var(--cf-card-border)".to_string()
+                                                                };
+                                                                let background = if is_selected {
+                                                                    format!(
+                                                                        "color-mix(in oklab, {} 14%, var(--cf-card-bg))",
+                                                                        env_color
+                                                                    )
+                                                                } else {
+                                                                    "transparent".to_string()
+                                                                };
+                                                                let color = if is_selected {
+                                                                    env_color.to_string()
+                                                                } else {
+                                                                    "var(--cf-text-secondary)".to_string()
+                                                                };
+                                                                rsx! {
+                                                                    button {
+                                                                        key: "{env.id}",
+                                                                        class: "focus-ring",
+                                                                        r#type: "button",
+                                                                        onclick: move |_| toggle_environment(env_id),
+                                                                        disabled: is_submitting(),
+                                                                        style: "padding:4px 10px; border-radius:99px; font-size:11px; border:{border}; background:{background}; color:{color}; cursor:pointer; display:inline-flex; align-items:center; gap:6px; font-family:inherit;",
+                                                                        span {
+                                                                            style: "width:6px; height:6px; border-radius:50%; background:{env_color};"
+                                                                        }
+                                                                        "{env.name}"
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                div {
+                                                    class: "help",
+                                                    "Builds for systems in any of these environments will be routed to this worker."
+                                                }
+                                            },
+                                            Some(Err(e)) => rsx! {
+                                                p {
+                                                    class: "text-sm text-red-400",
+                                                    "Failed to load environments: {e}"
+                                                }
+                                            },
+                                            None => rsx! {
+                                                p {
+                                                    class: "text-sm {theme::text::SECONDARY}",
+                                                    "Loading environments..."
+                                                }
+                                            },
+                                        }
+                                    }
                                 }
                             }
 
@@ -352,96 +447,6 @@ pub fn EditBuilderModal(
                                             onchange: move |e| enabled.set(e.checked()),
                                         }
                                         span { "Enabled (accepts jobs)" }
-                                    }
-                                }
-                            }
-
-                            // Environment assignments
-                            div {
-                                class: "field",
-                                label {
-                                    class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
-                                    "Environments served"
-                                }
-
-                                {
-                                    let env_data = environments.read();
-                                    match &*env_data {
-                                        Some(Ok(env_list)) => rsx! {
-                                            if env_list.is_empty() {
-                                                p {
-                                                    class: "text-sm {theme::text::SECONDARY}",
-                                                    "No environments available"
-                                                }
-                                            } else {
-                                                div {
-                                                    style: "display:flex; flex-wrap:wrap; gap:6px;",
-                                                    for env in env_list {
-                                                        {
-                                                            let env_id = env.id;
-                                                            let env_name = env.name.clone();
-                                                            let env_color = match env_name.to_ascii_lowercase().as_str() {
-                                                                "production" => "#dc2626",
-                                                                "staging" => "#d97706",
-                                                                "dev" => "#2563eb",
-                                                                "edge" => "#0f766e",
-                                                                "lab" => "#7c3aed",
-                                                                _ => "#6b7280",
-                                                            };
-                                                            let is_selected = selected_environments().contains(&env_id);
-                                                            let border = if is_selected {
-                                                                format!("1px solid {}", env_color)
-                                                            } else {
-                                                                "1px solid var(--cf-card-border)".to_string()
-                                                            };
-                                                            let background = if is_selected {
-                                                                format!(
-                                                                    "color-mix(in oklab, {} 14%, var(--cf-card-bg))",
-                                                                    env_color
-                                                                )
-                                                            } else {
-                                                                "transparent".to_string()
-                                                            };
-                                                            let color = if is_selected {
-                                                                env_color.to_string()
-                                                            } else {
-                                                                "var(--cf-text-secondary)".to_string()
-                                                            };
-                                                            rsx! {
-                                                                button {
-                                                                    key: "{env.id}",
-                                                                    class: "focus-ring",
-                                                                    r#type: "button",
-                                                                    onclick: move |_| toggle_environment(env_id),
-                                                                    disabled: is_submitting(),
-                                                                    style: "padding:4px 10px; border-radius:99px; font-size:11px; border:{border}; background:{background}; color:{color}; cursor:pointer; display:inline-flex; align-items:center; gap:6px; font-family:inherit;",
-                                                                    span {
-                                                                        style: "width:6px; height:6px; border-radius:50%; background:{env_color};"
-                                                                    }
-                                                                    "{env.name}"
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            div {
-                                                class: "help",
-                                                "Builds for systems in any of these environments will be routed to this worker."
-                                            }
-                                        },
-                                        Some(Err(e)) => rsx! {
-                                            p {
-                                                class: "text-sm text-red-400",
-                                                "Failed to load environments: {e}"
-                                            }
-                                        },
-                                        None => rsx! {
-                                            p {
-                                                class: "text-sm {theme::text::SECONDARY}",
-                                                "Loading environments..."
-                                            }
-                                        },
                                     }
                                 }
                             }
