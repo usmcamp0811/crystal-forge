@@ -285,14 +285,10 @@ pub fn EditBuilderModal(
                                                         for env in env_list {
                                                             {
                                                                 let env_id = env.id;
-                                                                let env_name = env.name.clone();
-                                                                let env_color = match env_name.to_ascii_lowercase().as_str() {
-                                                                    "production" => "#dc2626",
-                                                                    "staging" => "#d97706",
-                                                                    "dev" => "#2563eb",
-                                                                    "edge" => "#0f766e",
-                                                                    "lab" => "#7c3aed",
-                                                                    _ => "#6b7280",
+                                                                let env_color = if env.color_hex.trim().is_empty() {
+                                                                    "#6b7280".to_string()
+                                                                } else {
+                                                                    env.color_hex.clone()
                                                                 };
                                                                 let is_selected = selected_environments().contains(&env_id);
                                                                 let border = if is_selected {
@@ -309,7 +305,7 @@ pub fn EditBuilderModal(
                                                                     "transparent".to_string()
                                                                 };
                                                                 let color = if is_selected {
-                                                                    env_color.to_string()
+                                                                    env_color.clone()
                                                                 } else {
                                                                     "var(--cf-text-secondary)".to_string()
                                                                 };
