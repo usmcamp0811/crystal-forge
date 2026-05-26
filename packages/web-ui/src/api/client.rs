@@ -165,6 +165,194 @@ pub async fn fetch_cve_dashboard_vulnerabilities(
     fetch_json(&url).await
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Advanced CVE Dashboard Client Functions (TASK-322)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Fetch CVE list with filters.
+pub async fn fetch_cves(filters: &CveFilters) -> Result<Vec<CveListItem>, ApiClientError> {
+    let mut parts: Vec<String> = Vec::new();
+
+    if let Some(severity) = &filters.severity {
+        if !severity.is_empty() {
+            parts.push(format!("severity={}", encode_query_value(severity)));
+        }
+    }
+
+    if let Some(fix_status) = &filters.fix_status {
+        if !fix_status.is_empty() {
+            parts.push(format!("fix_status={}", encode_query_value(fix_status)));
+        }
+    }
+
+    if let Some(triage_status) = &filters.triage_status {
+        if !triage_status.is_empty() {
+            parts.push(format!("triage_status={}", encode_query_value(triage_status)));
+        }
+    }
+
+    if let Some(package) = &filters.package {
+        if !package.is_empty() {
+            parts.push(format!("package={}", encode_query_value(package)));
+        }
+    }
+
+    if let Some(search) = &filters.search {
+        if !search.is_empty() {
+            parts.push(format!("search={}", encode_query_value(search)));
+        }
+    }
+
+    if let Some(sort) = &filters.sort {
+        if !sort.is_empty() {
+            parts.push(format!("sort={}", encode_query_value(sort)));
+        }
+    }
+
+    if let Some(limit) = filters.limit {
+        parts.push(format!("limit={limit}"));
+    }
+
+    let mut url = format!("{}/cves", base_url());
+    if !parts.is_empty() {
+        url.push('?');
+        url.push_str(&parts.join("&"));
+    }
+
+    fetch_json(&url).await
+}
+
+/// Fetch CVEs grouped by package.
+pub async fn fetch_cves_grouped(
+    filters: &CveFilters,
+) -> Result<Vec<CvePackageGroup>, ApiClientError> {
+    let mut parts: Vec<String> = Vec::new();
+
+    if let Some(severity) = &filters.severity {
+        if !severity.is_empty() {
+            parts.push(format!("severity={}", encode_query_value(severity)));
+        }
+    }
+
+    if let Some(fix_status) = &filters.fix_status {
+        if !fix_status.is_empty() {
+            parts.push(format!("fix_status={}", encode_query_value(fix_status)));
+        }
+    }
+
+    if let Some(triage_status) = &filters.triage_status {
+        if !triage_status.is_empty() {
+            parts.push(format!("triage_status={}", encode_query_value(triage_status)));
+        }
+    }
+
+    let mut url = format!("{}/cves/grouped", base_url());
+    if !parts.is_empty() {
+        url.push('?');
+        url.push_str(&parts.join("&"));
+    }
+
+    fetch_json(&url).await
+}
+
+/// Fetch fleet-wide CVE statistics.
+pub async fn fetch_cve_fleet_stats() -> Result<CveFleetStats, ApiClientError> {
+    let url = format!("{}/cves/stats", base_url());
+    fetch_json(&url).await
+}
+
+/// Fetch package names for autocomplete.
+pub async fn fetch_cve_package_names() -> Result<Vec<String>, ApiClientError> {
+    let url = format!("{}/cves/packages", base_url());
+    fetch_json(&url).await
+}
+
+/// Fetch detailed information for a single CVE.
+pub async fn fetch_cve_detail(cve_id: &str) -> Result<CveDetail, ApiClientError> {
+    let url = format!("{}/cves/{}", base_url(), encode_uri_component(cve_id));
+    fetch_json(&url).await
+}
+
+/// Fetch systems affected by a CVE.
+pub async fn fetch_cve_systems(cve_id: &str) -> Result<Vec<CveAffectedSystemDetail>, ApiClientError> {
+    let url = format!(
+        "{}/cves/{}/systems",
+        base_url(),
+        encode_uri_component(cve_id)
+    );
+    fetch_json(&url).await
+}
+
+/// Fetch justification history for a CVE.
+pub async fn fetch_cve_justifications(
+    cve_id: &str,
+) -> Result<Vec<CveJustification>, ApiClientError> {
+    let url = format!(
+        "{}/cves/{}/justifications",
+        base_url(),
+        encode_uri_component(cve_id)
+    );
+    fetch_json(&url).await
+}
+
+/// Save a CVE justification.
+pub async fn save_cve_justification(
+    cve_id: &str,
+    input: &CveJustificationInput,
+) -> Result<(), ApiClientError> {
+    let url = format!(
+        "{}/cves/{}/justification",
+        base_url(),
+        encode_uri_component(cve_id)
+    );
+    post_json(&url, input).await?;
+    Ok(())
+}
+
+/// Trigger CVE scan for all active systems (fleet rescan).
+pub async fn trigger_cve_fleet_rescan() -> Result<FleetRescanResponse, ApiClientError> {
+    let url = format!("{}/cves/rescan-fleet", base_url());
+    post_json_no_body(&url).await
+}
+
+/// Export CVEs as CSV (triggers browser download).
+pub async fn export_cves_csv(filters: &CveFilters) -> Result<(), ApiClientError> {
+    let mut parts: Vec<String> = Vec::new();
+
+    if let Some(severity) = &filters.severity {
+        if !severity.is_empty() {
+            parts.push(format!("severity={}", encode_query_value(severity)));
+        }
+    }
+
+    if let Some(fix_status) = &filters.fix_status {
+        if !fix_status.is_empty() {
+            parts.push(format!("fix_status={}", encode_query_value(fix_status)));
+        }
+    }
+
+    if let Some(triage_status) = &filters.triage_status {
+        if !triage_status.is_empty() {
+            parts.push(format!("triage_status={}", encode_query_value(triage_status)));
+        }
+    }
+
+    let mut url = format!("{}/cves/export", base_url());
+    if !parts.is_empty() {
+        url.push('?');
+        url.push_str(&parts.join("&"));
+    }
+
+    // Trigger browser download by setting window.location
+    let window = web_sys::window().expect("no window");
+    window
+        .location()
+        .set_href(&url)
+        .map_err(|_| ApiClientError::Network("Failed to trigger download".to_string()))?;
+
+    Ok(())
+}
+
 /// Fetch a paginated list of systems.
 pub async fn fetch_systems(
     params: &SystemsListParams,
@@ -1389,6 +1577,21 @@ async fn send_empty(method: &str, url: &str) -> Result<(), ApiClientError> {
         });
     }
     Ok(())
+}
+
+/// POST with JSON body, expecting JSON response.
+async fn post_json<T: serde::de::DeserializeOwned, B: serde::Serialize>(
+    url: &str,
+    body: &B,
+) -> Result<T, ApiClientError> {
+    send_json("POST", url, Some(body)).await
+}
+
+/// POST without body, expecting JSON response.
+async fn post_json_no_body<T: serde::de::DeserializeOwned>(
+    url: &str,
+) -> Result<T, ApiClientError> {
+    send_json::<T, ()>("POST", url, None).await
 }
 
 async fn send_json<T: serde::de::DeserializeOwned, B: serde::Serialize>(
