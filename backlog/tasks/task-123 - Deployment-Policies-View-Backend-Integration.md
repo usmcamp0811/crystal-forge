@@ -4,7 +4,7 @@ title: Deployment Policies View - Backend Integration
 status: Done
 assignee: []
 created_date: '2026-02-23'
-updated_date: '2026-03-13 01:24'
+updated_date: '2026-05-26 03:34'
 labels:
   - backend
   - api
@@ -13,7 +13,7 @@ labels:
 milestone: m-13
 dependencies: []
 priority: high
-ordinal: 2500
+ordinal: 15000
 ---
 
 ## Description

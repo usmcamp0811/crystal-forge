@@ -5,7 +5,7 @@ status: Done
 assignee:
   - KimiK2.5
 created_date: '2026-02-14 04:41'
-updated_date: '2026-03-13 01:24'
+updated_date: '2026-05-26 03:34'
 labels:
   - ui
   - testing
@@ -13,7 +13,7 @@ labels:
 milestone: m-3
 dependencies: []
 parent_task_id: TASK-MEDIUM
-ordinal: 47000
+ordinal: 76000
 ---
 
 ## Description

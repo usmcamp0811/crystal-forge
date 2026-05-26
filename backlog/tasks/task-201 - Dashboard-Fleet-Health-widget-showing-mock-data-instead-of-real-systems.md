@@ -4,7 +4,7 @@ title: Dashboard Fleet Health widget showing mock data instead of real systems
 status: Done
 assignee: []
 created_date: '2026-03-20 13:40'
-updated_date: '2026-03-31 01:56'
+updated_date: '2026-05-26 03:34'
 labels:
   - frontend
   - dashboard
@@ -16,7 +16,7 @@ references:
   - packages/web-ui/src/components/dashboard/fleet_health.rs
   - packages/default/src/queries/dashboard.rs
 priority: high
-ordinal: 1200
+ordinal: 9000
 ---
 
 ## Description

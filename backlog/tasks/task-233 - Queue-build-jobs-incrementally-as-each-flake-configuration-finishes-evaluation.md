@@ -4,7 +4,7 @@ title: Queue build jobs incrementally as each flake configuration finishes evalu
 status: Done
 assignee: []
 created_date: '2026-04-01 01:34'
-updated_date: '2026-04-06 12:51'
+updated_date: '2026-05-26 03:34'
 labels:
   - eval
   - build-queue
@@ -12,6 +12,7 @@ labels:
   - sprint-ready
 dependencies: []
 priority: high
+ordinal: 266000
 ---
 
 ## Description

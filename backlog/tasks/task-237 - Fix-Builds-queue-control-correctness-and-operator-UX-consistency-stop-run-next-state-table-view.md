@@ -6,7 +6,7 @@ title: >-
 status: Done
 assignee: []
 created_date: '2026-04-02 01:09'
-updated_date: '2026-04-14 00:37'
+updated_date: '2026-05-26 03:34'
 labels:
   - builds
   - queue
@@ -24,6 +24,7 @@ references:
   - packages/web-ui/src/components/builds/build_detail_pane.rs
   - checks/web-ui/tests/integration-test.js
 priority: high
+ordinal: 264000
 ---
 
 ## Description

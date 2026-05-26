@@ -4,7 +4,7 @@ title: Replace blocking setup wizard with non-blocking guided coach panel
 status: Done
 assignee: []
 created_date: '2026-03-14 13:17'
-updated_date: '2026-03-15 20:17'
+updated_date: '2026-05-26 03:34'
 labels:
   - frontend
   - ux
@@ -12,6 +12,7 @@ labels:
   - admin
 dependencies: []
 priority: high
+ordinal: 284000
 ---
 
 ## Description

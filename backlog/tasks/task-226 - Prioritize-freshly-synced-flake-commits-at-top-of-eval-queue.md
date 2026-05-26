@@ -4,7 +4,7 @@ title: Prioritize freshly synced flake commits at top of eval queue
 status: Done
 assignee: []
 created_date: '2026-03-30 01:56'
-updated_date: '2026-03-31 01:57'
+updated_date: '2026-05-26 03:34'
 labels:
   - queueing
   - flakes
@@ -12,6 +12,7 @@ labels:
   - scheduling
 dependencies: []
 priority: high
+ordinal: 269000
 ---
 
 ## Description

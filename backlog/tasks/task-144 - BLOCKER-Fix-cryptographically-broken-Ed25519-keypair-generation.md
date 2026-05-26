@@ -4,7 +4,7 @@ title: 'BLOCKER: Fix cryptographically broken Ed25519 keypair generation'
 status: Done
 assignee: []
 created_date: '2026-03-01 02:27'
-updated_date: '2026-03-13 01:24'
+updated_date: '2026-05-26 03:34'
 labels:
   - security
   - blocker
@@ -13,7 +13,7 @@ labels:
   - web-ui
 dependencies: []
 priority: high
-ordinal: 86000
+ordinal: 115000
 ---
 
 ## Description

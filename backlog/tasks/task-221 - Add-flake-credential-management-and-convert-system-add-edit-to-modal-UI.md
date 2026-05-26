@@ -4,7 +4,7 @@ title: Add flake credential management and convert system add/edit to modal UI
 status: Done
 assignee: []
 created_date: '2026-03-28 22:14'
-updated_date: '2026-04-14 00:38'
+updated_date: '2026-05-26 03:34'
 labels:
   - backend
   - frontend
@@ -16,6 +16,7 @@ labels:
   - enhancement
 dependencies: []
 priority: high
+ordinal: 272000
 ---
 
 ## Description

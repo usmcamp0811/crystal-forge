@@ -4,7 +4,7 @@ title: Fix Deploy tab commit deployment and add generation rollback selector
 status: Done
 assignee: []
 created_date: '2026-05-10 13:23'
-updated_date: '2026-05-13 02:48'
+updated_date: '2026-05-26 03:34'
 labels:
   - bug
   - feature
@@ -12,7 +12,7 @@ labels:
   - deployment
 dependencies: []
 priority: high
-ordinal: 6595
+ordinal: 34000
 ---
 
 ## Description

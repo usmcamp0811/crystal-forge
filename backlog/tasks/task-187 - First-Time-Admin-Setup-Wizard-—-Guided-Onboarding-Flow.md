@@ -4,7 +4,7 @@ title: First-Time Admin Setup Wizard — Guided Onboarding Flow
 status: Done
 assignee: []
 created_date: '2026-03-13 01:16'
-updated_date: '2026-03-14 13:20'
+updated_date: '2026-05-26 03:34'
 labels:
   - frontend
   - backend
@@ -19,6 +19,7 @@ references:
   - modules/nixos/crystal-forge/default.nix
   - docs/specs/00-system-overview.md
 priority: high
+ordinal: 285000
 ---
 
 ## Description

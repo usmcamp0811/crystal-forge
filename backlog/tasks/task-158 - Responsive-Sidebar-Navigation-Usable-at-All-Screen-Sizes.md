@@ -4,7 +4,7 @@ title: Responsive Sidebar Navigation - Usable at All Screen Sizes
 status: Done
 assignee: []
 created_date: '2026-03-02 13:45'
-updated_date: '2026-03-13 00:49'
+updated_date: '2026-05-26 03:34'
 labels:
   - frontend
   - ui
@@ -14,7 +14,7 @@ labels:
 milestone: m-15
 dependencies: []
 priority: high
-ordinal: 1000
+ordinal: 8000
 ---
 
 ## Description

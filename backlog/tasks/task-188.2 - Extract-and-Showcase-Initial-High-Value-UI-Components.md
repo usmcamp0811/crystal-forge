@@ -4,7 +4,7 @@ title: Extract and Showcase Initial High-Value UI Components
 status: Done
 assignee: []
 created_date: '2026-03-13 01:52'
-updated_date: '2026-03-17 00:28'
+updated_date: '2026-05-26 03:34'
 labels:
   - frontend
   - ux
@@ -19,7 +19,7 @@ documentation:
   - docs/specs/01-frontend-views.md
 parent_task_id: TASK-188
 priority: high
-ordinal: 2000
+ordinal: 5000
 ---
 
 ## Description

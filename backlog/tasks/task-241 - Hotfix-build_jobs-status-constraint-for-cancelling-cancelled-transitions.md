@@ -4,7 +4,7 @@ title: Hotfix build_jobs status constraint for cancelling/cancelled transitions
 status: Done
 assignee: []
 created_date: '2026-04-03 12:18'
-updated_date: '2026-04-06 12:51'
+updated_date: '2026-05-26 03:34'
 labels:
   - hotfix
   - builds
@@ -16,6 +16,7 @@ references:
   - packages/default/src/queries/builders.rs
   - packages/default/src/handlers/api/builders.rs
 priority: high
+ordinal: 263000
 ---
 
 ## Description

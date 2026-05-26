@@ -4,7 +4,7 @@ title: Environments View - Backend Integration
 status: Done
 assignee: []
 created_date: '2026-02-23'
-updated_date: '2026-03-13 01:24'
+updated_date: '2026-05-26 03:34'
 labels:
   - backend
   - api
@@ -13,7 +13,7 @@ labels:
 milestone: m-9
 dependencies: []
 priority: high
-ordinal: 75000
+ordinal: 104000
 ---
 
 ## Description

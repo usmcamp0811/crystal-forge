@@ -4,13 +4,14 @@ title: Guard progressive timeline fetches with generation token
 status: Done
 assignee: []
 created_date: '2026-03-26 23:20'
-updated_date: '2026-03-31 01:57'
+updated_date: '2026-05-26 03:34'
 labels:
   - hotfix
   - ui
   - reliability
 dependencies: []
 priority: high
+ordinal: 274000
 ---
 
 ## Description

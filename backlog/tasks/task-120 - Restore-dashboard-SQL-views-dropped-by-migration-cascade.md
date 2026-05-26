@@ -4,10 +4,10 @@ title: Restore dashboard SQL views dropped by migration cascade
 status: Done
 assignee: []
 created_date: '2026-02-23 04:10'
-updated_date: '2026-03-13 01:24'
+updated_date: '2026-05-26 03:34'
 labels: []
 dependencies: []
-ordinal: 74000
+ordinal: 103000
 ---
 
 ## Description

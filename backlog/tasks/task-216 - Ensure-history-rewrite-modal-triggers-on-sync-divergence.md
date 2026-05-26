@@ -4,13 +4,14 @@ title: Ensure history rewrite modal triggers on sync divergence
 status: Done
 assignee: []
 created_date: '2026-03-26 15:55'
-updated_date: '2026-03-31 01:56'
+updated_date: '2026-05-26 03:34'
 labels:
   - bug
   - flakes
   - hotfix
 dependencies: []
 priority: high
+ordinal: 276000
 ---
 
 ## Description

@@ -4,7 +4,7 @@ title: Fix build queue cards - text overflow and layout issues
 status: Done
 assignee: []
 created_date: '2026-03-13 01:01'
-updated_date: '2026-03-14 13:23'
+updated_date: '2026-05-26 03:34'
 labels:
   - web-ui
   - ux
@@ -13,7 +13,7 @@ labels:
   - responsive
 dependencies: []
 priority: high
-ordinal: 3000
+ordinal: 26000
 ---
 
 ## Description

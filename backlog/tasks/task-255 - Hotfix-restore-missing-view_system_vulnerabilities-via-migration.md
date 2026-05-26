@@ -4,7 +4,7 @@ title: 'Hotfix: restore missing view_system_vulnerabilities via migration'
 status: Done
 assignee: []
 created_date: '2026-04-09 23:13'
-updated_date: '2026-04-14 00:34'
+updated_date: '2026-05-26 03:34'
 labels:
   - hotfix
   - cve
@@ -16,7 +16,7 @@ references:
   - packages/default/src/handlers/api/dashboard.rs
   - packages/default/migrations/0024_update_views.sql
 priority: high
-ordinal: 2550
+ordinal: 20000
 ---
 
 ## Description

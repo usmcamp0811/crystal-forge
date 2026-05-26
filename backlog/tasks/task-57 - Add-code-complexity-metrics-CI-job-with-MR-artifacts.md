@@ -5,7 +5,7 @@ status: Done
 assignee:
   - Codex 5.3
 created_date: '2026-02-18'
-updated_date: '2026-03-13 01:24'
+updated_date: '2026-05-26 03:34'
 labels:
   - ci
   - rust
@@ -14,7 +14,7 @@ labels:
 milestone: m-1
 dependencies: []
 priority: high
-ordinal: 32000
+ordinal: 61000
 ---
 
 ## Description

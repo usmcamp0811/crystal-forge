@@ -4,7 +4,7 @@ title: Add deterministic mock eval/build dev mode for fast workflow validation
 status: Done
 assignee: []
 created_date: '2026-03-04 23:28'
-updated_date: '2026-03-13 01:24'
+updated_date: '2026-05-26 03:34'
 labels:
   - dev-experience
   - eval-queue
@@ -12,7 +12,7 @@ labels:
   - testing
 dependencies: []
 priority: high
-ordinal: 91000
+ordinal: 120000
 ---
 
 ## Description

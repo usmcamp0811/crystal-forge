@@ -6,7 +6,7 @@ title: >-
 status: Done
 assignee: []
 created_date: '2026-03-31 02:48'
-updated_date: '2026-04-01 02:07'
+updated_date: '2026-05-26 03:34'
 labels:
   - builds
   - queue
@@ -23,6 +23,7 @@ references:
     backlog/tasks/task-155 -
     Improve-build-queue-UI-with-drag-and-drop-reordering-and-better-card-design.md
 priority: high
+ordinal: 267000
 ---
 
 ## Description

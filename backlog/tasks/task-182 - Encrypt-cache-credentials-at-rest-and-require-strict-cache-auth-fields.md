@@ -4,7 +4,7 @@ title: Encrypt cache credentials at rest and require strict cache auth fields
 status: Done
 assignee: []
 created_date: '2026-03-11 12:47'
-updated_date: '2026-03-13 01:24'
+updated_date: '2026-05-26 03:34'
 labels:
   - security
   - cache
@@ -12,7 +12,7 @@ labels:
   - web-ui
 dependencies: []
 priority: high
-ordinal: 93000
+ordinal: 122000
 ---
 
 ## Description

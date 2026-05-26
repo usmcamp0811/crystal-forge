@@ -4,7 +4,7 @@ title: Frontend Component Isolation Platform + Engineering Standards Documentati
 status: Done
 assignee: []
 created_date: '2026-03-13 01:40'
-updated_date: '2026-03-17 03:09'
+updated_date: '2026-05-26 03:34'
 labels:
   - frontend
   - ux
@@ -22,7 +22,7 @@ documentation:
   - docs/specs/01-frontend-views.md
   - docs/architecture.md
 priority: high
-ordinal: 1000
+ordinal: 3000
 ---
 
 ## Description

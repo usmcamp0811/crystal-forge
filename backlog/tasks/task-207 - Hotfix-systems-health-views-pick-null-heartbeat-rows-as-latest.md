@@ -4,7 +4,7 @@ title: Hotfix systems health views pick null heartbeat rows as latest
 status: Done
 assignee: []
 created_date: '2026-03-21 20:25'
-updated_date: '2026-03-31 01:56'
+updated_date: '2026-05-26 03:34'
 labels:
   - backend
   - database
@@ -17,7 +17,7 @@ references:
   - packages/default/migrations/0078_create_view_system_list.sql
   - packages/default/src/services/systems.rs
 priority: high
-ordinal: 1600
+ordinal: 11000
 ---
 
 # Hotfix systems health views pick null heartbeat rows as latest

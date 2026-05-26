@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@ai-agent'
 created_date: '2026-04-19 17:54'
-updated_date: '2026-04-20 20:33'
+updated_date: '2026-05-26 03:34'
 labels:
   - systems
   - ui
@@ -29,7 +29,7 @@ documentation:
     /home/mcamp/code/crystal-forge/design-example-systems/components/SystemDetail.jsx
   - /home/mcamp/code/crystal-forge/design-example-systems/styles.css
 priority: medium
-ordinal: 2780
+ordinal: 24000
 ---
 
 ## Description

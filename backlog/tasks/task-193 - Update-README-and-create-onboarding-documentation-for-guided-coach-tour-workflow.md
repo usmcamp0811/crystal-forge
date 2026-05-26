@@ -6,7 +6,7 @@ title: >-
 status: Done
 assignee: []
 created_date: '2026-03-16 01:02'
-updated_date: '2026-03-16 02:49'
+updated_date: '2026-05-26 03:34'
 labels:
   - documentation
   - onboarding
@@ -22,6 +22,7 @@ references:
   - docs/screenshots/
   - README.md
 priority: medium
+ordinal: 283000
 ---
 
 ## Description

@@ -4,7 +4,7 @@ title: Harden evaluator fallback to use strict mode for core policy
 status: Done
 assignee: []
 created_date: '2026-03-09 22:47'
-updated_date: '2026-03-13 01:24'
+updated_date: '2026-05-26 03:34'
 labels:
   - backend
   - evaluator
@@ -15,7 +15,7 @@ milestone: m-13
 dependencies: []
 parent_task_id: TASK-123
 priority: high
-ordinal: 7000
+ordinal: 19000
 ---
 
 ## Description

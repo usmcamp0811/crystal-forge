@@ -4,7 +4,7 @@ title: Add non-interactive flag to cf-keygen for automated key generation
 status: Done
 assignee: []
 created_date: '2026-05-08 03:12'
-updated_date: '2026-05-23 15:25'
+updated_date: '2026-05-26 03:34'
 labels:
   - enhancement
   - blocker
@@ -12,6 +12,7 @@ labels:
 dependencies:
   - TASK-292
 priority: high
+ordinal: 258000
 ---
 
 ## Description

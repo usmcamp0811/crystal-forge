@@ -5,7 +5,7 @@ status: Done
 assignee:
   - KimiK2.5
 created_date: '2026-02-12 10:00'
-updated_date: '2026-03-13 01:24'
+updated_date: '2026-05-26 03:34'
 labels:
   - ui
   - nix
@@ -17,7 +17,7 @@ dependencies:
   - TASK-8.9
 parent_task_id: TASK-8
 priority: high
-ordinal: 24000
+ordinal: 53000
 ---
 
 ## Description

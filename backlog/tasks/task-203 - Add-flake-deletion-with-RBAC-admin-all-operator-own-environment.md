@@ -5,7 +5,7 @@ status: Done
 assignee:
   - Claude
 created_date: '2026-03-20 13:40'
-updated_date: '2026-03-31 01:56'
+updated_date: '2026-05-26 03:34'
 labels:
   - backend
   - frontend
@@ -18,7 +18,7 @@ references:
   - packages/default/src/queries/flakes.rs
   - packages/web-ui/src/views/flakes.rs
 priority: high
-ordinal: 1400
+ordinal: 10000
 ---
 
 # Add flake deletion with RBAC: admin all, operator own environment

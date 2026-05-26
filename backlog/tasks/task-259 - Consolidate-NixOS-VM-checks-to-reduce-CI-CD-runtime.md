@@ -4,13 +4,14 @@ title: Consolidate NixOS VM checks to reduce CI/CD runtime
 status: Done
 assignee: []
 created_date: '2026-04-10 03:12'
-updated_date: '2026-04-14 00:34'
+updated_date: '2026-05-26 03:34'
 labels:
   - ci-cd
   - nix
   - performance
 dependencies: []
 priority: medium
+ordinal: 259000
 ---
 
 ## Description

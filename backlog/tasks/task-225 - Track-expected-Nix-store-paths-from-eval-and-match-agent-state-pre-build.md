@@ -4,7 +4,7 @@ title: Track expected Nix store paths from eval and match agent state pre-build
 status: Done
 assignee: []
 created_date: '2026-03-29 23:39'
-updated_date: '2026-03-30 02:44'
+updated_date: '2026-05-26 03:34'
 labels:
   - backend
   - nix
@@ -12,6 +12,7 @@ labels:
   - data-model
 dependencies: []
 priority: high
+ordinal: 270000
 ---
 
 ## Description

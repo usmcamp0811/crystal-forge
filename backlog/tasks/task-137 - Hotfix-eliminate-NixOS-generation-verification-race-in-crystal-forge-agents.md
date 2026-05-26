@@ -4,14 +4,14 @@ title: 'Hotfix: eliminate NixOS generation verification race in crystal-forge ag
 status: Done
 assignee: []
 created_date: '2026-02-27 14:58'
-updated_date: '2026-03-13 01:24'
+updated_date: '2026-05-26 03:34'
 labels:
   - hotfix
   - deployment
   - agent
   - nixos
 dependencies: []
-ordinal: 78000
+ordinal: 107000
 ---
 
 ## Description

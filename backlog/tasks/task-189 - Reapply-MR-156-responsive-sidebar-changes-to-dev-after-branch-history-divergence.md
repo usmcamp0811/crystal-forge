@@ -6,7 +6,7 @@ title: >-
 status: Done
 assignee: []
 created_date: '2026-03-13 02:17'
-updated_date: '2026-03-13 12:48'
+updated_date: '2026-05-26 03:34'
 labels:
   - frontend
   - recovery
@@ -20,7 +20,7 @@ references:
   - packages/web-ui/src/components/layout/topbar.rs
   - packages/web-ui/assets/app.css
 priority: high
-ordinal: 2250
+ordinal: 14000
 ---
 
 ## Description

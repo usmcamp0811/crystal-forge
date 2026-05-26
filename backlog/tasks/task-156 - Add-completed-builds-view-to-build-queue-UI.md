@@ -4,7 +4,7 @@ title: Add completed builds view to build queue UI
 status: Done
 assignee: []
 created_date: '2026-03-02 04:41'
-updated_date: '2026-03-24 20:45'
+updated_date: '2026-05-26 03:34'
 labels:
   - ui
   - build-queue
@@ -12,6 +12,7 @@ labels:
   - feature
 dependencies: []
 priority: medium
+ordinal: 286000
 ---
 
 ## Description

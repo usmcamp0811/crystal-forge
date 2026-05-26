@@ -5,12 +5,13 @@ status: Done
 assignee:
   - OpenCode
 created_date: '2026-03-20 02:58'
-updated_date: '2026-03-20 03:26'
+updated_date: '2026-05-26 03:34'
 labels: []
 dependencies: []
 references:
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/issues/115'
 priority: high
+ordinal: 279000
 ---
 
 ## Description

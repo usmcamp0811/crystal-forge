@@ -4,13 +4,13 @@ title: Implement session garbage collection
 status: Done
 assignee: []
 created_date: '2026-02-21 04:19'
-updated_date: '2026-03-13 01:24'
+updated_date: '2026-05-26 03:34'
 labels:
   - sessions
 dependencies:
   - TASK-65.3
 priority: medium
-ordinal: 72000
+ordinal: 101000
 ---
 
 ## Description

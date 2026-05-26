@@ -4,7 +4,7 @@ title: 'Dashboard Recent Deployments widget cuts off fifth item, needs scroll'
 status: Done
 assignee: []
 created_date: '2026-03-20 13:40'
-updated_date: '2026-04-14 00:34'
+updated_date: '2026-05-26 03:34'
 labels:
   - frontend
   - dashboard
@@ -15,7 +15,7 @@ dependencies: []
 references:
   - packages/web-ui/src/components/dashboard/recent_deployments.rs
 priority: high
-ordinal: 3000
+ordinal: 25000
 ---
 
 ## Description

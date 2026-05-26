@@ -5,7 +5,7 @@ status: Done
 assignee:
   - openai-gpt-5.4
 created_date: '2026-04-19 02:43'
-updated_date: '2026-04-23 13:25'
+updated_date: '2026-05-26 03:34'
 labels:
   - feature
   - security
@@ -19,7 +19,7 @@ references:
     https://www.reddit.com/r/homelab/comments/1spgay2/is_anyone_else_a_stickler_for_systemd_hardening/
   - 'https://www.freedesktop.org/software/systemd/man/systemd.exec.html#Security'
 priority: high
-ordinal: 3690
+ordinal: 28000
 ---
 
 ## Description

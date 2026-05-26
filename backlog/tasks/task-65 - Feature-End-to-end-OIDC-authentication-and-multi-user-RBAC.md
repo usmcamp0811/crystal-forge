@@ -5,7 +5,7 @@ status: Done
 assignee:
   - Claude Opus 4.5
 created_date: ''
-updated_date: '2026-03-13 01:24'
+updated_date: '2026-05-26 03:34'
 labels:
   - security
   - auth
@@ -25,7 +25,7 @@ dependencies:
   - TASK-65.7
   - TASK-65.8
 priority: high
-ordinal: 71000
+ordinal: 100000
 ---
 
 ## Description

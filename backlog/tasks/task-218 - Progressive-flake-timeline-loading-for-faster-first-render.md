@@ -4,13 +4,14 @@ title: Progressive flake timeline loading for faster first render
 status: Done
 assignee: []
 created_date: '2026-03-26 22:55'
-updated_date: '2026-03-31 01:57'
+updated_date: '2026-05-26 03:34'
 labels:
   - hotfix
   - ui
   - performance
 dependencies: []
 priority: high
+ordinal: 275000
 ---
 
 ## Description

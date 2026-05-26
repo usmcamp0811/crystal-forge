@@ -4,7 +4,7 @@ title: Stream real nix build output into Build Logs with batching/throttling
 status: Done
 assignee: []
 created_date: '2026-04-04 14:43'
-updated_date: '2026-04-06 12:51'
+updated_date: '2026-05-26 03:34'
 labels:
   - builds
   - logs
@@ -13,6 +13,7 @@ labels:
   - observability
 dependencies: []
 priority: high
+ordinal: 261000
 ---
 
 ## Description

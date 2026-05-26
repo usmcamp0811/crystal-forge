@@ -5,11 +5,11 @@ status: Done
 assignee:
   - MiniMax M2.5
 created_date: '2026-02-16 17:09'
-updated_date: '2026-03-13 01:24'
+updated_date: '2026-05-26 03:34'
 labels: []
 milestone: m-8
 dependencies: []
-ordinal: 42000
+ordinal: 71000
 ---
 
 ## Description

@@ -5,7 +5,7 @@ status: Done
 assignee:
   - Codex 5.3
 created_date: '2026-02-04 20:15'
-updated_date: '2026-03-13 01:24'
+updated_date: '2026-05-26 03:34'
 labels:
   - bug
   - deployment
@@ -14,7 +14,7 @@ labels:
 milestone: m-0
 dependencies: []
 priority: high
-ordinal: 94000
+ordinal: 123000
 ---
 
 ## Description

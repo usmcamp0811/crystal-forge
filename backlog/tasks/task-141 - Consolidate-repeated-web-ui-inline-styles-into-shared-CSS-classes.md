@@ -4,7 +4,7 @@ title: Consolidate repeated web-ui inline styles into shared CSS classes
 status: Done
 assignee: []
 created_date: '2026-02-28 18:05'
-updated_date: '2026-03-24 20:50'
+updated_date: '2026-05-26 03:34'
 labels:
   - web-ui
   - frontend
@@ -13,6 +13,7 @@ labels:
   - documentation
 dependencies: []
 priority: high
+ordinal: 287000
 ---
 
 ## Description

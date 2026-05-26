@@ -4,7 +4,7 @@ title: 'HIGH PRIORITY: Add public key validation for builder registration'
 status: Done
 assignee: []
 created_date: '2026-03-01 02:29'
-updated_date: '2026-03-13 01:24'
+updated_date: '2026-05-26 03:34'
 labels:
   - security
   - high-priority
@@ -12,7 +12,7 @@ labels:
   - validation
 dependencies: []
 priority: high
-ordinal: 90000
+ordinal: 119000
 ---
 
 ## Description

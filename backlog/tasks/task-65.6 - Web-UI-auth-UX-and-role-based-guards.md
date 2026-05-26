@@ -5,7 +5,7 @@ status: Done
 assignee:
   - KimiK2.5
 created_date: ''
-updated_date: '2026-03-13 01:24'
+updated_date: '2026-05-26 03:34'
 labels:
   - ui
   - security
@@ -16,7 +16,7 @@ dependencies:
   - TASK-65.0
   - TASK-65.5
 priority: medium
-ordinal: 57000
+ordinal: 86000
 ---
 
 ## Description

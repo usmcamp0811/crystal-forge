@@ -4,7 +4,7 @@ title: Hotfix restore missing migration 0101 to unblock server startup
 status: Done
 assignee: []
 created_date: '2026-03-29 14:35'
-updated_date: '2026-03-31 01:57'
+updated_date: '2026-05-26 03:34'
 labels:
   - hotfix
   - database
@@ -12,6 +12,7 @@ labels:
   - production
 dependencies: []
 priority: high
+ordinal: 271000
 ---
 
 ## Description

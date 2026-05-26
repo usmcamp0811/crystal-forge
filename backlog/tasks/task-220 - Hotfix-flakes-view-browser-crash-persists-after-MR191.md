@@ -4,7 +4,7 @@ title: Hotfix flakes view browser crash persists after MR191
 status: Done
 assignee: []
 created_date: '2026-03-28 15:44'
-updated_date: '2026-03-31 01:57'
+updated_date: '2026-05-26 03:34'
 labels:
   - bug
   - ui
@@ -12,6 +12,7 @@ labels:
   - regression
 dependencies: []
 priority: high
+ordinal: 273000
 ---
 
 ## Description

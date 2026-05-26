@@ -4,14 +4,14 @@ title: Improve Flakes View - Remove Filter Dropdown & Add File-Level Diff Naviga
 status: Done
 assignee: []
 created_date: '2026-02-25 22:45'
-updated_date: '2026-03-13 01:24'
+updated_date: '2026-05-26 03:34'
 labels:
   - ui
   - flakes-view
   - ux-improvement
 dependencies:
   - TASK-124
-ordinal: 76000
+ordinal: 105000
 ---
 
 ## Description

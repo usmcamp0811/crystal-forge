@@ -5,7 +5,7 @@ status: Done
 assignee:
   - KimiK2.5
 created_date: '2026-02-19 13:26'
-updated_date: '2026-03-13 01:24'
+updated_date: '2026-05-26 03:34'
 labels:
   - ui
   - flakes
@@ -13,7 +13,7 @@ labels:
 milestone: m-10
 dependencies: []
 priority: medium
-ordinal: 64000
+ordinal: 93000
 ---
 
 ## Description

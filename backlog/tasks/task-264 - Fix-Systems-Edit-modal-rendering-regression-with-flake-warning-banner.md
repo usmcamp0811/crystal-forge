@@ -4,7 +4,7 @@ title: Fix Systems Edit modal rendering regression with flake warning banner
 status: Done
 assignee: []
 created_date: '2026-04-11 16:00'
-updated_date: '2026-04-14 00:41'
+updated_date: '2026-05-26 03:34'
 labels:
   - bug
   - ui
@@ -18,7 +18,7 @@ references:
   - packages/web-ui/src/views/systems_list.rs
   - checks/web-ui/tests/integration-test.js
 priority: high
-ordinal: 5100
+ordinal: 32000
 ---
 
 ## Description

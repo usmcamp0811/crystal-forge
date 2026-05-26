@@ -6,7 +6,7 @@ title: >-
 status: Done
 assignee: []
 created_date: '2026-04-10 01:07'
-updated_date: '2026-04-14 00:34'
+updated_date: '2026-05-26 03:34'
 labels:
   - hotfix
   - database
@@ -18,7 +18,7 @@ references:
   - packages/default/migrations
   - packages/default/src/queries/systems.rs
 priority: high
-ordinal: 2560
+ordinal: 21000
 ---
 
 ## Description

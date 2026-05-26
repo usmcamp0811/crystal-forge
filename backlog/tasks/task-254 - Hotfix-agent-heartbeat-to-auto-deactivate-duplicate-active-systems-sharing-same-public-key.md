@@ -6,7 +6,7 @@ title: >-
 status: Done
 assignee: []
 created_date: '2026-04-09 16:31'
-updated_date: '2026-04-14 00:34'
+updated_date: '2026-05-26 03:34'
 labels:
   - hotfix
   - agent
@@ -18,7 +18,7 @@ references:
   - packages/default/src/handlers/agent/heartbeat.rs
   - packages/default/src/queries/systems.rs
 priority: high
-ordinal: 2600
+ordinal: 23000
 ---
 
 ## Description

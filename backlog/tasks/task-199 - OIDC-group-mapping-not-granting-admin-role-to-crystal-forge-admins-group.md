@@ -4,7 +4,7 @@ title: OIDC group mapping not granting admin role to crystal-forge-admins group
 status: Done
 assignee: []
 created_date: '2026-03-20 13:40'
-updated_date: '2026-03-31 01:56'
+updated_date: '2026-05-26 03:34'
 labels:
   - auth
   - oidc
@@ -17,7 +17,7 @@ references:
   - packages/default/src/config/oidc.rs
   - packages/default/src/handlers/api/auth_oidc.rs
 priority: high
-ordinal: 1000
+ordinal: 2000
 ---
 
 # OIDC group mapping not granting admin role to crystal-forge-admins group

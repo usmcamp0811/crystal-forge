@@ -4,7 +4,7 @@ title: Component Isolation Surface + Fixture Foundation
 status: Done
 assignee: []
 created_date: '2026-03-13 01:51'
-updated_date: '2026-03-16 23:28'
+updated_date: '2026-05-26 03:34'
 labels:
   - frontend
   - ux
@@ -20,6 +20,7 @@ documentation:
   - docs/architecture.md
 parent_task_id: TASK-188
 priority: high
+ordinal: 4000
 ---
 
 ## Description

@@ -5,7 +5,7 @@ status: Done
 assignee:
   - MiniMax M2.5
 created_date: ''
-updated_date: '2026-03-13 01:24'
+updated_date: '2026-05-26 03:34'
 labels:
   - security
   - auth
@@ -17,7 +17,7 @@ dependencies:
   - TASK-65.2
   - TASK-65.3
 priority: high
-ordinal: 58000
+ordinal: 87000
 ---
 
 ## Description
