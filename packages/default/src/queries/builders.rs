@@ -61,19 +61,23 @@ pub async fn create_builder(
     };
 
     let max_concurrent_jobs = request.max_concurrent_jobs.unwrap_or(1);
+    let enabled = request.enabled.unwrap_or(true);
 
     let builder = sqlx::query_as::<_, Builder>(
         r#"
-        INSERT INTO builders (name, public_key, max_cpu_cores, max_memory_mb, max_concurrent_jobs, status)
-        VALUES ($1, $2, $3, $4, $5, 'inactive')
+        INSERT INTO builders (name, host, arch, public_key, max_cpu_cores, max_memory_mb, max_concurrent_jobs, enabled, status)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'inactive')
         RETURNING *
         "#
     )
     .bind(&request.name)
+    .bind(&request.host)
+    .bind(&request.arch)
     .bind(public_key_str)
     .bind(request.max_cpu_cores)
     .bind(request.max_memory_mb)
     .bind(max_concurrent_jobs)
+    .bind(enabled)
     .fetch_one(pool)
     .await
     .context("Failed to create builder")?;
@@ -124,10 +128,13 @@ pub async fn list_builders(pool: &PgPool) -> Result<Vec<BuilderSummary>> {
         SELECT
             b.id,
             b.name,
+            b.host,
+            b.arch,
             b.status,
             b.max_cpu_cores,
             b.max_memory_mb,
             b.max_concurrent_jobs,
+            b.enabled,
             b.last_heartbeat_at,
             COALESCE(COUNT(DISTINCT bea.id), 0)::int as assigned_environment_count,
             COALESCE(COUNT(DISTINCT CASE WHEN bj.status = 'building' AND bj.builder_id = b.id THEN bj.id END), 0)::int as active_jobs,
@@ -144,7 +151,7 @@ pub async fn list_builders(pool: &PgPool) -> Result<Vec<BuilderSummary>> {
         FROM builders b
         LEFT JOIN builder_environment_assignments bea ON bea.builder_id = b.id
         LEFT JOIN build_jobs bj ON bj.builder_id = b.id AND bj.status = 'building'
-        GROUP BY b.id, b.name, b.status, b.max_cpu_cores, b.max_memory_mb, b.max_concurrent_jobs, b.last_heartbeat_at
+        GROUP BY b.id, b.name, b.host, b.arch, b.status, b.max_cpu_cores, b.max_memory_mb, b.max_concurrent_jobs, b.enabled, b.last_heartbeat_at
         ORDER BY b.created_at DESC
         "#
     )
@@ -169,6 +176,14 @@ pub async fn update_builder(
         param_count += 1;
         query.push_str(&format!(", name = ${}", param_count));
     }
+    if request.host.is_some() {
+        param_count += 1;
+        query.push_str(&format!(", host = ${}", param_count));
+    }
+    if request.arch.is_some() {
+        param_count += 1;
+        query.push_str(&format!(", arch = ${}", param_count));
+    }
     if request.status.is_some() {
         param_count += 1;
         query.push_str(&format!(", status = ${}", param_count));
@@ -185,13 +200,23 @@ pub async fn update_builder(
         param_count += 1;
         query.push_str(&format!(", max_concurrent_jobs = ${}", param_count));
     }
+    if request.enabled.is_some() {
+        param_count += 1;
+        query.push_str(&format!(", enabled = ${}", param_count));
+    }
 
-    query.push_str(" WHERE id = $1 RETURNING id, name, public_key, status, max_cpu_cores, max_memory_mb, max_concurrent_jobs, last_heartbeat_at, created_at, updated_at");
+    query.push_str(" WHERE id = $1 RETURNING *");
 
     let mut query_builder = sqlx::query_as::<_, Builder>(&query).bind(builder_id);
 
     if let Some(ref name) = request.name {
         query_builder = query_builder.bind(name);
+    }
+    if let Some(ref host) = request.host {
+        query_builder = query_builder.bind(host);
+    }
+    if let Some(ref arch) = request.arch {
+        query_builder = query_builder.bind(arch);
     }
     if let Some(ref status) = request.status {
         query_builder = query_builder.bind(status.to_string());
@@ -204,6 +229,9 @@ pub async fn update_builder(
     }
     if let Some(jobs) = request.max_concurrent_jobs {
         query_builder = query_builder.bind(jobs);
+    }
+    if let Some(enabled) = request.enabled {
+        query_builder = query_builder.bind(enabled);
     }
 
     let builder = query_builder
@@ -1283,10 +1311,13 @@ mod tests {
 
         let request = CreateBuilderRequest {
             name: name.to_string(),
+            host: Some(format!("{}.test.local", name)),
+            arch: "x86_64-linux".to_string(),
             public_key: Some(public_key_base64),
             max_cpu_cores: None,
             max_memory_mb: None,
             max_concurrent_jobs: Some(4),
+            enabled: Some(true),
             environment_ids: vec![],
         };
 
@@ -1664,10 +1695,13 @@ mod tests {
 
         let request = CreateBuilderRequest {
             name: "test-builder".to_string(),
+            host: Some("test-builder.test.local".to_string()),
+            arch: "x86_64-linux".to_string(),
             public_key: Some(public_key_base64),
             max_cpu_cores: Some(4),
             max_memory_mb: Some(8192),
             max_concurrent_jobs: Some(2),
+            enabled: Some(true),
             environment_ids: vec![],
         };
 
@@ -1702,10 +1736,13 @@ mod tests {
 
         let request = CreateBuilderRequest {
             name: "heartbeat-test".to_string(),
+            host: Some("heartbeat-test.test.local".to_string()),
+            arch: "x86_64-linux".to_string(),
             public_key: Some(public_key_base64),
             max_cpu_cores: None,
             max_memory_mb: None,
             max_concurrent_jobs: None,
+            enabled: Some(true),
             environment_ids: vec![],
         };
 
@@ -1739,10 +1776,13 @@ mod tests {
         // Invalid base64 string
         let request = CreateBuilderRequest {
             name: "invalid-key-builder".to_string(),
+            host: Some("invalid-key-builder.test.local".to_string()),
+            arch: "x86_64-linux".to_string(),
             public_key: Some("not-valid-base64!!!".to_string()),
             max_cpu_cores: None,
             max_memory_mb: None,
             max_concurrent_jobs: None,
+            enabled: Some(true),
             environment_ids: vec![],
         };
 
@@ -1766,10 +1806,13 @@ mod tests {
 
         let request = CreateBuilderRequest {
             name: "wrong-length-builder".to_string(),
+            host: Some("wrong-length-builder.test.local".to_string()),
+            arch: "x86_64-linux".to_string(),
             public_key: Some(wrong_length_key),
             max_cpu_cores: None,
             max_memory_mb: None,
             max_concurrent_jobs: None,
+            enabled: Some(true),
             environment_ids: vec![],
         };
 
@@ -1790,10 +1833,13 @@ mod tests {
 
         let request = CreateBuilderRequest {
             name: "empty-key-builder".to_string(),
+            host: Some("test.local".to_string()),
+            arch: "x86_64-linux".to_string(),
             public_key: Some("".to_string()),
             max_cpu_cores: None,
             max_memory_mb: None,
             max_concurrent_jobs: None,
+            enabled: None,
             environment_ids: vec![],
         };
 

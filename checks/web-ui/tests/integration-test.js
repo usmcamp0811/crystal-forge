@@ -2168,6 +2168,43 @@ const steps = [
     },
   },
   {
+    name: "11b-builders",
+    description: "Builders list",
+    action: async (page) => {
+      await page.goto(`${baseUrl}/builders`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2000);
+      await assertVisible(page.getByText("Builders").first(), "Expected Builders page heading");
+    },
+  },
+  {
+    name: "11c-builders-edit-modal",
+    description: "Builders edit modal with keypair actions",
+    action: async (page) => {
+      await page.goto(`${baseUrl}/builders`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2200);
+
+      const firstBuilderRow = page.locator("table tbody tr").first();
+      await assertVisible(firstBuilderRow, "Expected at least one builder row", 15000);
+      await firstBuilderRow.click();
+
+      await assertVisible(
+        page.getByText("Update builder registration.").first(),
+        "Expected edit builder modal subtitle",
+        15000,
+      );
+      await assertVisible(
+        page.getByRole("button", { name: "Generate Keypair" }).first(),
+        "Expected Generate Keypair action in builder edit modal",
+        15000,
+      );
+      await assertVisible(
+        page.getByRole("button", { name: "Apply Public Key Update" }).first(),
+        "Expected Apply Public Key Update action in builder edit modal",
+        15000,
+      );
+    },
+  },
+  {
     name: "12-systems",
     description: "Systems list",
     action: async (page) => {
@@ -4622,6 +4659,8 @@ const CI_FAST_STEP_NAMES = new Set([
   "06x-pipeline-readiness-scroll",
   "06y-recent-deployments-scroll",
   "06z-fleet-health-widget-assert",
+  "11b-builders",
+  "11c-builders-edit-modal",
   "15-builds",
   "11b-builds-queue-card-focus",
   "12b-systems-config-warning",

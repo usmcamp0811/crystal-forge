@@ -215,7 +215,10 @@ fn credential_label(cred: &LocalCredential) -> String {
 
 fn credential_matches_cache_type(cred: &LocalCredential, cache_type: &str) -> bool {
     match cache_type {
-        "s3" => matches!(cred.kind, LocalCredentialKind::AwsKey | LocalCredentialKind::AwsRole),
+        "s3" => matches!(
+            cred.kind,
+            LocalCredentialKind::AwsKey | LocalCredentialKind::AwsRole
+        ),
         "attic" => matches!(cred.kind, LocalCredentialKind::AtticToken),
         _ => matches!(cred.kind, LocalCredentialKind::NixToken),
     }
@@ -232,7 +235,12 @@ fn api_cache_type(cache_type: &str) -> String {
 
 fn credential_fields_for_request(
     selected_credential: Option<&LocalCredential>,
-) -> (Option<String>, Option<String>, Option<String>, Option<String>) {
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
     let s3_profile = selected_credential.and_then(|cred| match cred.kind {
         LocalCredentialKind::AwsRole => cred.role_arn.clone(),
         _ => None,
@@ -244,7 +252,12 @@ fn credential_fields_for_request(
         _ => None,
     });
 
-    (s3_profile, s3_access_key_id, s3_secret_access_key, attic_token)
+    (
+        s3_profile,
+        s3_access_key_id,
+        s3_secret_access_key,
+        attic_token,
+    )
 }
 
 /// Cache management page
@@ -253,7 +266,7 @@ pub fn CachesView() -> Element {
     let mut active_tab = use_signal(|| CachesTab::Destinations);
     let from_setup = use_signal(came_from_setup);
     let mut show_add_modal = use_signal(|| false);
-    
+
     // Load destinations for stats display
     let mut refresh_nonce = use_signal(|| 0_u32);
     let destinations = use_resource(move || {
@@ -403,7 +416,11 @@ pub fn CachesView() -> Element {
 
 /// List of cache destinations with CRUD operations
 #[component]
-fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>, mut show_add_modal: Signal<bool>) -> Element {
+fn CacheDestinationsList(
+    show_onboarding_hint: bool,
+    refresh_nonce: Signal<u32>,
+    mut show_add_modal: Signal<bool>,
+) -> Element {
     let destinations = use_resource(move || {
         let _nonce = refresh_nonce();
         async move { client::fetch_cache_destinations(false).await }
@@ -411,7 +428,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
 
     let mut search_query = use_signal(String::new);
     let mut edit_destination = use_signal(|| None::<CacheDestination>);
-    
+
     // Unified form state for both add and edit (simplified to match mockup)
     let mut form_name = use_signal(String::new);
     let mut form_type = use_signal(|| "s3".to_string());
@@ -424,7 +441,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
     let mut form_save_error = use_signal(|| None::<String>);
     let mut form_show_cred_modal = use_signal(|| false);
     let mut local_credentials = use_signal(Vec::<LocalCredential>::new);
-    
+
     // Pre-populate form when switching between add/edit
     use_effect(move || {
         if let Some(dest) = edit_destination() {
@@ -437,8 +454,14 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
             let has_auth = dest.s3_secret_access_key.is_some()
                 || dest.s3_access_key_id.is_some()
                 || dest.attic_token.is_some()
-                || dest.s3_profile.as_ref().is_some_and(|v| !v.trim().is_empty())
-                || dest.attic_cache_name.as_ref().is_some_and(|v| !v.trim().is_empty())
+                || dest
+                    .s3_profile
+                    .as_ref()
+                    .is_some_and(|v| !v.trim().is_empty())
+                || dest
+                    .attic_cache_name
+                    .as_ref()
+                    .is_some_and(|v| !v.trim().is_empty())
                 || matches!(dest.cache_type.as_str(), "S3" | "Attic" | "s3" | "attic");
             form_requires_auth.set(has_auth);
             form_cred_id.set(String::new());
@@ -446,7 +469,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
             form_test_error.set(None);
             form_save_error.set(None);
             form_show_cred_modal.set(false);
-            
+
             // Load environment assignments
             let cache_id = dest.id;
             form_environment_ids.set(Vec::new());
@@ -548,7 +571,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                             d.push_to.as_ref().map(|u| u.to_lowercase().contains(&query)).unwrap_or(false)
                         }).collect()
                     };
-                    
+
                     rsx! {
                         if filtered.is_empty() && !query.is_empty() {
                             div {
@@ -852,7 +875,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                         class: "modal",
                         onclick: move |e| e.stop_propagation(),
                         style: "width:min(620px,96vw); max-height:92vh;",
-                        
+
                         // Modal head
                         div {
                             class: "modal-head",
@@ -875,12 +898,12 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                             }
                             p { "Update binary cache destination." }
                         }
-                        
+
                         // Modal body
                         div {
                             class: "modal-body",
                             style: "overflow-y:auto;",
-                            
+
                             // Name
                             div {
                                 class: "field",
@@ -892,7 +915,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                     placeholder: "e.g. crystal-forge-prod-cache"
                                 }
                             }
-                            
+
                             // Type (segmented button)
                             div {
                                 class: "field",
@@ -911,7 +934,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                     }
                                 }
                             }
-                            
+
                             // URL
                             div {
                                 class: "field",
@@ -928,7 +951,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                     }
                                 }
                             }
-                            
+
                             // Requires authentication checkbox
                             label {
                                 style: "display:flex; gap:8px; align-items:center; font-size:13px; cursor:pointer;",
@@ -940,7 +963,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                 }
                                 span { "Requires authentication" }
                             }
-                            
+
                             // Credential dropdown (if auth required)
                             if form_requires_auth() {
                                 div {
@@ -1033,7 +1056,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                     }
                                 }
                             }
-                            
+
                             // Assigned environments
                             div {
                                 class: "field",
@@ -1047,7 +1070,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                                 let env_name = env.name.clone();
                                                 let is_selected = form_environment_ids().contains(&env_id);
                                                 let color = normalize_env_color(&env.color_hex);
-                                                
+
                                                 rsx! {
                                                     button {
                                                         class: "focus-ring",
@@ -1081,7 +1104,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                 }
                             }
                         }
-                        
+
                         // Modal foot
                         div {
                             class: "modal-foot",
@@ -1135,7 +1158,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                                             attic_cache_name: None,
                                             ..Default::default()
                                         };
-                                        
+
                                         match client::update_cache_destination(cache_id, &req).await {
                                             Ok(_) => {
                                                 // Update environment assignments
@@ -1173,7 +1196,7 @@ fn CacheDestinationsList(show_onboarding_hint: bool, refresh_nonce: Signal<u32>,
                             }
                         }
                     }
-                    
+
                 }
             }
 
@@ -1215,7 +1238,7 @@ fn CacheCredModal(cache_type: String, on_close: EventHandler<Option<LocalCredent
     let mut cred_secret_key = use_signal(String::new);
     let mut cred_token = use_signal(String::new);
     let mut cred_role_arn = use_signal(String::new);
-    
+
     rsx! {
         div {
             class: "modal-backdrop",
@@ -1225,7 +1248,7 @@ fn CacheCredModal(cache_type: String, on_close: EventHandler<Option<LocalCredent
                 class: "modal",
                 style: "width:min(520px,96vw);",
                 onclick: move |e| e.stop_propagation(),
-                
+
                 div {
                     class: "modal-head",
                     h2 {
@@ -1254,10 +1277,10 @@ fn CacheCredModal(cache_type: String, on_close: EventHandler<Option<LocalCredent
                         }
                     }
                 }
-                
+
                 div {
                     class: "modal-body",
-                    
+
                     div {
                         class: "field",
                         label { "Name" }
@@ -1268,7 +1291,7 @@ fn CacheCredModal(cache_type: String, on_close: EventHandler<Option<LocalCredent
                             placeholder: "e.g. aws-prod-role"
                         }
                     }
-                    
+
                     div {
                         class: "field",
                         label { "Type" }
@@ -1298,7 +1321,7 @@ fn CacheCredModal(cache_type: String, on_close: EventHandler<Option<LocalCredent
                             }
                         }
                     }
-                    
+
                     if cred_kind() == "aws-key" {
                         div {
                             class: "field",
@@ -1324,7 +1347,7 @@ fn CacheCredModal(cache_type: String, on_close: EventHandler<Option<LocalCredent
                             }
                         }
                     }
-                    
+
                     if cred_kind() == "aws-role" {
                         div {
                             class: "field",
@@ -1342,7 +1365,7 @@ fn CacheCredModal(cache_type: String, on_close: EventHandler<Option<LocalCredent
                             }
                         }
                     }
-                    
+
                     if cred_kind() == "attic-token" || cred_kind() == "nix-token" {
                         div {
                             class: "field",
@@ -1366,7 +1389,7 @@ fn CacheCredModal(cache_type: String, on_close: EventHandler<Option<LocalCredent
                         }
                     }
                 }
-                
+
                 div {
                     class: "modal-foot",
                     button {
@@ -1418,34 +1441,40 @@ fn CacheCredModal(cache_type: String, on_close: EventHandler<Option<LocalCredent
 #[component]
 /// Cache destination table row matching mockup (JSX lines 89-153)
 #[component]
-fn CacheDestinationRow(destination: CacheDestination, on_edit: EventHandler<CacheDestination>, on_change: EventHandler<()>) -> Element {
+fn CacheDestinationRow(
+    destination: CacheDestination,
+    on_edit: EventHandler<CacheDestination>,
+    on_change: EventHandler<()>,
+) -> Element {
     let mut show_delete_confirm = use_signal(|| false);
-    
+
     // Status mapping
     let (status_cls, status_color, status_label) = if destination.enabled {
         ("chip-healthy", "#34d399", "healthy")
     } else {
         ("chip-critical", "#f87171", "error")
     };
-    
+
     // Type icon glyph family
     let is_link_icon = matches!(destination.cache_type.as_str(), "Nix" | "Http");
-    
+
     // Fetch environment assignments
     let cache_id = destination.id;
     let env_ids = use_resource(move || async move {
-        client::get_cache_environments(cache_id).await.unwrap_or_default()
+        client::get_cache_environments(cache_id)
+            .await
+            .unwrap_or_default()
     });
     let environments = use_resource(|| async move { client::fetch_environments().await });
-    
+
     let dest_for_click = destination.clone();
     let dest_for_edit_btn = destination.clone();
-    
+
     rsx! {
         tr {
             style: "cursor:pointer;",
             onclick: move |_| on_edit.call(dest_for_click.clone()),
-            
+
             // Cache column
             td {
                 div {
@@ -1491,7 +1520,7 @@ fn CacheDestinationRow(destination: CacheDestination, on_edit: EventHandler<Cach
                     }
                 }
             }
-            
+
             // Type column
             td {
                 span {
@@ -1500,7 +1529,7 @@ fn CacheDestinationRow(destination: CacheDestination, on_edit: EventHandler<Cach
                     "{destination.cache_type}"
                 }
             }
-            
+
             // Status column
             td {
                 span {
@@ -1513,7 +1542,7 @@ fn CacheDestinationRow(destination: CacheDestination, on_edit: EventHandler<Cach
                     "{status_label}"
                 }
             }
-            
+
             // Storage column with usage bar (mockup lines 115-132)
             td {
                 div {
@@ -1526,7 +1555,7 @@ fn CacheDestinationRow(destination: CacheDestination, on_edit: EventHandler<Cach
                         let unit = "GB";
                         let usage_pct = (used as f64 / total as f64) * 100.0;
                         let bar_color = if usage_pct > 85.0 { "#fbbf24" } else { "#34d399" };
-                        
+
                         rsx! {
                             div {
                                 style: "font-size:11px; color:var(--cf-text-secondary);",
@@ -1542,14 +1571,14 @@ fn CacheDestinationRow(destination: CacheDestination, on_edit: EventHandler<Cach
                     }
                 }
             }
-            
+
             // Paths column (mockup line 133)
             td {
                 class: "mono",
                 style: "font-size:12px;",
                 "—"
             }
-            
+
             // Last push column
             td {
                 style: "font-size:12px; color:var(--cf-text-secondary);",
@@ -1559,7 +1588,7 @@ fn CacheDestinationRow(destination: CacheDestination, on_edit: EventHandler<Cach
                     "—"
                 }
             }
-            
+
             // Environments column
             td {
                 div {
@@ -1570,7 +1599,7 @@ fn CacheDestinationRow(destination: CacheDestination, on_edit: EventHandler<Cach
                                 .filter(|e| ids.contains(&e.id))
                                 .take(3)
                                 .collect();
-                            
+
                             rsx! {
                                 for env in matching_envs {
                                     EnvBadge { env_name: env.name.clone(), color_hex: env.color_hex.clone() }
@@ -1593,7 +1622,7 @@ fn CacheDestinationRow(destination: CacheDestination, on_edit: EventHandler<Cach
                     }
                 }
             }
-            
+
             // Actions column
             td {
                 div {
@@ -1622,7 +1651,7 @@ fn CacheDestinationRow(destination: CacheDestination, on_edit: EventHandler<Cach
                 }
             }
         }
-        
+
 
     }
 }
@@ -1631,7 +1660,7 @@ fn CacheDestinationRow(destination: CacheDestination, on_edit: EventHandler<Cach
 #[component]
 fn EnvBadge(env_name: String, color_hex: String) -> Element {
     let color = normalize_env_color(&color_hex);
-    
+
     rsx! {
         span {
             class: "chip chip-env",

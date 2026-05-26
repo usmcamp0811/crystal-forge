@@ -1572,38 +1572,64 @@ pub enum BuilderStatus {
     Inactive,
     #[serde(alias = "Offline")]
     Offline,
+    #[serde(alias = "Draining")]
+    Draining,
 }
 
 impl BuilderStatus {
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Active => "Active",
-            Self::Inactive => "Inactive",
-            Self::Offline => "Offline",
+            Self::Active => "running",
+            Self::Inactive => "paused",
+            Self::Offline => "offline",
+            Self::Draining => "draining",
         }
     }
 
     pub fn color_class(&self) -> &'static str {
         match self {
             Self::Active => "text-emerald-400",
-            Self::Inactive => "text-slate-400",
+            Self::Inactive => "text-amber-400",
             Self::Offline => "text-red-400",
+            Self::Draining => "text-blue-400",
         }
     }
 
     pub fn bg_class(&self) -> &'static str {
         match self {
             Self::Active => "bg-emerald-500/10",
-            Self::Inactive => "bg-slate-500/10",
+            Self::Inactive => "bg-amber-500/10",
             Self::Offline => "bg-red-500/10",
+            Self::Draining => "bg-blue-500/10",
         }
     }
 
     pub fn dot_class(&self) -> &'static str {
         match self {
             Self::Active => "bg-emerald-400",
-            Self::Inactive => "bg-slate-400",
+            Self::Inactive => "bg-amber-400",
             Self::Offline => "bg-red-400",
+            Self::Draining => "bg-blue-400",
+        }
+    }
+
+    /// JSX-compatible chip class matching BuildersView.jsx
+    pub fn chip_class(&self) -> &'static str {
+        match self {
+            Self::Active => "chip-healthy",
+            Self::Inactive => "chip-warning",
+            Self::Offline => "chip-critical",
+            Self::Draining => "chip-info",
+        }
+    }
+
+    /// JSX-compatible dot color matching BuildersView.jsx
+    pub fn dot_color(&self) -> &'static str {
+        match self {
+            Self::Active => "#34d399",
+            Self::Inactive => "#fbbf24",
+            Self::Offline => "#f87171",
+            Self::Draining => "#60a5fa",
         }
     }
 }
@@ -1613,10 +1639,14 @@ impl BuilderStatus {
 pub struct BuilderSummary {
     pub id: Uuid,
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    pub arch: String,
     pub status: BuilderStatus,
     pub max_cpu_cores: Option<i32>,
     pub max_memory_mb: Option<i32>,
     pub max_concurrent_jobs: i32,
+    pub enabled: bool,
     pub last_heartbeat_at: Option<DateTime<Utc>>,
     pub assigned_environment_count: i32,
     #[serde(default)]
@@ -1630,11 +1660,15 @@ pub struct BuilderSummary {
 pub struct BuilderDetail {
     pub id: Uuid,
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    pub arch: String,
     pub public_key: String,
     pub status: BuilderStatus,
     pub max_cpu_cores: Option<i32>,
     pub max_memory_mb: Option<i32>,
     pub max_concurrent_jobs: i32,
+    pub enabled: bool,
     pub last_heartbeat_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -1656,6 +1690,10 @@ pub struct BuilderCreatedResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateBuilderRequest {
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(default = "default_arch")]
+    pub arch: String,
     pub public_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_cpu_cores: Option<i32>,
@@ -1663,8 +1701,18 @@ pub struct CreateBuilderRequest {
     pub max_memory_mb: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_concurrent_jobs: Option<i32>,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
     #[serde(default)]
     pub environment_ids: Vec<Uuid>,
+}
+
+fn default_arch() -> String {
+    "x86_64-linux".to_string()
+}
+
+fn default_enabled() -> bool {
+    true
 }
 
 /// Update builder request
@@ -1673,6 +1721,10 @@ pub struct UpdateBuilderRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<BuilderStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_cpu_cores: Option<i32>,
@@ -1680,6 +1732,8 @@ pub struct UpdateBuilderRequest {
     pub max_memory_mb: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_concurrent_jobs: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
 }
 
 /// Update builder environments request

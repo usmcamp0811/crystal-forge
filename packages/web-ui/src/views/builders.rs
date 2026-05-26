@@ -1,9 +1,11 @@
-//! Builders management view.
+//! Builders management view - pixel-perfect JSX port.
 
 use dioxus::prelude::*;
 
-use crate::components::builders::{BuilderMetricsView, BuildersList};
-use crate::theme;
+use crate::api;
+use crate::components::builders::{AddBuilderModal, EditBuilderModal};
+use crate::components::loading::LoadingSpinner;
+use crate::components::{Icon, IconName};
 
 fn came_from_setup() -> bool {
     if let Some(storage) = web_sys::window()
@@ -20,22 +22,47 @@ fn came_from_setup() -> bool {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum BuildersTab {
-    List,
-    Metrics,
+enum ViewMode {
+    Cards,
+    Table,
 }
 
-/// Builders management page.
+/// Builders management page matching BuildersView.jsx structure.
 #[component]
 pub fn BuildersView() -> Element {
-    let mut active_tab = use_signal(|| BuildersTab::List);
+    let mut query = use_signal(String::new);
+    let mut status_filter = use_signal(|| "all".to_string());
+    let mut arch_filter = use_signal(|| "all".to_string());
+    let mut view_mode = use_signal(|| ViewMode::Cards);
+    let mut show_add_modal = use_signal(|| false);
+    let mut edit_builder_id = use_signal(|| None::<uuid::Uuid>);
+    let mut refresh_trigger = use_signal(|| 0);
     let from_setup = use_signal(came_from_setup);
+
+    let builders = use_resource(move || async move {
+        let _ = refresh_trigger();
+        api::client::fetch_builders().await
+    });
+
+    let mut on_builder_added = move || {
+        show_add_modal.set(false);
+        refresh_trigger.set(refresh_trigger() + 1);
+    };
+
+    let mut on_builder_updated = move || {
+        edit_builder_id.set(None);
+        refresh_trigger.set(refresh_trigger() + 1);
+    };
+
+    let mut on_edit_builder = move |id: uuid::Uuid| {
+        edit_builder_id.set(Some(id));
+    };
 
     rsx! {
         div {
-            class: "space-y-6",
+            style: "display: flex; flex-direction: column; gap: 16px;",
 
-            // Setup coach guidance shown when navigated from coach steps.
+            // Setup coach guidance
             if from_setup() {
                 div {
                     "data-testid": "setup-coach-builders-callout",
@@ -46,51 +73,372 @@ pub fn BuildersView() -> Element {
                 }
             }
 
-            header {
-                class: "flex flex-col gap-4",
+            // Page head
+            div {
+                class: "page-head",
                 div {
-                    h1 { class: "{theme::typography::PAGE_TITLE}", "Builders" }
+                    h1 { class: "page-title", "Builders" }
                     p {
-                        class: "text-sm {theme::text::SECONDARY}",
-                        "Manage build workers and monitor resource usage."
+                        class: "page-subtitle",
+                        {
+                            let builder_data = builders.read();
+                            match &*builder_data {
+                                Some(Ok(builders_list)) => {
+                                    let total = builders_list.len();
+                                    let running = builders_list.iter()
+                                        .filter(|b| b.status == crate::api::models::BuilderStatus::Active)
+                                        .count();
+                                    let slots_used: i32 = builders_list.iter()
+                                        .map(|b| b.active_jobs)
+                                        .sum();
+                                    let slots_total: i32 = builders_list.iter()
+                                        .map(|b| b.max_concurrent_jobs)
+                                        .sum();
+                                    // TODO: Add completed/failed 24h metrics when backend provides them
+                                    format!("{} of {} running · {}/{} slots used · builds in last 24h",
+                                        running, total, slots_used, slots_total)
+                                },
+                                _ => "Loading...".to_string()
+                            }
+                        }
                     }
                 }
-
-                // Tabs
-                div {
-                    class: "flex border-b border-slate-700",
-                    button {
-                        class: if active_tab() == BuildersTab::List {
-                            "px-4 py-2 border-b-2 border-blue-500 text-blue-400 font-medium"
-                        } else {
-                            "px-4 py-2 border-b-2 border-transparent text-slate-400 hover:text-white transition-colors"
-                        },
-                        onclick: move |_| active_tab.set(BuildersTab::List),
-                        "Builders"
-                    }
-                    button {
-                        class: if active_tab() == BuildersTab::Metrics {
-                            "px-4 py-2 border-b-2 border-blue-500 text-blue-400 font-medium"
-                        } else {
-                            "px-4 py-2 border-b-2 border-transparent text-slate-400 hover:text-white transition-colors"
-                        },
-                        onclick: move |_| active_tab.set(BuildersTab::Metrics),
-                        "Metrics"
-                    }
+                button {
+                    class: "btn btn-primary focus-ring",
+                    onclick: move |_| show_add_modal.set(true),
+                    Icon { name: IconName::Plus, size: 14 }
+                    " Add builder"
                 }
             }
 
-            // Tab content
-            match active_tab() {
-                BuildersTab::List => rsx! {
-                    BuildersList {
-                        show_onboarding_hint: from_setup(),
+            // Stat strip
+            {
+                let builder_data = builders.read();
+                match &*builder_data {
+                    Some(Ok(builders_list)) => {
+                        let total = builders_list.len();
+                        let running = builders_list.iter()
+                            .filter(|b| b.status == crate::api::models::BuilderStatus::Active)
+                            .count();
+                        let slots_used: i32 = builders_list.iter().map(|b| b.active_jobs).sum();
+                        let slots_total: i32 = builders_list.iter().map(|b| b.max_concurrent_jobs).sum();
+                        let slot_pct = if slots_total > 0 {
+                            ((slots_used as f64 / slots_total as f64) * 100.0).round() as i32
+                        } else {
+                            0
+                        };
+                        // TODO: Add completed/failed 24h from backend
+                        let completed = 0;
+                        let failed = 0;
+
+                        rsx! {
+                            div {
+                                class: "stat-strip",
+                                div {
+                                    class: "stat",
+                                    span {
+                                        class: "stat-accent",
+                                        style: "--stat-color: #a78bfa;"
+                                    }
+                                    div { class: "stat-label", "Total" }
+                                    div {
+                                        class: "stat-value",
+                                        style: "color: #a78bfa;",
+                                        "{total}"
+                                    }
+                                }
+                                div {
+                                    class: "stat",
+                                    span {
+                                        class: "stat-accent",
+                                        style: "--stat-color: #34d399;"
+                                    }
+                                    div { class: "stat-label", "Running" }
+                                    div {
+                                        class: "stat-value",
+                                        style: "color: #34d399;",
+                                        "{running}"
+                                    }
+                                }
+                                div {
+                                    class: "stat",
+                                    span {
+                                        class: "stat-accent",
+                                        style: if slot_pct > 85 {
+                                            "--stat-color: #fbbf24;"
+                                        } else {
+                                            "--stat-color: #60a5fa;"
+                                        }
+                                    }
+                                    div { class: "stat-label", "Slot use" }
+                                    div {
+                                        class: "stat-value",
+                                        style: if slot_pct > 85 {
+                                            "color: #fbbf24;"
+                                        } else {
+                                            "color: #60a5fa;"
+                                        },
+                                        "{slot_pct}%"
+                                    }
+                                }
+                                div {
+                                    class: "stat",
+                                    span {
+                                        class: "stat-accent",
+                                        style: "--stat-color: #34d399;"
+                                    }
+                                    div { class: "stat-label", "Built 24h" }
+                                    div {
+                                        class: "stat-value",
+                                        style: "color: #34d399;",
+                                        "{completed}"
+                                    }
+                                }
+                                div {
+                                    class: "stat",
+                                    span {
+                                        class: "stat-accent",
+                                        style: if failed > 0 {
+                                            "--stat-color: #f87171;"
+                                        } else {
+                                            "--stat-color: #34d399;"
+                                        }
+                                    }
+                                    div { class: "stat-label", "Failed 24h" }
+                                    div {
+                                        class: "stat-value",
+                                        style: if failed > 0 {
+                                            "color: #f87171;"
+                                        } else {
+                                            "color: #34d399;"
+                                        },
+                                        "{failed}"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    _ => rsx! { div {} }
+                }
+            }
+
+            // Filter bar
+            {
+                let builder_data = builders.read();
+                match &*builder_data {
+                    Some(Ok(builders_list)) => {
+                        // Extract unique architectures
+                        let mut arches: Vec<String> = builders_list.iter()
+                            .map(|b| b.arch.clone())
+                            .collect::<std::collections::HashSet<_>>()
+                            .into_iter()
+                            .collect();
+                        arches.sort();
+
+                        // Apply filters
+                        let filtered: Vec<_> = builders_list.iter()
+                            .filter(|b| {
+                                // Status filter
+                                let status_match = status_filter() == "all" || {
+                                    let status_label = b.status.label();
+                                    status_filter() == status_label
+                                };
+
+                                // Arch filter
+                                let arch_match = arch_filter() == "all" || b.arch == arch_filter();
+
+                                // Query filter
+                                let query_match = if query().is_empty() {
+                                    true
+                                } else {
+                                    let q = query().to_lowercase();
+                                    b.name.to_lowercase().contains(&q) ||
+                                    b.host.as_ref().map(|h| h.to_lowercase().contains(&q)).unwrap_or(false) ||
+                                    b.arch.to_lowercase().contains(&q)
+                                };
+
+                                status_match && arch_match && query_match
+                            })
+                            .cloned()
+                            .collect();
+
+                        let filtered_count = filtered.len();
+
+                        rsx! {
+                            div {
+                                class: "filterbar",
+
+                                // Search input
+                                div {
+                                    class: "filter-search",
+                                    style: "max-width: 320px;",
+                                    Icon { name: IconName::Search }
+                                    input {
+                                        class: "input focus-ring",
+                                        placeholder: "Search builders…",
+                                        value: "{query}",
+                                        oninput: move |e| query.set(e.value().clone())
+                                    }
+                                }
+
+                                // Status filter segmented control
+                                div {
+                                    class: "seg",
+                                    button {
+                                        class: if status_filter() == "all" { "active" } else { "" },
+                                        onclick: move |_| status_filter.set("all".to_string()),
+                                        "all"
+                                    }
+                                    button {
+                                        class: if status_filter() == "running" { "active" } else { "" },
+                                        onclick: move |_| status_filter.set("running".to_string()),
+                                        "running"
+                                    }
+                                    button {
+                                        class: if status_filter() == "paused" { "active" } else { "" },
+                                        onclick: move |_| status_filter.set("paused".to_string()),
+                                        "paused"
+                                    }
+                                    button {
+                                        class: if status_filter() == "offline" { "active" } else { "" },
+                                        onclick: move |_| status_filter.set("offline".to_string()),
+                                        "offline"
+                                    }
+                                    button {
+                                        class: if status_filter() == "draining" { "active" } else { "" },
+                                        onclick: move |_| status_filter.set("draining".to_string()),
+                                        "draining"
+                                    }
+                                }
+
+                                // Architecture dropdown
+                                select {
+                                    class: "input filter-select focus-ring",
+                                    style: "width: auto;",
+                                    value: "{arch_filter}",
+                                    onchange: move |e| arch_filter.set(e.value().clone()),
+                                    option { value: "all", "All architectures" }
+                                    for arch in arches {
+                                        option { value: "{arch}", "{arch}" }
+                                    }
+                                }
+
+                                // View mode toggle
+                                div {
+                                    class: "seg",
+                                    button {
+                                        class: if view_mode() == ViewMode::Cards { "active" } else { "" },
+                                        onclick: move |_| view_mode.set(ViewMode::Cards),
+                                        Icon { name: IconName::Grid, size: 12 }
+                                        " Cards"
+                                    }
+                                    button {
+                                        class: if view_mode() == ViewMode::Table { "active" } else { "" },
+                                        onclick: move |_| view_mode.set(ViewMode::Table),
+                                        Icon { name: IconName::Rows, size: 12 }
+                                        " Table"
+                                    }
+                                }
+
+                                // Filter count
+                                span {
+                                    class: "filter-count",
+                                    "{filtered_count} builders"
+                                }
+                            }
+
+                            // Cards or table view
+                            match view_mode() {
+                                ViewMode::Cards => rsx! {
+                                    div {
+                                        class: "cards-grid",
+                                        if filtered.is_empty() {
+                                            div {
+                                                class: "text-center py-12 border border-dashed border-slate-700 rounded-lg",
+                                                p { class: "text-slate-400", "No builders match the current filters." }
+                                            }
+                                        } else {
+                                            for builder in filtered {
+                                                BuilderCard {
+                                                    key: "{builder.id}",
+                                                    builder: builder.clone(),
+                                                    on_edit: move |_| on_edit_builder(builder.id)
+                                                }
+                                            }
+                                        }
+                                    }
+                                },
+                                ViewMode::Table => rsx! {
+                                    div {
+                                        class: "card",
+                                        style: "overflow: hidden;",
+                                        if filtered.is_empty() {
+                                            div {
+                                                class: "text-center py-12",
+                                                p { class: "text-slate-400", "No builders match the current filters." }
+                                            }
+                                        } else {
+                                            table {
+                                                class: "sys-table",
+                                                thead {
+                                                    tr {
+                                                        th { "Builder" }
+                                                        th { "Status" }
+                                                        th { "Arch · envs" }
+                                                        th { "Resources" }
+                                                        th { "Slot use" }
+                                                        th { "Built 24h" }
+                                                        th { "Last seen" }
+                                                        th { style: "text-align: right;", " " }
+                                                    }
+                                                }
+                                                tbody {
+                                                    for builder in filtered {
+                                                        BuilderRow {
+                                                            key: "{builder.id}",
+                                                            builder: builder.clone(),
+                                                            on_edit: move |_| on_edit_builder(builder.id)
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    Some(Err(e)) => rsx! {
+                        div {
+                            class: "border border-red-500/30 bg-red-500/10 rounded-lg p-4",
+                            p { class: "text-red-400", "⚠️ Failed to load builders: {e}" }
+                        }
+                    },
+                    None => rsx! {
+                        LoadingSpinner {}
                     }
-                },
-                BuildersTab::Metrics => rsx! {
-                    BuilderMetricsView {}
-                },
+                }
+            }
+        }
+
+        // Modals
+        if show_add_modal() {
+            AddBuilderModal {
+                on_close: move |_| show_add_modal.set(false),
+                on_success: move |_| on_builder_added(),
+                show_onboarding_callouts: from_setup()
+            }
+        }
+
+        if let Some(id) = edit_builder_id() {
+            EditBuilderModal {
+                builder_id: id,
+                on_close: move |_| edit_builder_id.set(None),
+                on_success: move |_| on_builder_updated()
             }
         }
     }
 }
+
+// BuilderCard and BuilderRow components will be defined in separate files
+use crate::components::builders::{BuilderCard, BuilderRow};
