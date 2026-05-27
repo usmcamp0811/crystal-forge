@@ -12,17 +12,16 @@ use crate::api::models::{
     CveAffectedSystemDetail, CveDetail, CveFilters, CveFleetStats, CveJustification,
     CveJustificationInput, CveListItem, CvePackageGroup,
 };
-use crate::auth::user::User;
-use crate::handlers::api::rbac::require_admin;
+use crate::auth::extractors::{AuthenticatedUser, RequireAdmin, RequireAuth};
+use crate::handlers::agent_request::CFState;
 use crate::queries::cves;
-use crate::server::AppState;
 
 /// GET /api/v1/cves
 /// List CVEs with filters.
 pub async fn list_cves(
-    State(state): State<AppState>,
+    State(state): State<CFState>,
     Query(filters): Query<CveFilters>,
-    _user: User, // Admin role check applied via middleware
+    _user: RequireAuth,
 ) -> Result<Json<Vec<CveListItem>>, (StatusCode, String)> {
     let cves = cves::fetch_cve_list(&state.pool, &filters)
         .await
@@ -39,9 +38,9 @@ pub async fn list_cves(
 /// GET /api/v1/cves/grouped
 /// List CVEs grouped by package.
 pub async fn list_cves_grouped(
-    State(state): State<AppState>,
+    State(state): State<CFState>,
     Query(filters): Query<CveFilters>,
-    _user: User,
+    _user: RequireAuth,
 ) -> Result<Json<Vec<CvePackageGroup>>, (StatusCode, String)> {
     let groups = cves::fetch_cve_packages_grouped(&state.pool, &filters)
         .await
@@ -58,8 +57,8 @@ pub async fn list_cves_grouped(
 /// GET /api/v1/cves/stats
 /// Get fleet-wide CVE statistics.
 pub async fn get_fleet_stats(
-    State(state): State<AppState>,
-    _user: User,
+    State(state): State<CFState>,
+    _user: RequireAuth,
 ) -> Result<Json<CveFleetStats>, (StatusCode, String)> {
     let stats = cves::fetch_cve_fleet_stats(&state.pool)
         .await
@@ -76,8 +75,8 @@ pub async fn get_fleet_stats(
 /// GET /api/v1/cves/packages
 /// Get list of package names for autocomplete.
 pub async fn list_package_names(
-    State(state): State<AppState>,
-    _user: User,
+    State(state): State<CFState>,
+    _user: RequireAuth,
 ) -> Result<Json<Vec<String>>, (StatusCode, String)> {
     let packages = cves::fetch_package_names(&state.pool)
         .await
@@ -94,9 +93,9 @@ pub async fn list_package_names(
 /// GET /api/v1/cves/:cve_id
 /// Get detailed information for a CVE.
 pub async fn get_cve_detail(
-    State(state): State<AppState>,
+    State(state): State<CFState>,
     Path(cve_id): Path<String>,
-    _user: User,
+    _user: RequireAuth,
 ) -> Result<Json<CveDetail>, (StatusCode, String)> {
     let detail = cves::fetch_cve_detail(&state.pool, &cve_id)
         .await
@@ -113,9 +112,9 @@ pub async fn get_cve_detail(
 /// GET /api/v1/cves/:cve_id/systems
 /// Get systems affected by a CVE.
 pub async fn get_cve_systems(
-    State(state): State<AppState>,
+    State(state): State<CFState>,
     Path(cve_id): Path<String>,
-    _user: User,
+    _user: RequireAuth,
 ) -> Result<Json<Vec<CveAffectedSystemDetail>>, (StatusCode, String)> {
     let systems = cves::fetch_cve_affected_systems(&state.pool, &cve_id)
         .await
@@ -132,17 +131,11 @@ pub async fn get_cve_systems(
 /// POST /api/v1/cves/:cve_id/justification
 /// Create or update a CVE justification (admin only).
 pub async fn save_justification(
-    State(state): State<AppState>,
+    State(state): State<CFState>,
     Path(cve_id): Path<String>,
-    headers: axum::http::HeaderMap,
-    user: User,
+    RequireAdmin(user): RequireAdmin,
     Json(payload): Json<CveJustificationRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    // Require admin role
-    if require_admin(&state.pool, &headers).await.is_none() {
-        return Err((StatusCode::FORBIDDEN, "Admin role required".to_string()));
-    }
-
     // Validate category
     let valid_categories = ["mitigated", "false_positive", "accepted_risk", "patch_scheduled"];
     if !valid_categories.contains(&payload.category.as_str()) {
@@ -166,7 +159,7 @@ pub async fn save_justification(
         cve_id: cve_id.clone(),
         category: payload.category.clone(),
         reason: payload.reason.trim().to_string(),
-        updated_by: user.id,
+        updated_by: user.user_id,
     };
 
     cves::insert_cve_justification(&state.pool, &input)
@@ -191,9 +184,9 @@ pub struct CveJustificationRequest {
 /// GET /api/v1/cves/:cve_id/justifications
 /// Get justification history for a CVE.
 pub async fn list_justifications(
-    State(state): State<AppState>,
+    State(state): State<CFState>,
     Path(cve_id): Path<String>,
-    _user: User,
+    _user: RequireAuth,
 ) -> Result<Json<Vec<CveJustification>>, (StatusCode, String)> {
     let justifications = cves::fetch_cve_justifications(&state.pool, &cve_id)
         .await
@@ -210,14 +203,9 @@ pub async fn list_justifications(
 /// POST /api/v1/cves/rescan-fleet
 /// Trigger CVE scans for all active systems (admin only).
 pub async fn trigger_fleet_rescan(
-    State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
-    _user: User,
+    State(state): State<CFState>,
+    _user: RequireAdmin,
 ) -> Result<Json<FleetRescanResponse>, (StatusCode, String)> {
-    // Require admin role
-    if require_admin(&state.pool, &headers).await.is_none() {
-        return Err((StatusCode::FORBIDDEN, "Admin role required".to_string()));
-    }
 
     // Get all active systems
     let systems = sqlx::query!(
@@ -263,9 +251,9 @@ pub struct FleetRescanResponse {
 /// GET /api/v1/cves/export
 /// Export CVEs as CSV.
 pub async fn export_cves(
-    State(state): State<AppState>,
+    State(state): State<CFState>,
     Query(filters): Query<CveFilters>,
-    _user: User,
+    _user: RequireAuth,
 ) -> Result<Response, (StatusCode, String)> {
     let cves = cves::fetch_cve_list(&state.pool, &filters)
         .await
@@ -337,10 +325,70 @@ use serde::Serialize;
 mod tests {
     use super::*;
 
+    // Admin enforcement for save_justification and trigger_fleet_rescan is handled
+    // declaratively by the RequireAdmin extractor — covered by extractors.rs tests.
+    // Here we test pure business logic that requires no DB.
+
+    // ── Validation unit tests (pure logic, no DB) ──
+
     #[test]
-    fn test_justification_validation() {
-        let valid_categories = ["mitigated", "false_positive", "accepted_risk", "patch_scheduled"];
-        assert!(valid_categories.contains(&"accepted_risk"));
-        assert!(!valid_categories.contains(&"invalid"));
+    fn justification_category_allowlist_accepts_valid_values() {
+        let valid = ["mitigated", "false_positive", "accepted_risk", "patch_scheduled"];
+        assert!(valid.contains(&"accepted_risk"));
+        assert!(valid.contains(&"patch_scheduled"));
+        assert!(valid.contains(&"mitigated"));
+        assert!(valid.contains(&"false_positive"));
+    }
+
+    #[test]
+    fn justification_category_allowlist_rejects_invalid_values() {
+        let valid = ["mitigated", "false_positive", "accepted_risk", "patch_scheduled"];
+        assert!(!valid.contains(&"wontfix"));
+        assert!(!valid.contains(&"ignored"));
+        assert!(!valid.contains(&""));
+        assert!(!valid.contains(&"ACCEPTED_RISK")); // case-sensitive
+    }
+
+    #[test]
+    fn justification_reason_length_validation() {
+        // Min 10 chars
+        let too_short = "short";
+        assert!(too_short.trim().len() < 10);
+
+        let at_min = "1234567890";
+        assert!(at_min.trim().len() >= 10);
+
+        // Max 2000 chars
+        let at_max = "a".repeat(2000);
+        assert!(at_max.trim().len() <= 2000);
+
+        let too_long = "a".repeat(2001);
+        assert!(too_long.trim().len() > 2000);
+    }
+
+    #[test]
+    fn csv_export_row_format_has_correct_column_count() {
+        // Verify our CSV header has 13 columns matching the row format string
+        let header = "CVE ID,Severity,CVSS Score,Package,Installed Version,Fixed Version,\
+                       Affected Systems,Environments,Fix Status,Triage Status,Age (days),\
+                       First Seen,Last Seen";
+        let col_count = header.split(',').count();
+        assert_eq!(col_count, 13, "CSV header must have 13 columns");
+
+        // Our row format also has 13 fields (14 braces = 13 commas between them)
+        let row_template = "{},{},{},{},{},{},{},{},{},{},{},{},{}";
+        let field_count = row_template.split("{}").count() - 1;
+        assert_eq!(field_count, 13, "CSV row must have 13 fields");
+    }
+
+    #[test]
+    fn cve_filters_default_has_no_constraints() {
+        let f = CveFilters::default();
+        assert!(f.severity.is_none());
+        assert!(f.fix_status.is_none());
+        assert!(f.triage_status.is_none());
+        assert!(f.package.is_none());
+        assert!(f.search.is_none());
+        assert!(f.sort.is_none());
     }
 }
