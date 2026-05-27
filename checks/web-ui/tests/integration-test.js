@@ -3460,69 +3460,56 @@ const steps = [
     description: "CVE dashboard - fleet overview",
     action: async (page) => {
       // Mock the CVE API endpoints so the test doesn't require real scan data.
-      await page.route("**/api/v1/cves/summary*", async (route) => {
+      await page.route("**/api/v1/cves/stats*", async (route) => {
         await route.fulfill({
           status: 200,
           contentType: "application/json",
           body: JSON.stringify({
-            total_open: 42,
-            severity: { critical: 5, high: 12, medium: 18, low: 7 },
-            affected_systems: 8,
-            new_cves_last_7_days: 3,
-            oldest_cve_age_days: 730,
+            total_cves: 42,
+            critical: 5,
+            high: 12,
+            medium: 18,
+            low: 7,
+            fixable: 20,
+            exploited: 2,
+            environments_affected: 3,
+            systems_affected: 8,
+            outstanding: 30,
+            accepted: 8,
+            scheduled: 4,
           }),
         });
       });
-      await page.route("**/api/v1/cves/top-systems*", async (route) => {
+      await page.route("**/api/v1/cves/packages*", async (route) => {
         await route.fulfill({
           status: 200,
           contentType: "application/json",
-          body: JSON.stringify([
-            {
-              system_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-              hostname: "prod-server-01",
-              total_cves: 15,
-              critical_cves: 3,
-              high_cves: 5,
-              medium_cves: 4,
-              low_cves: 3,
-              days_since_scan: 2,
-              last_cve_scan: new Date().toISOString(),
-            },
-          ]),
+          body: JSON.stringify(["openssl", "glibc"]),
         });
       });
-      await page.route("**/api/v1/cves/scan-freshness*", async (route) => {
+      await page.route("**/api/v1/cves?*", async (route) => {
         await route.fulfill({
           status: 200,
           contentType: "application/json",
           body: JSON.stringify([
             {
-              system_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-              hostname: "prod-server-01",
-              days_since_scan: 2,
-              last_cve_scan: new Date().toISOString(),
-              total_cves: 15,
-            },
-          ]),
-        });
-      });
-      await page.route("**/api/v1/cves/vulnerabilities*", async (route) => {
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify([
-            {
-              system_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-              hostname: "prod-server-01",
               cve_id: "CVE-2024-1234",
+              cvss_v3_score: 9.8,
+              title: "OpenSSL bounds check issue",
               severity: "critical",
-              cvss_score: 9.8,
+              cvss_vector: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+              published_date: "2024-02-01",
+              exploited: true,
               package_name: "openssl",
               installed_version: "3.0.1",
               fixed_version: "3.0.2",
+              fix_status: "fix_available",
+              affected_count: 4,
+              affected_environments: ["prod", "staging"],
               first_seen: new Date().toISOString(),
-              status: "open",
+              last_seen: new Date().toISOString(),
+              age_days: 12,
+              triage_status: "outstanding",
             },
           ]),
         });
@@ -3532,64 +3519,60 @@ const steps = [
       await page.waitForTimeout(2000);
 
       // Assert the page heading is present.
-      const heading = page.locator("main h1:has-text('CVE Dashboard')");
-      await assertVisible(heading, "Expected CVE Dashboard heading");
+      const heading = page.locator("main h1:has-text('CVEs')");
+      await assertVisible(heading, "Expected CVEs heading");
 
       // Assert summary stat cards are rendered.
-      const totalCard = page.locator("main").getByText("Total Open CVEs");
-      await assertVisible(totalCard, "Expected 'Total Open CVEs' stat card");
+      const patchableCard = page.locator("main").getByText("Patchable now");
+      await assertVisible(patchableCard, "Expected 'Patchable now' stat card");
 
       // Assert severity breakdown section.
       const criticalCard = page.locator("main").getByText("Critical").first();
       await assertVisible(criticalCard, "Expected severity breakdown visible");
 
-      // Assert the drill-down section is rendered.
-      const drillDownSection = page.locator("[data-testid='cve-drill-down']");
-      await assertVisible(drillDownSection, "Expected CVE drill-down section");
-
-      // Assert top-systems section.
-      const topSystems = page.locator("[data-testid='cve-top-systems']");
-      await assertVisible(topSystems, "Expected top-affected systems section");
-
-      // Assert scan freshness section.
-      const freshness = page.locator("[data-testid='cve-scan-freshness']");
-      await assertVisible(freshness, "Expected scan freshness section");
+      const severityFilterLabel = page.locator("main").getByText("Severity:");
+      await assertVisible(severityFilterLabel, "Expected severity filter controls");
+      const cveRow = page.locator("main td:has-text('CVE-2024-1234')");
+      await assertVisible(cveRow, "Expected CVE row to render");
 
       // Unroute after test.
-      await page.unroute("**/api/v1/cves/summary*");
-      await page.unroute("**/api/v1/cves/top-systems*");
-      await page.unroute("**/api/v1/cves/scan-freshness*");
-      await page.unroute("**/api/v1/cves/vulnerabilities*");
+      await page.unroute("**/api/v1/cves/stats*");
+      await page.unroute("**/api/v1/cves/packages*");
+      await page.unroute("**/api/v1/cves?*");
     },
   },
   {
     name: "16b-cves-severity-filter",
     description: "CVE dashboard - severity filter re-issues request with ?severity=critical",
     action: async (page) => {
-      await page.route("**/api/v1/cves/summary*", async (route) => {
+      await page.route("**/api/v1/cves/stats*", async (route) => {
         await route.fulfill({
           status: 200,
           contentType: "application/json",
           body: JSON.stringify({
-            total_open: 17,
-            severity: { critical: 5, high: 12, medium: 0, low: 0 },
-            affected_systems: 4,
-            new_cves_last_7_days: 1,
-            oldest_cve_age_days: 90,
+            total_cves: 17,
+            critical: 5,
+            high: 12,
+            medium: 0,
+            low: 0,
+            fixable: 7,
+            exploited: 1,
+            environments_affected: 2,
+            systems_affected: 4,
+            outstanding: 10,
+            accepted: 5,
+            scheduled: 2,
           }),
         });
       });
-      await page.route("**/api/v1/cves/top-systems*", async (route) => {
-        await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
-      });
-      await page.route("**/api/v1/cves/scan-freshness*", async (route) => {
-        await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+      await page.route("**/api/v1/cves/packages*", async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(["openssl"]) });
       });
 
       // Collect all URLs that hit the vulnerabilities endpoint so we can assert
       // the severity filter is sent as a query param after chip click.
       const vulnerabilityUrls = [];
-      await page.route("**/api/v1/cves/vulnerabilities*", async (route) => {
+      await page.route("**/api/v1/cves?*", async (route) => {
         vulnerabilityUrls.push(route.request().url());
         // First (unfiltered) call returns empty; filtered call returns a critical row.
         const url = route.request().url();
@@ -3599,16 +3582,23 @@ const steps = [
             contentType: "application/json",
             body: JSON.stringify([
               {
-                system_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-                hostname: "prod-server-01",
                 cve_id: "CVE-2024-9999",
+                cvss_v3_score: 9.8,
+                title: "Kernel privilege escalation",
                 severity: "critical",
-                cvss_score: 9.8,
+                cvss_vector: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+                published_date: "2024-02-02",
+                exploited: true,
                 package_name: "openssl",
                 installed_version: "3.0.1",
                 fixed_version: "3.0.2",
+                fix_status: "fix_available",
+                affected_count: 2,
+                affected_environments: ["prod"],
                 first_seen: new Date().toISOString(),
-                status: "fix_available",
+                last_seen: new Date().toISOString(),
+                age_days: 7,
+                triage_status: "outstanding",
               },
             ]),
           });
@@ -3630,7 +3620,7 @@ const steps = [
       // filtered request resolves very quickly in CI.
       const filteredResponsePromise = page.waitForResponse(
         (resp) =>
-          resp.url().includes("/api/v1/cves/vulnerabilities") &&
+          resp.url().includes("/api/v1/cves") &&
           resp.url().includes("severity=critical"),
         { timeout: 8000 },
       );
@@ -3668,10 +3658,9 @@ const steps = [
       const filteredRow = page.locator("td:has-text('CVE-2024-9999')");
       await assertVisible(filteredRow, "Expected filtered CVE row CVE-2024-9999 to appear after severity filter");
 
-      await page.unroute("**/api/v1/cves/summary*");
-      await page.unroute("**/api/v1/cves/top-systems*");
-      await page.unroute("**/api/v1/cves/scan-freshness*");
-      await page.unroute("**/api/v1/cves/vulnerabilities*");
+      await page.unroute("**/api/v1/cves/stats*");
+      await page.unroute("**/api/v1/cves/packages*");
+      await page.unroute("**/api/v1/cves?*");
     },
   },
   {
