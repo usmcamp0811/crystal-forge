@@ -13,6 +13,7 @@ use crate::api::models::{
     CveJustificationInput, CveListItem, CvePackageGroup,
 };
 use crate::auth::user::User;
+use crate::handlers::api::rbac::require_admin;
 use crate::queries::cves;
 use crate::server::AppState;
 
@@ -133,9 +134,15 @@ pub async fn get_cve_systems(
 pub async fn save_justification(
     State(state): State<AppState>,
     Path(cve_id): Path<String>,
+    headers: axum::http::HeaderMap,
     user: User,
-    Json(mut payload): Json<CveJustificationRequest>,
+    Json(payload): Json<CveJustificationRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    // Require admin role
+    if require_admin(&state.pool, &headers).await.is_none() {
+        return Err((StatusCode::FORBIDDEN, "Admin role required".to_string()));
+    }
+
     // Validate category
     let valid_categories = ["mitigated", "false_positive", "accepted_risk", "patch_scheduled"];
     if !valid_categories.contains(&payload.category.as_str()) {
@@ -157,7 +164,7 @@ pub async fn save_justification(
     let input = CveJustificationInput {
         system_id: payload.system_id,
         cve_id: cve_id.clone(),
-        category: payload.category,
+        category: payload.category.clone(),
         reason: payload.reason.trim().to_string(),
         updated_by: user.id,
     };
@@ -204,8 +211,14 @@ pub async fn list_justifications(
 /// Trigger CVE scans for all active systems (admin only).
 pub async fn trigger_fleet_rescan(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     _user: User,
 ) -> Result<Json<FleetRescanResponse>, (StatusCode, String)> {
+    // Require admin role
+    if require_admin(&state.pool, &headers).await.is_none() {
+        return Err((StatusCode::FORBIDDEN, "Admin role required".to_string()));
+    }
+
     // Get all active systems
     let systems = sqlx::query!(
         r#"

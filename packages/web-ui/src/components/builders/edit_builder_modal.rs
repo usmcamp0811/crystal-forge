@@ -5,9 +5,9 @@ use uuid::Uuid;
 
 use crate::api::{self, models::BuilderStatus};
 use crate::components::builders::generate_ed25519_keypair;
-use crate::components::{Icon, IconName};
 use crate::components::loading::LoadingSpinner;
 use crate::components::modals::ConfirmDialog;
+use crate::components::{Icon, IconName};
 use crate::theme;
 
 #[path = "edit_builder_modal_actions.rs"]

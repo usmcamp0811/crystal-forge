@@ -93,9 +93,17 @@ fn sync_cve_url_query(
         format!("?{}", parts.join("&"))
     };
 
-    let pathname = window.location().pathname().ok().unwrap_or_else(|| "/cves".to_string());
+    let pathname = window
+        .location()
+        .pathname()
+        .ok()
+        .unwrap_or_else(|| "/cves".to_string());
     if let Ok(history) = window.history() {
-        let _ = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&format!("{pathname}{query}")));
+        let _ = history.replace_state_with_url(
+            &wasm_bindgen::JsValue::NULL,
+            "",
+            Some(&format!("{pathname}{query}")),
+        );
     }
 }
 
@@ -136,7 +144,11 @@ pub fn CvesView() -> Element {
             fix_status.as_deref(),
             triage_status.as_deref(),
             package.as_deref(),
-            if search.trim().is_empty() { None } else { Some(search.as_str()) },
+            if search.trim().is_empty() {
+                None
+            } else {
+                Some(search.as_str())
+            },
             &sort,
             &view,
             cve.as_deref(),
@@ -145,7 +157,8 @@ pub fn CvesView() -> Element {
 
     // Data resources
     let stats = use_resource(move || async move { client::fetch_cve_fleet_stats().await });
-    let package_names = use_resource(move || async move { client::fetch_cve_package_names().await });
+    let package_names =
+        use_resource(move || async move { client::fetch_cve_package_names().await });
 
     let cve_list = use_resource(move || {
         let filters = CveFilters {
@@ -629,7 +642,7 @@ fn CveRow(cve: CveListItem, on_open: EventHandler<String>) -> Element {
         "MEDIUM" => theme::cve::MEDIUM_TEXT,
         _ => theme::cve::LOW_TEXT,
     };
-    
+
     let cve_id_for_onclick = cve.cve_id.clone();
 
     rsx! {
@@ -774,7 +787,7 @@ fn CvePackageGroupsView(filters: CveFilters, on_open_cve: EventHandler<String>) 
                         }
                     } else {
                         for group in groups {
-                            CvePackageGroupCard { 
+                            CvePackageGroupCard {
                                 group: group.clone(),
                                 on_open_cve: on_open_cve
                             }
@@ -1119,7 +1132,8 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
             }
         }) as Box<dyn FnMut(_)>);
 
-        let _ = window.add_event_listener_with_callback("keydown", handler.as_ref().unchecked_ref());
+        let _ =
+            window.add_event_listener_with_callback("keydown", handler.as_ref().unchecked_ref());
         handler.forget();
     });
 
@@ -1450,7 +1464,10 @@ fn AffectedSystemsList(systems: Vec<CveAffectedSystemDetail>) -> Element {
     let mut by_env: std::collections::HashMap<String, Vec<CveAffectedSystemDetail>> =
         std::collections::HashMap::new();
     for sys in systems {
-        let env = sys.environment.clone().unwrap_or_else(|| "unknown".to_string());
+        let env = sys
+            .environment
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
         by_env.entry(env).or_default().push(sys);
     }
 

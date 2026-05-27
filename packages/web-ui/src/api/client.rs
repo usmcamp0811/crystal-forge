@@ -187,7 +187,10 @@ pub async fn fetch_cves(filters: &CveFilters) -> Result<Vec<CveListItem>, ApiCli
 
     if let Some(triage_status) = &filters.triage_status {
         if !triage_status.is_empty() {
-            parts.push(format!("triage_status={}", encode_query_value(triage_status)));
+            parts.push(format!(
+                "triage_status={}",
+                encode_query_value(triage_status)
+            ));
         }
     }
 
@@ -242,7 +245,10 @@ pub async fn fetch_cves_grouped(
 
     if let Some(triage_status) = &filters.triage_status {
         if !triage_status.is_empty() {
-            parts.push(format!("triage_status={}", encode_query_value(triage_status)));
+            parts.push(format!(
+                "triage_status={}",
+                encode_query_value(triage_status)
+            ));
         }
     }
 
@@ -274,7 +280,9 @@ pub async fn fetch_cve_detail(cve_id: &str) -> Result<CveDetail, ApiClientError>
 }
 
 /// Fetch systems affected by a CVE.
-pub async fn fetch_cve_systems(cve_id: &str) -> Result<Vec<CveAffectedSystemDetail>, ApiClientError> {
+pub async fn fetch_cve_systems(
+    cve_id: &str,
+) -> Result<Vec<CveAffectedSystemDetail>, ApiClientError> {
     let url = format!(
         "{}/cves/{}/systems",
         base_url(),
@@ -333,7 +341,10 @@ pub async fn export_cves_csv(filters: &CveFilters) -> Result<(), ApiClientError>
 
     if let Some(triage_status) = &filters.triage_status {
         if !triage_status.is_empty() {
-            parts.push(format!("triage_status={}", encode_query_value(triage_status)));
+            parts.push(format!(
+                "triage_status={}",
+                encode_query_value(triage_status)
+            ));
         }
     }
 
@@ -1593,9 +1604,7 @@ async fn post_json<T: serde::de::DeserializeOwned, B: serde::Serialize>(
 }
 
 /// POST without body, expecting JSON response.
-async fn post_json_no_body<T: serde::de::DeserializeOwned>(
-    url: &str,
-) -> Result<T, ApiClientError> {
+async fn post_json_no_body<T: serde::de::DeserializeOwned>(url: &str) -> Result<T, ApiClientError> {
     send_json::<T, ()>("POST", url, None).await
 }
 
