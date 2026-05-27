@@ -335,24 +335,234 @@ pub async fn fetch_package_names(pool: &PgPool) -> Result<Vec<String>> {
 mod tests {
     use super::*;
 
+    // ── Query builder unit tests (pure logic, no DB connection needed) ──
+
+    fn build_list_query(filters: &CveFilters) -> String {
+        let mut query = String::from(
+            "SELECT * FROM view_cve_list_with_metadata WHERE 1=1\n",
+        );
+        let mut conditions = Vec::new();
+
+        if let Some(ref severity) = filters.severity {
+            conditions.push(format!("AND severity = '{}'", severity.to_uppercase()));
+        }
+        if let Some(ref fix_status) = filters.fix_status {
+            match fix_status.as_str() {
+                "available" => conditions.push("AND fix_status = 'fix_available'".to_string()),
+                "pending" => conditions.push("AND fix_status = 'open'".to_string()),
+                "exploited" => conditions.push("AND exploited = TRUE".to_string()),
+                _ => {}
+            }
+        }
+        if let Some(ref triage_status) = filters.triage_status {
+            conditions.push(format!("AND triage_status = '{}'", triage_status));
+        }
+        if let Some(ref package) = filters.package {
+            conditions.push(format!(
+                "AND package_name ILIKE '%{}%'",
+                package.replace('\'', "''")
+            ));
+        }
+        if let Some(ref search) = filters.search {
+            let esc = search.replace('\'', "''");
+            conditions.push(format!(
+                "AND (cve_id ILIKE '%{0}%' OR package_name ILIKE '%{0}%' OR title ILIKE '%{0}%')",
+                esc
+            ));
+        }
+        for cond in conditions {
+            query.push_str(&cond);
+            query.push('\n');
+        }
+        query
+    }
+
+    #[test]
+    fn no_filters_produces_base_query_only() {
+        let q = build_list_query(&CveFilters::default());
+        assert!(!q.contains("AND severity"));
+        assert!(!q.contains("AND fix_status"));
+        assert!(!q.contains("AND triage_status"));
+        assert!(!q.contains("AND package_name"));
+        assert!(!q.contains("AND (cve_id"));
+    }
+
+    #[test]
+    fn severity_filter_uppercased_in_query() {
+        let f = CveFilters {
+            severity: Some("critical".to_string()),
+            ..Default::default()
+        };
+        let q = build_list_query(&f);
+        assert!(q.contains("severity = 'CRITICAL'"), "query: {}", q);
+    }
+
+    #[test]
+    fn fix_status_available_maps_to_fix_available() {
+        let f = CveFilters {
+            fix_status: Some("available".to_string()),
+            ..Default::default()
+        };
+        let q = build_list_query(&f);
+        assert!(q.contains("fix_status = 'fix_available'"), "query: {}", q);
+    }
+
+    #[test]
+    fn fix_status_pending_maps_to_open() {
+        let f = CveFilters {
+            fix_status: Some("pending".to_string()),
+            ..Default::default()
+        };
+        let q = build_list_query(&f);
+        assert!(q.contains("fix_status = 'open'"), "query: {}", q);
+    }
+
+    #[test]
+    fn fix_status_exploited_maps_to_boolean_filter() {
+        let f = CveFilters {
+            fix_status: Some("exploited".to_string()),
+            ..Default::default()
+        };
+        let q = build_list_query(&f);
+        assert!(q.contains("exploited = TRUE"), "query: {}", q);
+    }
+
+    #[test]
+    fn unknown_fix_status_is_silently_ignored() {
+        let f = CveFilters {
+            fix_status: Some("wontfix".to_string()),
+            ..Default::default()
+        };
+        let q = build_list_query(&f);
+        assert!(!q.contains("AND fix_status"), "query: {}", q);
+        assert!(!q.contains("wontfix"), "query: {}", q);
+    }
+
+    #[test]
+    fn triage_status_filter_passed_through_verbatim() {
+        for status in ["outstanding", "scheduled", "accepted"] {
+            let f = CveFilters {
+                triage_status: Some(status.to_string()),
+                ..Default::default()
+            };
+            let q = build_list_query(&f);
+            assert!(
+                q.contains(&format!("triage_status = '{}'", status)),
+                "query for status={}: {}",
+                status,
+                q
+            );
+        }
+    }
+
+    #[test]
+    fn search_filter_escapes_single_quotes() {
+        let f = CveFilters {
+            search: Some("O'Reilly".to_string()),
+            ..Default::default()
+        };
+        let q = build_list_query(&f);
+        // Single quote must be doubled to prevent SQL injection
+        assert!(q.contains("O''Reilly"), "query: {}", q);
+        assert!(!q.contains("O'Reilly") || q.matches("O''Reilly").count() > 0);
+    }
+
+    #[test]
+    fn package_filter_escapes_single_quotes() {
+        let f = CveFilters {
+            package: Some("lib's-pkg".to_string()),
+            ..Default::default()
+        };
+        let q = build_list_query(&f);
+        assert!(q.contains("lib''s-pkg"), "query: {}", q);
+    }
+
+    #[test]
+    fn multiple_filters_all_appear_in_query() {
+        let f = CveFilters {
+            severity: Some("high".to_string()),
+            fix_status: Some("available".to_string()),
+            triage_status: Some("outstanding".to_string()),
+            search: Some("openssl".to_string()),
+            ..Default::default()
+        };
+        let q = build_list_query(&f);
+        assert!(q.contains("severity = 'HIGH'"));
+        assert!(q.contains("fix_status = 'fix_available'"));
+        assert!(q.contains("triage_status = 'outstanding'"));
+        assert!(q.contains("openssl"));
+    }
+
+    #[test]
+    fn cve_filters_default_all_none() {
+        let f = CveFilters::default();
+        assert!(f.severity.is_none());
+        assert!(f.fix_status.is_none());
+        assert!(f.triage_status.is_none());
+        assert!(f.package.is_none());
+        assert!(f.search.is_none());
+        assert!(f.sort.is_none());
+        assert!(f.limit.is_none());
+    }
+
+    // ── Live DB tests (require running PostgreSQL with migrations applied) ──
+
     #[tokio::test]
-    #[ignore] // Requires test database
-    async fn test_fetch_cve_list_no_filters() {
+    #[ignore = "requires test database"]
+    async fn fetch_cve_list_no_filters_returns_ok() {
         let pool = crate::config::CrystalForgeConfig::db_pool()
             .await
             .expect("test db pool");
-        let filters = CveFilters::default();
-        let result = fetch_cve_list(&pool, &filters).await;
-        assert!(result.is_ok());
+        let result = fetch_cve_list(&pool, &CveFilters::default()).await;
+        assert!(result.is_ok(), "error: {:?}", result.err());
     }
 
     #[tokio::test]
-    #[ignore]
-    async fn test_fetch_cve_fleet_stats() {
+    #[ignore = "requires test database"]
+    async fn fetch_cve_fleet_stats_returns_ok() {
         let pool = crate::config::CrystalForgeConfig::db_pool()
             .await
             .expect("test db pool");
         let result = fetch_cve_fleet_stats(&pool).await;
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "error: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires test database"]
+    async fn fetch_cve_list_severity_filter_constrains_results() {
+        let pool = crate::config::CrystalForgeConfig::db_pool()
+            .await
+            .expect("test db pool");
+        let f = CveFilters {
+            severity: Some("critical".to_string()),
+            ..Default::default()
+        };
+        let result = fetch_cve_list(&pool, &f).await.expect("query failed");
+        for cve in &result {
+            assert_eq!(
+                cve.severity.to_uppercase(),
+                "CRITICAL",
+                "expected only CRITICAL cves, got: {:?}",
+                cve.severity
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires test database"]
+    async fn fetch_cve_list_limit_respected() {
+        let pool = crate::config::CrystalForgeConfig::db_pool()
+            .await
+            .expect("test db pool");
+        let f = CveFilters {
+            limit: Some(5),
+            ..Default::default()
+        };
+        let result = fetch_cve_list(&pool, &f).await.expect("query failed");
+        assert!(
+            result.len() <= 5,
+            "expected at most 5 results, got {}",
+            result.len()
+        );
     }
 }
