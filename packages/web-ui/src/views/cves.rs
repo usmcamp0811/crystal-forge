@@ -15,22 +15,137 @@ use crate::api::models::{
     CveJustificationInput, CveListItem, CvePackageGroup,
 };
 use crate::components::layout::Card;
+use crate::components::notifications::Toast;
 use crate::theme;
+
+fn query_param(name: &str) -> Option<String> {
+    let window = web_sys::window()?;
+    let search = window.location().search().ok()?;
+    let query = search.trim_start_matches('?');
+    if query.is_empty() {
+        return None;
+    }
+
+    for pair in query.split('&') {
+        let mut parts = pair.splitn(2, '=');
+        let key = parts.next().unwrap_or_default();
+        let value = parts.next().unwrap_or_default();
+        if key == name {
+            return js_sys::decode_uri_component(value)
+                .ok()
+                .map(|v| v.as_string().unwrap_or_default());
+        }
+    }
+
+    None
+}
+
+fn sync_cve_url_query(
+    severity: Option<&str>,
+    fix_status: Option<&str>,
+    triage_status: Option<&str>,
+    package: Option<&str>,
+    search: Option<&str>,
+    sort: &str,
+    view: &str,
+    cve: Option<&str>,
+) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+
+    let mut parts: Vec<String> = Vec::new();
+    let push = |parts: &mut Vec<String>, key: &str, value: &str| {
+        if !value.trim().is_empty() {
+            let encoded: String = js_sys::encode_uri_component(value).into();
+            parts.push(format!("{key}={encoded}"));
+        }
+    };
+
+    if let Some(v) = severity {
+        push(&mut parts, "severity", v);
+    }
+    if let Some(v) = fix_status {
+        push(&mut parts, "fix_status", v);
+    }
+    if let Some(v) = triage_status {
+        push(&mut parts, "triage_status", v);
+    }
+    if let Some(v) = package {
+        push(&mut parts, "package", v);
+    }
+    if let Some(v) = search {
+        push(&mut parts, "search", v);
+    }
+    if sort != "severity" {
+        push(&mut parts, "sort", sort);
+    }
+    if view != "flat" {
+        push(&mut parts, "view", view);
+    }
+    if let Some(v) = cve {
+        push(&mut parts, "cve", v);
+    }
+
+    let query = if parts.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", parts.join("&"))
+    };
+
+    let pathname = window.location().pathname().ok().unwrap_or_else(|| "/cves".to_string());
+    if let Ok(history) = window.history() {
+        let _ = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&format!("{pathname}{query}")));
+    }
+}
 
 #[component]
 pub fn CvesView() -> Element {
+    let initial_severity = query_param("severity");
+    let initial_fix = query_param("fix_status").or_else(|| query_param("fix"));
+    let initial_triage = query_param("triage_status").or_else(|| query_param("triage"));
+    let initial_package = query_param("package");
+    let initial_search = query_param("search").unwrap_or_default();
+    let initial_sort = query_param("sort").unwrap_or_else(|| "severity".to_string());
+    let initial_view = query_param("view").unwrap_or_else(|| "flat".to_string());
+    let initial_cve = query_param("cve");
+
     // Filter state
-    let mut severity_filter = use_signal(|| Option::<String>::None);
-    let mut fix_status_filter = use_signal(|| Option::<String>::None);
-    let mut triage_status_filter = use_signal(|| Option::<String>::None);
-    let mut package_filter = use_signal(|| Option::<String>::None);
-    let mut search_query = use_signal(String::new);
-    let mut sort_by = use_signal(|| "severity".to_string());
-    let mut view_mode = use_signal(|| "flat".to_string()); // "flat" or "grouped"
-    let mut selected_cve_id = use_signal(|| Option::<String>::None);
+    let mut severity_filter = use_signal(move || initial_severity.clone());
+    let mut fix_status_filter = use_signal(move || initial_fix.clone());
+    let mut triage_status_filter = use_signal(move || initial_triage.clone());
+    let mut package_filter = use_signal(move || initial_package.clone());
+    let mut search_query = use_signal(move || initial_search.clone());
+    let mut sort_by = use_signal(move || initial_sort.clone());
+    let mut view_mode = use_signal(move || initial_view.clone()); // "flat" or "grouped"
+    let mut selected_cve_id = use_signal(move || initial_cve.clone());
+    let mut toast_message: Signal<Option<(String, bool)>> = use_signal(|| None);
+
+    use_effect(move || {
+        let severity = severity_filter();
+        let fix_status = fix_status_filter();
+        let triage_status = triage_status_filter();
+        let package = package_filter();
+        let search = search_query();
+        let sort = sort_by();
+        let view = view_mode();
+        let cve = selected_cve_id();
+
+        sync_cve_url_query(
+            severity.as_deref(),
+            fix_status.as_deref(),
+            triage_status.as_deref(),
+            package.as_deref(),
+            if search.trim().is_empty() { None } else { Some(search.as_str()) },
+            &sort,
+            &view,
+            cve.as_deref(),
+        );
+    });
 
     // Data resources
     let stats = use_resource(move || async move { client::fetch_cve_fleet_stats().await });
+    let package_names = use_resource(move || async move { client::fetch_cve_package_names().await });
 
     let cve_list = use_resource(move || {
         let filters = CveFilters {
@@ -194,6 +309,33 @@ pub fn CvesView() -> Element {
                                 value: "{search_query}",
                                 oninput: move |evt| search_query.set(evt.value()),
                             }
+
+                            div {
+                                class: "w-64",
+                                input {
+                                    class: "w-full px-3 py-2 rounded-md border border-white/15 bg-black/20 text-sm font-mono",
+                                    r#type: "text",
+                                    list: "cve-package-options",
+                                    placeholder: "All packages…",
+                                    value: "{package_filter().unwrap_or_default()}",
+                                    oninput: move |evt| {
+                                        let value = evt.value();
+                                        if value.trim().is_empty() {
+                                            package_filter.set(None);
+                                        } else {
+                                            package_filter.set(Some(value));
+                                        }
+                                    },
+                                }
+                                datalist {
+                                    id: "cve-package-options",
+                                    if let Some(Ok(packages)) = package_names.read().as_ref() {
+                                        for package in packages {
+                                            option { value: "{package}" }
+                                        }
+                                    }
+                                }
+                            }
                         }
 
                         // Severity Filter
@@ -273,6 +415,26 @@ pub fn CvesView() -> Element {
                                 }
                             }
                         }
+
+                        // Sort
+                        div {
+                            class: "flex flex-wrap gap-2",
+                            span {
+                                class: "text-xs {theme::text::SECONDARY} self-center mr-2",
+                                "Sort:"
+                            }
+                            for sort in [("severity", "Severity"), ("cvss", "CVSS"), ("age", "Newest"), ("affected", "Most affected")] {
+                                button {
+                                    class: if sort_by() == sort.0 {
+                                        "px-3 py-1.5 rounded-md text-xs font-medium border bg-violet-600/20 border-violet-400/50 text-violet-100"
+                                    } else {
+                                        "px-3 py-1.5 rounded-md text-xs font-medium border border-white/15 text-gray-300 hover:bg-white/5"
+                                    },
+                                    onclick: move |_| sort_by.set(sort.0.to_string()),
+                                    "{sort.1}"
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -283,13 +445,18 @@ pub fn CvesView() -> Element {
                 button {
                     class: "px-4 py-2 text-sm rounded-md border border-white/15 hover:bg-white/5 flex items-center gap-2",
                     onclick: move |_| {
+                        let mut toast_message = toast_message;
                         spawn(async move {
                             match client::trigger_cve_fleet_rescan().await {
                                 Ok(_) => {
-                                    // TODO: Toast notification "Fleet rescan initiated"
+                                    toast_message.set(Some(("Fleet rescan initiated".to_string(), true)));
+                                    gloo_timers::future::TimeoutFuture::new(4000).await;
+                                    toast_message.set(None);
                                 }
                                 Err(e) => {
-                                    // TODO: Toast notification "Rescan failed: {e}"
+                                    toast_message.set(Some((format!("Rescan failed: {e}"), false)));
+                                    gloo_timers::future::TimeoutFuture::new(5000).await;
+                                    toast_message.set(None);
                                 }
                             }
                         });
@@ -299,6 +466,7 @@ pub fn CvesView() -> Element {
                 button {
                     class: "px-4 py-2 text-sm rounded-md border border-white/15 hover:bg-white/5 flex items-center gap-2",
                     onclick: move |_| {
+                        let mut toast_message = toast_message;
                         spawn(async move {
                             match client::export_cves_csv(&CveFilters {
                                 severity: severity_filter(),
@@ -310,10 +478,14 @@ pub fn CvesView() -> Element {
                                 limit: None, // Export all
                             }).await {
                                 Ok(_) => {
-                                    // TODO: Toast notification "CSV export started"
+                                    toast_message.set(Some(("CSV export started".to_string(), true)));
+                                    gloo_timers::future::TimeoutFuture::new(3000).await;
+                                    toast_message.set(None);
                                 }
-                                Err(_e) => {
-                                    // TODO: Toast notification "Export failed: {e}"
+                                Err(e) => {
+                                    toast_message.set(Some((format!("Export failed: {e}"), false)));
+                                    gloo_timers::future::TimeoutFuture::new(5000).await;
+                                    toast_message.set(None);
                                 }
                             }
                         });
@@ -352,6 +524,9 @@ pub fn CvesView() -> Element {
             // CVE List
             if view_mode() == "grouped" {
                 CvePackageGroupsView {
+                    on_open_cve: move |cve_id: String| {
+                        selected_cve_id.set(Some(cve_id));
+                    },
                     filters: CveFilters {
                         severity: severity_filter(),
                         fix_status: fix_status_filter(),
@@ -428,6 +603,14 @@ pub fn CvesView() -> Element {
                 CveDrawer {
                     cve_id: cve_id.clone(),
                     on_close: move |_| selected_cve_id.set(None)
+                }
+            }
+
+            if let Some((ref message, is_success)) = *toast_message.read() {
+                Toast {
+                    message: message.clone(),
+                    is_success,
+                    on_dismiss: move |_| toast_message.set(None)
                 }
             }
         }
@@ -569,7 +752,7 @@ fn CveRow(cve: CveListItem, on_open: EventHandler<String>) -> Element {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[component]
-fn CvePackageGroupsView(filters: CveFilters) -> Element {
+fn CvePackageGroupsView(filters: CveFilters, on_open_cve: EventHandler<String>) -> Element {
     let grouped_cves = use_resource(move || {
         let f = filters.clone();
         async move { client::fetch_cves_grouped(&f).await }
@@ -591,7 +774,10 @@ fn CvePackageGroupsView(filters: CveFilters) -> Element {
                         }
                     } else {
                         for group in groups {
-                            CvePackageGroupCard { group: group.clone() }
+                            CvePackageGroupCard { 
+                                group: group.clone(),
+                                on_open_cve: on_open_cve
+                            }
                         }
                     }
                 },
@@ -621,7 +807,7 @@ fn CvePackageGroupsView(filters: CveFilters) -> Element {
 }
 
 #[component]
-fn CvePackageGroupCard(group: CvePackageGroup) -> Element {
+fn CvePackageGroupCard(group: CvePackageGroup, on_open_cve: EventHandler<String>) -> Element {
     let mut is_expanded = use_signal(|| false);
 
     let severity_color = if group.critical_count > 0 {
@@ -749,11 +935,17 @@ fn CvePackageGroupCard(group: CvePackageGroup) -> Element {
                                             th { class: "py-2 px-3", "Fix" }
                                             th { class: "py-2 px-3", "Triage" }
                                             th { class: "py-2 px-3", "Age" }
+                                            th { class: "py-2 px-3 text-right", " " }
                                         }
                                     }
                                     tbody {
                                         for cve in cves {
-                                            CveRowInGroup { cve: cve.clone() }
+                                            CveRowInGroup {
+                                                cve: cve.clone(),
+                                                on_open: move |cve_id: String| {
+                                                    on_open_cve.call(cve_id);
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -767,13 +959,14 @@ fn CvePackageGroupCard(group: CvePackageGroup) -> Element {
 }
 
 #[component]
-fn CveRowInGroup(cve: CveListItem) -> Element {
+fn CveRowInGroup(cve: CveListItem, on_open: EventHandler<String>) -> Element {
     let severity_color = match cve.severity.to_uppercase().as_str() {
         "CRITICAL" => theme::cve::CRITICAL_TEXT,
         "HIGH" => theme::cve::HIGH_TEXT,
         "MEDIUM" => theme::cve::MEDIUM_TEXT,
         _ => theme::cve::LOW_TEXT,
     };
+    let cve_id_for_onclick = cve.cve_id.clone();
 
     rsx! {
         tr {
@@ -862,6 +1055,15 @@ fn CveRowInGroup(cve: CveListItem) -> Element {
                 class: "py-2 px-3 text-xs {theme::text::SECONDARY}",
                 "{cve.age_days}d"
             }
+
+            td {
+                class: "py-2 px-3 text-right",
+                button {
+                    class: "px-2 py-1 text-xs rounded hover:bg-white/10",
+                    onclick: move |_| on_open.call(cve_id_for_onclick.clone()),
+                    "→"
+                }
+            }
         }
     }
 }
@@ -872,6 +1074,12 @@ fn CveRowInGroup(cve: CveListItem) -> Element {
 
 #[component]
 fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
+    let mut justification_category = use_signal(|| "accepted_risk".to_string());
+    let mut justification_reason = use_signal(String::new);
+    let mut save_status = use_signal(|| Option::<String>::None);
+    let mut justifications_refresh = use_signal(|| 0_u64);
+    let mut esc_listener_attached = use_signal(|| false);
+
     let cve_id_detail = cve_id.clone();
     let cve_detail = use_resource(move || {
         let id = cve_id_detail.clone();
@@ -886,8 +1094,33 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
 
     let cve_id_justs = cve_id.clone();
     let justifications = use_resource(move || {
+        let _tick = justifications_refresh();
         let id = cve_id_justs.clone();
         async move { client::fetch_cve_justifications(&id).await }
+    });
+
+    use_effect(move || {
+        use wasm_bindgen::JsCast;
+        use wasm_bindgen::closure::Closure;
+
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+
+        if esc_listener_attached() {
+            return;
+        }
+        esc_listener_attached.set(true);
+
+        let on_close = on_close;
+        let handler = Closure::wrap(Box::new(move |event: web_sys::KeyboardEvent| {
+            if event.key() == "Escape" {
+                on_close.call(());
+            }
+        }) as Box<dyn FnMut(_)>);
+
+        let _ = window.add_event_listener_with_callback("keydown", handler.as_ref().unchecked_ref());
+        handler.forget();
     });
 
     rsx! {
@@ -1111,6 +1344,72 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
                                 class: "text-xs {theme::text::SECONDARY} uppercase tracking-wide mb-2 font-semibold",
                                 "Triage Justifications"
                             }
+
+                            div {
+                                class: "mb-3 space-y-2 p-3 rounded border border-white/10 bg-white/5",
+                                div {
+                                    class: "text-xs {theme::text::SECONDARY}",
+                                    "Add justification (admin required)"
+                                }
+                                select {
+                                    class: "w-full px-3 py-2 rounded-md border border-white/15 bg-black/20 text-sm",
+                                    value: "{justification_category}",
+                                    onchange: move |evt| justification_category.set(evt.value()),
+                                    option { value: "accepted_risk", "Accepted risk" }
+                                    option { value: "patch_scheduled", "Patch scheduled" }
+                                    option { value: "mitigated", "Mitigated" }
+                                    option { value: "false_positive", "False positive" }
+                                }
+                                textarea {
+                                    class: "w-full px-3 py-2 rounded-md border border-white/15 bg-black/20 text-sm min-h-24",
+                                    placeholder: "Reason (10-2000 chars)",
+                                    value: "{justification_reason}",
+                                    oninput: move |evt| justification_reason.set(evt.value()),
+                                }
+                                div {
+                                    class: "flex items-center gap-2",
+                                    button {
+                                        class: "px-3 py-2 text-sm rounded-md border border-white/15 hover:bg-white/5",
+                                        onclick: move |_| {
+                                            let cve_id = cve_id.clone();
+                                            let category = justification_category();
+                                            let reason = justification_reason();
+
+                                            if reason.trim().len() < 10 || reason.trim().len() > 2000 {
+                                                save_status.set(Some("Reason must be 10-2000 characters".to_string()));
+                                                return;
+                                            }
+
+                                            spawn(async move {
+                                                let payload = CveJustificationInput {
+                                                    system_id: None,
+                                                    category,
+                                                    reason,
+                                                };
+
+                                                match client::save_cve_justification(&cve_id, &payload).await {
+                                                    Ok(_) => {
+                                                        save_status.set(Some("Justification saved".to_string()));
+                                                        justification_reason.set(String::new());
+                                                        justifications_refresh.set(justifications_refresh() + 1);
+                                                    }
+                                                    Err(err) => {
+                                                        save_status.set(Some(format!("Save failed: {}", err)));
+                                                    }
+                                                }
+                                            });
+                                        },
+                                        "Save justification"
+                                    }
+                                    if let Some(msg) = save_status() {
+                                        span {
+                                            class: "text-xs {theme::text::SECONDARY}",
+                                            "{msg}"
+                                        }
+                                    }
+                                }
+                            }
+
                             match &*justifications.read_unchecked() {
                                 Some(Ok(justs)) => rsx! {
                                     if justs.is_empty() {
