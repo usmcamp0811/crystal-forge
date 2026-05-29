@@ -17,7 +17,7 @@ pub async fn fetch_cve_list(pool: &PgPool, filters: &CveFilters) -> Result<Vec<C
         r#"
         SELECT 
             cve_id,
-            cvss_v3_score,
+            cvss_v3_score::real as cvss_v3_score,
             severity,
             title,
             cvss_vector,
@@ -128,7 +128,7 @@ pub async fn fetch_cve_packages_grouped(
             fixable_count,
             outstanding_count,
             exploited_count,
-            max_cvss,
+            max_cvss::real as max_cvss,
             severity_score
         FROM view_cves_grouped_by_package
         ORDER BY severity_score DESC, max_cvss DESC NULLS LAST
@@ -159,7 +159,7 @@ pub async fn fetch_cve_detail(pool: &PgPool, cve_id: &str) -> Result<CveDetail> 
         r#"
         SELECT 
             c.id as cve_id,
-            c.cvss_v3_score,
+            c.cvss_v3_score::real as cvss_v3_score,
             severity_from_cvss(c.cvss_v3_score) as severity,
             c.description as title,
             c.vector as cvss_vector,

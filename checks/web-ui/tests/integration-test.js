@@ -3487,7 +3487,7 @@ const steps = [
           body: JSON.stringify(["openssl", "glibc"]),
         });
       });
-      await page.route("**/api/v1/cves?*", async (route) => {
+      await page.route(/\/api\/v1\/cves(?:\?.*)?$/, async (route) => {
         await route.fulfill({
           status: 200,
           contentType: "application/json",
@@ -3518,6 +3518,13 @@ const steps = [
       await page.goto(`${baseUrl}/cves`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
 
+      // Minimize onboarding coach if present so it does not intercept clicks.
+      const coachCollapse16 = page.locator("[data-testid='onboarding-coach-collapse']").first();
+      if (await coachCollapse16.isVisible().catch(() => false)) {
+        await coachCollapse16.click({ force: true });
+        await page.waitForTimeout(250);
+      }
+
       // Assert the page heading is present.
       const heading = page.locator("main h1:has-text('CVEs')");
       await assertVisible(heading, "Expected CVEs heading");
@@ -3530,15 +3537,24 @@ const steps = [
       const criticalCard = page.locator("main").getByText("Critical").first();
       await assertVisible(criticalCard, "Expected severity breakdown visible");
 
-      const severityFilterLabel = page.locator("main").getByText("Severity:");
-      await assertVisible(severityFilterLabel, "Expected severity filter controls");
+      // The CVE view uses a segmented filter bar with severity buttons in a .seg container.
+      // We verify the filter bar is present by checking for the "Critical" button in a .seg element.
+      const severityFilterSeg = page.locator("main .seg button:has-text('Critical')");
+      await assertVisible(severityFilterSeg, "Expected severity filter controls");
+
+      // Switch to flat view mode (default is grouped) to see individual CVE rows in a table.
+      const flatViewBtn = page.locator("button:has-text('Flat')");
+      await flatViewBtn.waitFor({ timeout: 5000 });
+      await flatViewBtn.click();
+      await page.waitForTimeout(1000);
+
       const cveRow = page.locator("main td:has-text('CVE-2024-1234')");
       await assertVisible(cveRow, "Expected CVE row to render");
 
       // Unroute after test.
       await page.unroute("**/api/v1/cves/stats*");
       await page.unroute("**/api/v1/cves/packages*");
-      await page.unroute("**/api/v1/cves?*");
+      await page.unroute(/\/api\/v1\/cves(?:\?.*)?$/);
     },
   },
   {
@@ -3572,7 +3588,7 @@ const steps = [
       // Collect all URLs that hit the vulnerabilities endpoint so we can assert
       // the severity filter is sent as a query param after chip click.
       const vulnerabilityUrls = [];
-      await page.route("**/api/v1/cves?*", async (route) => {
+      await page.route(/\/api\/v1\/cves(?:\?.*)?$/, async (route) => {
         vulnerabilityUrls.push(route.request().url());
         // First (unfiltered) call returns empty; filtered call returns a critical row.
         const url = route.request().url();
@@ -3610,11 +3626,24 @@ const steps = [
       await page.goto(`${baseUrl}/cves`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(1500);
 
+      // Minimize onboarding coach if present so it does not intercept clicks.
+      const coachCollapse16b = page.locator("[data-testid='onboarding-coach-collapse']").first();
+      if (await coachCollapse16b.isVisible().catch(() => false)) {
+        await coachCollapse16b.click({ force: true });
+        await page.waitForTimeout(250);
+      }
+
+      // Switch to flat view mode first (default is grouped) to see individual CVE rows in a table.
+      const flatViewBtn = page.locator("button:has-text('Flat')");
+      await flatViewBtn.waitFor({ timeout: 5000 });
+      await flatViewBtn.click();
+      await page.waitForTimeout(1000);
+
       // Wait for the initial unfiltered vulnerabilities request to settle.
       const initialCount = vulnerabilityUrls.length;
 
       // Click the Critical severity filter button.
-      const criticalBtn = page.locator("button:has-text('Critical')").first();
+      const criticalBtn = page.locator(".seg button:has-text('Critical')").first();
       await criticalBtn.waitFor({ timeout: 5000 });
       // Register response wait before clicking to avoid race conditions when the
       // filtered request resolves very quickly in CI.
@@ -3645,9 +3674,9 @@ const steps = [
       }
 
       // Assert the Critical chip now has the active/highlighted style.
-      // The active chip gets class bg-violet-600/20 per FilterButton component.
+      // The new CVE view uses the `active` class on filter buttons inside .seg containers.
       const activeCriticalBtn = page.locator(
-        "button:has-text('Critical').bg-violet-600\\/20",
+        ".seg button:has-text('Critical').active",
       );
       await assertVisible(
         activeCriticalBtn,
@@ -3660,7 +3689,7 @@ const steps = [
 
       await page.unroute("**/api/v1/cves/stats*");
       await page.unroute("**/api/v1/cves/packages*");
-      await page.unroute("**/api/v1/cves?*");
+      await page.unroute(/\/api\/v1\/cves(?:\?.*)?$/);
     },
   },
   {

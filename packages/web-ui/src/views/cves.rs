@@ -16,6 +16,7 @@ use crate::api::models::{
 };
 use crate::components::layout::Card;
 use crate::components::notifications::Toast;
+use crate::routes::Route;
 use crate::theme;
 
 fn query_param(name: &str) -> Option<String> {
@@ -38,6 +39,15 @@ fn query_param(name: &str) -> Option<String> {
     }
 
     None
+}
+
+fn deployment_policy_status_color(policy: &str) -> &'static str {
+    match policy.to_lowercase().as_str() {
+        "automatic" => "#34d399",
+        "scheduled" => "#60a5fa",
+        "manual" => "#fbbf24",
+        _ => "#9ca3af",
+    }
 }
 
 fn sync_cve_url_query(
@@ -80,7 +90,7 @@ fn sync_cve_url_query(
     if sort != "severity" {
         push(&mut parts, "sort", sort);
     }
-    if view != "flat" {
+    if view != "grouped" {
         push(&mut parts, "view", view);
     }
     if let Some(v) = cve {
@@ -115,7 +125,7 @@ pub fn CvesView() -> Element {
     let initial_package = query_param("package");
     let initial_search = query_param("search").unwrap_or_default();
     let initial_sort = query_param("sort").unwrap_or_else(|| "severity".to_string());
-    let initial_view = query_param("view").unwrap_or_else(|| "flat".to_string());
+    let initial_view = query_param("view").unwrap_or_else(|| "grouped".to_string());
     let initial_cve = query_param("cve");
 
     // Filter state
@@ -180,19 +190,96 @@ pub fn CvesView() -> Element {
 
     rsx! {
         div {
-            class: "space-y-6",
+            style: "display: flex; flex-direction: column; gap: 16px;",
 
             // Page Header
             div {
-                class: "flex items-center justify-between",
-                h1 {
-                    class: "{theme::typography::PAGE_TITLE}",
-                    "CVEs"
+                class: "page-head",
+                div {
+                    h1 { class: "page-title", "CVEs" }
+                    if let Some(Ok(s)) = stats.read().as_ref() {
+                        p {
+                            class: "page-subtitle",
+                            "{s.total_cves} vulnerabilities · {s.systems_affected} systems affected · {s.fixable} have patches"
+                        }
+                    }
                 }
-                if let Some(Ok(s)) = stats.read().as_ref() {
-                    p {
-                        class: "text-sm {theme::text::SECONDARY}",
-                        "{s.total_cves} vulnerabilities · {s.systems_affected} systems affected · {s.fixable} patchable"
+                div {
+                    style: "display: flex; gap: 8px;",
+                    button {
+                        class: "btn btn-ghost focus-ring",
+                        onclick: move |_| {
+                            let mut toast_message = toast_message;
+                            spawn(async move {
+                                match client::trigger_cve_fleet_rescan().await {
+                                    Ok(_) => {
+                                        toast_message.set(Some(("Fleet rescan initiated".to_string(), true)));
+                                        gloo_timers::future::TimeoutFuture::new(4000).await;
+                                        toast_message.set(None);
+                                    }
+                                    Err(e) => {
+                                        toast_message.set(Some((format!("Rescan failed: {e}"), false)));
+                                        gloo_timers::future::TimeoutFuture::new(5000).await;
+                                        toast_message.set(None);
+                                    }
+                                }
+                            });
+                        },
+                        // Sync icon
+                        svg {
+                            width: "14",
+                            height: "14",
+                            view_box: "0 0 24 24",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            path { d: "M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" }
+                        }
+                        " Rescan fleet"
+                    }
+                    button {
+                        class: "btn btn-ghost focus-ring",
+                        onclick: move |_| {
+                            let mut toast_message = toast_message;
+                            spawn(async move {
+                                match client::export_cves_csv(&CveFilters {
+                                    severity: severity_filter(),
+                                    fix_status: fix_status_filter(),
+                                    triage_status: triage_status_filter(),
+                                    package: package_filter(),
+                                    search: if search_query().is_empty() { None } else { Some(search_query()) },
+                                    sort: Some(sort_by()),
+                                    limit: None,
+                                }).await {
+                                    Ok(_) => {
+                                        toast_message.set(Some(("Export report started".to_string(), true)));
+                                        gloo_timers::future::TimeoutFuture::new(3000).await;
+                                        toast_message.set(None);
+                                    }
+                                    Err(e) => {
+                                        toast_message.set(Some((format!("Export failed: {e}"), false)));
+                                        gloo_timers::future::TimeoutFuture::new(5000).await;
+                                        toast_message.set(None);
+                                    }
+                                }
+                            });
+                        },
+                        svg {
+                            width: "14",
+                            height: "14",
+                            view_box: "0 0 24 24",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            path { d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" }
+                            polyline { points: "7 10 12 15 17 10" }
+                            line { x1: "12", y1: "15", x2: "12", y2: "3" }
+                        }
+                        " Export report"
                     }
                 }
             }
@@ -200,337 +287,225 @@ pub fn CvesView() -> Element {
             // Statistics Strip
             if let Some(Ok(fleet_stats)) = stats.read().as_ref() {
                 div {
-                    class: "grid grid-cols-1 md:grid-cols-5 gap-4",
+                    class: "stat-strip",
 
                     // Critical
-                    Card {
-                        children: rsx! {
-                            div {
-                                class: "p-4",
-                                div {
-                                    class: "text-xs {theme::text::SECONDARY} mb-1",
-                                    "Critical"
-                                }
-                                div {
-                                    class: "text-2xl font-bold {theme::cve::CRITICAL_TEXT}",
-                                    "{fleet_stats.critical}"
-                                }
-                                div {
-                                    class: "text-xs {theme::text::SECONDARY} mt-1",
-                                    "{fleet_stats.exploited} actively exploited"
-                                }
-                            }
-                        }
+                    div {
+                        class: "stat",
+                        span { class: "stat-accent", style: "--stat-color: #f87171;" }
+                        div { class: "stat-label", "Critical" }
+                        div { class: "stat-value", style: "color: #f87171;", "{fleet_stats.critical}" }
+                        div { class: "stat-meta", "{fleet_stats.exploited} actively exploited" }
                     }
 
                     // High
-                    Card {
-                        children: rsx! {
-                            div {
-                                class: "p-4",
-                                div {
-                                    class: "text-xs {theme::text::SECONDARY} mb-1",
-                                    "High"
-                                }
-                                div {
-                                    class: "text-2xl font-bold {theme::cve::HIGH_TEXT}",
-                                    "{fleet_stats.high}"
-                                }
-                            }
-                        }
+                    div {
+                        class: "stat",
+                        span { class: "stat-accent", style: "--stat-color: #fbbf24;" }
+                        div { class: "stat-label", "High" }
+                        div { class: "stat-value", style: "color: #fbbf24;", "{fleet_stats.high}" }
                     }
 
                     // Patchable
-                    Card {
-                        children: rsx! {
-                            div {
-                                class: "p-4",
-                                div {
-                                    class: "text-xs {theme::text::SECONDARY} mb-1",
-                                    "Patchable now"
-                                }
-                                div {
-                                    class: "text-2xl font-bold text-blue-400",
-                                    "{fleet_stats.fixable}"
-                                }
-                                div {
-                                    class: "text-xs {theme::text::SECONDARY} mt-1",
-                                    "Just deploy newer flake"
-                                }
-                            }
-                        }
+                    div {
+                        class: "stat",
+                        span { class: "stat-accent", style: "--stat-color: #60a5fa;" }
+                        div { class: "stat-label", "Patchable now" }
+                        div { class: "stat-value", style: "color: #60a5fa;", "{fleet_stats.fixable}" }
+                        div { class: "stat-meta", "Just deploy newer flake" }
                     }
 
                     // Accepted Risk
-                    Card {
-                        children: rsx! {
-                            div {
-                                class: "p-4",
-                                div {
-                                    class: "text-xs {theme::text::SECONDARY} mb-1",
-                                    "Accepted risk"
-                                }
-                                div {
-                                    class: "text-2xl font-bold text-purple-400",
-                                    "{fleet_stats.accepted + fleet_stats.scheduled}"
-                                }
-                                div {
-                                    class: "text-xs {theme::text::SECONDARY} mt-1",
-                                    "{fleet_stats.accepted} accepted · {fleet_stats.scheduled} scheduled"
-                                }
-                            }
-                        }
+                    div {
+                        class: "stat",
+                        span { class: "stat-accent", style: "--stat-color: #a78bfa;" }
+                        div { class: "stat-label", "Accepted risk" }
+                        div { class: "stat-value", style: "color: #a78bfa;", "{fleet_stats.accepted + fleet_stats.scheduled}" }
+                        div { class: "stat-meta", "{fleet_stats.accepted} accepted · {fleet_stats.scheduled} scheduled" }
                     }
 
                     // Outstanding
-                    Card {
-                        children: rsx! {
-                            div {
-                                class: "p-4",
-                                div {
-                                    class: "text-xs {theme::text::SECONDARY} mb-1",
-                                    "Outstanding"
-                                }
-                                div {
-                                    class: "text-2xl font-bold",
-                                    class: if fleet_stats.outstanding > 20 { "{theme::cve::CRITICAL_TEXT}" } else { "text-green-400" },
-                                    "{fleet_stats.outstanding}"
-                                }
-                                div {
-                                    class: "text-xs {theme::text::SECONDARY} mt-1",
-                                    "need triage"
-                                }
-                            }
+                    div {
+                        class: "stat",
+                        span { class: "stat-accent", style: "--stat-color: #34d399;" }
+                        div { class: "stat-label", "Outstanding" }
+                        div {
+                            class: "stat-value",
+                            style: if fleet_stats.outstanding > 20 { "color: #f87171;" } else { "color: #34d399;" },
+                            "{fleet_stats.outstanding}"
                         }
+                        div { class: "stat-meta", "need triage" }
                     }
                 }
             }
 
             // Filter Bar
-            Card {
-                children: rsx! {
-                    div {
-                        class: "p-4 space-y-4",
+            div {
+                class: "filterbar",
 
-                        // Search
-                        div {
-                            class: "flex gap-4",
-                            input {
-                                class: "flex-1 px-3 py-2 rounded-md border border-white/15 bg-black/20 text-sm",
-                                r#type: "text",
-                                placeholder: "Search CVE / package / title…",
-                                value: "{search_query}",
-                                oninput: move |evt| search_query.set(evt.value()),
+                // Search input
+                div {
+                    class: "filter-search",
+                    style: "max-width: 300px;",
+                    svg {
+                        width: "14",
+                        height: "14",
+                        view_box: "0 0 24 24",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        stroke_linecap: "round",
+                        stroke_linejoin: "round",
+                        circle { cx: "11", cy: "11", r: "8" }
+                        path { d: "m21 21-4.3-4.3" }
+                    }
+                    input {
+                        class: "input focus-ring",
+                        r#type: "text",
+                        placeholder: "Search CVE / package / title…",
+                        value: "{search_query}",
+                        oninput: move |evt| search_query.set(evt.value()),
+                    }
+                }
+
+                // Severity Filter
+                div {
+                    class: "seg",
+                    for (sev, label) in [("all", "All"), ("critical", "Critical"), ("high", "High"), ("medium", "Medium"), ("low", "Low")] {
+                        button {
+                            class: if severity_filter().as_deref() == if sev == "all" { None } else { Some(sev) } { "active" } else { "" },
+                            onclick: move |_| {
+                                if sev == "all" {
+                                    severity_filter.set(None);
+                                } else {
+                                    severity_filter.set(Some(sev.to_string()));
+                                }
+                            },
+                            "{label}"
+                        }
+                    }
+                }
+
+                // Fix Status Filter
+                div {
+                    class: "seg",
+                    for status in [("all", "Any status"), ("available", "Has patch"), ("pending", "No patch"), ("exploited", "Exploited")] {
+                        button {
+                            class: if fix_status_filter().as_deref() == if status.0 == "all" { None } else { Some(status.0) } { "active" } else { "" },
+                            onclick: move |_| {
+                                if status.0 == "all" {
+                                    fix_status_filter.set(None);
+                                } else {
+                                    fix_status_filter.set(Some(status.0.to_string()));
+                                }
+                            },
+                            "{status.1}"
+                        }
+                    }
+                }
+
+                // Triage Status Filter
+                div {
+                    class: "seg",
+                    for status in [("all", "Any triage"), ("outstanding", "Outstanding"), ("scheduled", "Scheduled"), ("accepted", "Accepted")] {
+                        button {
+                            class: if triage_status_filter().as_deref() == if status.0 == "all" { None } else { Some(status.0) } { "active" } else { "" },
+                            onclick: move |_| {
+                                if status.0 == "all" {
+                                    triage_status_filter.set(None);
+                                } else {
+                                    triage_status_filter.set(Some(status.0.to_string()));
+                                }
+                            },
+                            "{status.1}"
+                        }
+                    }
+                }
+
+                // Package filter
+                div {
+                    style: "position: relative; max-width: 200px;",
+                    input {
+                        class: "input focus-ring mono",
+                        style: if package_filter().is_some() { "font-size: 12px; padding-right: 28px;" } else { "font-size: 12px; padding-right: 12px;" },
+                        r#type: "text",
+                        list: "cve-pkg-list",
+                        placeholder: "All packages…",
+                        value: "{package_filter().unwrap_or_default()}",
+                        oninput: move |evt| {
+                            let value = evt.value();
+                            if value.trim().is_empty() {
+                                package_filter.set(None);
+                            } else {
+                                package_filter.set(Some(value));
                             }
-
-                            div {
-                                class: "w-64",
-                                input {
-                                    class: "w-full px-3 py-2 rounded-md border border-white/15 bg-black/20 text-sm font-mono",
-                                    r#type: "text",
-                                    list: "cve-package-options",
-                                    placeholder: "All packages…",
-                                    value: "{package_filter().unwrap_or_default()}",
-                                    oninput: move |evt| {
-                                        let value = evt.value();
-                                        if value.trim().is_empty() {
-                                            package_filter.set(None);
-                                        } else {
-                                            package_filter.set(Some(value));
-                                        }
-                                    },
-                                }
-                                datalist {
-                                    id: "cve-package-options",
-                                    if let Some(Ok(packages)) = package_names.read().as_ref() {
-                                        for package in packages {
-                                            option { value: "{package}" }
-                                        }
-                                    }
-                                }
+                        },
+                    }
+                    datalist {
+                        id: "cve-pkg-list",
+                        if let Some(Ok(packages)) = package_names.read().as_ref() {
+                            for package in packages {
+                                option { value: "{package}" }
                             }
                         }
-
-                        // Severity Filter
-                        div {
-                            class: "flex flex-wrap gap-2",
-                            span {
-                                class: "text-xs {theme::text::SECONDARY} self-center mr-2",
-                                "Severity:"
-                            }
-                            for sev in ["all", "critical", "high", "medium", "low"] {
-                                button {
-                                    class: if severity_filter().as_deref() == if sev == "all" { None } else { Some(sev) } {
-                                        "px-3 py-1.5 rounded-md text-xs font-medium border bg-violet-600/20 border-violet-400/50 text-violet-100"
-                                    } else {
-                                        "px-3 py-1.5 rounded-md text-xs font-medium border border-white/15 text-gray-300 hover:bg-white/5"
-                                    },
-                                    onclick: move |_| {
-                                        if sev == "all" {
-                                            severity_filter.set(None);
-                                        } else {
-                                            severity_filter.set(Some(sev.to_string()));
-                                        }
-                                    },
-                                    "{sev}"
-                                }
-                            }
-                        }
-
-                        // Fix Status Filter
-                        div {
-                            class: "flex flex-wrap gap-2",
-                            span {
-                                class: "text-xs {theme::text::SECONDARY} self-center mr-2",
-                                "Fix Status:"
-                            }
-                            for status in [("all", "Any status"), ("available", "Has patch"), ("pending", "No patch"), ("exploited", "Exploited")] {
-                                button {
-                                    class: if fix_status_filter().as_deref() == if status.0 == "all" { None } else { Some(status.0) } {
-                                        "px-3 py-1.5 rounded-md text-xs font-medium border bg-violet-600/20 border-violet-400/50 text-violet-100"
-                                    } else {
-                                        "px-3 py-1.5 rounded-md text-xs font-medium border border-white/15 text-gray-300 hover:bg-white/5"
-                                    },
-                                    onclick: move |_| {
-                                        if status.0 == "all" {
-                                            fix_status_filter.set(None);
-                                        } else {
-                                            fix_status_filter.set(Some(status.0.to_string()));
-                                        }
-                                    },
-                                    "{status.1}"
-                                }
-                            }
-                        }
-
-                        // Triage Status Filter
-                        div {
-                            class: "flex flex-wrap gap-2",
-                            span {
-                                class: "text-xs {theme::text::SECONDARY} self-center mr-2",
-                                "Triage:"
-                            }
-                            for status in [("all", "Any triage"), ("outstanding", "Outstanding"), ("scheduled", "Scheduled"), ("accepted", "Accepted")] {
-                                button {
-                                    class: if triage_status_filter().as_deref() == if status.0 == "all" { None } else { Some(status.0) } {
-                                        "px-3 py-1.5 rounded-md text-xs font-medium border bg-violet-600/20 border-violet-400/50 text-violet-100"
-                                    } else {
-                                        "px-3 py-1.5 rounded-md text-xs font-medium border border-white/15 text-gray-300 hover:bg-white/5"
-                                    },
-                                    onclick: move |_| {
-                                        if status.0 == "all" {
-                                            triage_status_filter.set(None);
-                                        } else {
-                                            triage_status_filter.set(Some(status.0.to_string()));
-                                        }
-                                    },
-                                    "{status.1}"
-                                }
-                            }
-                        }
-
-                        // Sort
-                        div {
-                            class: "flex flex-wrap gap-2",
-                            span {
-                                class: "text-xs {theme::text::SECONDARY} self-center mr-2",
-                                "Sort:"
-                            }
-                            for sort in [("severity", "Severity"), ("cvss", "CVSS"), ("age", "Newest"), ("affected", "Most affected")] {
-                                button {
-                                    class: if sort_by() == sort.0 {
-                                        "px-3 py-1.5 rounded-md text-xs font-medium border bg-violet-600/20 border-violet-400/50 text-violet-100"
-                                    } else {
-                                        "px-3 py-1.5 rounded-md text-xs font-medium border border-white/15 text-gray-300 hover:bg-white/5"
-                                    },
-                                    onclick: move |_| sort_by.set(sort.0.to_string()),
-                                    "{sort.1}"
-                                }
+                    }
+                    if package_filter().is_some() {
+                        button {
+                            class: "btn-icon focus-ring",
+                            style: "position: absolute; right: 4px; top: 50%; transform: translateY(-50%); padding: 4px;",
+                            title: "Clear",
+                            onclick: move |_| package_filter.set(None),
+                            svg {
+                                width: "11",
+                                height: "11",
+                                view_box: "0 0 24 24",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                stroke_linecap: "round",
+                                stroke_linejoin: "round",
+                                path { d: "M18 6 6 18" }
+                                path { d: "M6 6l12 12" }
                             }
                         }
                     }
                 }
-            }
 
-            // Action Buttons
-            div {
-                class: "flex gap-2",
-                button {
-                    class: "px-4 py-2 text-sm rounded-md border border-white/15 hover:bg-white/5 flex items-center gap-2",
-                    onclick: move |_| {
-                        let mut toast_message = toast_message;
-                        spawn(async move {
-                            match client::trigger_cve_fleet_rescan().await {
-                                Ok(_) => {
-                                    toast_message.set(Some(("Fleet rescan initiated".to_string(), true)));
-                                    gloo_timers::future::TimeoutFuture::new(4000).await;
-                                    toast_message.set(None);
-                                }
-                                Err(e) => {
-                                    toast_message.set(Some((format!("Rescan failed: {e}"), false)));
-                                    gloo_timers::future::TimeoutFuture::new(5000).await;
-                                    toast_message.set(None);
-                                }
-                            }
-                        });
-                    },
-                    "🔄 Rescan fleet"
-                }
-                button {
-                    class: "px-4 py-2 text-sm rounded-md border border-white/15 hover:bg-white/5 flex items-center gap-2",
-                    onclick: move |_| {
-                        let mut toast_message = toast_message;
-                        spawn(async move {
-                            match client::export_cves_csv(&CveFilters {
-                                severity: severity_filter(),
-                                fix_status: fix_status_filter(),
-                                triage_status: triage_status_filter(),
-                                package: package_filter(),
-                                search: if search_query().is_empty() { None } else { Some(search_query()) },
-                                sort: Some(sort_by()),
-                                limit: None, // Export all
-                            }).await {
-                                Ok(_) => {
-                                    toast_message.set(Some(("CSV export started".to_string(), true)));
-                                    gloo_timers::future::TimeoutFuture::new(3000).await;
-                                    toast_message.set(None);
-                                }
-                                Err(e) => {
-                                    toast_message.set(Some((format!("Export failed: {e}"), false)));
-                                    gloo_timers::future::TimeoutFuture::new(5000).await;
-                                    toast_message.set(None);
-                                }
-                            }
-                        });
-                    },
-                    "📥 Export CSV"
-                }
-            }
-
-            // View Mode Toggle
-            div {
-                class: "flex gap-2",
+                // Group label + toggle
                 span {
-                    class: "text-xs {theme::text::SECONDARY} self-center mr-2",
-                    "View:"
+                    class: "filter-count",
+                    style: "margin-left: auto; margin-right: 0;",
+                    "Group"
                 }
-                button {
-                    class: if view_mode() == "flat" {
-                        "px-3 py-1.5 rounded-md text-xs font-medium border bg-violet-600/20 border-violet-400/50 text-violet-100"
-                    } else {
-                        "px-3 py-1.5 rounded-md text-xs font-medium border border-white/15 text-gray-300 hover:bg-white/5"
-                    },
-                    onclick: move |_| view_mode.set("flat".to_string()),
-                    "Flat list"
+                div {
+                    class: "seg",
+                    button {
+                        class: if view_mode() == "grouped" { "active" } else { "" },
+                        onclick: move |_| view_mode.set("grouped".to_string()),
+                        "By package"
+                    }
+                    button {
+                        class: if view_mode() == "flat" { "active" } else { "" },
+                        onclick: move |_| view_mode.set("flat".to_string()),
+                        "Flat list"
+                    }
                 }
-                button {
-                    class: if view_mode() == "grouped" {
-                        "px-3 py-1.5 rounded-md text-xs font-medium border bg-violet-600/20 border-violet-400/50 text-violet-100"
-                    } else {
-                        "px-3 py-1.5 rounded-md text-xs font-medium border border-white/15 text-gray-300 hover:bg-white/5"
-                    },
-                    onclick: move |_| view_mode.set("grouped".to_string()),
-                    "By package"
+
+                // Sort label + toggle
+                span {
+                    class: "filter-count",
+                    style: "margin-left: 0; margin-right: 0;",
+                    "Sort"
+                }
+                div {
+                    class: "seg",
+                    for sort in [("severity", "Severity"), ("cvss", "CVSS"), ("age", "Newest"), ("affected", "Most affected")] {
+                        button {
+                            class: if sort_by() == sort.0 { "active" } else { "" },
+                            onclick: move |_| sort_by.set(sort.0.to_string()),
+                            "{sort.1}"
+                        }
+                    }
                 }
             }
 
@@ -551,62 +526,62 @@ pub fn CvesView() -> Element {
                     }
                 }
             } else {
-                Card {
-                    children: rsx! {
-                        div {
-                            class: "overflow-x-auto",
-                            match &*cve_list.read_unchecked() {
-                                Some(Ok(cves)) => rsx! {
+                div {
+                    class: "card",
+                    style: "overflow: hidden;",
+                    match &*cve_list.read_unchecked() {
+                        Some(Ok(cves)) => rsx! {
+                            table {
+                                class: "sys-table",
+                                thead {
+                                    tr {
+                                        th { "CVE" }
+                                        th { "Severity" }
+                                        th { "CVSS" }
+                                        th { "Package" }
+                                        th { "Title" }
+                                        th { "Affected" }
+                                        th { "Fix" }
+                                        th { "Triage" }
+                                        th { "Age" }
+                                        th { style: "text-align: right;", " " }
+                                    }
+                                }
+                                tbody {
                                     if cves.is_empty() {
-                                        div {
-                                            class: "p-8 text-center {theme::text::SECONDARY}",
-                                            "No CVEs match the current filters."
+                                        tr {
+                                            td {
+                                                colspan: "10",
+                                                style: "padding: 24px; text-align: center; color: var(--cf-text-muted); font-size: 13px;",
+                                                "No CVEs match the current filters."
+                                            }
                                         }
                                     } else {
-                                        table {
-                                            class: "min-w-full text-sm",
-                                            thead {
-                                                tr {
-                                                    class: "border-b border-white/10 text-left {theme::text::SECONDARY}",
-                                                    th { class: "py-2 pr-3", "CVE" }
-                                                    th { class: "py-2 pr-3", "Severity" }
-                                                    th { class: "py-2 pr-3", "CVSS" }
-                                                    th { class: "py-2 pr-3", "Package" }
-                                                    th { class: "py-2 pr-3", "Title" }
-                                                    th { class: "py-2 pr-3", "Affected" }
-                                                    th { class: "py-2 pr-3", "Fix" }
-                                                    th { class: "py-2 pr-3", "Triage" }
-                                                    th { class: "py-2 pr-3", "Age" }
-                                                    th { class: "py-2 pr-3 text-right", " " }
-                                                }
-                                            }
-                                            tbody {
-                                                for cve in cves {
-                                                    CveRow {
-                                                        cve: cve.clone(),
-                                                        on_open: move |cve_id: String| {
-                                                            selected_cve_id.set(Some(cve_id));
-                                                        }
-                                                    }
+                                        for cve in cves {
+                                            CveRow {
+                                                cve: cve.clone(),
+                                                total_systems: stats.read().as_ref().and_then(|r| r.as_ref().ok()).map(|s| s.systems_affected).unwrap_or(0),
+                                                on_open: move |cve_id: String| {
+                                                    selected_cve_id.set(Some(cve_id));
                                                 }
                                             }
                                         }
                                     }
-                                },
-                                Some(Err(err)) => rsx! {
-                                    div {
-                                        class: "p-8 text-center {theme::text::SECONDARY}",
-                                        "Error loading CVEs: {err}"
-                                    }
-                                },
-                                None => rsx! {
-                                    div {
-                                        class: "p-8 text-center {theme::text::SECONDARY}",
-                                        "Loading CVEs..."
-                                    }
-                                },
+                                }
                             }
-                        }
+                        },
+                        Some(Err(err)) => rsx! {
+                            div {
+                                style: "padding: 24px; text-align: center; color: var(--cf-text-muted); font-size: 13px;",
+                                "Error loading CVEs: {err}"
+                            }
+                        },
+                        None => rsx! {
+                            div {
+                                style: "padding: 24px; text-align: center; color: var(--cf-text-muted); font-size: 13px;",
+                                "Loading CVEs..."
+                            }
+                        },
                     }
                 }
             }
@@ -635,107 +610,179 @@ pub fn CvesView() -> Element {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[component]
-fn CveRow(cve: CveListItem, on_open: EventHandler<String>) -> Element {
-    let severity_color = match cve.severity.to_uppercase().as_str() {
-        "CRITICAL" => theme::cve::CRITICAL_TEXT,
-        "HIGH" => theme::cve::HIGH_TEXT,
-        "MEDIUM" => theme::cve::MEDIUM_TEXT,
-        _ => theme::cve::LOW_TEXT,
+fn CveRow(cve: CveListItem, total_systems: i64, on_open: EventHandler<String>) -> Element {
+    let sev_cls = match cve.severity.to_uppercase().as_str() {
+        "CRITICAL" => "chip-critical",
+        "HIGH" => "chip-warning",
+        "MEDIUM" => "chip-info",
+        _ => "chip-unknown",
+    };
+    let sev_color = match cve.severity.to_uppercase().as_str() {
+        "CRITICAL" => "#f87171",
+        "HIGH" => "#fbbf24",
+        "MEDIUM" => "#60a5fa",
+        _ => "#9ca3af",
     };
 
     let cve_id_for_onclick = cve.cve_id.clone();
+    let cve_id_for_row = cve_id_for_onclick.clone();
+    let cve_id_for_link = cve_id_for_onclick.clone();
+    let cve_id_for_open = cve_id_for_onclick.clone();
 
     rsx! {
         tr {
-            class: "border-b border-white/5 hover:bg-white/5",
+            style: "cursor: pointer;",
+            onclick: move |_| on_open.call(cve_id_for_row.clone()),
 
             // CVE ID
             td {
-                class: "py-2 pr-3 font-mono text-sm font-medium",
-                "{cve.cve_id}"
-                if cve.exploited {
-                    span {
-                        class: "ml-2 px-2 py-0.5 text-xs rounded bg-red-500/20 text-red-300 border border-red-500/30",
-                        "exploited"
+                div {
+                    class: "mono",
+                    style: "font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 8px;",
+                    "{cve.cve_id}"
+                    if cve.exploited {
+                        span {
+                            class: "chip chip-critical",
+                            style: "font-size: 10px;",
+                            title: "Actively exploited in the wild",
+                            "exploited"
+                        }
                     }
                 }
             }
 
             // Severity
             td {
-                class: "py-2 pr-3",
                 span {
-                    class: "px-2 py-1 text-xs rounded-md {severity_color}",
+                    class: "chip {sev_cls}",
+                    span {
+                        class: "chip-dot",
+                        style: "background: {sev_color};",
+                    }
                     "{cve.severity}"
                 }
             }
 
             // CVSS
             td {
-                class: "py-2 pr-3",
                 if let Some(cvss) = cve.cvss_v3_score {
-                    span {
-                        class: "font-mono text-sm",
-                        "{cvss:.1}"
+                    div {
+                        style: "display: flex; align-items: center; gap: 6px;",
+                        div {
+                            style: "width: 40px; height: 5px; background: var(--cf-subtle-bg); border-radius: 99px; overflow: hidden;",
+                            div {
+                                style: "width: {cvss * 10.0}%; height: 100%; background: {sev_color};",
+                            }
+                        }
+                        span {
+                            class: "mono",
+                            style: "font-size: 12px; color: var(--cf-text-primary); font-weight: 600;",
+                            "{cvss:.1}"
+                        }
                     }
                 }
             }
 
             // Package
             td {
-                class: "py-2 pr-3 font-mono text-xs",
+                class: "mono",
+                style: "font-size: 12px;",
                 "{cve.package_name.as_deref().unwrap_or(\"\")}"
             }
 
             // Title
             td {
-                class: "py-2 pr-3 max-w-xs truncate",
-                title: "{cve.title}",
-                "{cve.title}"
+                style: "font-size: 13px; max-width: 340px;",
+                div {
+                    class: "truncate",
+                    title: "{cve.title}",
+                    "{cve.title}"
+                }
             }
 
             // Affected
             td {
-                class: "py-2 pr-3 font-mono text-xs",
-                "{cve.affected_count}"
+                div {
+                    style: "display: flex; align-items: center; gap: 6px;",
+                    // Server icon
+                    svg {
+                        width: "11",
+                        height: "11",
+                        view_box: "0 0 24 24",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        stroke_linecap: "round",
+                        stroke_linejoin: "round",
+                        style: "color: var(--cf-text-muted);",
+                        rect { x: "2", y: "2", width: "20", height: "8", rx: "2", ry: "2" }
+                        rect { x: "2", y: "14", width: "20", height: "8", rx: "2", ry: "2" }
+                        line { x1: "6", y1: "6", x2: "6.01", y2: "6" }
+                        line { x1: "6", y1: "18", x2: "6.01", y2: "18" }
+                    }
+                    span {
+                        class: "mono",
+                        style: if cve.affected_count > 0 { "font-size: 12px; font-weight: 600; color: var(--cf-text-primary);" } else { "font-size: 12px; font-weight: 600; color: var(--cf-text-muted);" },
+                        "{cve.affected_count}"
+                    }
+                    span {
+                        style: "font-size: 11px; color: var(--cf-text-muted);",
+                        "/ {total_systems}"
+                    }
+                }
             }
 
             // Fix Status
             td {
-                class: "py-2 pr-3",
                 if cve.fix_status == "fix_available" {
                     span {
-                        class: "px-2 py-1 text-xs rounded-md bg-green-500/20 text-green-300",
-                        "Fix available"
+                        class: "chip chip-healthy",
+                        title: "{cve.fixed_version.as_deref().unwrap_or(\"\")}",
+                        // Check icon
+                        svg {
+                            width: "10",
+                            height: "10",
+                            view_box: "0 0 24 24",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "3",
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            style: "display: inline; vertical-align: middle;",
+                            polyline { points: "20 6 9 17 4 12" }
+                        }
+                        " "
+                        if let Some(ver) = &cve.fixed_version {
+                            "{ver}"
+                        }
                     }
                 } else {
                     span {
-                        class: "px-2 py-1 text-xs rounded-md bg-yellow-500/20 text-yellow-300",
-                        "No patch"
+                        class: "chip chip-warning",
+                        "no patch yet"
                     }
                 }
             }
 
             // Triage Status
             td {
-                class: "py-2 pr-3",
                 match cve.triage_status.as_str() {
                     "accepted" => rsx! {
                         span {
-                            class: "px-2 py-1 text-xs rounded-md bg-purple-500/20 text-purple-300",
-                            "Accepted"
+                            class: "chip chip-info",
+                            "accepted"
                         }
                     },
                     "scheduled" => rsx! {
                         span {
-                            class: "px-2 py-1 text-xs rounded-md bg-blue-500/20 text-blue-300",
-                            "Scheduled"
+                            class: "chip chip-info",
+                            "scheduled"
                         }
                     },
                     _ => rsx! {
                         span {
-                            class: "px-2 py-1 text-xs rounded-md bg-red-500/20 text-red-300",
-                            "Outstanding"
+                            class: "chip chip-critical",
+                            "outstanding"
                         }
                     },
                 }
@@ -743,17 +790,61 @@ fn CveRow(cve: CveListItem, on_open: EventHandler<String>) -> Element {
 
             // Age
             td {
-                class: "py-2 pr-3 text-xs {theme::text::SECONDARY}",
+                style: "font-size: 12px; color: var(--cf-text-muted);",
                 "{cve.age_days}d"
             }
 
             // Actions
             td {
-                class: "py-2 pr-3 text-right",
-                button {
-                    class: "px-2 py-1 text-xs rounded hover:bg-white/10",
-                    onclick: move |_| on_open.call(cve_id_for_onclick.clone()),
-                    "→"
+                div {
+                    class: "row-actions",
+                    button {
+                        class: "btn-icon focus-ring",
+                        title: "Open advisory",
+                        onclick: move |evt| {
+                            evt.stop_propagation();
+                            let _ = web_sys::window().and_then(|w| {
+                                w.open_with_url_and_target(
+                                    &format!("https://nvd.nist.gov/vuln/detail/{}", cve_id_for_link),
+                                    "_blank"
+                                ).ok()
+                            });
+                        },
+                        // Link icon
+                        svg {
+                            width: "14",
+                            height: "14",
+                            view_box: "0 0 24 24",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            path { d: "M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" }
+                            path { d: "M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" }
+                        }
+                    }
+                    button {
+                        class: "btn-icon focus-ring",
+                        title: "Details",
+                        onclick: move |evt| {
+                            evt.stop_propagation();
+                            on_open.call(cve_id_for_open.clone());
+                        },
+                        // Arrow-right icon
+                        svg {
+                            width: "14",
+                            height: "14",
+                            view_box: "0 0 24 24",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            line { x1: "5", y1: "12", x2: "19", y2: "12" }
+                            polyline { points: "12 5 19 12 12 19" }
+                        }
+                    }
                 }
             }
         }
@@ -772,20 +863,18 @@ fn CvePackageGroupsView(filters: CveFilters, on_open_cve: EventHandler<String>) 
     });
 
     rsx! {
-        div {
-            class: "space-y-4",
-            match &*grouped_cves.read_unchecked() {
-                Some(Ok(groups)) => rsx! {
-                    if groups.is_empty() {
-                        Card {
-                            children: rsx! {
-                                div {
-                                    class: "p-8 text-center {theme::text::SECONDARY}",
-                                    "No CVE packages match the current filters."
-                                }
-                            }
-                        }
-                    } else {
+        match &*grouped_cves.read_unchecked() {
+            Some(Ok(groups)) => rsx! {
+                if groups.is_empty() {
+                    div {
+                        class: "empty",
+                        style: "margin: 0;",
+                        h3 { "No CVEs match" }
+                        div { "Try clearing a filter." }
+                    }
+                } else {
+                    div {
+                        style: "display: flex; flex-direction: column; gap: 10px;",
                         for group in groups {
                             CvePackageGroupCard {
                                 group: group.clone(),
@@ -793,28 +882,23 @@ fn CvePackageGroupsView(filters: CveFilters, on_open_cve: EventHandler<String>) 
                             }
                         }
                     }
-                },
-                Some(Err(err)) => rsx! {
-                    Card {
-                        children: rsx! {
-                            div {
-                                class: "p-8 text-center {theme::text::SECONDARY}",
-                                "Error loading CVE groups: {err}"
-                            }
-                        }
-                    }
-                },
-                None => rsx! {
-                    Card {
-                        children: rsx! {
-                            div {
-                                class: "p-8 text-center {theme::text::SECONDARY}",
-                                "Loading CVE groups..."
-                            }
-                        }
-                    }
-                },
-            }
+                }
+            },
+            Some(Err(err)) => rsx! {
+                div {
+                    class: "empty",
+                    style: "margin: 0;",
+                    h3 { "Error loading CVEs" }
+                    div { "{err}" }
+                }
+            },
+            None => rsx! {
+                div {
+                    class: "empty",
+                    style: "margin: 0;",
+                    h3 { "Loading CVEs..." }
+                }
+            },
         }
     }
 }
@@ -823,142 +907,175 @@ fn CvePackageGroupsView(filters: CveFilters, on_open_cve: EventHandler<String>) 
 fn CvePackageGroupCard(group: CvePackageGroup, on_open_cve: EventHandler<String>) -> Element {
     let mut is_expanded = use_signal(|| false);
 
-    let severity_color = if group.critical_count > 0 {
-        theme::cve::CRITICAL_TEXT
+    let sev_color = if group.critical_count > 0 {
+        "#f87171"
     } else if group.high_count > 0 {
-        theme::cve::HIGH_TEXT
+        "#fbbf24"
     } else if group.medium_count > 0 {
-        theme::cve::MEDIUM_TEXT
+        "#60a5fa"
     } else {
-        theme::cve::LOW_TEXT
+        "#9ca3af"
     };
 
     rsx! {
-        Card {
-            children: rsx! {
+        div {
+            class: "card",
+            style: "overflow: hidden;",
+
+            // Header button
+            button {
+                class: "focus-ring",
+                style: format!(
+                    "all: unset; display: grid; grid-template-columns: 24px 1fr auto auto; align-items: center; gap: 14px; padding: 14px 18px; cursor: pointer; width: 100%; background: {}; border-left: 3px solid {}; box-sizing: border-box;",
+                    if is_expanded() { "color-mix(in oklab, var(--cf-brand-purple) 6%, var(--cf-card-bg))" } else { "transparent" },
+                    sev_color
+                ),
+                onclick: move |_| is_expanded.set(!is_expanded()),
+
+                // Chevron icon
+                svg {
+                    width: "14",
+                    height: "14",
+                    view_box: "0 0 24 24",
+                    fill: "none",
+                    stroke: "currentColor",
+                    stroke_width: "2",
+                    stroke_linecap: "round",
+                    stroke_linejoin: "round",
+                    style: "color: var(--cf-text-muted);",
+                    if is_expanded() {
+                        polyline { points: "6 9 12 15 18 9" }
+                    } else {
+                        polyline { points: "9 18 15 12 9 6" }
+                    }
+                }
+
+                // Package info
                 div {
-                    class: "overflow-hidden",
+                    style: "display: flex; flex-direction: column; gap: 2px; min-width: 0;",
 
-                    // Header button
-                    button {
-                        class: "w-full p-4 flex items-center gap-4 hover:bg-white/5 text-left",
-                        style: if is_expanded() { "background: rgba(124, 58, 237, 0.1);" } else { "" },
-                        onclick: move |_| is_expanded.set(!is_expanded()),
-
-                        // Chevron
+                    // First row: package name + CVE count + exploited chip
+                    div {
+                        style: "display: flex; align-items: center; gap: 10px; flex-wrap: wrap;",
                         span {
-                            class: "text-xs {theme::text::SECONDARY}",
-                            if is_expanded() { "▼" } else { "▶" }
+                            class: "mono",
+                            style: "font-size: 14px; font-weight: 700;",
+                            "{group.package_name}"
                         }
-
-                        // Package name
-                        div {
-                            class: "flex-1 min-w-0",
-                            div {
-                                class: "font-mono font-bold text-sm",
-                                "{group.package_name}"
-                            }
-                            div {
-                                class: "text-xs {theme::text::SECONDARY} mt-1",
-                                {
-                                    let cve_plural = if group.cve_count == 1 { "" } else { "s" };
-                                    format!("{} CVE{} · {} systems affected · {} patchable · {} outstanding",
-                                        group.cve_count, cve_plural, group.total_affected_systems,
-                                        group.fixable_count, group.outstanding_count)
-                                }
+                        span {
+                            style: "font-size: 12px; color: var(--cf-text-muted);",
+                            {
+                                let cve_plural = if group.cve_count == 1 { "" } else { "s" };
+                                format!("{} CVE{}", group.cve_count, cve_plural)
                             }
                         }
-
-                        // Severity chips
-                        div {
-                            class: "flex gap-2 flex-wrap",
-                            if group.critical_count > 0 {
-                                span {
-                                    class: "px-2 py-1 text-xs rounded-md {theme::cve::CRITICAL_TEXT} bg-red-500/20",
-                                    "{group.critical_count} crit"
-                                }
-                            }
-                            if group.high_count > 0 {
-                                span {
-                                    class: "px-2 py-1 text-xs rounded-md {theme::cve::HIGH_TEXT} bg-orange-500/20",
-                                    "{group.high_count} high"
-                                }
-                            }
-                            if group.medium_count > 0 {
-                                span {
-                                    class: "px-2 py-1 text-xs rounded-md {theme::cve::MEDIUM_TEXT} bg-blue-500/20",
-                                    "{group.medium_count} med"
-                                }
-                            }
-                            if group.low_count > 0 {
-                                span {
-                                    class: "px-2 py-1 text-xs rounded-md {theme::cve::LOW_TEXT} bg-gray-500/20",
-                                    "{group.low_count} low"
-                                }
-                            }
-                            if group.exploited_count > 0 {
-                                span {
-                                    class: "px-2 py-1 text-xs rounded-md bg-red-500/30 text-red-200 border border-red-500/50",
-                                    "{group.exploited_count} exploited"
-                                }
-                            }
-                        }
-
-                        // Max CVSS
-                        div {
-                            class: "flex flex-col items-end gap-1 min-w-24",
-                            div {
-                                class: "text-xs {theme::text::SECONDARY} uppercase tracking-wide",
-                                "Worst CVSS"
-                            }
-                            if let Some(cvss) = group.max_cvss {
-                                div {
-                                    class: "flex items-center gap-2",
-                                    div {
-                                        class: "w-12 h-1 rounded-full bg-white/10 overflow-hidden",
-                                        div {
-                                            class: "h-full {severity_color}",
-                                            style: "width: {cvss * 10.0}%",
-                                        }
-                                    }
-                                    span {
-                                        class: "font-mono text-sm font-semibold",
-                                        "{cvss:.1}"
-                                    }
-                                }
+                        if group.exploited_count > 0 {
+                            span {
+                                class: "chip chip-critical",
+                                style: "font-size: 10px;",
+                                "{group.exploited_count} exploited"
                             }
                         }
                     }
 
-                    // Expanded CVE list
-                    if is_expanded() {
-                        if let Some(cves) = &group.cves {
+                    // Second row: systems/patchable/outstanding
+                    div {
+                        style: "font-size: 11px; color: var(--cf-text-secondary);",
+                        {
+                            let sys_plural = if group.total_affected_systems == 1 { "" } else { "s" };
+                            format!("{} system{} affected · {} patchable · {} outstanding",
+                                group.total_affected_systems, sys_plural,
+                                group.fixable_count, group.outstanding_count)
+                        }
+                    }
+                }
+
+                // Severity chips
+                div {
+                    style: "display: flex; gap: 5px; flex-wrap: wrap; justify-content: flex-end;",
+                    if group.critical_count > 0 {
+                        span {
+                            class: "chip chip-critical",
+                            style: "font-size: 10px;",
+                            "{group.critical_count} crit"
+                        }
+                    }
+                    if group.high_count > 0 {
+                        span {
+                            class: "chip chip-warning",
+                            style: "font-size: 10px;",
+                            "{group.high_count} high"
+                        }
+                    }
+                    if group.medium_count > 0 {
+                        span {
+                            class: "chip chip-info",
+                            style: "font-size: 10px;",
+                            "{group.medium_count} med"
+                        }
+                    }
+                    if group.low_count > 0 {
+                        span {
+                            class: "chip chip-unknown",
+                            style: "font-size: 10px;",
+                            "{group.low_count} low"
+                        }
+                    }
+                }
+
+                // Max CVSS
+                div {
+                    style: "display: flex; flex-direction: column; align-items: flex-end; gap: 2px; min-width: 96px;",
+                    div {
+                        style: "font-size: 10px; color: var(--cf-text-muted); text-transform: uppercase; letter-spacing: 0.06em;",
+                        "Worst CVSS"
+                    }
+                    if let Some(cvss) = group.max_cvss {
+                        div {
+                            style: "display: flex; align-items: center; gap: 6px;",
                             div {
-                                class: "border-t border-white/10",
-                                table {
-                                    class: "min-w-full text-sm",
-                                    thead {
-                                        tr {
-                                            class: "border-b border-white/5 text-left {theme::text::SECONDARY}",
-                                            th { class: "py-2 px-3", "CVE" }
-                                            th { class: "py-2 px-3", "Severity" }
-                                            th { class: "py-2 px-3", "CVSS" }
-                                            th { class: "py-2 px-3", "Title" }
-                                            th { class: "py-2 px-3", "Affected" }
-                                            th { class: "py-2 px-3", "Fix" }
-                                            th { class: "py-2 px-3", "Triage" }
-                                            th { class: "py-2 px-3", "Age" }
-                                            th { class: "py-2 px-3 text-right", " " }
-                                        }
-                                    }
-                                    tbody {
-                                        for cve in cves {
-                                            CveRowInGroup {
-                                                cve: cve.clone(),
-                                                on_open: move |cve_id: String| {
-                                                    on_open_cve.call(cve_id);
-                                                }
-                                            }
+                                style: "width: 50px; height: 5px; background: var(--cf-subtle-bg); border-radius: 99px; overflow: hidden;",
+                                div {
+                                    style: "width: {cvss * 10.0}%; height: 100%; background: {sev_color};",
+                                }
+                            }
+                            span {
+                                class: "mono",
+                                style: "font-size: 12px; color: var(--cf-text-primary); font-weight: 600;",
+                                "{cvss:.1}"
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Expanded CVE list
+            if is_expanded() {
+                if let Some(cves) = &group.cves {
+                    div {
+                        style: "border-top: 1px solid var(--cf-divider);",
+                        table {
+                            class: "sys-table",
+                            style: "font-size: 12px;",
+                            thead {
+                                tr {
+                                    th { "CVE" }
+                                    th { "Severity" }
+                                    th { "CVSS" }
+                                    th { "Title" }
+                                    th { "Affected" }
+                                    th { "Fix" }
+                                    th { "Triage" }
+                                    th { "Age" }
+                                }
+                            }
+                            tbody {
+                                for cve in cves {
+                                    CveRowInGroup {
+                                        cve: cve.clone(),
+                                        total_systems: group.total_affected_systems,
+                                        on_open: move |cve_id: String| {
+                                            on_open_cve.call(cve_id);
                                         }
                                     }
                                 }
@@ -971,111 +1088,180 @@ fn CvePackageGroupCard(group: CvePackageGroup, on_open_cve: EventHandler<String>
     }
 }
 
+/// CVE row inside a grouped package card (no actions column, matching JSX reference)
 #[component]
-fn CveRowInGroup(cve: CveListItem, on_open: EventHandler<String>) -> Element {
-    let severity_color = match cve.severity.to_uppercase().as_str() {
-        "CRITICAL" => theme::cve::CRITICAL_TEXT,
-        "HIGH" => theme::cve::HIGH_TEXT,
-        "MEDIUM" => theme::cve::MEDIUM_TEXT,
-        _ => theme::cve::LOW_TEXT,
+fn CveRowInGroup(cve: CveListItem, total_systems: i64, on_open: EventHandler<String>) -> Element {
+    let sev_cls = match cve.severity.to_uppercase().as_str() {
+        "CRITICAL" => "chip-critical",
+        "HIGH" => "chip-warning",
+        "MEDIUM" => "chip-info",
+        _ => "chip-unknown",
     };
-    let cve_id_for_onclick = cve.cve_id.clone();
+    let sev_color = match cve.severity.to_uppercase().as_str() {
+        "CRITICAL" => "#f87171",
+        "HIGH" => "#fbbf24",
+        "MEDIUM" => "#60a5fa",
+        _ => "#9ca3af",
+    };
+
+    let cve_id_for_row = cve.cve_id.clone();
 
     rsx! {
         tr {
-            class: "border-b border-white/5 hover:bg-white/5",
+            style: "cursor: pointer;",
+            onclick: move |_| on_open.call(cve_id_for_row.clone()),
 
+            // CVE ID
             td {
-                class: "py-2 px-3 font-mono text-sm font-medium",
-                "{cve.cve_id}"
-                if cve.exploited {
-                    span {
-                        class: "ml-2 px-2 py-0.5 text-xs rounded bg-red-500/20 text-red-300 border border-red-500/30",
-                        "exploited"
+                div {
+                    class: "mono",
+                    style: "font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 8px;",
+                    "{cve.cve_id}"
+                    if cve.exploited {
+                        span {
+                            class: "chip chip-critical",
+                            style: "font-size: 10px;",
+                            title: "Actively exploited in the wild",
+                            "exploited"
+                        }
                     }
                 }
             }
 
+            // Severity
             td {
-                class: "py-2 px-3",
                 span {
-                    class: "px-2 py-1 text-xs rounded-md {severity_color}",
+                    class: "chip {sev_cls}",
+                    span {
+                        class: "chip-dot",
+                        style: "background: {sev_color};",
+                    }
                     "{cve.severity}"
                 }
             }
 
+            // CVSS
             td {
-                class: "py-2 px-3",
                 if let Some(cvss) = cve.cvss_v3_score {
-                    span {
-                        class: "font-mono text-sm",
-                        "{cvss:.1}"
+                    div {
+                        style: "display: flex; align-items: center; gap: 6px;",
+                        div {
+                            style: "width: 40px; height: 5px; background: var(--cf-subtle-bg); border-radius: 99px; overflow: hidden;",
+                            div {
+                                style: "width: {cvss * 10.0}%; height: 100%; background: {sev_color};",
+                            }
+                        }
+                        span {
+                            class: "mono",
+                            style: "font-size: 12px; color: var(--cf-text-primary); font-weight: 600;",
+                            "{cvss:.1}"
+                        }
                     }
                 }
             }
 
+            // Title
             td {
-                class: "py-2 px-3 max-w-xs truncate",
-                title: "{cve.title}",
-                "{cve.title}"
+                style: "font-size: 13px; max-width: 340px;",
+                div {
+                    class: "truncate",
+                    title: "{cve.title}",
+                    "{cve.title}"
+                }
             }
 
+            // Affected
             td {
-                class: "py-2 px-3 font-mono text-xs",
-                "{cve.affected_count}"
+                div {
+                    style: "display: flex; align-items: center; gap: 6px;",
+                    // Server icon
+                    svg {
+                        width: "11",
+                        height: "11",
+                        view_box: "0 0 24 24",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        stroke_linecap: "round",
+                        stroke_linejoin: "round",
+                        style: "color: var(--cf-text-muted);",
+                        rect { x: "2", y: "2", width: "20", height: "8", rx: "2", ry: "2" }
+                        rect { x: "2", y: "14", width: "20", height: "8", rx: "2", ry: "2" }
+                        line { x1: "6", y1: "6", x2: "6.01", y2: "6" }
+                        line { x1: "6", y1: "18", x2: "6.01", y2: "18" }
+                    }
+                    span {
+                        class: "mono",
+                        style: if cve.affected_count > 0 { "font-size: 12px; font-weight: 600; color: var(--cf-text-primary);" } else { "font-size: 12px; font-weight: 600; color: var(--cf-text-muted);" },
+                        "{cve.affected_count}"
+                    }
+                    span {
+                        style: "font-size: 11px; color: var(--cf-text-muted);",
+                        "/ {total_systems}"
+                    }
+                }
             }
 
+            // Fix Status
             td {
-                class: "py-2 px-3",
                 if cve.fix_status == "fix_available" {
                     span {
-                        class: "px-2 py-1 text-xs rounded-md bg-green-500/20 text-green-300",
-                        "Fix available"
+                        class: "chip chip-healthy",
+                        title: "{cve.fixed_version.as_deref().unwrap_or(\"\")}",
+                        // Check icon
+                        svg {
+                            width: "10",
+                            height: "10",
+                            view_box: "0 0 24 24",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "3",
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            style: "display: inline; vertical-align: middle;",
+                            polyline { points: "20 6 9 17 4 12" }
+                        }
+                        " "
+                        if let Some(ver) = &cve.fixed_version {
+                            "{ver}"
+                        }
                     }
                 } else {
                     span {
-                        class: "px-2 py-1 text-xs rounded-md bg-yellow-500/20 text-yellow-300",
-                        "No patch"
+                        class: "chip chip-warning",
+                        "no patch yet"
                     }
                 }
             }
 
+            // Triage Status
             td {
-                class: "py-2 px-3",
                 match cve.triage_status.as_str() {
                     "accepted" => rsx! {
                         span {
-                            class: "px-2 py-1 text-xs rounded-md bg-purple-500/20 text-purple-300",
-                            "Accepted"
+                            class: "chip chip-info",
+                            "accepted"
                         }
                     },
                     "scheduled" => rsx! {
                         span {
-                            class: "px-2 py-1 text-xs rounded-md bg-blue-500/20 text-blue-300",
-                            "Scheduled"
+                            class: "chip chip-info",
+                            "scheduled"
                         }
                     },
                     _ => rsx! {
                         span {
-                            class: "px-2 py-1 text-xs rounded-md bg-red-500/20 text-red-300",
-                            "Outstanding"
+                            class: "chip chip-critical",
+                            "outstanding"
                         }
                     },
                 }
             }
 
+            // Age
             td {
-                class: "py-2 px-3 text-xs {theme::text::SECONDARY}",
+                style: "font-size: 12px; color: var(--cf-text-muted);",
                 "{cve.age_days}d"
-            }
-
-            td {
-                class: "py-2 px-3 text-right",
-                button {
-                    class: "px-2 py-1 text-xs rounded hover:bg-white/10",
-                    onclick: move |_| on_open.call(cve_id_for_onclick.clone()),
-                    "→"
-                }
             }
         }
     }
@@ -1087,11 +1273,14 @@ fn CveRowInGroup(cve: CveListItem, on_open: EventHandler<String>) -> Element {
 
 #[component]
 fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
+    let cve_id_label = cve_id.clone();
+    let cve_id_for_save_seed = cve_id.clone();
     let mut justification_category = use_signal(|| "accepted_risk".to_string());
     let mut justification_reason = use_signal(String::new);
     let mut save_status = use_signal(|| Option::<String>::None);
     let mut justifications_refresh = use_signal(|| 0_u64);
     let mut esc_listener_attached = use_signal(|| false);
+    let advisory_cve_id = cve_id.clone();
 
     let cve_id_detail = cve_id.clone();
     let cve_detail = use_resource(move || {
@@ -1125,10 +1314,10 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
         }
         esc_listener_attached.set(true);
 
-        let on_close = on_close;
+        let on_close_for_esc = on_close.clone();
         let handler = Closure::wrap(Box::new(move |event: web_sys::KeyboardEvent| {
             if event.key() == "Escape" {
-                on_close.call(());
+                on_close_for_esc.call(());
             }
         }) as Box<dyn FnMut(_)>);
 
@@ -1140,128 +1329,206 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
     rsx! {
         // Backdrop
         div {
-            class: "fixed inset-0 bg-black/50 z-40",
+            class: "fl-tray-backdrop fixed inset-0 bg-black/50 z-40",
             onclick: move |_| on_close.call(()),
         }
 
         // Drawer panel
         aside {
-            class: "fixed top-0 right-0 h-full w-full max-w-2xl bg-gray-900 border-l border-white/10 z-50 flex flex-col shadow-xl",
+            class: "fl-tray fixed top-0 right-0 h-full w-full max-w-2xl bg-gray-900 border-l border-white/10 z-50 flex flex-col shadow-xl",
+            role: "dialog",
+            aria_label: "{cve_id_label}",
 
             // Header
             header {
-                class: "flex items-center justify-between p-4 border-b border-white/10",
+                class: "fl-tray-head",
                 match &*cve_detail.read_unchecked() {
-                    Some(Ok(detail)) => rsx! {
-                        div {
-                            class: "flex items-center gap-3 flex-1 min-w-0",
-                            span { class: "text-xl", "🛡️" }
+                    Some(Ok(detail)) => {
+                        let sev_color = match detail.severity.to_uppercase().as_str() {
+                            "CRITICAL" => "#f87171",
+                            "HIGH" => "#fbbf24",
+                            "MEDIUM" => "#60a5fa",
+                            _ => "#9ca3af",
+                        };
+                        let sev_cls = match detail.severity.to_uppercase().as_str() {
+                            "CRITICAL" => "chip-critical",
+                            "HIGH" => "chip-warning",
+                            "MEDIUM" => "chip-info",
+                            _ => "chip-unknown",
+                        };
+                        rsx! {
                             div {
-                                class: "min-w-0",
+                                style: "display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1;",
+                                // Shield icon colored by severity
+                                svg {
+                                    width: "18",
+                                    height: "18",
+                                    view_box: "0 0 24 24",
+                                    fill: "none",
+                                    stroke: "currentColor",
+                                    stroke_width: "2",
+                                    stroke_linecap: "round",
+                                    stroke_linejoin: "round",
+                                    style: "color: {sev_color}; flex-shrink: 0;",
+                                    path { d: "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" }
+                                }
                                 div {
-                                    class: "flex items-center gap-2 flex-wrap",
-                                    span {
-                                        class: "font-mono font-bold text-base",
-                                        "{detail.cve_id}"
-                                    }
-                                    {
-                                        let sev_class = match detail.severity.to_uppercase().as_str() {
-                                            "CRITICAL" => format!("px-2 py-1 text-xs rounded-md {} bg-red-500/20", theme::cve::CRITICAL_TEXT),
-                                            "HIGH" => format!("px-2 py-1 text-xs rounded-md {} bg-orange-500/20", theme::cve::HIGH_TEXT),
-                                            "MEDIUM" => format!("px-2 py-1 text-xs rounded-md {} bg-blue-500/20", theme::cve::MEDIUM_TEXT),
-                                            _ => format!("px-2 py-1 text-xs rounded-md {} bg-gray-500/20", theme::cve::LOW_TEXT),
-                                        };
-                                        rsx! {
+                                    style: "min-width: 0;",
+                                    div {
+                                        style: "display: flex; align-items: center; gap: 8px; flex-wrap: wrap;",
+                                        span {
+                                            class: "mono",
+                                            style: "font-weight: 700; font-size: 15px;",
+                                            "{detail.cve_id}"
+                                        }
+                                        span {
+                                            class: "chip {sev_cls}",
                                             span {
-                                                class: "{sev_class}",
-                                                "{detail.severity}"
+                                                class: "chip-dot",
+                                                style: "background: {sev_color};",
+                                            }
+                                            "{detail.severity}"
+                                        }
+                                        if detail.exploited {
+                                            span {
+                                                class: "chip chip-critical",
+                                                "exploited in the wild"
                                             }
                                         }
                                     }
-                                    if detail.exploited {
-                                        span {
-                                            class: "px-2 py-1 text-xs rounded bg-red-500/30 text-red-200 border border-red-500/50",
-                                            "exploited in the wild"
-                                        }
+                                    div {
+                                        style: "font-size: 12px; color: var(--cf-text-secondary); margin-top: 3px;",
+                                        "{detail.title}"
                                     }
-                                }
-                                div {
-                                    class: "text-xs {theme::text::SECONDARY} mt-1",
-                                    "{detail.title}"
                                 }
                             }
                         }
                     },
                     _ => rsx! {
-                        span { class: "font-mono font-bold", "{cve_id}" }
+                        span { class: "mono", style: "font-weight: 700;", "{cve_id_label}" }
                     }
                 }
-                button {
-                    class: "px-2 py-1 text-sm rounded hover:bg-white/10",
-                    onclick: move |_| on_close.call(()),
-                    "✕"
+                div {
+                    style: "display: flex; gap: 6px;",
+                    button {
+                        class: "btn btn-ghost focus-ring xs",
+                        title: "https://nvd.nist.gov/vuln/detail/{advisory_cve_id}",
+                        onclick: move |_| {
+                            let _ = web_sys::window().and_then(|w| {
+                                w.open_with_url_and_target(
+                                    &format!("https://nvd.nist.gov/vuln/detail/{}", advisory_cve_id),
+                                    "_blank"
+                                ).ok()
+                            });
+                        },
+                        // Link icon
+                        svg {
+                            width: "11",
+                            height: "11",
+                            view_box: "0 0 24 24",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            path { d: "M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" }
+                            path { d: "M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" }
+                        }
+                        " Advisory"
+                    }
+                    button {
+                        class: "btn-icon focus-ring",
+                        onclick: move |_| on_close.call(()),
+                        // X icon
+                        svg {
+                            width: "16",
+                            height: "16",
+                            view_box: "0 0 24 24",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            path { d: "M18 6 6 18" }
+                            path { d: "M6 6l12 12" }
+                        }
+                    }
                 }
             }
 
             // Stats band
             match &*cve_detail.read_unchecked() {
-                Some(Ok(detail)) => rsx! {
-                    div {
-                        class: "grid grid-cols-5 gap-4 p-4 border-b border-white/10 bg-white/5",
+                Some(Ok(detail)) => {
+                    let sev_color = match detail.severity.to_uppercase().as_str() {
+                        "CRITICAL" => "#f87171",
+                        "HIGH" => "#fbbf24",
+                        "MEDIUM" => "#60a5fa",
+                        _ => "#9ca3af",
+                    };
+                    rsx! {
                         div {
-                            class: "text-center",
-                            div { class: "text-xs {theme::text::SECONDARY} uppercase tracking-wide", "CVSS" }
-                            {
-                                let cvss_class = match detail.severity.to_uppercase().as_str() {
-                                    "CRITICAL" => format!("text-lg font-bold mt-1 {}", theme::cve::CRITICAL_TEXT),
-                                    "HIGH" => format!("text-lg font-bold mt-1 {}", theme::cve::HIGH_TEXT),
-                                    "MEDIUM" => format!("text-lg font-bold mt-1 {}", theme::cve::MEDIUM_TEXT),
-                                    _ => format!("text-lg font-bold mt-1 {}", theme::cve::LOW_TEXT),
-                                };
-                                let cvss_text = if let Some(cvss) = detail.cvss_v3_score {
-                                    format!("{:.1}", cvss)
-                                } else {
-                                    "N/A".to_string()
-                                };
-                                rsx! {
-                                    div {
-                                        class: "{cvss_class}",
-                                        "{cvss_text}"
+                            class: "ed-stats",
+                            div {
+                                class: "ed-stat",
+                                div { class: "ed-stat-label", "CVSS" }
+                                div {
+                                    class: "ed-stat-val",
+                                    style: "color: {sev_color};",
+                                    if let Some(cvss) = detail.cvss_v3_score {
+                                        "{cvss:.1}"
+                                    } else {
+                                        "N/A"
                                     }
                                 }
                             }
-                        }
-                        div {
-                            class: "text-center",
-                            div { class: "text-xs {theme::text::SECONDARY} uppercase tracking-wide", "Package" }
-                            div { class: "text-sm font-mono font-semibold mt-1", "{detail.package_name.as_deref().unwrap_or(\"N/A\")}" }
-                        }
-                        div {
-                            class: "text-center",
-                            div { class: "text-xs {theme::text::SECONDARY} uppercase tracking-wide", "Affected" }
-                            div { class: "text-lg font-bold mt-1", "{affected_systems.read().as_ref().and_then(|r| r.as_ref().ok()).map(|s| s.len()).unwrap_or(0)}" }
-                        }
-                        div {
-                            class: "text-center",
-                            div { class: "text-xs {theme::text::SECONDARY} uppercase tracking-wide", "Fix" }
                             div {
-                                class: "text-sm font-mono font-semibold mt-1",
-                                if detail.fix_status == "fix_available" {
-                                    span { class: "text-green-400", "{detail.fixed_version.as_deref().unwrap_or(\"available\")}" }
-                                } else {
-                                    span { class: "text-yellow-400", "pending" }
+                                class: "ed-stat",
+                                div { class: "ed-stat-label", "Package" }
+                                div {
+                                    class: "ed-stat-val mono",
+                                    style: "font-size: 14px;",
+                                    "{detail.package_name.as_deref().unwrap_or(\"N/A\")}"
                                 }
                             }
-                        }
-                        div {
-                            class: "text-center",
-                            div { class: "text-xs {theme::text::SECONDARY} uppercase tracking-wide", "Discovered" }
                             div {
-                                class: "text-sm font-semibold mt-1",
-                                if let Some(date) = detail.published_date {
-                                    "{date}"
-                                } else {
-                                    "N/A"
+                                class: "ed-stat",
+                                div { class: "ed-stat-label", "Affected" }
+                                div {
+                                    class: "ed-stat-val",
+                                    "{affected_systems.read().as_ref().and_then(|r| r.as_ref().ok()).map(|s| s.len()).unwrap_or(0)}"
+                                }
+                            }
+                            div {
+                                class: "ed-stat",
+                                div { class: "ed-stat-label", "Fix" }
+                                div {
+                                    class: "ed-stat-val",
+                                    style: "font-size: 14px;",
+                                    if detail.fix_status == "fix_available" {
+                                        span {
+                                            class: "mono",
+                                            style: "color: #34d399;",
+                                            "{detail.fixed_version.as_deref().unwrap_or(\"available\")}"
+                                        }
+                                    } else {
+                                        span {
+                                            style: "color: #fbbf24;",
+                                            "pending"
+                                        }
+                                    }
+                                }
+                            }
+                            div {
+                                class: "ed-stat",
+                                div { class: "ed-stat-label", "Discovered" }
+                                div {
+                                    class: "ed-stat-val",
+                                    style: "font-size: 14px;",
+                                    if let Some(date) = detail.published_date {
+                                        "{date}"
+                                    } else {
+                                        "N/A"
+                                    }
                                 }
                             }
                         }
@@ -1272,68 +1539,109 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
 
             // Body (scrollable)
             div {
-                class: "flex-1 overflow-y-auto p-4 space-y-6",
+                class: "ed-body",
+                style: "padding: 18px 22px; display: flex; flex-direction: column; gap: 18px; overflow: auto;",
 
                 match &*cve_detail.read_unchecked() {
                     Some(Ok(detail)) => rsx! {
                         // CVSS Vector
                         section {
                             h3 {
-                                class: "text-xs {theme::text::SECONDARY} uppercase tracking-wide mb-2 font-semibold",
-                                "CVSS Vector"
+                                style: "font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--cf-text-muted); margin: 0 0 8px; font-weight: 600;",
+                                "CVSS vector"
                             }
                             if let Some(vector) = &detail.cvss_vector {
                                 code {
-                                    class: "block font-mono text-xs bg-black/30 p-3 rounded border border-white/10",
+                                    class: "mono",
+                                    style: "font-size: 12px; color: var(--cf-text-primary); background: var(--cf-subtle-bg); padding: 6px 10px; border-radius: 6px; display: inline-block;",
                                     "{vector}"
                                 }
                             } else {
-                                p { class: "text-xs {theme::text::SECONDARY}", "No CVSS vector available." }
+                                div { style: "font-size: 12px; color: var(--cf-text-muted);", "No CVSS vector available." }
                             }
                         }
 
                         // Remediation
                         section {
                             h3 {
-                                class: "text-xs {theme::text::SECONDARY} uppercase tracking-wide mb-2 font-semibold",
+                                style: "font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--cf-text-muted); margin: 0 0 10px; font-weight: 600;",
                                 "Remediation"
                             }
                             if detail.fix_status == "fix_available" {
                                 div {
-                                    class: "p-3 rounded border border-green-500/30 bg-green-500/10 text-sm",
-                                    p {
-                                        "✅ Fixed in "
-                                        span { class: "font-mono font-semibold text-green-400", "{detail.package_name.as_deref().unwrap_or(\"package\")}-{detail.fixed_version.as_deref().unwrap_or(\"version\")}" }
+                                    class: "sd-callout sd-callout-info",
+                                    // Check icon
+                                    svg {
+                                        width: "13",
+                                        height: "13",
+                                        view_box: "0 0 24 24",
+                                        fill: "none",
+                                        stroke: "currentColor",
+                                        stroke_width: "3",
+                                        stroke_linecap: "round",
+                                        stroke_linejoin: "round",
+                                        polyline { points: "20 6 9 17 4 12" }
+                                    }
+                                    div {
+                                        style: "font-size: 12px;",
+                                        "Fixed in "
+                                        span {
+                                            class: "mono",
+                                            style: "font-weight: 600; color: #34d399;",
+                                            "{detail.package_name.as_deref().unwrap_or(\"package\")}-{detail.fixed_version.as_deref().unwrap_or(\"version\")}"
+                                        }
                                         ". Affected systems will pick up the fix automatically once the upstream flake bumps the package and an eval passes."
                                     }
                                 }
                             } else {
                                 div {
-                                    class: "p-3 rounded border border-yellow-500/30 bg-yellow-500/10 text-sm",
-                                    p {
-                                        class: "font-semibold",
-                                        "⚠️ No upstream patch yet."
+                                    class: "sd-callout sd-callout-danger",
+                                    // Warning icon
+                                    svg {
+                                        width: "13",
+                                        height: "13",
+                                        view_box: "0 0 24 24",
+                                        fill: "none",
+                                        stroke: "currentColor",
+                                        stroke_width: "2",
+                                        stroke_linecap: "round",
+                                        stroke_linejoin: "round",
+                                        path { d: "M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" }
+                                        line { x1: "12", y1: "9", x2: "12", y2: "13" }
+                                        line { x1: "12", y1: "17", x2: "12.01", y2: "17" }
                                     }
-                                    p {
-                                        class: "mt-1 text-xs",
-                                        "Watch the advisory for updates. Consider applying compensating controls (network isolation, WAF rule) on affected hosts."
+                                    div {
+                                        style: "font-size: 12px;",
+                                        strong { "No upstream patch yet." }
+                                        " Watch the advisory for updates. Consider applying compensating controls (network isolation, WAF rule) on affected hosts."
                                     }
                                 }
                             }
-                            div {
-                                class: "mt-3 grid grid-cols-2 gap-2 text-xs",
-                                div { class: "{theme::text::SECONDARY}", "Introduced in:" }
-                                div { class: "font-mono", "{detail.installed_version.as_deref().unwrap_or(\"N/A\")}" }
-                                div { class: "{theme::text::SECONDARY}", "Fixed in:" }
-                                div { class: "font-mono", "{detail.fixed_version.as_deref().unwrap_or(\"—\")}" }
+                            dl {
+                                class: "kv-grid",
+                                style: "margin-top: 10px;",
+                                dt { "Introduced in" }
+                                dd { class: "mono", "{detail.package_name.as_deref().unwrap_or(\"\")}-{detail.installed_version.as_deref().unwrap_or(\"N/A\")}" }
+                                dt { "Fixed in" }
+                                dd { class: "mono", if detail.fix_status == "fix_available" { "{detail.package_name.as_deref().unwrap_or(\"\")}-{detail.fixed_version.as_deref().unwrap_or(\"\")}" } else { "—" } }
+                                dt { "Advisory" }
+                                dd {
+                                    class: "mono",
+                                    a {
+                                        href: "https://nvd.nist.gov/vuln/detail/{cve_id_label}",
+                                        target: "_blank",
+                                        style: "color: var(--cf-brand-purple);",
+                                        "nvd.nist.gov"
+                                    }
+                                }
                             }
                         }
 
                         // Affected Systems
                         section {
                             h3 {
-                                class: "text-xs {theme::text::SECONDARY} uppercase tracking-wide mb-2 font-semibold",
-                                "Affected Systems · {affected_systems.read().as_ref().and_then(|r| r.as_ref().ok()).map(|s| s.len()).unwrap_or(0)}"
+                                style: "font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--cf-text-muted); margin: 0 0 10px; font-weight: 600;",
+                                "Affected systems · {affected_systems.read().as_ref().and_then(|r| r.as_ref().ok()).map(|s| s.len()).unwrap_or(0)}"
                             }
                             match &*affected_systems.read_unchecked() {
                                 Some(Ok(systems)) => rsx! {
@@ -1355,7 +1663,7 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
                         // Justifications
                         section {
                             h3 {
-                                class: "text-xs {theme::text::SECONDARY} uppercase tracking-wide mb-2 font-semibold",
+                                class: "text-xs {theme::text::SECONDARY} uppercase tracking-[0.08em] mb-2 font-semibold",
                                 "Triage Justifications"
                             }
 
@@ -1381,11 +1689,15 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
                                     oninput: move |evt| justification_reason.set(evt.value()),
                                 }
                                 div {
+                                    class: "text-[11px] {theme::text::SECONDARY}",
+                                    "Reason should explain risk acceptance or mitigation details for audit traceability."
+                                }
+                                div {
                                     class: "flex items-center gap-2",
                                     button {
                                         class: "px-3 py-2 text-sm rounded-md border border-white/15 hover:bg-white/5",
                                         onclick: move |_| {
-                                            let cve_id = cve_id.clone();
+                                            let cve_id = cve_id_for_save_seed.clone();
                                             let category = justification_category();
                                             let reason = justification_reason();
 
@@ -1460,57 +1772,115 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
 
 #[component]
 fn AffectedSystemsList(systems: Vec<CveAffectedSystemDetail>) -> Element {
-    // Group by environment
-    let mut by_env: std::collections::HashMap<String, Vec<CveAffectedSystemDetail>> =
-        std::collections::HashMap::new();
+    // Group by environment while preserving encounter order for stable rendering.
+    let mut by_env: Vec<(String, Vec<CveAffectedSystemDetail>)> = Vec::new();
     for sys in systems {
         let env = sys
             .environment
             .clone()
             .unwrap_or_else(|| "unknown".to_string());
-        by_env.entry(env).or_default().push(sys);
+
+        if let Some((_, entries)) = by_env.iter_mut().find(|(k, _)| k == &env) {
+            entries.push(sys);
+        } else {
+            by_env.push((env, vec![sys]));
+        }
+    }
+
+    // If empty, show message
+    if by_env.is_empty() {
+        return rsx! {
+            div {
+                style: "font-size: 12px; color: var(--cf-text-muted); padding: 12px 0;",
+                "No active systems affected. This CVE may apply to systems no longer in the registry."
+            }
+        };
     }
 
     rsx! {
         div {
-            class: "space-y-3",
+            style: "display: flex; flex-direction: column; gap: 14px;",
             for (env, sys_list) in by_env.iter() {
                 div {
+                    // Environment header with badge and host count
                     div {
-                        class: "text-xs {theme::text::SECONDARY} mb-1",
-                        {
-                            let host_plural = if sys_list.len() == 1 { "" } else { "s" };
-                            format!("Environment: {} ({} host{})", env, sys_list.len(), host_plural)
+                        style: "display: flex; align-items: center; gap: 8px; margin-bottom: 6px;",
+                        EnvBadge { env: env.clone() }
+                        span {
+                            style: "font-size: 11px; color: var(--cf-text-muted);",
+                            {
+                                let host_plural = if sys_list.len() == 1 { "" } else { "s" };
+                                format!("{} host{}", sys_list.len(), host_plural)
+                            }
                         }
                     }
+                    // Card with table
                     div {
-                        class: "border border-white/10 rounded overflow-hidden",
+                        class: "card",
+                        style: "overflow: hidden; border: 1px solid var(--cf-divider);",
                         table {
-                            class: "min-w-full text-xs",
+                            class: "sys-table",
+                            style: "font-size: 12px;",
                             tbody {
                                 for sys in sys_list {
                                     tr {
-                                        class: "border-b border-white/5 hover:bg-white/5",
+                                        // Hostname with status dot (40% width)
                                         td {
-                                            class: "py-2 px-3 font-mono font-semibold",
-                                            "{sys.hostname}"
+                                            style: "width: 40%;",
+                                            div {
+                                                style: "display: flex; align-items: center; gap: 8px;",
+                                                // Status dot - green for healthy
+                                                span {
+                                                    class: "status-dot",
+                                                    style: "--status-color: {deployment_policy_status_color(&sys.deployment_policy)};",
+                                                }
+                                                span {
+                                                    class: "mono",
+                                                    style: "font-weight: 600;",
+                                                    "{sys.hostname}"
+                                                }
+                                            }
                                         }
+                                        // Flake name
                                         td {
-                                            class: "py-2 px-3 font-mono {theme::text::SECONDARY}",
+                                            class: "mono",
+                                            style: "font-size: 11px; color: var(--cf-text-muted);",
                                             if let Some(flake) = &sys.flake_name {
                                                 "{flake}"
                                             }
                                         }
+                                        // Commit hash (first 7 chars)
                                         td {
-                                            class: "py-2 px-3 font-mono text-xs {theme::text::SECONDARY}",
+                                            class: "mono",
+                                            style: "font-size: 11px;",
                                             if let Some(commit) = &sys.commit_hash {
-                                                "{&commit[..7]}"
+                                                "{commit}"
                                             }
                                         }
+                                        // Deployment chip (based on deployment_policy)
                                         td {
-                                            class: "py-2 px-3 font-mono text-xs",
-                                            if let Some(ver) = &sys.current_package_version {
-                                                "{ver}"
+                                            DeploymentChip { state: sys.deployment_policy.clone() }
+                                        }
+                                        // Arrow button to open system
+                                        td {
+                                            style: "text-align: right;",
+                                            Link {
+                                                to: Route::SystemDetailView { id: sys.system_id.to_string() },
+                                                class: "btn-icon focus-ring",
+                                                title: "Open {sys.hostname}",
+                                                // Arrow-right icon
+                                                svg {
+                                                    width: "13",
+                                                    height: "13",
+                                                    view_box: "0 0 24 24",
+                                                    fill: "none",
+                                                    stroke: "currentColor",
+                                                    stroke_width: "2",
+                                                    stroke_linecap: "round",
+                                                    stroke_linejoin: "round",
+                                                    line { x1: "5", y1: "12", x2: "19", y2: "12" }
+                                                    polyline { points: "12 5 19 12 12 19" }
+                                                }
                                             }
                                         }
                                     }
@@ -1520,6 +1890,54 @@ fn AffectedSystemsList(systems: Vec<CveAffectedSystemDetail>) -> Element {
                     }
                 }
             }
+        }
+    }
+}
+
+/// Environment badge with colored dot and text.
+/// Matches JSX EnvBadge component.
+#[component]
+fn EnvBadge(env: String) -> Element {
+    // Environment style mapping matching JSX ENV_STYLE
+    let (bg, fg, border) = match env.to_lowercase().as_str() {
+        "production" => ("rgba(220,38,38,0.10)", "#f87171", "rgba(248,113,113,0.25)"),
+        "staging" => ("rgba(217,119,6,0.10)", "#fbbf24", "rgba(251,191,36,0.25)"),
+        "dev" => ("rgba(37,99,235,0.10)", "#60a5fa", "rgba(96,165,250,0.25)"),
+        "edge" => ("rgba(15,118,110,0.12)", "#2dd4bf", "rgba(45,212,191,0.25)"),
+        "lab" => ("rgba(124,58,237,0.10)", "#a78bfa", "rgba(167,139,250,0.25)"),
+        _ => ("rgba(37,99,235,0.10)", "#60a5fa", "rgba(96,165,250,0.25)"), // default to dev
+    };
+
+    rsx! {
+        span {
+            class: "env-badge",
+            style: "--env-bg: {bg}; --env-fg: {fg}; --env-border: {border};",
+            span { class: "chip-dot" }
+            "{env}"
+        }
+    }
+}
+
+/// Deployment state chip.
+/// Matches JSX DeploymentChip component.
+#[component]
+fn DeploymentChip(state: String) -> Element {
+    let (chip_class, label) = match state.to_lowercase().as_str() {
+        "up-to-date" => ("chip-healthy", "up to date"),
+        "behind" => ("chip-warning", "behind"),
+        "failed" => ("chip-critical", "deploy failed"),
+        "drift" => ("chip-warning", "drift"),
+        "deploying" => ("chip-info", "deploying"),
+        "automatic" => ("chip-healthy", "automatic"),
+        "manual" => ("chip-info", "manual"),
+        "scheduled" => ("chip-info", "scheduled"),
+        _ => ("chip-unknown", "unknown"),
+    };
+
+    rsx! {
+        span {
+            class: "chip {chip_class}",
+            "{label}"
         }
     }
 }
