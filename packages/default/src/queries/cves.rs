@@ -318,7 +318,7 @@ pub async fn fetch_cve_fleet_stats(pool: &PgPool) -> Result<CveFleetStats> {
             COALESCE(exploited, 0)::bigint as exploited,
             COALESCE(fixable, 0)::bigint as fixable,
             COALESCE(environments_affected, 0)::bigint as environments_affected,
-            COALESCE(total_system_cve_instances, 0)::bigint as systems_affected,
+            COALESCE(systems_affected, 0)::bigint as systems_affected,
             COALESCE(outstanding, 0)::bigint as outstanding,
             COALESCE(accepted, 0)::bigint as accepted,
             COALESCE(scheduled, 0)::bigint as scheduled
