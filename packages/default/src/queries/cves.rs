@@ -18,21 +18,21 @@ pub async fn fetch_cve_list(pool: &PgPool, filters: &CveFilters) -> Result<Vec<C
         SELECT 
             cve_id,
             cvss_v3_score::real as cvss_v3_score,
-            severity,
-            title,
+            COALESCE(severity, 'UNKNOWN') as severity,
+            COALESCE(title, '') as title,
             cvss_vector,
             published_date,
-            exploited,
+            COALESCE(exploited, FALSE) as exploited,
             package_name,
             installed_version,
             fixed_version,
-            fix_status,
-            affected_count::bigint as affected_count,
+            COALESCE(fix_status, 'open') as fix_status,
+            COALESCE(affected_count, 0)::bigint as affected_count,
             affected_environments,
             first_seen,
             last_seen,
-            age_days::int as age_days,
-            triage_status
+            COALESCE(age_days, 0)::int as age_days,
+            COALESCE(triage_status, 'outstanding') as triage_status
         FROM view_cve_list_with_metadata
         WHERE 1=1
         "#,
@@ -293,18 +293,18 @@ pub async fn fetch_cve_fleet_stats(pool: &PgPool) -> Result<CveFleetStats> {
     let stats = sqlx::query_as::<_, CveFleetStats>(
         r#"
         SELECT 
-            total_cves::bigint as total_cves,
-            critical::bigint as critical,
-            high::bigint as high,
-            medium::bigint as medium,
-            low::bigint as low,
-            exploited::bigint as exploited,
-            fixable::bigint as fixable,
-            environments_affected::bigint as environments_affected,
-            total_system_cve_instances::bigint as systems_affected,
-            outstanding::bigint as outstanding,
-            accepted::bigint as accepted,
-            scheduled::bigint as scheduled
+            COALESCE(total_cves, 0)::bigint as total_cves,
+            COALESCE(critical, 0)::bigint as critical,
+            COALESCE(high, 0)::bigint as high,
+            COALESCE(medium, 0)::bigint as medium,
+            COALESCE(low, 0)::bigint as low,
+            COALESCE(exploited, 0)::bigint as exploited,
+            COALESCE(fixable, 0)::bigint as fixable,
+            COALESCE(environments_affected, 0)::bigint as environments_affected,
+            COALESCE(total_system_cve_instances, 0)::bigint as systems_affected,
+            COALESCE(outstanding, 0)::bigint as outstanding,
+            COALESCE(accepted, 0)::bigint as accepted,
+            COALESCE(scheduled, 0)::bigint as scheduled
         FROM view_cve_fleet_stats
         "#,
     )
