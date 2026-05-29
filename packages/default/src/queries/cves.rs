@@ -124,7 +124,7 @@ pub async fn fetch_cve_packages_grouped(
             medium_count,
             low_count,
             environments_count,
-            total_affected_systems,
+            total_affected_systems::bigint as total_affected_systems,
             fixable_count,
             outstanding_count,
             exploited_count,
