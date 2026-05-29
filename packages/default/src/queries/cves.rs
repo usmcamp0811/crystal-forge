@@ -27,11 +27,11 @@ pub async fn fetch_cve_list(pool: &PgPool, filters: &CveFilters) -> Result<Vec<C
             installed_version,
             fixed_version,
             fix_status,
-            affected_count,
+            affected_count::bigint as affected_count,
             affected_environments,
             first_seen,
             last_seen,
-            age_days,
+            age_days::int as age_days,
             triage_status
         FROM view_cve_list_with_metadata
         WHERE 1=1
@@ -293,18 +293,18 @@ pub async fn fetch_cve_fleet_stats(pool: &PgPool) -> Result<CveFleetStats> {
     let stats = sqlx::query_as::<_, CveFleetStats>(
         r#"
         SELECT 
-            total_cves,
-            critical,
-            high,
-            medium,
-            low,
-            exploited,
-            fixable,
-            environments_affected,
-            total_system_cve_instances as systems_affected,
-            outstanding,
-            accepted,
-            scheduled
+            total_cves::bigint as total_cves,
+            critical::bigint as critical,
+            high::bigint as high,
+            medium::bigint as medium,
+            low::bigint as low,
+            exploited::bigint as exploited,
+            fixable::bigint as fixable,
+            environments_affected::bigint as environments_affected,
+            total_system_cve_instances::bigint as systems_affected,
+            outstanding::bigint as outstanding,
+            accepted::bigint as accepted,
+            scheduled::bigint as scheduled
         FROM view_cve_fleet_stats
         "#,
     )
