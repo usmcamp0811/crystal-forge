@@ -8,6 +8,23 @@ use crate::api::models::{
     CveJustificationInput, CveListItem, CvePackageGroup,
 };
 
+fn default_cve_fleet_stats() -> CveFleetStats {
+    CveFleetStats {
+        total_cves: 0,
+        critical: 0,
+        high: 0,
+        medium: 0,
+        low: 0,
+        exploited: 0,
+        fixable: 0,
+        environments_affected: 0,
+        systems_affected: 0,
+        outstanding: 0,
+        accepted: 0,
+        scheduled: 0,
+    }
+}
+
 /// Fetch paginated list of CVEs with filters applied.
 ///
 /// Uses `view_cve_list_with_metadata` for performance.
@@ -308,10 +325,10 @@ pub async fn fetch_cve_fleet_stats(pool: &PgPool) -> Result<CveFleetStats> {
         FROM view_cve_fleet_stats
         "#,
     )
-    .fetch_one(pool)
+    .fetch_optional(pool)
     .await?;
 
-    Ok(stats)
+    Ok(stats.unwrap_or_else(default_cve_fleet_stats))
 }
 
 /// Fetch distinct package names for autocomplete.
@@ -503,6 +520,23 @@ mod tests {
         assert!(f.search.is_none());
         assert!(f.sort.is_none());
         assert!(f.limit.is_none());
+    }
+
+    #[test]
+    fn default_cve_fleet_stats_is_all_zero() {
+        let stats = default_cve_fleet_stats();
+        assert_eq!(stats.total_cves, 0);
+        assert_eq!(stats.critical, 0);
+        assert_eq!(stats.high, 0);
+        assert_eq!(stats.medium, 0);
+        assert_eq!(stats.low, 0);
+        assert_eq!(stats.exploited, 0);
+        assert_eq!(stats.fixable, 0);
+        assert_eq!(stats.environments_affected, 0);
+        assert_eq!(stats.systems_affected, 0);
+        assert_eq!(stats.outstanding, 0);
+        assert_eq!(stats.accepted, 0);
+        assert_eq!(stats.scheduled, 0);
     }
 
     // ── Live DB tests (require running PostgreSQL with migrations applied) ──
