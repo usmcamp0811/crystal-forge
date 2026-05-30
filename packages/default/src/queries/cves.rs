@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use sqlx::PgPool;
+use std::collections::{HashMap, HashSet};
 
 use crate::api::models::{
     CveAffectedSystemDetail, CveDetail, CveFilters, CveFleetStats, CveJustification,
@@ -114,38 +115,13 @@ pub async fn fetch_cve_packages_grouped(
     pool: &PgPool,
     filters: &CveFilters,
 ) -> Result<Vec<CvePackageGroup>> {
-    // First get package-level stats
-    let package_stats = sqlx::query!(
-        r#"
-        SELECT 
-            package_name as "package_name!",
-            cve_count::bigint as "cve_count!",
-            critical_count::bigint as "critical_count!",
-            high_count::bigint as "high_count!",
-            medium_count::bigint as "medium_count!",
-            low_count::bigint as "low_count!",
-            environments_count::bigint as "environments_count!",
-            total_affected_systems::bigint as "total_affected_systems!",
-            fixable_count::bigint as "fixable_count!",
-            outstanding_count::bigint as "outstanding_count!",
-            exploited_count::bigint as "exploited_count!",
-            max_cvss::real as "max_cvss?",
-            severity_score::bigint as "severity_score!"
-        FROM view_cves_grouped_by_package
-        ORDER BY severity_score DESC, max_cvss DESC NULLS LAST
-        LIMIT 100
-        "#,
-    )
-    .fetch_all(pool)
-    .await?;
-
-    // Avoid N+1 queries: fetch CVEs once, then group in-memory by package.
+    // Fetch CVEs once with active filters, then group in-memory.
+    // This ensures grouped mode respects severity/fix/triage/search filters.
     let mut all_filters = filters.clone();
     all_filters.limit = Some(1000);
     let all_cves = fetch_cve_list(pool, &all_filters).await?;
 
-    let mut cves_by_package: std::collections::HashMap<String, Vec<CveListItem>> =
-        std::collections::HashMap::new();
+    let mut cves_by_package: HashMap<String, Vec<CveListItem>> = HashMap::new();
     for cve in all_cves {
         if let Some(pkg) = cve.package_name.clone() {
             cves_by_package.entry(pkg).or_default().push(cve);
@@ -153,32 +129,102 @@ pub async fn fetch_cve_packages_grouped(
     }
 
     let mut result = Vec::new();
-    for row in package_stats {
-        let mut pkg_group = CvePackageGroup {
-            package_name: row.package_name,
-            cve_count: row.cve_count,
-            critical_count: row.critical_count,
-            high_count: row.high_count,
-            medium_count: row.medium_count,
-            low_count: row.low_count,
-            environments_count: row.environments_count,
-            total_affected_systems: row.total_affected_systems,
-            fixable_count: row.fixable_count,
-            outstanding_count: row.outstanding_count,
-            exploited_count: row.exploited_count,
-            max_cvss: row.max_cvss,
-            severity_score: row.severity_score,
-            cves: None,
-        };
+    for (package_name, mut cves) in cves_by_package {
+        let mut critical_count = 0i64;
+        let mut high_count = 0i64;
+        let mut medium_count = 0i64;
+        let mut low_count = 0i64;
+        let mut environments: HashSet<String> = HashSet::new();
+        let mut total_affected_systems = 0i64;
+        let mut fixable_count = 0i64;
+        let mut outstanding_count = 0i64;
+        let mut exploited_count = 0i64;
+        let mut max_cvss: Option<f32> = None;
+        let mut severity_score = 0i64;
 
-        let mut cves = cves_by_package
-            .remove(&pkg_group.package_name)
-            .unwrap_or_default();
+        for cve in &cves {
+            match cve.severity.as_str() {
+                "CRITICAL" => {
+                    critical_count += 1;
+                    severity_score += 1000;
+                }
+                "HIGH" => {
+                    high_count += 1;
+                    severity_score += 100;
+                }
+                "MEDIUM" => {
+                    medium_count += 1;
+                    severity_score += 10;
+                }
+                "LOW" => {
+                    low_count += 1;
+                    severity_score += 1;
+                }
+                _ => {}
+            }
+
+            total_affected_systems += cve.affected_count;
+
+            if cve.fix_status == "fix_available" {
+                fixable_count += 1;
+            }
+            if cve.triage_status == "outstanding" {
+                outstanding_count += 1;
+            }
+            if cve.exploited {
+                exploited_count += 1;
+            }
+
+            if let Some(score) = cve.cvss_v3_score {
+                max_cvss = match max_cvss {
+                    Some(curr) if curr >= score => Some(curr),
+                    _ => Some(score),
+                };
+            }
+
+            if let Some(envs) = &cve.affected_environments {
+                for env in envs {
+                    environments.insert(env.clone());
+                }
+            }
+        }
+
+        // Keep grouped rows bounded per package for UI stability.
         if cves.len() > 100 {
             cves.truncate(100);
         }
-        pkg_group.cves = Some(cves);
-        result.push(pkg_group);
+
+        result.push(CvePackageGroup {
+            package_name,
+            cve_count: cves.len() as i64,
+            critical_count,
+            high_count,
+            medium_count,
+            low_count,
+            environments_count: environments.len() as i64,
+            total_affected_systems,
+            fixable_count,
+            outstanding_count,
+            exploited_count,
+            max_cvss,
+            severity_score,
+            cves: Some(cves),
+        });
+    }
+
+    // Match prior ordering semantics.
+    result.sort_by(|a, b| {
+        b.severity_score
+            .cmp(&a.severity_score)
+            .then_with(|| {
+                b.max_cvss
+                    .partial_cmp(&a.max_cvss)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| a.package_name.cmp(&b.package_name))
+    });
+    if result.len() > 100 {
+        result.truncate(100);
     }
 
     Ok(result)
