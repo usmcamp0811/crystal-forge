@@ -152,33 +152,57 @@ pub async fn fetch_cve_packages_grouped(
                     OR title ILIKE $5
                 )
                 AND package_name IS NOT NULL
+        ),
+        package_counts AS (
+            SELECT
+                package_name,
+                COUNT(*)::bigint as cve_count,
+                COUNT(*) FILTER (WHERE severity = 'CRITICAL')::bigint as critical_count,
+                COUNT(*) FILTER (WHERE severity = 'HIGH')::bigint as high_count,
+                COUNT(*) FILTER (WHERE severity = 'MEDIUM')::bigint as medium_count,
+                COUNT(*) FILTER (WHERE severity = 'LOW')::bigint as low_count,
+                SUM(affected_count)::bigint as total_affected_systems,
+                COUNT(*) FILTER (WHERE fix_status = 'fix_available')::bigint as fixable_count,
+                COUNT(*) FILTER (WHERE triage_status = 'outstanding')::bigint as outstanding_count,
+                COUNT(*) FILTER (WHERE exploited = TRUE)::bigint as exploited_count,
+                MAX(cvss_v3_score)::real as max_cvss,
+                SUM(
+                    CASE severity
+                        WHEN 'CRITICAL' THEN 1000
+                        WHEN 'HIGH' THEN 100
+                        WHEN 'MEDIUM' THEN 10
+                        WHEN 'LOW' THEN 1
+                        ELSE 0
+                    END
+                )::bigint as severity_score
+            FROM filtered
+            GROUP BY package_name
+        ),
+        package_envs AS (
+            SELECT
+                f.package_name,
+                COUNT(DISTINCT ae)::bigint as environments_count
+            FROM filtered f
+            LEFT JOIN LATERAL UNNEST(f.affected_environments) AS ae ON TRUE
+            GROUP BY f.package_name
         )
         SELECT
-            package_name as "package_name!",
-            COUNT(*)::bigint as "cve_count!",
-            COUNT(*) FILTER (WHERE severity = 'CRITICAL')::bigint as "critical_count!",
-            COUNT(*) FILTER (WHERE severity = 'HIGH')::bigint as "high_count!",
-            COUNT(*) FILTER (WHERE severity = 'MEDIUM')::bigint as "medium_count!",
-            COUNT(*) FILTER (WHERE severity = 'LOW')::bigint as "low_count!",
-            COUNT(DISTINCT ae)::bigint as "environments_count!",
-            SUM(affected_count)::bigint as "total_affected_systems!",
-            COUNT(*) FILTER (WHERE fix_status = 'fix_available')::bigint as "fixable_count!",
-            COUNT(*) FILTER (WHERE triage_status = 'outstanding')::bigint as "outstanding_count!",
-            COUNT(*) FILTER (WHERE exploited = TRUE)::bigint as "exploited_count!",
-            MAX(cvss_v3_score)::real as "max_cvss?",
-            SUM(
-                CASE severity
-                    WHEN 'CRITICAL' THEN 1000
-                    WHEN 'HIGH' THEN 100
-                    WHEN 'MEDIUM' THEN 10
-                    WHEN 'LOW' THEN 1
-                    ELSE 0
-                END
-            )::bigint as "severity_score!"
-        FROM filtered f
-        LEFT JOIN LATERAL UNNEST(f.affected_environments) AS ae ON TRUE
-        GROUP BY package_name
-        ORDER BY "severity_score!" DESC, "max_cvss?" DESC NULLS LAST, "package_name!" ASC
+            pc.package_name as "package_name!",
+            pc.cve_count as "cve_count!",
+            pc.critical_count as "critical_count!",
+            pc.high_count as "high_count!",
+            pc.medium_count as "medium_count!",
+            pc.low_count as "low_count!",
+            COALESCE(pe.environments_count, 0)::bigint as "environments_count!",
+            pc.total_affected_systems as "total_affected_systems!",
+            pc.fixable_count as "fixable_count!",
+            pc.outstanding_count as "outstanding_count!",
+            pc.exploited_count as "exploited_count!",
+            pc.max_cvss as "max_cvss?",
+            pc.severity_score as "severity_score!"
+        FROM package_counts pc
+        LEFT JOIN package_envs pe ON pe.package_name = pc.package_name
+        ORDER BY pc.severity_score DESC, pc.max_cvss DESC NULLS LAST, pc.package_name ASC
         LIMIT 100
         "#,
         severity_param,
