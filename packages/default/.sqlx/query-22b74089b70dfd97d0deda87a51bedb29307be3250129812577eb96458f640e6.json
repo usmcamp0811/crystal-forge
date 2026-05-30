@@ -1,0 +1,92 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT \n            package_name as \"package_name!\",\n            cve_count::bigint as \"cve_count!\",\n            critical_count::bigint as \"critical_count!\",\n            high_count::bigint as \"high_count!\",\n            medium_count::bigint as \"medium_count!\",\n            low_count::bigint as \"low_count!\",\n            environments_count::bigint as \"environments_count!\",\n            total_affected_systems::bigint as \"total_affected_systems!\",\n            fixable_count::bigint as \"fixable_count!\",\n            outstanding_count::bigint as \"outstanding_count!\",\n            exploited_count::bigint as \"exploited_count!\",\n            max_cvss::real as \"max_cvss?\",\n            severity_score::bigint as \"severity_score!\"\n        FROM view_cves_grouped_by_package\n        ORDER BY severity_score DESC, max_cvss DESC NULLS LAST\n        LIMIT 100\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "package_name!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "cve_count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "critical_count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "high_count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "medium_count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "low_count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 6,
+        "name": "environments_count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 7,
+        "name": "total_affected_systems!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 8,
+        "name": "fixable_count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 9,
+        "name": "outstanding_count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 10,
+        "name": "exploited_count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 11,
+        "name": "max_cvss?",
+        "type_info": "Float4"
+      },
+      {
+        "ordinal": 12,
+        "name": "severity_score!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      null,
+      true,
+      true,
+      true,
+      null,
+      true
+    ]
+  },
+  "hash": "22b74089b70dfd97d0deda87a51bedb29307be3250129812577eb96458f640e6"
+}

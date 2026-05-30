@@ -30,97 +30,81 @@ fn default_cve_fleet_stats() -> CveFleetStats {
 /// Uses `view_cve_list_with_metadata` for performance.
 /// Filters are AND combined. Search query does OR across CVE ID, package name, and title.
 pub async fn fetch_cve_list(pool: &PgPool, filters: &CveFilters) -> Result<Vec<CveListItem>> {
-    let mut query = String::from(
+    let limit = filters.limit.unwrap_or(500).min(1000);
+    let severity_param = filters.severity.as_ref().map(|s| s.to_uppercase());
+    let fix_status_param = filters.fix_status.clone();
+    let triage_status_param = filters.triage_status.clone();
+    let package_param = filters.package.as_ref().map(|p| format!("%{p}%"));
+    let search_param = filters.search.as_ref().map(|s| format!("%{s}%"));
+    let sort_param = filters.sort.as_deref().unwrap_or("severity");
+
+    let rows = sqlx::query_as!(
+        CveListItem,
         r#"
-        SELECT 
-            cve_id,
-            cvss_v3_score::real as cvss_v3_score,
-            COALESCE(severity, 'UNKNOWN') as severity,
-            COALESCE(title, '') as title,
-            cvss_vector,
-            published_date,
-            COALESCE(exploited, FALSE) as exploited,
-            package_name,
-            installed_version,
-            fixed_version,
-            COALESCE(fix_status, 'open') as fix_status,
-            COALESCE(affected_count, 0)::bigint as affected_count,
-            affected_environments,
-            first_seen,
-            last_seen,
-            COALESCE(age_days, 0)::int as age_days,
-            COALESCE(triage_status, 'outstanding') as triage_status
+        SELECT
+            cve_id as "cve_id!",
+            cvss_v3_score::real as "cvss_v3_score?",
+            COALESCE(severity, 'UNKNOWN') as "severity!",
+            COALESCE(title, '') as "title!",
+            cvss_vector as "cvss_vector?",
+            published_date as "published_date?",
+            COALESCE(exploited, FALSE) as "exploited!",
+            package_name as "package_name?",
+            installed_version as "installed_version?",
+            fixed_version as "fixed_version?",
+            COALESCE(fix_status, 'open') as "fix_status!",
+            COALESCE(affected_count, 0)::bigint as "affected_count!",
+            affected_environments as "affected_environments?: Vec<String>",
+            first_seen as "first_seen?",
+            last_seen as "last_seen?",
+            COALESCE(age_days, 0)::int as "age_days!",
+            COALESCE(triage_status, 'outstanding') as "triage_status!"
         FROM view_cve_list_with_metadata
-        WHERE 1=1
-        "#,
-    );
-
-    let mut conditions = Vec::new();
-
-    if let Some(ref severity) = filters.severity {
-        conditions.push(format!("AND severity = '{}'", severity.to_uppercase()));
-    }
-
-    if let Some(ref fix_status) = filters.fix_status {
-        match fix_status.as_str() {
-            "available" => conditions.push("AND fix_status = 'fix_available'".to_string()),
-            "pending" => conditions.push("AND fix_status = 'open'".to_string()),
-            "exploited" => conditions.push("AND exploited = TRUE".to_string()),
-            _ => {}
-        }
-    }
-
-    if let Some(ref triage_status) = filters.triage_status {
-        conditions.push(format!("AND triage_status = '{}'", triage_status));
-    }
-
-    if let Some(ref package) = filters.package {
-        conditions.push(format!(
-            "AND package_name ILIKE '%{}%'",
-            package.replace('\'', "''")
-        ));
-    }
-
-    if let Some(ref search) = filters.search {
-        let search_escaped = search.replace('\'', "''");
-        conditions.push(format!(
-            "AND (cve_id ILIKE '%{0}%' OR package_name ILIKE '%{0}%' OR title ILIKE '%{0}%')",
-            search_escaped
-        ));
-    }
-
-    for condition in conditions {
-        query.push_str(&condition);
-        query.push('\n');
-    }
-
-    // Sorting
-    match filters.sort.as_deref() {
-        Some("cvss") => query.push_str("ORDER BY cvss_v3_score DESC NULLS LAST"),
-        Some("age") => query.push_str("ORDER BY age_days ASC"),
-        Some("affected") => query.push_str("ORDER BY affected_count DESC"),
-        Some("severity") | _ => {
-            // Default: severity score then CVSS
-            query.push_str(
-                r#"ORDER BY 
+        WHERE
+            ($1::text IS NULL OR severity = $1)
+            AND (
+                $2::text IS NULL
+                OR ($2 = 'available' AND fix_status = 'fix_available')
+                OR ($2 = 'pending' AND fix_status = 'open')
+                OR ($2 = 'exploited' AND exploited = TRUE)
+            )
+            AND ($3::text IS NULL OR triage_status = $3)
+            AND ($4::text IS NULL OR package_name ILIKE $4)
+            AND (
+                $5::text IS NULL
+                OR cve_id ILIKE $5
+                OR package_name ILIKE $5
+                OR title ILIKE $5
+            )
+        ORDER BY
+            CASE
+                WHEN $6 = 'severity' THEN
                     CASE severity
                         WHEN 'CRITICAL' THEN 1
                         WHEN 'HIGH' THEN 2
                         WHEN 'MEDIUM' THEN 3
                         WHEN 'LOW' THEN 4
                         ELSE 5
-                    END,
-                    cvss_v3_score DESC NULLS LAST"#,
-            );
-        }
-    }
-
-    let limit = filters.limit.unwrap_or(500).min(1000);
-    query.push_str(&format!("\nLIMIT {}", limit));
-
-    let rows = sqlx::query_as::<_, CveListItem>(&query)
-        .fetch_all(pool)
-        .await?;
+                    END
+                ELSE NULL
+            END ASC NULLS LAST,
+            CASE WHEN $6 = 'severity' THEN cvss_v3_score END DESC NULLS LAST,
+            CASE WHEN $6 = 'cvss' THEN cvss_v3_score END DESC NULLS LAST,
+            CASE WHEN $6 = 'age' THEN age_days END ASC NULLS LAST,
+            CASE WHEN $6 = 'affected' THEN affected_count END DESC NULLS LAST,
+            cve_id ASC
+        LIMIT $7
+        "#,
+        severity_param,
+        fix_status_param,
+        triage_status_param,
+        package_param,
+        search_param,
+        sort_param,
+        limit,
+    )
+    .fetch_all(pool)
+    .await?;
 
     Ok(rows)
 }
@@ -131,22 +115,22 @@ pub async fn fetch_cve_packages_grouped(
     filters: &CveFilters,
 ) -> Result<Vec<CvePackageGroup>> {
     // First get package-level stats
-    let package_stats = sqlx::query_as::<_, CvePackageGroup>(
+    let package_stats = sqlx::query!(
         r#"
         SELECT 
-            package_name,
-            cve_count,
-            critical_count,
-            high_count,
-            medium_count,
-            low_count,
-            environments_count,
-            total_affected_systems::bigint as total_affected_systems,
-            fixable_count,
-            outstanding_count,
-            exploited_count,
-            max_cvss::real as max_cvss,
-            severity_score
+            package_name as "package_name!",
+            cve_count::bigint as "cve_count!",
+            critical_count::bigint as "critical_count!",
+            high_count::bigint as "high_count!",
+            medium_count::bigint as "medium_count!",
+            low_count::bigint as "low_count!",
+            environments_count::bigint as "environments_count!",
+            total_affected_systems::bigint as "total_affected_systems!",
+            fixable_count::bigint as "fixable_count!",
+            outstanding_count::bigint as "outstanding_count!",
+            exploited_count::bigint as "exploited_count!",
+            max_cvss::real as "max_cvss?",
+            severity_score::bigint as "severity_score!"
         FROM view_cves_grouped_by_package
         ORDER BY severity_score DESC, max_cvss DESC NULLS LAST
         LIMIT 100
@@ -157,7 +141,23 @@ pub async fn fetch_cve_packages_grouped(
 
     // For each package, fetch its CVEs (applying same filters as list view)
     let mut result = Vec::new();
-    for mut pkg_group in package_stats {
+    for row in package_stats {
+        let mut pkg_group = CvePackageGroup {
+            package_name: row.package_name,
+            cve_count: row.cve_count,
+            critical_count: row.critical_count,
+            high_count: row.high_count,
+            medium_count: row.medium_count,
+            low_count: row.low_count,
+            environments_count: row.environments_count,
+            total_affected_systems: row.total_affected_systems,
+            fixable_count: row.fixable_count,
+            outstanding_count: row.outstanding_count,
+            exploited_count: row.exploited_count,
+            max_cvss: row.max_cvss,
+            severity_score: row.severity_score,
+            cves: None,
+        };
         let mut pkg_filters = filters.clone();
         pkg_filters.package = Some(pkg_group.package_name.clone());
         pkg_filters.limit = Some(100); // Limit CVEs per package
@@ -172,31 +172,31 @@ pub async fn fetch_cve_packages_grouped(
 
 /// Fetch detailed information for a single CVE.
 pub async fn fetch_cve_detail(pool: &PgPool, cve_id: &str) -> Result<CveDetail> {
-    let detail = sqlx::query_as::<_, CveDetail>(
+    let detail = sqlx::query_as!(
+        CveDetail,
         r#"
-        SELECT 
-            c.id as cve_id,
-            c.cvss_v3_score::real as cvss_v3_score,
-            severity_from_cvss(c.cvss_v3_score) as severity,
-            c.description as title,
-            c.vector as cvss_vector,
-            c.cwe_id,
-            c.published_date,
-            c.modified_date,
-            c.exploited,
-            np.pname as package_name,
-            np.version as installed_version,
-            pv.fixed_version,
-            pv.detection_method,
-            CASE WHEN pv.fixed_version IS NOT NULL THEN 'fix_available' ELSE 'open' END as fix_status
-        FROM cves c
-        LEFT JOIN package_vulnerabilities pv ON c.id = pv.cve_id AND NOT pv.is_whitelisted
-        LEFT JOIN nix_packages np ON pv.derivation_path = np.derivation_path
-        WHERE c.id = $1
+        SELECT
+            v.cve_id as "cve_id!",
+            v.cvss_v3_score::real as "cvss_v3_score?",
+            COALESCE(v.severity, 'UNKNOWN') as "severity!",
+            COALESCE(v.title, '') as "title!",
+            v.cvss_vector as "cvss_vector?",
+            c.cwe_id as "cwe_id?",
+            v.published_date as "published_date?",
+            c.modified_date as "modified_date?",
+            COALESCE(v.exploited, FALSE) as "exploited!",
+            v.package_name as "package_name?",
+            v.installed_version as "installed_version?",
+            v.fixed_version as "fixed_version?",
+            NULL::text as "detection_method?",
+            COALESCE(v.fix_status, 'open') as "fix_status!"
+        FROM view_cve_list_with_metadata v
+        LEFT JOIN cves c ON c.id = v.cve_id
+        WHERE v.cve_id = $1
         LIMIT 1
         "#,
+        cve_id,
     )
-    .bind(cve_id)
     .fetch_one(pool)
     .await?;
 
@@ -208,38 +208,69 @@ pub async fn fetch_cve_affected_systems(
     pool: &PgPool,
     cve_id: &str,
 ) -> Result<Vec<CveAffectedSystemDetail>> {
-    let systems = sqlx::query_as::<_, CveAffectedSystemDetail>(
+    let systems = sqlx::query_as!(
+        CveAffectedSystemDetail,
         r#"
-        SELECT DISTINCT
-            s.id as system_id,
-            s.hostname,
-            e.name as environment,
-            ss.primary_ip_address,
-            f.name as flake_name,
-            f.id as flake_id,
-            com.git_commit_hash as commit_hash,
-            s.deployment_policy,
-            np.version as current_package_version
-        FROM cves c
-        JOIN package_vulnerabilities pv ON c.id = pv.cve_id AND NOT pv.is_whitelisted
-        JOIN nix_packages np ON pv.derivation_path = np.derivation_path
-        JOIN scan_packages sp ON np.derivation_path = sp.derivation_path
-        JOIN cve_scans cs ON sp.scan_id = cs.id AND cs.completed_at IS NOT NULL
-        JOIN evaluation_targets et ON cs.evaluation_target_id = et.id
-        JOIN systems s ON et.target_name = s.hostname AND s.is_active = TRUE
-        LEFT JOIN environments e ON s.environment_id = e.id
-        LEFT JOIN flakes f ON s.flake_id = f.id
-        LEFT JOIN commits com ON et.commit_id = com.id
-        LEFT JOIN (
-            SELECT DISTINCT ON (hostname) hostname, primary_ip_address
-            FROM system_states
-            ORDER BY hostname, timestamp DESC
-        ) ss ON s.hostname = ss.hostname
-        WHERE c.id = $1
-        ORDER BY e.name NULLS LAST, s.hostname
+        WITH latest_per_system AS (
+            SELECT DISTINCT ON (s.id)
+                s.id as system_id,
+                s.hostname,
+                e.name as environment,
+                ss.primary_ip_address,
+                f.name as flake_name,
+                f.id as flake_id,
+                NULL::text as commit_hash,
+                s.deployment_policy,
+                pkg_d.version as current_package_version,
+                scan.completed_at
+            FROM systems s
+            JOIN derivations d
+              ON s.hostname = d.derivation_name
+             AND d.derivation_type = 'nixos'
+            JOIN derivation_statuses ds
+              ON d.status_id = ds.id
+             AND ds.name IN ('build-complete','complete')
+            JOIN cve_scans scan
+              ON d.id = scan.derivation_id
+             AND scan.completed_at IS NOT NULL
+            JOIN scan_packages sp
+              ON scan.id = sp.scan_id
+            JOIN derivations pkg_d
+              ON sp.derivation_id = pkg_d.id
+             AND pkg_d.derivation_type = 'package'
+            JOIN package_vulnerabilities pv
+              ON pkg_d.id = pv.derivation_id
+             AND NOT pv.is_whitelisted
+            JOIN cves c
+              ON pv.cve_id::text = c.id::text
+            LEFT JOIN environments e
+              ON s.environment_id = e.id
+            LEFT JOIN flakes f
+              ON s.flake_id = f.id
+            LEFT JOIN (
+                SELECT DISTINCT ON (hostname) hostname, primary_ip_address
+                FROM system_states
+                ORDER BY hostname, timestamp DESC
+            ) ss ON s.hostname = ss.hostname
+            WHERE s.is_active = TRUE
+              AND c.id = $1
+            ORDER BY s.id, scan.completed_at DESC
+        )
+        SELECT
+            system_id,
+            hostname as "hostname!",
+            environment as "environment?",
+            primary_ip_address as "primary_ip_address?",
+            flake_name as "flake_name?",
+            flake_id as "flake_id?",
+            commit_hash as "commit_hash?",
+            deployment_policy as "deployment_policy!",
+            current_package_version as "current_package_version?"
+        FROM latest_per_system
+        ORDER BY environment NULLS LAST, hostname
         "#,
+        cve_id,
     )
-    .bind(cve_id)
     .fetch_all(pool)
     .await?;
 
@@ -251,24 +282,25 @@ pub async fn fetch_cve_justifications(
     pool: &PgPool,
     cve_id: &str,
 ) -> Result<Vec<CveJustification>> {
-    let justifications = sqlx::query_as::<_, CveJustification>(
+    let justifications = sqlx::query_as!(
+        CveJustification,
         r#"
         SELECT 
-            scj.system_id,
-            scj.cve_id,
-            scj.category,
-            scj.reason,
-            scj.updated_by,
-            scj.updated_at,
-            scj.created_at,
-            u.username as updated_by_username
+            scj.system_id as "system_id?",
+            scj.cve_id as "cve_id!",
+            scj.category as "category!",
+            scj.reason as "reason!",
+            scj.updated_by as "updated_by?",
+            scj.updated_at as "updated_at!",
+            scj.created_at as "created_at!",
+            u.username as "updated_by_username?"
         FROM system_cve_justifications scj
         LEFT JOIN users u ON scj.updated_by = u.id
         WHERE scj.cve_id = $1
         ORDER BY scj.updated_at DESC
         "#,
+        cve_id,
     )
-    .bind(cve_id)
     .fetch_all(pool)
     .await?;
 
@@ -307,25 +339,26 @@ pub async fn insert_cve_justification(
 
 /// Fetch fleet-wide CVE statistics for the dashboard summary.
 pub async fn fetch_cve_fleet_stats(pool: &PgPool) -> Result<CveFleetStats> {
-    let stats = sqlx::query_as::<_, CveFleetStats>(
+    let stats = sqlx::query_as!(
+        CveFleetStats,
         r#"
         SELECT 
-            COALESCE((to_jsonb(v)->>'total_cves')::bigint, 0) as total_cves,
-            COALESCE((to_jsonb(v)->>'critical')::bigint, 0) as critical,
-            COALESCE((to_jsonb(v)->>'high')::bigint, 0) as high,
-            COALESCE((to_jsonb(v)->>'medium')::bigint, 0) as medium,
-            COALESCE((to_jsonb(v)->>'low')::bigint, 0) as low,
-            COALESCE((to_jsonb(v)->>'exploited')::bigint, 0) as exploited,
-            COALESCE((to_jsonb(v)->>'fixable')::bigint, 0) as fixable,
-            COALESCE((to_jsonb(v)->>'environments_affected')::bigint, 0) as environments_affected,
+            COALESCE((to_jsonb(v)->>'total_cves')::bigint, 0) as "total_cves!",
+            COALESCE((to_jsonb(v)->>'critical')::bigint, 0) as "critical!",
+            COALESCE((to_jsonb(v)->>'high')::bigint, 0) as "high!",
+            COALESCE((to_jsonb(v)->>'medium')::bigint, 0) as "medium!",
+            COALESCE((to_jsonb(v)->>'low')::bigint, 0) as "low!",
+            COALESCE((to_jsonb(v)->>'exploited')::bigint, 0) as "exploited!",
+            COALESCE((to_jsonb(v)->>'fixable')::bigint, 0) as "fixable!",
+            COALESCE((to_jsonb(v)->>'environments_affected')::bigint, 0) as "environments_affected!",
             COALESCE(
                 (to_jsonb(v)->>'systems_affected')::bigint,
                 (to_jsonb(v)->>'total_system_cve_instances')::bigint,
                 0
-            ) as systems_affected,
-            COALESCE((to_jsonb(v)->>'outstanding')::bigint, 0) as outstanding,
-            COALESCE((to_jsonb(v)->>'accepted')::bigint, 0) as accepted,
-            COALESCE((to_jsonb(v)->>'scheduled')::bigint, 0) as scheduled
+            ) as "systems_affected!",
+            COALESCE((to_jsonb(v)->>'outstanding')::bigint, 0) as "outstanding!",
+            COALESCE((to_jsonb(v)->>'accepted')::bigint, 0) as "accepted!",
+            COALESCE((to_jsonb(v)->>'scheduled')::bigint, 0) as "scheduled!"
         FROM view_cve_fleet_stats v
         LIMIT 1
         "#,
@@ -338,9 +371,9 @@ pub async fn fetch_cve_fleet_stats(pool: &PgPool) -> Result<CveFleetStats> {
 
 /// Fetch distinct package names for autocomplete.
 pub async fn fetch_package_names(pool: &PgPool) -> Result<Vec<String>> {
-    let packages = sqlx::query_scalar::<_, String>(
+    let packages = sqlx::query_scalar!(
         r#"
-        SELECT DISTINCT package_name
+        SELECT DISTINCT package_name as "package_name!"
         FROM view_cve_list_with_metadata
         WHERE package_name IS NOT NULL
         ORDER BY package_name
