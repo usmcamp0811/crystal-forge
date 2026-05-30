@@ -1745,28 +1745,39 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
                                                         for (env, count) in env_counts_vec.iter() {
                                                             {
                                                                 let env_str = env.clone();
-                                                                let is_on = scope_envs.read().contains(env);
-                                                                let env_color = match env.to_lowercase().as_str() {
-                                                                    "production" => "#f87171",
-                                                                    "staging"    => "#fbbf24",
-                                                                    "dev"        => "#60a5fa",
-                                                                    "edge"       => "#2dd4bf",
-                                                                    "lab"        => "#a78bfa",
-                                                                    _            => "#9ca3af",
+                                                                let all_envs_for_click = all_envs.clone();
+                                                                // is_on: if scope_envs is still empty (not yet initialised),
+                                                                // treat every env as selected — same as "All environments" default.
+                                                                let envs_snap = scope_envs.read();
+                                                                let is_on = envs_snap.is_empty() || envs_snap.contains(env);
+                                                                drop(envs_snap);
+
+                                                                // Explicit per-env bg / fg / border — matches EnvBadge & JSX ENV_STYLE exactly.
+                                                                // Avoids color-mix() with CSS variables which don't resolve in inline styles.
+                                                                let (env_fg, env_bg_on, env_border_on) = match env.to_lowercase().as_str() {
+                                                                    "production" => ("#f87171", "rgba(220,38,38,0.14)",  "rgba(248,113,113,0.45)"),
+                                                                    "staging"    => ("#fbbf24", "rgba(217,119,6,0.14)",  "rgba(251,191,36,0.45)"),
+                                                                    "dev"        => ("#60a5fa", "rgba(37,99,235,0.14)",  "rgba(96,165,250,0.45)"),
+                                                                    "edge"       => ("#2dd4bf", "rgba(15,118,110,0.14)", "rgba(45,212,191,0.45)"),
+                                                                    "lab"        => ("#a78bfa", "rgba(124,58,237,0.14)", "rgba(167,139,250,0.45)"),
+                                                                    _            => ("#9ca3af", "rgba(107,114,128,0.14)","rgba(156,163,175,0.35)"),
                                                                 };
-                                                                let border_c = if is_on { env_color } else { "var(--cf-card-border)" };
-                                                                let bg_c = if is_on {
-                                                                    format!("color-mix(in oklab, {env_color} 16%, var(--cf-card-bg))")
+                                                                let style = if is_on {
+                                                                    format!("padding: 4px 10px; border-radius: 99px; font-size: 11px; cursor: pointer; font-family: inherit; border: 1px solid {env_border_on}; background: {env_bg_on}; color: {env_fg}; display: inline-flex; align-items: center; gap: 6px;")
                                                                 } else {
-                                                                    "transparent".to_string()
+                                                                    "padding: 4px 10px; border-radius: 99px; font-size: 11px; cursor: pointer; font-family: inherit; border: 1px solid var(--cf-card-border); background: transparent; color: var(--cf-text-secondary); display: inline-flex; align-items: center; gap: 6px;".to_string()
                                                                 };
-                                                                let text_c = if is_on { env_color } else { "var(--cf-text-secondary)" };
+                                                                let dot_color = if is_on { env_fg } else { "var(--cf-text-muted)" };
                                                                 rsx! {
                                                                     button {
                                                                         class: "focus-ring",
-                                                                        style: "padding: 4px 10px; border-radius: 99px; font-size: 11px; cursor: pointer; font-family: inherit; border: 1px solid {border_c}; background: {bg_c}; color: {text_c}; display: inline-flex; align-items: center; gap: 6px;",
+                                                                        style: "{style}",
                                                                         onclick: move |_| {
                                                                             let mut envs = scope_envs.read().clone();
+                                                                            // On first click when empty, populate all first then toggle
+                                                                            if envs.is_empty() {
+                                                                                envs = all_envs_for_click.clone();
+                                                                            }
                                                                             if let Some(pos) = envs.iter().position(|e| e == &env_str) {
                                                                                 envs.remove(pos);
                                                                             } else {
@@ -1775,7 +1786,7 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
                                                                             scope_envs.set(envs);
                                                                         },
                                                                         span {
-                                                                            style: "width: 6px; height: 6px; border-radius: 50%; background: {env_color};",
+                                                                            style: "width: 6px; height: 6px; border-radius: 50%; background: {dot_color};",
                                                                         }
                                                                         "{env}"
                                                                         span {
