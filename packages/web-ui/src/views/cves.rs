@@ -1931,8 +1931,11 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
                                                 }
                                                 button {
                                                     class: "btn btn-primary focus-ring",
-                                                    disabled: justification_reason().trim().len() < 10,
-                                                    style: if justification_reason().trim().len() < 10 { "opacity: 0.5; cursor: not-allowed;" } else { "" },
+                                                    style: if justification_reason().trim().len() < 10 {
+                                                        "opacity: 0.5; cursor: not-allowed;"
+                                                    } else {
+                                                        "opacity: 1; cursor: pointer;"
+                                                    },
                                                     onclick: move |_| {
                                                         let cve_id = cve_id_for_save_seed.clone();
                                                         let category = justification_category();
