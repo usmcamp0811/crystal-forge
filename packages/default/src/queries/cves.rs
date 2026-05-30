@@ -139,7 +139,19 @@ pub async fn fetch_cve_packages_grouped(
     .fetch_all(pool)
     .await?;
 
-    // For each package, fetch its CVEs (applying same filters as list view)
+    // Avoid N+1 queries: fetch CVEs once, then group in-memory by package.
+    let mut all_filters = filters.clone();
+    all_filters.limit = Some(1000);
+    let all_cves = fetch_cve_list(pool, &all_filters).await?;
+
+    let mut cves_by_package: std::collections::HashMap<String, Vec<CveListItem>> =
+        std::collections::HashMap::new();
+    for cve in all_cves {
+        if let Some(pkg) = cve.package_name.clone() {
+            cves_by_package.entry(pkg).or_default().push(cve);
+        }
+    }
+
     let mut result = Vec::new();
     for row in package_stats {
         let mut pkg_group = CvePackageGroup {
@@ -158,11 +170,13 @@ pub async fn fetch_cve_packages_grouped(
             severity_score: row.severity_score,
             cves: None,
         };
-        let mut pkg_filters = filters.clone();
-        pkg_filters.package = Some(pkg_group.package_name.clone());
-        pkg_filters.limit = Some(100); // Limit CVEs per package
 
-        let cves = fetch_cve_list(pool, &pkg_filters).await?;
+        let mut cves = cves_by_package
+            .remove(&pkg_group.package_name)
+            .unwrap_or_default();
+        if cves.len() > 100 {
+            cves.truncate(100);
+        }
         pkg_group.cves = Some(cves);
         result.push(pkg_group);
     }
