@@ -310,19 +310,24 @@ pub async fn fetch_cve_fleet_stats(pool: &PgPool) -> Result<CveFleetStats> {
     let stats = sqlx::query_as::<_, CveFleetStats>(
         r#"
         SELECT 
-            COALESCE(total_cves, 0)::bigint as total_cves,
-            COALESCE(critical, 0)::bigint as critical,
-            COALESCE(high, 0)::bigint as high,
-            COALESCE(medium, 0)::bigint as medium,
-            COALESCE(low, 0)::bigint as low,
-            COALESCE(exploited, 0)::bigint as exploited,
-            COALESCE(fixable, 0)::bigint as fixable,
-            COALESCE(environments_affected, 0)::bigint as environments_affected,
-            COALESCE(systems_affected, 0)::bigint as systems_affected,
-            COALESCE(outstanding, 0)::bigint as outstanding,
-            COALESCE(accepted, 0)::bigint as accepted,
-            COALESCE(scheduled, 0)::bigint as scheduled
-        FROM view_cve_fleet_stats
+            COALESCE((to_jsonb(v)->>'total_cves')::bigint, 0) as total_cves,
+            COALESCE((to_jsonb(v)->>'critical')::bigint, 0) as critical,
+            COALESCE((to_jsonb(v)->>'high')::bigint, 0) as high,
+            COALESCE((to_jsonb(v)->>'medium')::bigint, 0) as medium,
+            COALESCE((to_jsonb(v)->>'low')::bigint, 0) as low,
+            COALESCE((to_jsonb(v)->>'exploited')::bigint, 0) as exploited,
+            COALESCE((to_jsonb(v)->>'fixable')::bigint, 0) as fixable,
+            COALESCE((to_jsonb(v)->>'environments_affected')::bigint, 0) as environments_affected,
+            COALESCE(
+                (to_jsonb(v)->>'systems_affected')::bigint,
+                (to_jsonb(v)->>'total_system_cve_instances')::bigint,
+                0
+            ) as systems_affected,
+            COALESCE((to_jsonb(v)->>'outstanding')::bigint, 0) as outstanding,
+            COALESCE((to_jsonb(v)->>'accepted')::bigint, 0) as accepted,
+            COALESCE((to_jsonb(v)->>'scheduled')::bigint, 0) as scheduled
+        FROM view_cve_fleet_stats v
+        LIMIT 1
         "#,
     )
     .fetch_optional(pool)
