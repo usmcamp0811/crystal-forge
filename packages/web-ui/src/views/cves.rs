@@ -14,10 +14,26 @@ use crate::api::models::{
     CveAffectedSystemDetail, CveDetail, CveFilters, CveFleetStats, CveJustification,
     CveJustificationInput, CveListItem, CvePackageGroup,
 };
+use crate::components::environments::with_alpha;
 use crate::components::layout::Card;
 use crate::components::notifications::Toast;
+use crate::environments::adapter::load_environment_colors_with_fallback;
 use crate::routes::Route;
 use crate::theme;
+
+/// Derive fg / bg / border for an environment name from the live color map.
+/// Falls back to a neutral gray if the env isn't found.
+fn env_style_from_colors(env: &str, colors: &[(String, String)]) -> (String, String, String) {
+    let hex = colors
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(env))
+        .map(|(_, h)| h.as_str())
+        .unwrap_or("#6b7280");
+    let fg = hex.to_string();
+    let bg = with_alpha(hex, 0.13);
+    let border = with_alpha(hex, 0.40);
+    (fg, bg, border)
+}
 
 fn query_param(name: &str) -> Option<String> {
     let window = web_sys::window()?;
@@ -1307,6 +1323,13 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
         async move { client::fetch_cve_justifications(&id).await }
     });
 
+    // Environment color map: Vec<(name, color_hex)> from the environments API.
+    // Used by EnvBadge and the scope picker so colors match whatever the user
+    // has configured, rather than a hard-coded palette.
+    let env_colors = use_resource(move || async move {
+        load_environment_colors_with_fallback().await.colors
+    });
+
     use_effect(move || {
         use wasm_bindgen::JsCast;
         use wasm_bindgen::closure::Closure;
@@ -1752,22 +1775,19 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
                                                                 let is_on = envs_snap.is_empty() || envs_snap.contains(env);
                                                                 drop(envs_snap);
 
-                                                                // Explicit per-env bg / fg / border — matches EnvBadge & JSX ENV_STYLE exactly.
-                                                                // Avoids color-mix() with CSS variables which don't resolve in inline styles.
-                                                                let (env_fg, env_bg_on, env_border_on) = match env.to_lowercase().as_str() {
-                                                                    "production" => ("#f87171", "rgba(220,38,38,0.14)",  "rgba(248,113,113,0.45)"),
-                                                                    "staging"    => ("#fbbf24", "rgba(217,119,6,0.14)",  "rgba(251,191,36,0.45)"),
-                                                                    "dev"        => ("#60a5fa", "rgba(37,99,235,0.14)",  "rgba(96,165,250,0.45)"),
-                                                                    "edge"       => ("#2dd4bf", "rgba(15,118,110,0.14)", "rgba(45,212,191,0.45)"),
-                                                                    "lab"        => ("#a78bfa", "rgba(124,58,237,0.14)", "rgba(167,139,250,0.45)"),
-                                                                    _            => ("#9ca3af", "rgba(107,114,128,0.14)","rgba(156,163,175,0.35)"),
-                                                                };
+                                                                // Derive colors from the live env_colors resource (API-sourced).
+                                                                let colors_snap = env_colors.read();
+                                                                let colors_ref: &[(String, String)] = colors_snap
+                                                                    .as_ref()
+                                                                    .map(|v| v.as_slice())
+                                                                    .unwrap_or(&[]);
+                                                                let (env_fg, env_bg_on, env_border_on) = env_style_from_colors(env, colors_ref);
                                                                 let style = if is_on {
                                                                     format!("padding: 4px 10px; border-radius: 99px; font-size: 11px; cursor: pointer; font-family: inherit; border: 1px solid {env_border_on}; background: {env_bg_on}; color: {env_fg}; display: inline-flex; align-items: center; gap: 6px;")
                                                                 } else {
                                                                     "padding: 4px 10px; border-radius: 99px; font-size: 11px; cursor: pointer; font-family: inherit; border: 1px solid var(--cf-card-border); background: transparent; color: var(--cf-text-secondary); display: inline-flex; align-items: center; gap: 6px;".to_string()
                                                                 };
-                                                                let dot_color = if is_on { env_fg } else { "var(--cf-text-muted)" };
+                                                                let dot_color = if is_on { env_fg.clone() } else { "var(--cf-text-muted)".to_string() };
                                                                 rsx! {
                                                                     button {
                                                                         class: "focus-ring",
@@ -2148,7 +2168,10 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
                                     if systems.is_empty() {
                                         p { class: "text-xs {theme::text::SECONDARY}", "No active systems affected." }
                                     } else {
-                                        AffectedSystemsList { systems: systems.clone() }
+                                        AffectedSystemsList {
+                                            systems: systems.clone(),
+                                            colors: env_colors.read().as_ref().cloned().unwrap_or_default(),
+                                        }
                                     }
                                 },
                                 Some(Err(err)) => rsx! {
@@ -2173,7 +2196,7 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
 }
 
 #[component]
-fn AffectedSystemsList(systems: Vec<CveAffectedSystemDetail>) -> Element {
+fn AffectedSystemsList(systems: Vec<CveAffectedSystemDetail>, colors: Vec<(String, String)>) -> Element {
     // Group by environment while preserving encounter order for stable rendering.
     let mut by_env: Vec<(String, Vec<CveAffectedSystemDetail>)> = Vec::new();
     for sys in systems {
@@ -2207,7 +2230,7 @@ fn AffectedSystemsList(systems: Vec<CveAffectedSystemDetail>) -> Element {
                     // Environment header with badge and host count
                     div {
                         style: "display: flex; align-items: center; gap: 8px; margin-bottom: 6px;",
-                        EnvBadge { env: env.clone() }
+                        EnvBadge { env: env.clone(), colors: colors.clone() }
                         span {
                             style: "font-size: 11px; color: var(--cf-text-muted);",
                             {
@@ -2297,19 +2320,10 @@ fn AffectedSystemsList(systems: Vec<CveAffectedSystemDetail>) -> Element {
 }
 
 /// Environment badge with colored dot and text.
-/// Matches JSX EnvBadge component.
+/// Colors are looked up from the live environment color map (API-sourced).
 #[component]
-fn EnvBadge(env: String) -> Element {
-    // Environment style mapping matching JSX ENV_STYLE
-    let (bg, fg, border) = match env.to_lowercase().as_str() {
-        "production" => ("rgba(220,38,38,0.10)", "#f87171", "rgba(248,113,113,0.25)"),
-        "staging" => ("rgba(217,119,6,0.10)", "#fbbf24", "rgba(251,191,36,0.25)"),
-        "dev" => ("rgba(37,99,235,0.10)", "#60a5fa", "rgba(96,165,250,0.25)"),
-        "edge" => ("rgba(15,118,110,0.12)", "#2dd4bf", "rgba(45,212,191,0.25)"),
-        "lab" => ("rgba(124,58,237,0.10)", "#a78bfa", "rgba(167,139,250,0.25)"),
-        _ => ("rgba(37,99,235,0.10)", "#60a5fa", "rgba(96,165,250,0.25)"), // default to dev
-    };
-
+fn EnvBadge(env: String, colors: Vec<(String, String)>) -> Element {
+    let (fg, bg, border) = env_style_from_colors(&env, &colors);
     rsx! {
         span {
             class: "env-badge",
