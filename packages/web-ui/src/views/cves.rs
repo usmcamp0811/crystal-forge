@@ -1320,7 +1320,12 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
         let on_close_for_esc = on_close.clone();
         let handler = Closure::wrap(Box::new(move |event: web_sys::KeyboardEvent| {
             if event.key() == "Escape" {
-                on_close_for_esc.call(());
+                // Mirror JSX: if accept form is open, close it first; otherwise close drawer
+                if show_accept() {
+                    show_accept.set(false);
+                } else {
+                    on_close_for_esc.call(());
+                }
             }
         }) as Box<dyn FnMut(_)>);
 
