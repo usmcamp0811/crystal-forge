@@ -2060,23 +2060,22 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
                                                     }
                                                     " Edit"
                                                 }
-                                                // Revoke button
-                                                button {
-                                                    class: "btn btn-ghost focus-ring xs",
-                                                    onclick: move |_| {
-                                                        let cve_id = cve_id_for_save_seed.clone();
-                                                        spawn(async move {
-                                                            // Submit a revocation by posting outstanding category
-                                                            let payload = CveJustificationInput {
-                                                                system_id: None,
-                                                                category: "outstanding".to_string(),
-                                                                reason: "Justification revoked.".to_string(),
-                                                            };
-                                                            if client::save_cve_justification(&cve_id, &payload).await.is_ok() {
-                                                                justifications_refresh.set(justifications_refresh() + 1);
-                                                            }
-                                                        });
-                                                    },
+                                                 // Revoke button — calls DELETE endpoint
+                                                 button {
+                                                     class: "btn btn-ghost focus-ring xs",
+                                                     onclick: move |_| {
+                                                         let cve_id = cve_id_for_save_seed.clone();
+                                                         spawn(async move {
+                                                             match client::revoke_cve_justification(&cve_id).await {
+                                                                 Ok(_) => {
+                                                                     justifications_refresh.set(justifications_refresh() + 1);
+                                                                 }
+                                                                 Err(err) => {
+                                                                     save_status.set(Some(format!("Revoke failed: {}", err)));
+                                                                 }
+                                                             }
+                                                         });
+                                                     },
                                                     svg {
                                                         width: "10", height: "10", view_box: "0 0 24 24",
                                                         fill: "none", stroke: "currentColor", stroke_width: "2",

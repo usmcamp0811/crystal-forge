@@ -181,6 +181,27 @@ pub struct CveJustificationRequest {
     pub reason: String,
 }
 
+/// DELETE /api/v1/cves/:cve_id/justification
+/// Revoke the fleet-wide CVE justification (admin only).
+/// Per-system justifications are not affected.
+/// Idempotent: returns 204 whether or not a justification existed.
+pub async fn revoke_justification(
+    State(state): State<CFState>,
+    Path(cve_id): Path<String>,
+    _user: RequireAdmin,
+) -> Result<StatusCode, (StatusCode, String)> {
+    cves::revoke_fleet_cve_justification(&state.pool, &cve_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to revoke justification: {}", e),
+            )
+        })?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// GET /api/v1/cves/:cve_id/justifications
 /// Get justification history for a CVE.
 pub async fn list_justifications(
@@ -202,50 +223,37 @@ pub async fn list_justifications(
 
 /// POST /api/v1/cves/rescan-fleet
 /// Trigger CVE scans for all active systems (admin only).
+///
+/// Currently returns 501 Not Implemented: the enqueue path to the builder
+/// queue is not yet wired. The button in the UI is intentionally non-functional
+/// until this endpoint is fully implemented.
 pub async fn trigger_fleet_rescan(
-    State(state): State<CFState>,
+    _state: State<CFState>,
     _user: RequireAdmin,
 ) -> Result<Json<FleetRescanResponse>, (StatusCode, String)> {
-
-    // Get all active systems
-    let systems = sqlx::query!(
-        r#"
-        SELECT id, hostname
-        FROM systems
-        WHERE is_active = TRUE
-        "#
-    )
-    .fetch_all(&state.pool)
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to fetch active systems: {}", e),
-        )
-    })?;
-
-    let enqueued_count = systems.len();
-
-    // TODO: Enqueue CVE scans via builder queue
-    // For now, just return the count
-    // In full implementation, call:
-    // for system in systems {
-    //     crate::builder::services::cve_scans::enqueue_scan_for_system(&state.pool, system.id).await?;
-    // }
-
-    Ok(Json(FleetRescanResponse {
-        enqueued_count: enqueued_count as i64,
-        message: format!(
-            "CVE scan triggered for {} systems. Results will appear in 5-10 minutes.",
-            enqueued_count
-        ),
-    }))
+    Err((
+        StatusCode::NOT_IMPLEMENTED,
+        "Fleet CVE rescan is not yet wired to the builder queue. \
+         Implement enqueue_scan_for_system() and remove this stub."
+            .to_string(),
+    ))
 }
 
 #[derive(Debug, Serialize)]
 pub struct FleetRescanResponse {
     pub enqueued_count: i64,
     pub message: String,
+}
+
+/// Escape a single CSV field per RFC 4180:
+/// wrap in double-quotes if the value contains commas, double-quotes, or newlines;
+/// double up any internal double-quotes.
+fn csv_field(value: &str) -> String {
+    if value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r') {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
 }
 
 /// GET /api/v1/cves/export
@@ -264,7 +272,7 @@ pub async fn export_cves(
             )
         })?;
 
-    // Generate CSV
+    // Build CSV with proper RFC 4180 field escaping
     let mut csv_output = String::new();
     csv_output.push_str("CVE ID,Severity,CVSS Score,Package,Installed Version,Fixed Version,Affected Systems,Environments,Fix Status,Triage Status,Age (days),First Seen,Last Seen\n");
 
@@ -281,23 +289,27 @@ pub async fn export_cves(
             .last_seen
             .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
             .unwrap_or_default();
+        let cvss = cve.cvss_v3_score.map(|s| s.to_string()).unwrap_or_default();
 
-        csv_output.push_str(&format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
-            cve.cve_id,
-            cve.severity,
-            cve.cvss_v3_score.map(|s| s.to_string()).unwrap_or_default(),
-            cve.package_name.unwrap_or_default(),
-            cve.installed_version.unwrap_or_default(),
-            cve.fixed_version.unwrap_or_default(),
-            cve.affected_count,
-            environments,
-            cve.fix_status,
-            cve.triage_status,
-            cve.age_days,
-            first_seen,
-            last_seen,
-        ));
+        let row = [
+            csv_field(&cve.cve_id),
+            csv_field(&cve.severity),
+            csv_field(&cvss),
+            csv_field(&cve.package_name.unwrap_or_default()),
+            csv_field(&cve.installed_version.unwrap_or_default()),
+            csv_field(&cve.fixed_version.unwrap_or_default()),
+            cve.affected_count.to_string(),
+            csv_field(&environments),
+            csv_field(&cve.fix_status),
+            csv_field(&cve.triage_status),
+            cve.age_days.to_string(),
+            csv_field(&first_seen),
+            csv_field(&last_seen),
+        ]
+        .join(",");
+
+        csv_output.push_str(&row);
+        csv_output.push('\n');
     }
 
     let filename = format!(
@@ -374,11 +386,39 @@ mod tests {
                        First Seen,Last Seen";
         let col_count = header.split(',').count();
         assert_eq!(col_count, 13, "CSV header must have 13 columns");
+    }
 
-        // Our row format also has 13 fields (14 braces = 13 commas between them)
-        let row_template = "{},{},{},{},{},{},{},{},{},{},{},{},{}";
-        let field_count = row_template.split("{}").count() - 1;
-        assert_eq!(field_count, 13, "CSV row must have 13 fields");
+    #[test]
+    fn csv_field_plain_value_unchanged() {
+        assert_eq!(csv_field("openssl"), "openssl");
+        assert_eq!(csv_field("CVE-2024-1234"), "CVE-2024-1234");
+        assert_eq!(csv_field(""), "");
+    }
+
+    #[test]
+    fn csv_field_wraps_value_containing_comma() {
+        assert_eq!(csv_field("foo,bar"), "\"foo,bar\"");
+    }
+
+    #[test]
+    fn csv_field_doubles_internal_quotes() {
+        assert_eq!(csv_field("say \"hi\""), "\"say \"\"hi\"\"\"");
+    }
+
+    #[test]
+    fn csv_field_wraps_value_containing_newline() {
+        assert_eq!(csv_field("line1\nline2"), "\"line1\nline2\"");
+    }
+
+    #[test]
+    fn revoke_category_not_in_save_allowlist() {
+        // Ensure "outstanding" is rejected by save_justification so revoke
+        // must go through the DELETE endpoint, not POST.
+        let valid = ["mitigated", "false_positive", "accepted_risk", "patch_scheduled"];
+        assert!(
+            !valid.contains(&"outstanding"),
+            "outstanding must not be in save allowlist — use DELETE /justification to revoke"
+        );
     }
 
     #[test]

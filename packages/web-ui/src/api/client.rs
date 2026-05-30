@@ -302,6 +302,18 @@ pub async fn save_cve_justification(
     Ok(())
 }
 
+/// Revoke the fleet-wide justification for a CVE (DELETE).
+///
+/// Idempotent: the server returns 204 whether or not a justification existed.
+pub async fn revoke_cve_justification(cve_id: &str) -> Result<(), ApiClientError> {
+    let url = format!(
+        "{}/cves/{}/justification",
+        base_url(),
+        encode_uri_component(cve_id)
+    );
+    send_empty("DELETE", &url).await
+}
+
 /// Trigger CVE scan for all active systems (fleet rescan).
 pub async fn trigger_cve_fleet_rescan() -> Result<FleetRescanResponse, ApiClientError> {
     let url = format!("{}/cves/rescan-fleet", base_url());

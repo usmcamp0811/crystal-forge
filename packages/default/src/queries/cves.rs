@@ -500,28 +500,79 @@ pub async fn fetch_cve_justifications(
 
 /// Insert or update a CVE justification.
 ///
-/// Uses ON CONFLICT to update existing justifications for the same system+CVE pair.
+/// Fleet-wide rows (system_id IS NULL) use a separate partial-unique-index
+/// conflict target so PostgreSQL can upsert them correctly — NULL values are
+/// not considered equal by normal UNIQUE constraints, so repeated fleet-wide
+/// saves would otherwise insert duplicates.
+///
+/// Per-system rows (system_id IS NOT NULL) continue to use the composite
+/// primary key (system_id, cve_id) as the conflict target.
 pub async fn insert_cve_justification(
     pool: &PgPool,
     input: &CveJustificationInput,
 ) -> Result<()> {
+    if input.system_id.is_none() {
+        // Fleet-wide: conflict on the partial unique index WHERE system_id IS NULL
+        sqlx::query(
+            r#"
+            INSERT INTO system_cve_justifications
+                (system_id, cve_id, category, reason, updated_by, updated_at)
+            VALUES (NULL, $1, $2, $3, $4, NOW())
+            ON CONFLICT (cve_id)
+            WHERE system_id IS NULL
+            DO UPDATE SET
+                category   = EXCLUDED.category,
+                reason     = EXCLUDED.reason,
+                updated_by = EXCLUDED.updated_by,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(&input.cve_id)
+        .bind(&input.category)
+        .bind(&input.reason)
+        .bind(input.updated_by)
+        .execute(pool)
+        .await?;
+    } else {
+        // Per-system: conflict on composite primary key (system_id, cve_id)
+        sqlx::query(
+            r#"
+            INSERT INTO system_cve_justifications
+                (system_id, cve_id, category, reason, updated_by, updated_at)
+            VALUES ($1, $2, $3, $4, $5, NOW())
+            ON CONFLICT (system_id, cve_id)
+            DO UPDATE SET
+                category   = EXCLUDED.category,
+                reason     = EXCLUDED.reason,
+                updated_by = EXCLUDED.updated_by,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(input.system_id)
+        .bind(&input.cve_id)
+        .bind(&input.category)
+        .bind(&input.reason)
+        .bind(input.updated_by)
+        .execute(pool)
+        .await?;
+    }
+
+    Ok(())
+}
+
+/// Revoke the fleet-wide justification for a CVE (DELETE WHERE system_id IS NULL).
+///
+/// Per-system justifications are left untouched.
+/// Returns Ok(()) whether or not a row existed (idempotent).
+pub async fn revoke_fleet_cve_justification(pool: &PgPool, cve_id: &str) -> Result<()> {
     sqlx::query(
         r#"
-        INSERT INTO system_cve_justifications (system_id, cve_id, category, reason, updated_by, updated_at)
-        VALUES ($1, $2, $3, $4, $5, NOW())
-        ON CONFLICT (system_id, cve_id)
-        DO UPDATE SET
-            category = EXCLUDED.category,
-            reason = EXCLUDED.reason,
-            updated_by = EXCLUDED.updated_by,
-            updated_at = NOW()
+        DELETE FROM system_cve_justifications
+        WHERE cve_id = $1
+          AND system_id IS NULL
         "#,
     )
-    .bind(input.system_id)
-    .bind(&input.cve_id)
-    .bind(&input.category)
-    .bind(&input.reason)
-    .bind(input.updated_by)
+    .bind(cve_id)
     .execute(pool)
     .await?;
 

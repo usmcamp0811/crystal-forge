@@ -191,7 +191,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/cves/export", get(cves::export_cves))
         .route("/api/v1/cves/:cve_id", get(cves::get_cve_detail))
         .route("/api/v1/cves/:cve_id/systems", get(cves::get_cve_systems))
-        .route("/api/v1/cves/:cve_id/justification", post(cves::save_justification))
+        .route("/api/v1/cves/:cve_id/justification", post(cves::save_justification).delete(cves::revoke_justification))
         .route("/api/v1/cves/:cve_id/justifications", get(cves::list_justifications))
         .route(
             "/api/v1/hardening/summary",
