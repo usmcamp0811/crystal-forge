@@ -512,16 +512,7 @@ pub fn CvesView() -> Element {
             // CVE List
             if view_mode() == "grouped" {
                 CvePackageGroupsView {
-                    key: format!(
-                        "{}|{}|{}|{}|{}|{}|{}",
-                        severity_filter().as_deref().unwrap_or("all"),
-                        fix_status_filter().as_deref().unwrap_or("all"),
-                        triage_status_filter().as_deref().unwrap_or("all"),
-                        package_filter().as_deref().unwrap_or("all"),
-                        if search_query().is_empty() { "" } else { search_query().as_str() },
-                        sort_by(),
-                        view_mode(),
-                    ),
+                    key: "{severity_filter().as_deref().unwrap_or(\"all\")}|{fix_status_filter().as_deref().unwrap_or(\"all\")}|{triage_status_filter().as_deref().unwrap_or(\"all\")}|{package_filter().as_deref().unwrap_or(\"all\")}|{search_query()}|{sort_by()}|{view_mode()}",
                     on_open_cve: move |cve_id: String| {
                         selected_cve_id.set(Some(cve_id));
                     },
@@ -1287,9 +1278,11 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
     let cve_id_for_save_seed = cve_id.clone();
     let mut justification_category = use_signal(|| "accepted_risk".to_string());
     let mut justification_reason = use_signal(String::new);
+    let mut justification_expiry = use_signal(String::new);
     let mut save_status = use_signal(|| Option::<String>::None);
     let mut justifications_refresh = use_signal(|| 0_u64);
     let mut esc_listener_attached = use_signal(|| false);
+    let mut show_accept = use_signal(|| false);
     let advisory_cve_id = cve_id.clone();
 
     let cve_id_detail = cve_id.clone();
@@ -1446,6 +1439,47 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
                         }
                         " Advisory"
                     }
+                    // Accept risk / Edit justification — driven by latest justification state
+                    {
+                        let is_outstanding = match &*justifications.read_unchecked() {
+                            Some(Ok(justs)) => justs.first().map(|j| {
+                                j.category != "accepted_risk" && j.category != "patch_scheduled"
+                            }).unwrap_or(true),
+                            _ => true,
+                        };
+                        if is_outstanding {
+                            rsx! {
+                                button {
+                                    class: "btn btn-primary focus-ring xs",
+                                    onclick: move |_| show_accept.set(true),
+                                    // Check icon
+                                    svg {
+                                        width: "11", height: "11", view_box: "0 0 24 24",
+                                        fill: "none", stroke: "currentColor", stroke_width: "3",
+                                        stroke_linecap: "round", stroke_linejoin: "round",
+                                        polyline { points: "20 6 9 17 4 12" }
+                                    }
+                                    " Accept risk"
+                                }
+                            }
+                        } else {
+                            rsx! {
+                                button {
+                                    class: "btn btn-ghost focus-ring xs",
+                                    onclick: move |_| show_accept.set(true),
+                                    // File/edit icon
+                                    svg {
+                                        width: "11", height: "11", view_box: "0 0 24 24",
+                                        fill: "none", stroke: "currentColor", stroke_width: "2",
+                                        stroke_linecap: "round", stroke_linejoin: "round",
+                                        path { d: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" }
+                                        polyline { points: "14 2 14 8 20 8" }
+                                    }
+                                    " Edit justification"
+                                }
+                            }
+                        }
+                    }
                     button {
                         class: "btn-icon focus-ring",
                         onclick: move |_| on_close.call(()),
@@ -1571,6 +1605,315 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
                             }
                         }
 
+                        // Triage / Acceptance — matches JSX CveDrawer triage section
+                        section {
+                            h3 {
+                                style: "font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--cf-text-muted); margin: 0 0 10px; font-weight: 600;",
+                                "Triage status"
+                            }
+
+                            {
+                                // Derive triage state from justifications data
+                                let (triage_state, latest_reason, latest_by, latest_at) =
+                                    match &*justifications.read_unchecked() {
+                                        Some(Ok(justs)) => {
+                                            if let Some(j) = justs.first() {
+                                                let state = if j.category == "accepted_risk" {
+                                                    "accepted"
+                                                } else if j.category == "patch_scheduled" {
+                                                    "scheduled"
+                                                } else {
+                                                    "outstanding"
+                                                };
+                                                (
+                                                    state,
+                                                    Some(j.reason.clone()),
+                                                    j.updated_by_username.clone(),
+                                                    Some(j.updated_at.format("%Y-%m-%d %H:%M UTC").to_string()),
+                                                )
+                                            } else {
+                                                ("outstanding", None, None, None)
+                                            }
+                                        }
+                                        _ => ("outstanding", None, None, None),
+                                    };
+
+                                let total_affected = affected_systems
+                                    .read()
+                                    .as_ref()
+                                    .and_then(|r| r.as_ref().ok())
+                                    .map(|s| s.len())
+                                    .unwrap_or(0);
+
+                                if show_accept() {
+                                    // ── Acceptance / edit form ──────────────────────────────────
+                                    rsx! {
+                                        div {
+                                            style: "padding: 14px; border-radius: 10px; border: 1px solid var(--cf-card-border); background: var(--cf-card-bg); display: flex; flex-direction: column; gap: 12px;",
+
+                                            // Disposition
+                                            div {
+                                                class: "field",
+                                                label { "Disposition" }
+                                                div {
+                                                    class: "seg",
+                                                    style: "width: fit-content;",
+                                                    button {
+                                                        class: if justification_category() == "accepted_risk" { "active" } else { "" },
+                                                        onclick: move |_| justification_category.set("accepted_risk".to_string()),
+                                                        "Accept risk"
+                                                    }
+                                                    button {
+                                                        class: if justification_category() == "patch_scheduled" { "active" } else { "" },
+                                                        onclick: move |_| justification_category.set("patch_scheduled".to_string()),
+                                                        "Schedule patch"
+                                                    }
+                                                }
+                                            }
+
+                                            // Justification textarea + presets
+                                            div {
+                                                class: "field",
+                                                label { "Justification" }
+                                                textarea {
+                                                    class: "input focus-ring",
+                                                    rows: "3",
+                                                    value: "{justification_reason}",
+                                                    oninput: move |evt| justification_reason.set(evt.value()),
+                                                    placeholder: "Why is this acceptable / what is the compensating control?",
+                                                    style: "resize: vertical;",
+                                                }
+                                                // Preset buttons
+                                                div {
+                                                    style: "display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px;",
+                                                    for preset in [
+                                                        "Mitigated by network segmentation; service is internal-only.",
+                                                        "Compensating control via WAF rule.",
+                                                        "Vulnerable code path not reachable in this deployment.",
+                                                        "Acceptable in non-production; tracked for prod patch.",
+                                                        "False positive — upstream backport already applied.",
+                                                    ] {
+                                                        button {
+                                                            class: "focus-ring",
+                                                            style: "all: unset; cursor: pointer; font-size: 10px; padding: 3px 8px; border-radius: 99px; background: var(--cf-subtle-bg); color: var(--cf-text-secondary); border: 1px solid var(--cf-divider);",
+                                                            onclick: move |_| justification_reason.set(preset.to_string()),
+                                                            {
+                                                                if preset.len() > 42 {
+                                                                    format!("{}…", &preset[..40])
+                                                                } else {
+                                                                    preset.to_string()
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                if !justification_reason().is_empty() && justification_reason().trim().len() < 10 {
+                                                    div {
+                                                        class: "help",
+                                                        style: "color: #fbbf24;",
+                                                        "Add a bit more detail (min 10 chars)."
+                                                    }
+                                                }
+                                            }
+
+                                            // Expiry / target date
+                                            div {
+                                                class: "field",
+                                                style: "max-width: 220px;",
+                                                label {
+                                                    if justification_category() == "patch_scheduled" { "Target patch date" } else { "Review / expiry date (optional)" }
+                                                }
+                                                input {
+                                                    r#type: "date",
+                                                    class: "input focus-ring",
+                                                    value: "{justification_expiry}",
+                                                    oninput: move |evt| justification_expiry.set(evt.value()),
+                                                }
+                                            }
+
+                                            // Audit trail callout
+                                            div {
+                                                class: "sd-callout sd-callout-info",
+                                                style: "font-size: 11px;",
+                                                svg {
+                                                    width: "12", height: "12", view_box: "0 0 24 24",
+                                                    fill: "none", stroke: "currentColor", stroke_width: "3",
+                                                    stroke_linecap: "round", stroke_linejoin: "round",
+                                                    polyline { points: "20 6 9 17 4 12" }
+                                                }
+                                                div { "Recorded against your account and attached to each covered system's compliance evidence trail." }
+                                            }
+
+                                            // Cancel / Save
+                                            div {
+                                                style: "display: flex; justify-content: flex-end; gap: 8px;",
+                                                button {
+                                                    class: "btn btn-ghost focus-ring",
+                                                    onclick: move |_| show_accept.set(false),
+                                                    "Cancel"
+                                                }
+                                                button {
+                                                    class: "btn btn-primary focus-ring",
+                                                    disabled: justification_reason().trim().len() < 10,
+                                                    style: if justification_reason().trim().len() < 10 { "opacity: 0.5; cursor: not-allowed;" } else { "" },
+                                                    onclick: move |_| {
+                                                        let cve_id = cve_id_for_save_seed.clone();
+                                                        let category = justification_category();
+                                                        let reason = justification_reason();
+
+                                                        if reason.trim().len() < 10 || reason.trim().len() > 2000 {
+                                                            save_status.set(Some("Reason must be 10-2000 characters".to_string()));
+                                                            return;
+                                                        }
+
+                                                        spawn(async move {
+                                                            let payload = CveJustificationInput {
+                                                                system_id: None,
+                                                                category,
+                                                                reason,
+                                                            };
+
+                                                            match client::save_cve_justification(&cve_id, &payload).await {
+                                                                Ok(_) => {
+                                                                    save_status.set(Some("Justification saved".to_string()));
+                                                                    justification_reason.set(String::new());
+                                                                    justifications_refresh.set(justifications_refresh() + 1);
+                                                                    show_accept.set(false);
+                                                                }
+                                                                Err(err) => {
+                                                                    save_status.set(Some(format!("Save failed: {}", err)));
+                                                                }
+                                                            }
+                                                        });
+                                                    },
+                                                    {
+                                                        let verb = if justification_category() == "accepted_risk" { "Accept" } else { "Schedule" };
+                                                        format!("{} for {} system{}", verb, total_affected, if total_affected == 1 { "" } else { "s" })
+                                                    }
+                                                }
+                                            }
+                                            if let Some(msg) = save_status() {
+                                                p { class: "text-xs {theme::text::SECONDARY}", style: "margin-top: 4px; text-align: right;", "{msg}" }
+                                            }
+                                        }
+                                    }
+                                } else if triage_state == "outstanding" {
+                                    // ── Outstanding callout ─────────────────────────────────────
+                                    rsx! {
+                                        div {
+                                            class: "sd-callout sd-callout-warn",
+                                            svg {
+                                                width: "13", height: "13", view_box: "0 0 24 24",
+                                                fill: "none", stroke: "currentColor", stroke_width: "2",
+                                                stroke_linecap: "round", stroke_linejoin: "round",
+                                                path { d: "M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" }
+                                                line { x1: "12", y1: "9", x2: "12", y2: "13" }
+                                                line { x1: "12", y1: "17", x2: "12.01", y2: "17" }
+                                            }
+                                            div {
+                                                style: "font-size: 12px;",
+                                                strong { "Outstanding — needs triage." }
+                                                " Patch the affected systems, or accept the risk with a justification. You can scope it to all environments or only specific ones (e.g. accept in dev, keep open in prod)."
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    // ── Accepted / Scheduled card ───────────────────────────────
+                                    let border_color = if triage_state == "accepted" { "rgba(167,139,250,0.3)" } else { "rgba(96,165,250,0.3)" };
+                                    let bg_color = if triage_state == "accepted" { "rgba(167,139,250,0.07)" } else { "rgba(96,165,250,0.07)" };
+                                    rsx! {
+                                        div {
+                                            style: "padding: 14px; border-radius: 10px; border: 1px solid {border_color}; background: {bg_color};",
+                                            // Header row: chip + "covers N of M systems"
+                                            div {
+                                                style: "display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px;",
+                                                span {
+                                                    class: "chip chip-info",
+                                                    style: if triage_state == "accepted" { "background: rgba(167,139,250,0.18); color: #a78bfa;" } else { "" },
+                                                    if triage_state == "accepted" { "Risk accepted" } else { "Patch scheduled" }
+                                                }
+                                                span {
+                                                    style: "font-size: 11px; color: var(--cf-text-muted);",
+                                                    {
+                                                        let s = if total_affected == 1 { "" } else { "s" };
+                                                        format!("covers {total_affected} system{s}")
+                                                    }
+                                                }
+                                            }
+                                            // Reason text
+                                            if let Some(reason) = &latest_reason {
+                                                div {
+                                                    style: "font-size: 13px; color: var(--cf-text-primary); line-height: 1.5;",
+                                                    "{reason}"
+                                                }
+                                            }
+                                            // By / at + Edit + Revoke
+                                            div {
+                                                style: "font-size: 11px; color: var(--cf-text-muted); margin-top: 8px; display: flex; gap: 8px; align-items: center;",
+                                                svg {
+                                                    width: "11", height: "11", view_box: "0 0 24 24",
+                                                    fill: "none", stroke: "currentColor", stroke_width: "2",
+                                                    stroke_linecap: "round", stroke_linejoin: "round",
+                                                    path { d: "M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" }
+                                                    circle { cx: "12", cy: "7", r: "4" }
+                                                }
+                                                span {
+                                                    "by "
+                                                    span {
+                                                        class: "mono",
+                                                        "{latest_by.as_deref().unwrap_or(\"—\")}"
+                                                    }
+                                                }
+                                                if let Some(at) = &latest_at {
+                                                    span { "· {at}" }
+                                                }
+                                                // Edit button
+                                                button {
+                                                    class: "btn btn-ghost focus-ring xs",
+                                                    style: "margin-left: auto;",
+                                                    onclick: move |_| show_accept.set(true),
+                                                    svg {
+                                                        width: "10", height: "10", view_box: "0 0 24 24",
+                                                        fill: "none", stroke: "currentColor", stroke_width: "2",
+                                                        stroke_linecap: "round", stroke_linejoin: "round",
+                                                        path { d: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" }
+                                                        polyline { points: "14 2 14 8 20 8" }
+                                                    }
+                                                    " Edit"
+                                                }
+                                                // Revoke button
+                                                button {
+                                                    class: "btn btn-ghost focus-ring xs",
+                                                    onclick: move |_| {
+                                                        let cve_id = cve_id_for_save_seed.clone();
+                                                        spawn(async move {
+                                                            // Submit a revocation by posting outstanding category
+                                                            let payload = CveJustificationInput {
+                                                                system_id: None,
+                                                                category: "outstanding".to_string(),
+                                                                reason: "Justification revoked.".to_string(),
+                                                            };
+                                                            if client::save_cve_justification(&cve_id, &payload).await.is_ok() {
+                                                                justifications_refresh.set(justifications_refresh() + 1);
+                                                            }
+                                                        });
+                                                    },
+                                                    svg {
+                                                        width: "10", height: "10", view_box: "0 0 24 24",
+                                                        fill: "none", stroke: "currentColor", stroke_width: "2",
+                                                        stroke_linecap: "round", stroke_linejoin: "round",
+                                                        path { d: "M18 6 6 18" }
+                                                        path { d: "M6 6l12 12" }
+                                                    }
+                                                    " Revoke"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         // Remediation
                         section {
                             h3 {
@@ -1580,16 +1923,10 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
                             if detail.fix_status == "fix_available" {
                                 div {
                                     class: "sd-callout sd-callout-info",
-                                    // Check icon
                                     svg {
-                                        width: "13",
-                                        height: "13",
-                                        view_box: "0 0 24 24",
-                                        fill: "none",
-                                        stroke: "currentColor",
-                                        stroke_width: "3",
-                                        stroke_linecap: "round",
-                                        stroke_linejoin: "round",
+                                        width: "13", height: "13", view_box: "0 0 24 24",
+                                        fill: "none", stroke: "currentColor", stroke_width: "3",
+                                        stroke_linecap: "round", stroke_linejoin: "round",
                                         polyline { points: "20 6 9 17 4 12" }
                                     }
                                     div {
@@ -1606,16 +1943,10 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
                             } else {
                                 div {
                                     class: "sd-callout sd-callout-danger",
-                                    // Warning icon
                                     svg {
-                                        width: "13",
-                                        height: "13",
-                                        view_box: "0 0 24 24",
-                                        fill: "none",
-                                        stroke: "currentColor",
-                                        stroke_width: "2",
-                                        stroke_linecap: "round",
-                                        stroke_linejoin: "round",
+                                        width: "13", height: "13", view_box: "0 0 24 24",
+                                        fill: "none", stroke: "currentColor", stroke_width: "2",
+                                        stroke_linecap: "round", stroke_linejoin: "round",
                                         path { d: "M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" }
                                         line { x1: "12", y1: "9", x2: "12", y2: "13" }
                                         line { x1: "12", y1: "17", x2: "12.01", y2: "17" }
@@ -1666,104 +1997,6 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
                                 },
                                 None => rsx! {
                                     p { class: "text-xs {theme::text::SECONDARY}", "Loading systems..." }
-                                }
-                            }
-                        }
-
-                        // Justifications
-                        section {
-                            h3 {
-                                class: "text-xs {theme::text::SECONDARY} uppercase tracking-[0.08em] mb-2 font-semibold",
-                                "Triage Justifications"
-                            }
-
-                            div {
-                                class: "mb-3 space-y-2 p-3 rounded border border-white/10 bg-white/5",
-                                div {
-                                    class: "text-xs {theme::text::SECONDARY}",
-                                    "Add justification (admin required)"
-                                }
-                                select {
-                                    class: "w-full px-3 py-2 rounded-md border border-white/15 bg-black/20 text-sm",
-                                    value: "{justification_category}",
-                                    onchange: move |evt| justification_category.set(evt.value()),
-                                    option { value: "accepted_risk", "Accepted risk" }
-                                    option { value: "patch_scheduled", "Patch scheduled" }
-                                    option { value: "mitigated", "Mitigated" }
-                                    option { value: "false_positive", "False positive" }
-                                }
-                                textarea {
-                                    class: "w-full px-3 py-2 rounded-md border border-white/15 bg-black/20 text-sm min-h-24",
-                                    placeholder: "Reason (10-2000 chars)",
-                                    value: "{justification_reason}",
-                                    oninput: move |evt| justification_reason.set(evt.value()),
-                                }
-                                div {
-                                    class: "text-[11px] {theme::text::SECONDARY}",
-                                    "Reason should explain risk acceptance or mitigation details for audit traceability."
-                                }
-                                div {
-                                    class: "flex items-center gap-2",
-                                    button {
-                                        class: "px-3 py-2 text-sm rounded-md border border-white/15 hover:bg-white/5",
-                                        onclick: move |_| {
-                                            let cve_id = cve_id_for_save_seed.clone();
-                                            let category = justification_category();
-                                            let reason = justification_reason();
-
-                                            if reason.trim().len() < 10 || reason.trim().len() > 2000 {
-                                                save_status.set(Some("Reason must be 10-2000 characters".to_string()));
-                                                return;
-                                            }
-
-                                            spawn(async move {
-                                                let payload = CveJustificationInput {
-                                                    system_id: None,
-                                                    category,
-                                                    reason,
-                                                };
-
-                                                match client::save_cve_justification(&cve_id, &payload).await {
-                                                    Ok(_) => {
-                                                        save_status.set(Some("Justification saved".to_string()));
-                                                        justification_reason.set(String::new());
-                                                        justifications_refresh.set(justifications_refresh() + 1);
-                                                    }
-                                                    Err(err) => {
-                                                        save_status.set(Some(format!("Save failed: {}", err)));
-                                                    }
-                                                }
-                                            });
-                                        },
-                                        "Save justification"
-                                    }
-                                    if let Some(msg) = save_status() {
-                                        span {
-                                            class: "text-xs {theme::text::SECONDARY}",
-                                            "{msg}"
-                                        }
-                                    }
-                                }
-                            }
-
-                            match &*justifications.read_unchecked() {
-                                Some(Ok(justs)) => rsx! {
-                                    if justs.is_empty() {
-                                        p { class: "text-xs {theme::text::SECONDARY}", "No justifications recorded." }
-                                    } else {
-                                        div {
-                                            class: "space-y-2",
-                                            for just in justs {
-                                                JustificationCard { justification: just.clone() }
-                                            }
-                                        }
-                                    }
-                                },
-                                Some(Err(err)) => rsx! {
-                                    p { class: "text-xs text-red-400", "Error loading justifications: {err}" }
-                                },
-                                None => rsx! {
-                                    p { class: "text-xs {theme::text::SECONDARY}", "Loading justifications..." }
                                 }
                             }
                         }
