@@ -45,7 +45,7 @@ pub async fn fetch_cve_list(pool: &PgPool, filters: &CveFilters) -> Result<Vec<C
         SELECT
             cve_id as "cve_id!",
             cvss_v3_score::real as "cvss_v3_score?",
-            COALESCE(severity, 'UNKNOWN') as "severity!",
+            UPPER(COALESCE(severity, 'UNKNOWN')) as "severity!",
             COALESCE(title, '') as "title!",
             cvss_vector as "cvss_vector?",
             published_date as "published_date?",
@@ -59,17 +59,17 @@ pub async fn fetch_cve_list(pool: &PgPool, filters: &CveFilters) -> Result<Vec<C
             first_seen as "first_seen?",
             last_seen as "last_seen?",
             COALESCE(age_days, 0)::int as "age_days!",
-            COALESCE(triage_status, 'outstanding') as "triage_status!"
+            LOWER(COALESCE(triage_status, 'outstanding')) as "triage_status!"
         FROM view_cve_list_with_metadata
         WHERE
-            ($1::text IS NULL OR severity = $1)
+            ($1::text IS NULL OR UPPER(severity) = $1)
             AND (
                 $2::text IS NULL
                 OR ($2 = 'available' AND fix_status = 'fix_available')
                 OR ($2 = 'pending' AND fix_status = 'open')
                 OR ($2 = 'exploited' AND exploited = TRUE)
             )
-            AND ($3::text IS NULL OR triage_status = $3)
+            AND ($3::text IS NULL OR LOWER(triage_status) = LOWER($3))
             AND ($4::text IS NULL OR package_name ILIKE $4)
             AND (
                 $5::text IS NULL
@@ -80,7 +80,7 @@ pub async fn fetch_cve_list(pool: &PgPool, filters: &CveFilters) -> Result<Vec<C
         ORDER BY
             CASE
                 WHEN $6 = 'severity' THEN
-                    CASE severity
+                    CASE UPPER(severity)
                         WHEN 'CRITICAL' THEN 1
                         WHEN 'HIGH' THEN 2
                         WHEN 'MEDIUM' THEN 3
