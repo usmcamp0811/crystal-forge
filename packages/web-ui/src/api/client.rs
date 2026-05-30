@@ -298,8 +298,7 @@ pub async fn save_cve_justification(
         base_url(),
         encode_uri_component(cve_id)
     );
-    let _: () = post_json(&url, input).await?;
-    Ok(())
+    send_empty_with_csrf("POST", &url, Some(input)).await
 }
 
 /// Revoke the fleet-wide justification for a CVE (DELETE).
