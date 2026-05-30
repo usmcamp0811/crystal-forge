@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use sqlx::PgPool;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::api::models::{
     CveAffectedSystemDetail, CveDetail, CveFilters, CveFleetStats, CveJustification,
@@ -115,118 +115,223 @@ pub async fn fetch_cve_packages_grouped(
     pool: &PgPool,
     filters: &CveFilters,
 ) -> Result<Vec<CvePackageGroup>> {
-    // Fetch CVEs once with active filters, then group in-memory.
-    // This ensures grouped mode respects severity/fix/triage/search filters.
-    let mut all_filters = filters.clone();
-    all_filters.limit = Some(1000);
-    let all_cves = fetch_cve_list(pool, &all_filters).await?;
+    let severity_param = filters.severity.as_ref().map(|s| s.to_uppercase());
+    let fix_status_param = filters.fix_status.clone();
+    let triage_status_param = filters.triage_status.clone();
+    let package_param = filters.package.as_ref().map(|p| format!("%{p}%"));
+    let search_param = filters.search.as_ref().map(|s| format!("%{s}%"));
 
-    let mut cves_by_package: HashMap<String, Vec<CveListItem>> = HashMap::new();
-    for cve in all_cves {
-        if let Some(pkg) = cve.package_name.clone() {
-            cves_by_package.entry(pkg).or_default().push(cve);
-        }
-    }
+    // 1) Aggregate package cards over the full filtered dataset (no list-row cap).
+    let package_stats = sqlx::query!(
+        r#"
+        WITH filtered AS (
+            SELECT
+                package_name,
+                UPPER(COALESCE(severity, 'UNKNOWN')) AS severity,
+                COALESCE(affected_count, 0)::bigint AS affected_count,
+                COALESCE(fix_status, 'open') AS fix_status,
+                LOWER(COALESCE(triage_status, 'outstanding')) AS triage_status,
+                COALESCE(exploited, FALSE) AS exploited,
+                cvss_v3_score::real AS cvss_v3_score,
+                affected_environments
+            FROM view_cve_list_with_metadata
+            WHERE
+                ($1::text IS NULL OR UPPER(severity) = $1)
+                AND (
+                    $2::text IS NULL
+                    OR ($2 = 'available' AND fix_status = 'fix_available')
+                    OR ($2 = 'pending' AND fix_status = 'open')
+                    OR ($2 = 'exploited' AND exploited = TRUE)
+                )
+                AND ($3::text IS NULL OR LOWER(triage_status) = LOWER($3))
+                AND ($4::text IS NULL OR package_name ILIKE $4)
+                AND (
+                    $5::text IS NULL
+                    OR cve_id ILIKE $5
+                    OR package_name ILIKE $5
+                    OR title ILIKE $5
+                )
+                AND package_name IS NOT NULL
+        )
+        SELECT
+            package_name as "package_name!",
+            COUNT(*)::bigint as "cve_count!",
+            COUNT(*) FILTER (WHERE severity = 'CRITICAL')::bigint as "critical_count!",
+            COUNT(*) FILTER (WHERE severity = 'HIGH')::bigint as "high_count!",
+            COUNT(*) FILTER (WHERE severity = 'MEDIUM')::bigint as "medium_count!",
+            COUNT(*) FILTER (WHERE severity = 'LOW')::bigint as "low_count!",
+            COUNT(DISTINCT ae)::bigint as "environments_count!",
+            SUM(affected_count)::bigint as "total_affected_systems!",
+            COUNT(*) FILTER (WHERE fix_status = 'fix_available')::bigint as "fixable_count!",
+            COUNT(*) FILTER (WHERE triage_status = 'outstanding')::bigint as "outstanding_count!",
+            COUNT(*) FILTER (WHERE exploited = TRUE)::bigint as "exploited_count!",
+            MAX(cvss_v3_score)::real as "max_cvss?",
+            SUM(
+                CASE severity
+                    WHEN 'CRITICAL' THEN 1000
+                    WHEN 'HIGH' THEN 100
+                    WHEN 'MEDIUM' THEN 10
+                    WHEN 'LOW' THEN 1
+                    ELSE 0
+                END
+            )::bigint as "severity_score!"
+        FROM filtered f
+        LEFT JOIN LATERAL UNNEST(f.affected_environments) AS ae ON TRUE
+        GROUP BY package_name
+        ORDER BY "severity_score!" DESC, "max_cvss?" DESC NULLS LAST, "package_name!" ASC
+        LIMIT 100
+        "#,
+        severity_param,
+        fix_status_param,
+        triage_status_param,
+        package_param,
+        search_param,
+    )
+    .fetch_all(pool)
+    .await?;
 
-    let mut result = Vec::new();
-    for (package_name, mut cves) in cves_by_package {
-        let mut critical_count = 0i64;
-        let mut high_count = 0i64;
-        let mut medium_count = 0i64;
-        let mut low_count = 0i64;
-        let mut environments: HashSet<String> = HashSet::new();
-        let mut total_affected_systems = 0i64;
-        let mut fixable_count = 0i64;
-        let mut outstanding_count = 0i64;
-        let mut exploited_count = 0i64;
-        let mut max_cvss: Option<f32> = None;
-        let mut severity_score = 0i64;
+    let selected_packages: Vec<String> = package_stats
+        .iter()
+        .map(|row| row.package_name.clone())
+        .collect();
 
-        for cve in &cves {
-            match cve.severity.as_str() {
-                "CRITICAL" => {
-                    critical_count += 1;
-                    severity_score += 1000;
-                }
-                "HIGH" => {
-                    high_count += 1;
-                    severity_score += 100;
-                }
-                "MEDIUM" => {
-                    medium_count += 1;
-                    severity_score += 10;
-                }
-                "LOW" => {
-                    low_count += 1;
-                    severity_score += 1;
-                }
-                _ => {}
-            }
+    // 2) Fetch nested rows in one query; cap nested rows per package via ROW_NUMBER.
+    let nested_rows = sqlx::query!(
+        r#"
+        WITH filtered AS (
+            SELECT
+                cve_id,
+                cvss_v3_score::real AS cvss_v3_score,
+                UPPER(COALESCE(severity, 'UNKNOWN')) AS severity,
+                COALESCE(title, '') AS title,
+                cvss_vector,
+                published_date,
+                COALESCE(exploited, FALSE) AS exploited,
+                package_name,
+                installed_version,
+                fixed_version,
+                COALESCE(fix_status, 'open') AS fix_status,
+                COALESCE(affected_count, 0)::bigint AS affected_count,
+                affected_environments,
+                first_seen,
+                last_seen,
+                COALESCE(age_days, 0)::int AS age_days,
+                LOWER(COALESCE(triage_status, 'outstanding')) AS triage_status
+            FROM view_cve_list_with_metadata
+            WHERE
+                ($1::text IS NULL OR UPPER(severity) = $1)
+                AND (
+                    $2::text IS NULL
+                    OR ($2 = 'available' AND fix_status = 'fix_available')
+                    OR ($2 = 'pending' AND fix_status = 'open')
+                    OR ($2 = 'exploited' AND exploited = TRUE)
+                )
+                AND ($3::text IS NULL OR LOWER(triage_status) = LOWER($3))
+                AND ($4::text IS NULL OR package_name ILIKE $4)
+                AND (
+                    $5::text IS NULL
+                    OR cve_id ILIKE $5
+                    OR package_name ILIKE $5
+                    OR title ILIKE $5
+                )
+                AND package_name = ANY($6::text[])
+        ),
+        ranked AS (
+            SELECT
+                *,
+                ROW_NUMBER() OVER (
+                    PARTITION BY package_name
+                    ORDER BY
+                        CASE severity
+                            WHEN 'CRITICAL' THEN 1
+                            WHEN 'HIGH' THEN 2
+                            WHEN 'MEDIUM' THEN 3
+                            WHEN 'LOW' THEN 4
+                            ELSE 5
+                        END,
+                        cvss_v3_score DESC NULLS LAST,
+                        cve_id ASC
+                ) AS rn
+            FROM filtered
+        )
+        SELECT
+            cve_id as "cve_id!",
+            cvss_v3_score as "cvss_v3_score?",
+            severity as "severity!",
+            title as "title!",
+            cvss_vector as "cvss_vector?",
+            published_date as "published_date?",
+            exploited as "exploited!",
+            package_name as "package_name?",
+            installed_version as "installed_version?",
+            fixed_version as "fixed_version?",
+            fix_status as "fix_status!",
+            affected_count as "affected_count!",
+            affected_environments as "affected_environments?: Vec<String>",
+            first_seen as "first_seen?",
+            last_seen as "last_seen?",
+            age_days as "age_days!",
+            triage_status as "triage_status!"
+        FROM ranked
+        WHERE rn <= 100
+        ORDER BY package_name ASC, rn ASC
+        "#,
+        severity_param,
+        fix_status_param,
+        triage_status_param,
+        package_param,
+        search_param,
+        &selected_packages,
+    )
+    .fetch_all(pool)
+    .await?;
 
-            total_affected_systems += cve.affected_count;
-
-            if cve.fix_status == "fix_available" {
-                fixable_count += 1;
-            }
-            if cve.triage_status == "outstanding" {
-                outstanding_count += 1;
-            }
-            if cve.exploited {
-                exploited_count += 1;
-            }
-
-            if let Some(score) = cve.cvss_v3_score {
-                max_cvss = match max_cvss {
-                    Some(curr) if curr >= score => Some(curr),
-                    _ => Some(score),
-                };
-            }
-
-            if let Some(envs) = &cve.affected_environments {
-                for env in envs {
-                    environments.insert(env.clone());
-                }
-            }
-        }
-
-        let cve_count = cves.len() as i64;
-
-        // Keep grouped rows bounded per package for UI stability.
-        if cves.len() > 100 {
-            cves.truncate(100);
-        }
-
-        result.push(CvePackageGroup {
-            package_name,
-            cve_count,
-            critical_count,
-            high_count,
-            medium_count,
-            low_count,
-            environments_count: environments.len() as i64,
-            total_affected_systems,
-            fixable_count,
-            outstanding_count,
-            exploited_count,
-            max_cvss,
-            severity_score,
-            cves: Some(cves),
+    let mut nested_by_package: HashMap<String, Vec<CveListItem>> = HashMap::new();
+    for row in nested_rows {
+        let pkg_key = row.package_name.clone().unwrap_or_default();
+        nested_by_package.entry(pkg_key).or_default().push(CveListItem {
+            cve_id: row.cve_id,
+            cvss_v3_score: row.cvss_v3_score,
+            severity: row.severity,
+            title: row.title,
+            cvss_vector: row.cvss_vector,
+            published_date: row.published_date,
+            exploited: row.exploited,
+            package_name: row.package_name,
+            installed_version: row.installed_version,
+            fixed_version: row.fixed_version,
+            fix_status: row.fix_status,
+            affected_count: row.affected_count,
+            affected_environments: row.affected_environments,
+            first_seen: row.first_seen,
+            last_seen: row.last_seen,
+            age_days: row.age_days,
+            triage_status: row.triage_status,
         });
     }
 
-    // Match prior ordering semantics.
-    result.sort_by(|a, b| {
-        b.severity_score
-            .cmp(&a.severity_score)
-            .then_with(|| {
-                b.max_cvss
-                    .partial_cmp(&a.max_cvss)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .then_with(|| a.package_name.cmp(&b.package_name))
-    });
-    if result.len() > 100 {
-        result.truncate(100);
+    let mut result = Vec::new();
+    for row in package_stats {
+        let cves = nested_by_package
+            .remove(&row.package_name)
+            .unwrap_or_default();
+
+        result.push(CvePackageGroup {
+            package_name: row.package_name,
+            cve_count: row.cve_count,
+            critical_count: row.critical_count,
+            high_count: row.high_count,
+            medium_count: row.medium_count,
+            low_count: row.low_count,
+            environments_count: row.environments_count,
+            total_affected_systems: row.total_affected_systems,
+            fixable_count: row.fixable_count,
+            outstanding_count: row.outstanding_count,
+            exploited_count: row.exploited_count,
+            max_cvss: row.max_cvss,
+            severity_score: row.severity_score,
+            cves: Some(cves),
+        });
     }
 
     Ok(result)
