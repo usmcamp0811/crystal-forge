@@ -512,6 +512,16 @@ pub fn CvesView() -> Element {
             // CVE List
             if view_mode() == "grouped" {
                 CvePackageGroupsView {
+                    key: format!(
+                        "{}|{}|{}|{}|{}|{}|{}",
+                        severity_filter().as_deref().unwrap_or("all"),
+                        fix_status_filter().as_deref().unwrap_or("all"),
+                        triage_status_filter().as_deref().unwrap_or("all"),
+                        package_filter().as_deref().unwrap_or("all"),
+                        if search_query().is_empty() { "" } else { search_query().as_str() },
+                        sort_by(),
+                        view_mode(),
+                    ),
                     on_open_cve: move |cve_id: String| {
                         selected_cve_id.set(Some(cve_id));
                     },
