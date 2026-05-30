@@ -189,6 +189,8 @@ pub async fn fetch_cve_packages_grouped(
             }
         }
 
+        let cve_count = cves.len() as i64;
+
         // Keep grouped rows bounded per package for UI stability.
         if cves.len() > 100 {
             cves.truncate(100);
@@ -196,7 +198,7 @@ pub async fn fetch_cve_packages_grouped(
 
         result.push(CvePackageGroup {
             package_name,
-            cve_count: cves.len() as i64,
+            cve_count,
             critical_count,
             high_count,
             medium_count,

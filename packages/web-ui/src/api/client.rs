@@ -169,8 +169,7 @@ pub async fn fetch_cve_dashboard_vulnerabilities(
 // Advanced CVE Dashboard Client Functions (TASK-322)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Fetch CVE list with filters.
-pub async fn fetch_cves(filters: &CveFilters) -> Result<Vec<CveListItem>, ApiClientError> {
+fn cve_filter_query_parts(filters: &CveFilters) -> Vec<String> {
     let mut parts: Vec<String> = Vec::new();
 
     if let Some(severity) = &filters.severity {
@@ -216,6 +215,13 @@ pub async fn fetch_cves(filters: &CveFilters) -> Result<Vec<CveListItem>, ApiCli
         parts.push(format!("limit={limit}"));
     }
 
+    parts
+}
+
+/// Fetch CVE list with filters.
+pub async fn fetch_cves(filters: &CveFilters) -> Result<Vec<CveListItem>, ApiClientError> {
+    let parts = cve_filter_query_parts(filters);
+
     let mut url = format!("{}/cves", base_url());
     if !parts.is_empty() {
         url.push('?');
@@ -229,28 +235,7 @@ pub async fn fetch_cves(filters: &CveFilters) -> Result<Vec<CveListItem>, ApiCli
 pub async fn fetch_cves_grouped(
     filters: &CveFilters,
 ) -> Result<Vec<CvePackageGroup>, ApiClientError> {
-    let mut parts: Vec<String> = Vec::new();
-
-    if let Some(severity) = &filters.severity {
-        if !severity.is_empty() {
-            parts.push(format!("severity={}", encode_query_value(severity)));
-        }
-    }
-
-    if let Some(fix_status) = &filters.fix_status {
-        if !fix_status.is_empty() {
-            parts.push(format!("fix_status={}", encode_query_value(fix_status)));
-        }
-    }
-
-    if let Some(triage_status) = &filters.triage_status {
-        if !triage_status.is_empty() {
-            parts.push(format!(
-                "triage_status={}",
-                encode_query_value(triage_status)
-            ));
-        }
-    }
+    let parts = cve_filter_query_parts(filters);
 
     let mut url = format!("{}/cves/grouped", base_url());
     if !parts.is_empty() {
