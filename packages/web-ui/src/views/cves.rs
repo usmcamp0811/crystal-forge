@@ -1278,7 +1278,10 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
     let cve_id_for_save_seed = cve_id.clone();
     let mut justification_category = use_signal(|| "accepted_risk".to_string());
     let mut justification_reason = use_signal(String::new);
-    let mut justification_expiry = use_signal(String::new);
+    // "all" or "some" — mirrors JSX scopeMode
+    let mut scope_mode = use_signal(|| "all".to_string());
+    // Set of environment names the user toggled on (used when scope_mode == "some")
+    let mut scope_envs: Signal<Vec<String>> = use_signal(Vec::new);
     let mut save_status = use_signal(|| Option::<String>::None);
     let mut justifications_refresh = use_signal(|| 0_u64);
     let mut esc_listener_attached = use_signal(|| false);
@@ -1446,18 +1449,31 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
                     }
                     // Accept risk / Edit justification — driven by latest justification state
                     {
-                        let is_outstanding = match &*justifications.read_unchecked() {
-                            Some(Ok(justs)) => justs.first().map(|j| {
-                                j.category != "accepted_risk" && j.category != "patch_scheduled"
-                            }).unwrap_or(true),
-                            _ => true,
-                        };
+                        let (is_outstanding, existing_category, existing_reason) =
+                            match &*justifications.read_unchecked() {
+                                Some(Ok(justs)) => {
+                                    if let Some(j) = justs.first() {
+                                        let outstanding = j.category != "accepted_risk"
+                                            && j.category != "patch_scheduled";
+                                        (outstanding, j.category.clone(), j.reason.clone())
+                                    } else {
+                                        (true, "accepted_risk".to_string(), String::new())
+                                    }
+                                }
+                                _ => (true, "accepted_risk".to_string(), String::new()),
+                            };
                         if is_outstanding {
                             rsx! {
                                 button {
                                     class: "btn btn-primary focus-ring xs",
-                                    onclick: move |_| show_accept.set(true),
-                                    // Check icon
+                                    onclick: move |_| {
+                                        // New acceptance — reset form to defaults
+                                        justification_category.set("accepted_risk".to_string());
+                                        justification_reason.set(String::new());
+                                        scope_mode.set("all".to_string());
+                                        scope_envs.set(Vec::new()); // will re-default to all on open
+                                        show_accept.set(true);
+                                    },
                                     svg {
                                         width: "11", height: "11", view_box: "0 0 24 24",
                                         fill: "none", stroke: "currentColor", stroke_width: "3",
@@ -1471,8 +1487,12 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
                             rsx! {
                                 button {
                                     class: "btn btn-ghost focus-ring xs",
-                                    onclick: move |_| show_accept.set(true),
-                                    // File/edit icon
+                                    onclick: move |_| {
+                                        // Editing — prefill from existing justification
+                                        justification_category.set(existing_category.clone());
+                                        justification_reason.set(existing_reason.clone());
+                                        show_accept.set(true);
+                                    },
                                     svg {
                                         width: "11", height: "11", view_box: "0 0 24 24",
                                         fill: "none", stroke: "currentColor", stroke_width: "2",
@@ -1619,7 +1639,7 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
 
                             {
                                 // Derive triage state from justifications data
-                                let (triage_state, latest_reason, latest_by, latest_at) =
+                                let (triage_state, latest_reason, latest_by, latest_at, existing_category, existing_reason) =
                                     match &*justifications.read_unchecked() {
                                         Some(Ok(justs)) => {
                                             if let Some(j) = justs.first() {
@@ -1635,12 +1655,14 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
                                                     Some(j.reason.clone()),
                                                     j.updated_by_username.clone(),
                                                     Some(j.updated_at.format("%Y-%m-%d %H:%M UTC").to_string()),
+                                                    j.category.clone(),
+                                                    j.reason.clone(),
                                                 )
                                             } else {
-                                                ("outstanding", None, None, None)
+                                                ("outstanding", None, None, None, "accepted_risk".to_string(), String::new())
                                             }
                                         }
-                                        _ => ("outstanding", None, None, None),
+                                        _ => ("outstanding", None, None, None, "accepted_risk".to_string(), String::new()),
                                     };
 
                                 let total_affected = affected_systems
@@ -1652,9 +1674,143 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
 
                                 if show_accept() {
                                     // ── Acceptance / edit form ──────────────────────────────────
+                                    // Compute env lists from affected systems for the scope picker
+                                    let (all_envs, env_counts_vec): (Vec<String>, Vec<(String, usize)>) = {
+                                        let mut counts: Vec<(String, usize)> = Vec::new();
+                                        if let Some(Ok(systems)) = &*affected_systems.read_unchecked() {
+                                            for sys in systems {
+                                                let env = sys.environment.clone().unwrap_or_else(|| "unknown".to_string());
+                                                if let Some(entry) = counts.iter_mut().find(|(k, _)| k == &env) {
+                                                    entry.1 += 1;
+                                                } else {
+                                                    counts.push((env, 1));
+                                                }
+                                            }
+                                        }
+                                        let envs: Vec<String> = counts.iter().map(|(e, _)| e.clone()).collect();
+                                        (envs, counts)
+                                    };
+
+                                    // If scope_envs is empty (first open), default to all envs
+                                    if scope_envs.read().is_empty() && !all_envs.is_empty() {
+                                        scope_envs.set(all_envs.clone());
+                                    }
+
+                                    let effective_envs = if scope_mode() == "all" {
+                                        all_envs.clone()
+                                    } else {
+                                        scope_envs.read().clone()
+                                    };
+
+                                    let covered_count = if let Some(Ok(systems)) = &*affected_systems.read_unchecked() {
+                                        systems.iter().filter(|s| {
+                                            let env = s.environment.as_deref().unwrap_or("unknown");
+                                            effective_envs.iter().any(|e| e == env)
+                                        }).count()
+                                    } else {
+                                        0
+                                    };
+
+                                    let all_affected_count = if let Some(Ok(systems)) = &*affected_systems.read_unchecked() {
+                                        systems.len()
+                                    } else {
+                                        0
+                                    };
+
                                     rsx! {
                                         div {
                                             style: "padding: 14px; border-radius: 10px; border: 1px solid var(--cf-card-border); background: var(--cf-card-bg); display: flex; flex-direction: column; gap: 12px;",
+
+                                            // Apply to — scope picker
+                                            div {
+                                                class: "field",
+                                                label { "Apply to" }
+                                                div {
+                                                    class: "seg",
+                                                    style: "width: fit-content;",
+                                                    button {
+                                                        class: if scope_mode() == "all" { "active" } else { "" },
+                                                        onclick: move |_| scope_mode.set("all".to_string()),
+                                                        "All environments"
+                                                    }
+                                                    button {
+                                                        class: if scope_mode() == "some" { "active" } else { "" },
+                                                        onclick: move |_| scope_mode.set("some".to_string()),
+                                                        "Specific environments"
+                                                    }
+                                                }
+                                                if scope_mode() == "some" {
+                                                    div {
+                                                        style: "display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px;",
+                                                        for (env, count) in env_counts_vec.iter() {
+                                                            {
+                                                                let env_str = env.clone();
+                                                                let is_on = scope_envs.read().contains(env);
+                                                                let env_color = match env.to_lowercase().as_str() {
+                                                                    "production" => "#f87171",
+                                                                    "staging"    => "#fbbf24",
+                                                                    "dev"        => "#60a5fa",
+                                                                    "edge"       => "#2dd4bf",
+                                                                    "lab"        => "#a78bfa",
+                                                                    _            => "#9ca3af",
+                                                                };
+                                                                let border_c = if is_on { env_color } else { "var(--cf-card-border)" };
+                                                                let bg_c = if is_on {
+                                                                    format!("color-mix(in oklab, {env_color} 16%, var(--cf-card-bg))")
+                                                                } else {
+                                                                    "transparent".to_string()
+                                                                };
+                                                                let text_c = if is_on { env_color } else { "var(--cf-text-secondary)" };
+                                                                rsx! {
+                                                                    button {
+                                                                        class: "focus-ring",
+                                                                        style: "padding: 4px 10px; border-radius: 99px; font-size: 11px; cursor: pointer; font-family: inherit; border: 1px solid {border_c}; background: {bg_c}; color: {text_c}; display: inline-flex; align-items: center; gap: 6px;",
+                                                                        onclick: move |_| {
+                                                                            let mut envs = scope_envs.read().clone();
+                                                                            if let Some(pos) = envs.iter().position(|e| e == &env_str) {
+                                                                                envs.remove(pos);
+                                                                            } else {
+                                                                                envs.push(env_str.clone());
+                                                                            }
+                                                                            scope_envs.set(envs);
+                                                                        },
+                                                                        span {
+                                                                            style: "width: 6px; height: 6px; border-radius: 50%; background: {env_color};",
+                                                                        }
+                                                                        "{env}"
+                                                                        span {
+                                                                            class: "mono",
+                                                                            style: "font-size: 10px; opacity: 0.7;",
+                                                                            "{count}"
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                // "Covers N of M" help line
+                                                div {
+                                                    class: "help",
+                                                    style: "margin-top: 6px;",
+                                                    "Covers "
+                                                    strong {
+                                                        style: "color: var(--cf-text-primary);",
+                                                        "{covered_count}"
+                                                    }
+                                                    {
+                                                        let sys_s = if all_affected_count == 1 { "" } else { "s" };
+                                                        format!(" of {all_affected_count} affected system{sys_s}")
+                                                    }
+                                                    if scope_mode() == "some" && covered_count < all_affected_count {
+                                                        {
+                                                            let remaining = all_affected_count - covered_count;
+                                                            format!(" · {remaining} remain outstanding")
+                                                        }
+                                                    }
+                                                    "."
+                                                }
+                                            }
 
                                             // Disposition
                                             div {
@@ -1721,21 +1877,6 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
                                                 }
                                             }
 
-                                            // Expiry / target date
-                                            div {
-                                                class: "field",
-                                                style: "max-width: 220px;",
-                                                label {
-                                                    if justification_category() == "patch_scheduled" { "Target patch date" } else { "Review / expiry date (optional)" }
-                                                }
-                                                input {
-                                                    r#type: "date",
-                                                    class: "input focus-ring",
-                                                    value: "{justification_expiry}",
-                                                    oninput: move |evt| justification_expiry.set(evt.value()),
-                                                }
-                                            }
-
                                             // Audit trail callout
                                             div {
                                                 class: "sd-callout sd-callout-info",
@@ -1793,7 +1934,8 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
                                                     },
                                                     {
                                                         let verb = if justification_category() == "accepted_risk" { "Accept" } else { "Schedule" };
-                                                        format!("{} for {} system{}", verb, total_affected, if total_affected == 1 { "" } else { "s" })
+                                                        let s = if covered_count == 1 { "" } else { "s" };
+                                                        format!("{verb} for {covered_count} system{s}")
                                                     }
                                                 }
                                             }
@@ -1839,10 +1981,7 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
                                                 }
                                                 span {
                                                     style: "font-size: 11px; color: var(--cf-text-muted);",
-                                                    {
-                                                        let s = if total_affected == 1 { "" } else { "s" };
-                                                        format!("covers {total_affected} system{s}")
-                                                    }
+                                                    "fleet-wide justification"
                                                 }
                                             }
                                             // Reason text
@@ -1872,11 +2011,15 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
                                                 if let Some(at) = &latest_at {
                                                     span { "· {at}" }
                                                 }
-                                                // Edit button
+                                                // Edit button — prefill form from existing justification
                                                 button {
                                                     class: "btn btn-ghost focus-ring xs",
                                                     style: "margin-left: auto;",
-                                                    onclick: move |_| show_accept.set(true),
+                                                    onclick: move |_| {
+                                                        justification_category.set(existing_category.clone());
+                                                        justification_reason.set(existing_reason.clone());
+                                                        show_accept.set(true);
+                                                    },
                                                     svg {
                                                         width: "10", height: "10", view_box: "0 0 24 24",
                                                         fill: "none", stroke: "currentColor", stroke_width: "2",
