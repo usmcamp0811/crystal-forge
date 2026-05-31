@@ -3,6 +3,7 @@ id: doc-8
 title: CrystalForgelatest UI Parity Matrix (TASK-328)
 type: specification
 created_date: '2026-05-31 16:08'
+updated_date: '2026-05-31 16:12'
 tags:
   - ui-parity
   - design-system
@@ -10,6 +11,10 @@ tags:
   - crystalforgelatest
 ---
 # CrystalForgelatest UI Parity Matrix (TASK-328)
+
+## What this is
+This is the **implementation and QA contract** for parity work, not just a progress note.
+It defines objective pass/fail rules so “pixel parity” can be verified deterministically.
 
 ## Scope
 Authoritative design source:
@@ -24,8 +29,8 @@ Implementation target:
 - Base font size: **14px**
 - Default line-height: **1.45**
 - Radius scale: **6 / 10 / 14 / 16 / 999px**
-- Button sizing baseline: **8px vertical / 14px horizontal padding**, **13px text**
-- Input sizing baseline: **8px 12px**, **13px text**
+- Button baseline: **8px vertical / 14px horizontal**, **13px text**
+- Input baseline: **8px 12px**, **13px text**
 - Card border: **1px**
 - Focus ring: **2px equivalent visible ring**
 - Theme modes required: **dark + light**
@@ -40,119 +45,139 @@ Implementation target:
 | Status colors | healthy/warning/critical/offline/info chips | Exact semantic color + bg alpha parity | `assets/app.css`, chip components |
 | Shadow model | `--shadow-card`, `--shadow-pop` | Exact values for each theme | `assets/app.css` |
 
+## Tolerance Rules (for pixel checks)
+- **Spacing / dimensions tolerance**: ±1px
+- **Typography size tolerance**: 0px (must match)
+- **Color tolerance**: exact token value match
+- **Border/radius tolerance**: 0px (must match)
+- **If conflict exists** between screenshot and `styles.css`, `styles.css` token values are authoritative unless explicitly overridden by component-local rules in design source.
+
 ## View-by-View Parity Matrix
 
 ### 1) Shell / Layout Frame
 - Source: sidebar, brand block, nav sections, top controls/tweaks
 - Owner: `packages/web-ui/src/main.rs`, layout components, `assets/app.css`
-- Criteria:
-  - Sidebar width and paddings match reference spacing rhythm
-  - Brand mark size/radius/gradient matches visual spec
-  - Section label typography/case/letterspacing match
-  - Rail/full mode spacing and icon alignment match
-- Required web-ui assertions:
-  - Sidebar mode toggle applies expected structural class/state
-  - Theme toggle updates root theme attribute and preserves layout geometry
+- Numeric criteria:
+  - Sidebar full width: match reference width token usage
+  - Brand mark: **28x28**, radius **7px**
+  - Brand block min-height: **60px**
+  - Nav section label: uppercase, letter-spacing consistent with design token
+- Required assertions:
+  - Sidebar mode toggle applies expected structure/state
+  - Theme toggle sets root theme attribute and preserves geometry
 - Required screenshots:
-  - Dark: full sidebar + rail sidebar
-  - Light: full sidebar + rail sidebar
+  - Dark: full sidebar + rail
+  - Light: full sidebar + rail
 
 ### 2) Systems View
-- Source: `app.jsx` Systems view section
+- Source: `app.jsx` Systems section
 - Owner: `src/views/systems_list.rs`, system components, adapters
-- Criteria:
-  - Header/title/subtitle text and action button geometry match
-  - Stat strip card count, spacing, accents, and typography match
-  - Filter bar controls, segmented view toggle, result count placement match
-  - Card/table modes match row/card density and column rhythm
-  - Panel/modal visual geometry and behavior match
-- Required web-ui assertions:
-  - Filter/search affect shown count deterministically
-  - Card/table toggle retains selected filters
-  - Modal open/close state transitions deterministic
+- Numeric criteria:
+  - Header action buttons use baseline button sizing
+  - Stat-strip cards maintain radius **16px** and border **1px**
+  - Filter controls maintain input/button baseline spacing
+  - Table and card density match reference row/card rhythm
+- Required assertions:
+  - Filter/search deterministically change shown count
+  - Card/table toggle preserves active filter/query state
+  - Modal open/close transitions deterministic
 - Required screenshots:
-  - loading, empty, error, populated(card), populated(table), filtered, panel open, each modal
+  - loading, empty, error, populated-card, populated-table, filtered, panel-open, each modal
 
 ### 3) Flakes View
 - Owner: `src/views/flakes*.rs`, flakes components
-- Criteria: timeline/list density, chips/statuses, filters/tabs, detail pane alignment
+- Numeric criteria: chip dimensions, timeline spacing, table/list row density align to baseline tokens
 - Assertions: filter + selection + queue/state controls
 - Screenshots: loading/empty/error/populated + modal/tab variants
 
 ### 4) Builds View
 - Owner: `src/views/builds.rs`, build components
-- Criteria: active/history segmentation, queue table density, detail panel hierarchy
-- Assertions: row select, action controls, status transitions rendering
+- Numeric criteria: active/history layout spacing and queue table row density align with systems/evals standards
+- Assertions: row selection, action controls, status transition rendering
 - Screenshots: loading/empty/error/populated + active/history + detail selected
 
 ### 5) Evaluations View
 - Owner: `src/views/evaluations.rs`, eval components
-- Criteria: queue presentation parity, logs/detail layout parity, control density parity
-- Assertions: selection, ordering controls, live/log state behavior
+- Numeric criteria: queue/table density and detail/log pane spacing match global layout rhythm
+- Assertions: selection, ordering controls, live/log states
 - Screenshots: loading/empty/error/populated + queue/detail/log variants
 
 ### 6) CVEs View
 - Owner: `src/views/cves.rs`, cve components
-- Criteria: severity chip semantics, grouping rows, filter/search alignment
-- Assertions: severity filters + grouping correctness in UI state
+- Numeric criteria: severity chip paddings/typography and filter bar spacing match chip/input baselines
+- Assertions: severity filters + grouping correctness
 - Screenshots: loading/empty/error/populated + filtered states
 
 ### 7) Caches View
 - Owner: `src/views/caches.rs`, caches components
-- Criteria: card/table spacing, controls alignment, status chip parity
-- Assertions: test-credential flow UI state transitions, filter/search behavior
+- Numeric criteria: controls spacing + row/card density align to baseline tokens
+- Assertions: credential-test flow transitions + filter/search behavior
 - Screenshots: loading/empty/error/populated + modal/dialog states
 
 ### 8) Compliance View
 - Owner: `src/views/compliance.rs` (+ new if missing)
-- Criteria: complete screen composition parity, controls/states parity
-- Assertions: critical compliance interactions and state transitions
+- Numeric criteria: complete screen adheres to baseline typography/spacing/radius/border system
+- Assertions: key compliance interactions and transitions
 - Screenshots: loading/empty/error/populated + action/dialog states
 
 ### 9) Admin View
 - Owner: `src/views/admin.rs`
-- Criteria: exact table/control/dialog parity and hierarchy
-- Assertions: admin workflows and response-state rendering
+- Numeric criteria: table/control/dialog geometry follows baseline tokens
+- Assertions: admin workflow behavior and response-state rendering
 - Screenshots: loading/empty/error/populated + dialogs + success/error toasts
 
 ### 10) User Profile View
 - Owner: `src/views/profile.rs` (+ related auth/profile state)
-- Criteria: profile sections, forms, feedback/status styling parity
-- Assertions: edit/save/cancel/validation state transitions
+- Numeric criteria: form field/button spacing and section rhythm match baseline
+- Assertions: edit/save/cancel/validation transitions
 - Screenshots: loading/empty/error/populated + editing/confirmation states
 
 ## Interaction Inventory (Must Be Asserted)
-1. Search input filtering (systems, flakes, builds, evals, cves, caches)
-2. Multi-filter combinations and reset behavior
-3. Card/table or tab mode toggles preserve filter/query state
-4. Row/card selection updates detail pane deterministically
-5. Modal open/close, cancel, and confirm states
-6. API error states render design-compliant error surfaces
-7. Loading → populated transition and loading → error transition
-8. Empty-state messaging and CTA visual parity
-9. Theme switch dark/light visual parity and no layout shift
+1. Search filtering
+2. Multi-filter combinations + reset
+3. Mode/tab toggles preserve state
+4. Selection updates detail panes deterministically
+5. Modal/dialog open/close/cancel/confirm
+6. API error states render compliant error surfaces
+7. Loading→populated and loading→error transitions
+8. Empty-state CTA and copy parity
+9. Theme dark/light parity without layout shift
 
-## Screenshot Contract (Mandatory Coverage)
+## Screenshot Contract (Mandatory)
 Per in-scope view, capture:
 - `loading`
 - `empty`
 - `error`
 - `populated-default`
 - `populated-filtered`
-- each modal/dialog/tab variant relevant to that view
+- each modal/dialog/tab variant
 
 Naming format:
 - `<view>--<state>--<theme>.png`
-- examples: `systems--populated-table--dark.png`, `admin--dialog-user-edit--light.png`
+- e.g. `systems--populated-table--dark.png`, `admin--dialog-user-edit--light.png`
+
+## Scoring Rubric (Execution Tracking)
+Use this to track “how close we are” objectively per view:
+- **Visual parity (40%)**: spacing, typography, colors, radius, borders, shadows
+- **Interaction parity (30%)**: controls, toggles, filters, modal/dialog behaviors
+- **Data parity (20%)**: backend-driven values, no placeholder paths in production
+- **Verification parity (10%)**: assertions + full screenshot coverage landed in `checks/web-ui`
+
+Grade per view:
+- **A (95-100)** release-ready parity
+- **B (85-94)** minor deltas only
+- **C (70-84)** meaningful drift remains
+- **D (<70)** not acceptable for parity completion
 
 ## Dependency & Execution Order
-1. TASK-328 (this spec)
+1. TASK-328 (this matrix)
 2. TASK-329 (global tokens/shell)
 3. TASK-332 (API contract fields)
 4. TASK-330 + TASK-331 + TASK-334 + TASK-335 + TASK-336 (view implementation)
-5. TASK-333 (verification harness completion and strict enforcement)
+5. TASK-333 (verification harness strict enforcement)
 
 ## Exit Criteria for TASK-328
-- Matrix completed and approved as authoritative implementation contract
-- Every in-scope view has objective visual criteria, assertion contract, and screenshot contract
+- Matrix approved as authoritative implementation contract
+- Every in-scope view has objective visual criteria + assertion contract + screenshot contract
 - Every in-scope area mapped to owner implementation files
+- Scoring rubric adopted for downstream parity reviews
