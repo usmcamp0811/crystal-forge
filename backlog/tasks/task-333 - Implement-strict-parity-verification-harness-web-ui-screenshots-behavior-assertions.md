@@ -3,10 +3,10 @@ id: TASK-333
 title: >-
   Implement strict parity verification harness (web-ui screenshots + behavior
   assertions)
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-05-31 15:57'
-updated_date: '2026-05-31 15:59'
+updated_date: '2026-05-31 16:07'
 labels:
   - design-parity
   - verification
