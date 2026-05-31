@@ -3,10 +3,10 @@ id: TASK-328
 title: >-
   Establish CrystalForgelatest parity spec with pixel metrics and interaction
   inventory
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-05-31 15:56'
-updated_date: '2026-05-31 15:58'
+updated_date: '2026-05-31 16:07'
 labels:
   - design-parity
   - ui-ux
