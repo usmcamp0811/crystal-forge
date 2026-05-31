@@ -4,13 +4,17 @@ title: Add tab icons to system detail view to match design example
 status: Backlog
 assignee: []
 created_date: '2026-05-10 13:28'
-updated_date: '2026-05-31 15:59'
+updated_date: '2026-05-31 16:04'
 labels:
   - ui
   - design-system
   - icons
 milestone: m-16
-dependencies: []
+dependencies:
+  - TASK-328
+  - TASK-333
+references:
+  - /home/mcamp/code/crystal-forge/CrystalForgelatest
 priority: medium
 ordinal: 0
 ---
@@ -18,97 +22,45 @@ ordinal: 0
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-The system detail view tabs are currently using inline SVG icons directly in the component code, but they should use the Icon component system to match our design example at `/home/mcamp/code/crystal-forge/crystal-forge/project/components/SystemDetail.jsx`.
+## Problem
+System detail tabs currently use inline SVG snippets and mixed sizing, which diverges from the design system icon contract and creates inconsistent visual behavior across tabs.
 
-## Current State
+## Goal
+Replace inline tab icons with shared Icon component usage and deliver exact icon mapping/size parity with the design example.
 
-The tabs in `packages/web-ui/src/views/system_detail.rs` (lines 883-975) have inline SVG definitions for each tab icon:
-- Overview: house/home icon (inline SVG)
-- Deploy: deploy icon (inline SVG)
-- History: clock icon (inline SVG)
-- CVEs: shield icon (inline SVG)
-- Hardening: shield with minus icon (inline SVG)
-- Logs: terminal icon (inline SVG)
-- Config: file icon (inline SVG)
+## Non-Goals
+- No redesign of system detail tab structure or navigation semantics.
+- No unrelated styling refactors outside tab icon rendering.
+- No backend/API behavior changes.
 
-## Design Example
+## Scope
+- Extend `packages/web-ui/src/components/icon.rs` with missing tab icon variants required by system detail tabs.
+- Replace inline SVG icon rendering in `packages/web-ui/src/views/system_detail.rs` with Icon component calls.
+- Normalize icon size and alignment to match design source.
+- Ensure badge/layout behavior remains intact after icon replacement.
 
-The JSX design example at `/home/mcamp/code/crystal-forge/crystal-forge/project/components/SystemDetail.jsx` (lines 75-96) shows the expected pattern:
+## Architectural Constraints
+- Keep presentation concerns in UI components; no business logic in tab rendering.
+- Reuse shared icon primitives (no new per-view inline SVG blocks).
+- Preserve existing tab-state/data-flow architecture.
 
-```jsx
-{[
-  { k: "overview",   l: "Overview",  i: "dashboard" },
-  { k: "deploy",     l: "Deploy",    i: "deploy" },
-  { k: "history",    l: "History",   i: "history" },
-  { k: "logs",       l: "Logs",      i: "terminal" },
-  { k: "config",     l: "Config",    i: "file" },
-  { k: "cves",       l: "CVEs",      i: "shield", badge: ... },
-  { k: "hardening",  l: "Hardening", i: "key" },
-].map(t => (
-  <button ...>
-    <Icon name={t.i} size={13} /> {t.l}
-    {t.badge != null && <span className="sd-tab-badge">{t.badge}</span>}
-  </button>
-))}
-```
+## Verification Plan
+- `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown`
+- `nix build .#checks.x86_64-linux.web-ui`
+- Update `checks/web-ui` to assert icon presence/mapping for all affected tabs.
+- Capture screenshot evidence for all affected system-detail tab states.
 
-Note: The design uses size={13} for tab icons.
+## Impact Areas
+- `packages/web-ui/src/components/icon.rs`
+- `packages/web-ui/src/views/system_detail.rs`
+- `checks/web-ui/**`
 
-## Required Changes
+## Risk Level
+Medium (localized UI refactor with high visual-sensitivity requirements).
 
-### 1. Extend Icon Component
-
-Add missing icon variants to `packages/web-ui/src/components/icon.rs`:
-- `Dashboard` (for Overview tab)
-- `Deploy` (for Deploy tab)
-- `History` (for History tab)
-- `Shield` (for CVEs tab - already exists inline, extract it)
-- `Key` (for Hardening tab)
-- `File` (for Config tab)
-
-The Terminal icon already exists in the Icon component and can be reused.
-
-### 2. Update Tab Rendering
-
-Replace the inline SVG definitions in `system_detail.rs` with Icon component calls:
-
-```rust
-match tab {
-    Tab::Overview => rsx!(Icon { name: IconName::Dashboard, size: 13 }),
-    Tab::Deploy => rsx!(Icon { name: IconName::Deploy, size: 13 }),
-    Tab::History => rsx!(Icon { name: IconName::History, size: 13 }),
-    Tab::Cves => rsx!(Icon { name: IconName::Shield, size: 13 }),
-    Tab::Hardening => rsx!(Icon { name: IconName::Key, size: 13 }),
-    Tab::Logs => rsx!(Icon { name: IconName::Terminal, size: 13 }),
-    Tab::Config => rsx!(Icon { name: IconName::File, size: 13 }),
-}
-```
-
-### 3. Icon SVG Paths
-
-Extract the SVG path data from the existing inline icons or match them to the design system:
-- **Dashboard**: Use a grid/squares icon for Overview
-- **Deploy**: Keep existing deploy icon (up/down arrows)
-- **History**: Keep existing clock icon
-- **Shield**: Keep existing shield icon
-- **Key**: Use a key icon for Hardening
-- **File**: Use a document/file icon for Config
-- **Terminal**: Already exists, reuse it
-
-## Design System Consistency
-
-- Icon size must be 13px (as shown in design example)
-- Icons must use `currentColor` for stroke
-- Icons must be consistent with the rest of the application
-- Remove the custom `class: "w-3.5 h-3.5"` styling (currently 14px) and use explicit size={13}
-
-## Technical Notes
-
-**Icon Component Location**: `packages/web-ui/src/components/icon.rs`
-**System Detail View**: `packages/web-ui/src/views/system_detail.rs`
-**Design Reference**: `/home/mcamp/code/crystal-forge/crystal-forge/project/components/SystemDetail.jsx`
-
-The Icon component already has the correct structure (SVG with view_box, stroke, fill, etc). We just need to add the new icon variants and update the tab rendering to use the Icon component instead of inline SVG.
+## Dependencies
+- Uses milestone parity specification and verification harness requirements (TASK-328 and TASK-333).
+- Requires no unresolved backend dependencies.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
