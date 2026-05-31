@@ -4,6 +4,7 @@ title: Align global design system tokens and shell layout to CrystalForgelatest
 status: Backlog
 assignee: []
 created_date: '2026-05-31 15:56'
+updated_date: '2026-05-31 15:58'
 labels:
   - design-parity
   - design-system
@@ -49,4 +50,5 @@ Risk: High (shared primitives affect all views).
 - [ ] #2 Dark and light theme base surfaces render to parity for shell and primitive components
 - [ ] #3 No duplicate conflicting token definitions remain for shared primitives
 - [ ] #4 web-ui check captures shell + primitive screenshot set for both themes
+- [ ] #5 web-ui check includes assertions that token-driven styles render expected computed values/classes for core primitives
 <!-- AC:END -->
