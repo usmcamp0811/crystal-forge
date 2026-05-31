@@ -3,10 +3,10 @@ id: TASK-330
 title: >-
   Complete Systems view parity including cards-table modes and modal flows with
   real API data
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-05-31 15:56'
-updated_date: '2026-05-31 15:58'
+updated_date: '2026-05-31 16:07'
 labels:
   - design-parity
   - systems
