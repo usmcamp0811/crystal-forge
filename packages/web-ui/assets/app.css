@@ -4,6 +4,17 @@ html, body {
   background: var(--cf-page-bg);
 }
 
+/* Global typography baseline — matches design reference */
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  color: var(--cf-text-primary);
+  font-size: 14px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
 /* Design System Foundation */
 :root {
   /* Brand colors */

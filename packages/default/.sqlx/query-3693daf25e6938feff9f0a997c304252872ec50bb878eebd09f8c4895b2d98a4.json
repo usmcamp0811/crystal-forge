@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT \n            scj.system_id as \"system_id?\",\n            scj.cve_id as \"cve_id!\",\n            scj.category as \"category!\",\n            scj.reason as \"reason!\",\n            scj.updated_by as \"updated_by?\",\n            scj.updated_at as \"updated_at!\",\n            scj.created_at as \"created_at!\",\n            u.username as \"updated_by_username?\"\n        FROM system_cve_justifications scj\n        LEFT JOIN users u ON scj.updated_by = u.id\n        WHERE scj.cve_id = $1\n        ORDER BY scj.updated_at DESC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "system_id?",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "cve_id!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "category!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "reason!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "updated_by?",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 5,
+        "name": "updated_at!",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 6,
+        "name": "created_at!",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "updated_by_username?",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "3693daf25e6938feff9f0a997c304252872ec50bb878eebd09f8c4895b2d98a4"
+}

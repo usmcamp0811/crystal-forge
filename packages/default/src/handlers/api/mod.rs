@@ -9,6 +9,7 @@ pub mod builders;
 pub mod caches;
 pub mod commits;
 pub mod config_health;
+pub mod cves;
 pub mod dashboard;
 pub mod deployment_policies;
 pub mod deployments;
