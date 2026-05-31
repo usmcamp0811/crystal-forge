@@ -205,10 +205,62 @@ pub fn ScanningView() -> Element {
                                 "×"
                             }
                         }
-                        div { class: "dash-w-body", style: "gap:8px;",
-                            div { style: "font-size:12px;", strong { "Scan started" } " · campground-config-main" }
-                            div { style: "font-size:12px;", strong { "Scan completed" } " · ops-jumpbox" }
-                            div { style: "font-size:12px;", strong { "Scan failed" } " · legacy-edge-node" }
+                        div {
+                            class: "dash-w-body",
+                            style: "gap:0;",
+                            div {
+                                style: "display:flex; gap:10px; padding-left:2px;",
+                                div {
+                                    style: "display:flex; flex-direction:column; align-items:center; padding-top:4px; flex-shrink:0;",
+                                    div { style: "width:22px; height:22px; border-radius:6px; background:color-mix(in oklab, #60a5fa 18%, transparent); color:#60a5fa; display:grid; place-items:center; font-size:11px;", "↻" }
+                                    div { style: "width:2px; flex:1; background:var(--cf-divider); min-height:16px;" }
+                                }
+                                div {
+                                    style: "padding-top:3px; padding-bottom:14px; min-width:0;",
+                                    div {
+                                        style: "font-size:12px; color:var(--cf-text-primary); display:flex; gap:6px; justify-content:space-between;",
+                                        span { style: "font-weight:600;", "Scan started" }
+                                        span { style: "font-size:11px; color:var(--cf-text-muted); white-space:nowrap;", "just now" }
+                                    }
+                                    div { class: "mono", style: "font-size:11px; color:var(--cf-brand-purple);", "campground-config-main" }
+                                    div { style: "font-size:11px; color:var(--cf-text-muted); margin-top:2px;", "Queued by schedule policy for deployed configs" }
+                                }
+                            }
+                            div {
+                                style: "display:flex; gap:10px; padding-left:2px;",
+                                div {
+                                    style: "display:flex; flex-direction:column; align-items:center; padding-top:4px; flex-shrink:0;",
+                                    div { style: "width:22px; height:22px; border-radius:6px; background:color-mix(in oklab, #34d399 18%, transparent); color:#34d399; display:grid; place-items:center; font-size:11px;", "✓" }
+                                    div { style: "width:2px; flex:1; background:var(--cf-divider); min-height:16px;" }
+                                }
+                                div {
+                                    style: "padding-top:3px; padding-bottom:14px; min-width:0;",
+                                    div {
+                                        style: "font-size:12px; color:var(--cf-text-primary); display:flex; gap:6px; justify-content:space-between;",
+                                        span { style: "font-weight:600;", "Scan completed" }
+                                        span { style: "font-size:11px; color:var(--cf-text-muted); white-space:nowrap;", "3m ago" }
+                                    }
+                                    div { class: "mono", style: "font-size:11px; color:var(--cf-brand-purple);", "ops-jumpbox" }
+                                    div { style: "font-size:11px; color:var(--cf-text-muted); margin-top:2px;", "No critical findings detected" }
+                                }
+                            }
+                            div {
+                                style: "display:flex; gap:10px; padding-left:2px;",
+                                div {
+                                    style: "display:flex; flex-direction:column; align-items:center; padding-top:4px; flex-shrink:0;",
+                                    div { style: "width:22px; height:22px; border-radius:6px; background:color-mix(in oklab, #f87171 18%, transparent); color:#f87171; display:grid; place-items:center; font-size:11px;", "×" }
+                                }
+                                div {
+                                    style: "padding-top:3px; padding-bottom:0; min-width:0;",
+                                    div {
+                                        style: "font-size:12px; color:var(--cf-text-primary); display:flex; gap:6px; justify-content:space-between;",
+                                        span { style: "font-weight:600;", "Scan failed" }
+                                        span { style: "font-size:11px; color:var(--cf-text-muted); white-space:nowrap;", "2h ago" }
+                                    }
+                                    div { class: "mono", style: "font-size:11px; color:var(--cf-brand-purple);", "legacy-edge-node" }
+                                    div { style: "font-size:11px; color:var(--cf-text-muted); margin-top:2px;", "Timed out while resolving archived derivation" }
+                                }
+                            }
                         }
                     }
                 }
@@ -223,7 +275,33 @@ pub fn ScanningView() -> Element {
                         style: "width:min(620px,96vw);",
                         onclick: move |evt| evt.stop_propagation(),
                         div { class: "modal-head", h2 { "Scan schedule" }, p { "Control how often vulnix rescans configurations." } }
-                        div { class: "modal-body", p { class: "page-subtitle", "Schedule controls mirror the ScanningView design and will be wired to backend policy next." } }
+                        div {
+                            class: "modal-body",
+                            div {
+                                style: "display:flex; align-items:flex-start; justify-content:space-between; gap:16px; padding:12px 0; border-bottom:1px solid var(--cf-divider);",
+                                div {
+                                    div { style: "font-size:13px; font-weight:600;", "Scan on build" }
+                                    div { style: "font-size:11px; color:var(--cf-text-muted); margin-top:2px; line-height:1.5;", "Scan freshly-built configs before deploy." }
+                                }
+                                label { style: "display:flex; gap:8px; align-items:center; font-size:13px; cursor:pointer;",
+                                    input { r#type: "checkbox", checked: true }
+                                    span { "On" }
+                                }
+                            }
+                            div {
+                                style: "display:flex; align-items:flex-start; justify-content:space-between; gap:16px; padding:12px 0; border-bottom:1px solid var(--cf-divider);",
+                                div {
+                                    div { style: "font-size:13px; font-weight:600;", "Deployed configs" }
+                                    div { style: "font-size:11px; color:var(--cf-text-muted); margin-top:2px; line-height:1.5;", "Currently running on at least one system." }
+                                }
+                                select { class: "input focus-ring", style: "width:120px;", option { value: "24h", "Every 24h" } }
+                            }
+                            div {
+                                class: "sd-callout sd-callout-info",
+                                style: "font-size:11px; margin-top:12px;",
+                                div { "Estimated load: deployed configs at every 24h dominate builder cost." }
+                            }
+                        }
                         div {
                             class: "modal-foot",
                             button { class: "btn btn-ghost focus-ring", onclick: move |_| schedule_open.set(false), "Cancel" }
