@@ -22,6 +22,7 @@ pub fn ScanningView() -> Element {
     let mut policy_archived_interval = use_signal(|| "168h".to_string());
     let mut policy_archived_enabled = use_signal(|| true);
     let mut policy_rebuild_to_scan = use_signal(|| false);
+    let mut schedule_save_error = use_signal(|| Option::<String>::None);
 
     let stats = use_resource(|| async { fetch_scanning_stats().await });
     let queue = use_resource(|| async { fetch_scanning_queue(Some(50)).await });
@@ -257,6 +258,10 @@ pub fn ScanningView() -> Element {
                         div { class: "modal-body",
                             if let Some(policy) = schedule_value.clone() {
                                 div { style: "display:flex; flex-direction:column; gap:10px;",
+                                    if let Some(err) = schedule_save_error() {
+                                        div { class: "chip chip-critical", "{err}" }
+                                    }
+
                                     div { style: "display:flex; justify-content:space-between; align-items:center;",
                                         span { style: "font-size:13px; font-weight:600;", "Scan on build" }
                                         input {
@@ -343,11 +348,20 @@ pub fn ScanningView() -> Element {
                                         archived_enabled: policy_archived_enabled(),
                                         rebuild_to_scan: policy_rebuild_to_scan(),
                                     };
+                                    schedule_save_error.set(None);
                                     spawn(async move {
-                                        let _ = update_scanning_schedule(&req).await;
+                                        match update_scanning_schedule(&req).await {
+                                            Ok(_) => {
+                                                schedule.restart();
+                                                schedule_open.set(false);
+                                            }
+                                            Err(e) => {
+                                                schedule_save_error.set(Some(format!(
+                                                    "Failed to save schedule: {e}"
+                                                )));
+                                            }
+                                        }
                                     });
-                                    schedule.restart();
-                                    schedule_open.set(false);
                                 },
                                 "Save schedule"
                             }

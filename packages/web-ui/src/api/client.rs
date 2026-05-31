@@ -124,9 +124,9 @@ pub async fn fetch_scanning_schedule() -> Result<ScanSchedulePolicyResponse, Api
 
 pub async fn update_scanning_schedule(
     req: &UpdateScanSchedulePolicyRequest,
-) -> Result<serde_json::Value, ApiClientError> {
+) -> Result<ScanSchedulePolicyResponse, ApiClientError> {
     let url = format!("{}/scanning/schedule", base_url());
-    send_json("PUT", &url, Some(req)).await
+    send_json_with_csrf("PUT", &url, Some(req)).await
 }
 
 pub async fn fetch_hardening_fleet_summary() -> Result<HardeningFleetSummaryResponse, ApiClientError>

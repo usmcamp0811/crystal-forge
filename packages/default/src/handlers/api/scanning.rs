@@ -209,7 +209,25 @@ pub async fn put_scanning_schedule(
     };
 
     match update_scan_schedule_policy(&pool, &row).await {
-        Ok(_) => (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response(),
+        Ok(_) => match get_scan_schedule_policy(&pool).await {
+            Ok(p) => (
+                StatusCode::OK,
+                Json(ScanSchedulePolicyResponse {
+                    on_build: p.on_build,
+                    deployed_interval: p.deployed_interval,
+                    recent_interval: p.recent_interval,
+                    archived_interval: p.archived_interval,
+                    archived_enabled: p.archived_enabled,
+                    rebuild_to_scan: p.rebuild_to_scan,
+                    updated_at: p.updated_at,
+                }),
+            )
+                .into_response(),
+            Err(e) => {
+                error!("scanning schedule reload failed after update: {e:#}");
+                internal_error("Failed to reload scan schedule")
+            }
+        },
         Err(e) => {
             error!("scanning schedule update failed: {e:#}");
             internal_error("Failed to update scan schedule")

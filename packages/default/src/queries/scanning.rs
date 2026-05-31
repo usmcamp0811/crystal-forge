@@ -116,7 +116,16 @@ pub async fn update_scan_schedule_policy(
 pub async fn get_scan_stats(pool: &PgPool) -> Result<ScanStatsRow> {
     let row = sqlx::query(
         r#"
-        WITH latest AS (
+        WITH policy AS (
+            SELECT
+                GREATEST(
+                    1,
+                    COALESCE(NULLIF(regexp_replace(deployed_interval, '[^0-9]', '', 'g'), '')::INT, 24)
+                ) AS deployed_hours
+            FROM scan_schedule_policy
+            WHERE id = 1
+        ),
+        latest AS (
             SELECT DISTINCT ON (d.id)
                 d.id AS derivation_id,
                 cs.status,
@@ -132,7 +141,10 @@ pub async fn get_scan_stats(pool: &PgPool) -> Result<ScanStatsRow> {
             COUNT(*) FILTER (WHERE status = 'pending')::BIGINT AS queued,
             COUNT(*) FILTER (WHERE status = 'failed')::BIGINT AS failed,
             COUNT(*) FILTER (WHERE completed_at IS NULL)::BIGINT AS never_scanned,
-            COUNT(*) FILTER (WHERE completed_at IS NOT NULL AND completed_at < NOW() - INTERVAL '24 hours')::BIGINT AS stale,
+            COUNT(*) FILTER (
+                WHERE completed_at IS NOT NULL
+                AND completed_at < NOW() - (SELECT deployed_hours * INTERVAL '1 hour' FROM policy)
+            )::BIGINT AS stale,
             CASE
                 WHEN COUNT(*) = 0 THEN 0
                 ELSE ROUND((COUNT(*) FILTER (WHERE completed_at IS NOT NULL)::numeric / COUNT(*)::numeric) * 100)
@@ -202,7 +214,16 @@ pub async fn get_scan_queue(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueueRo
 pub async fn get_scan_systems(pool: &PgPool, limit: i64) -> Result<Vec<ScanSystemRow>> {
     let rows = sqlx::query(
         r#"
-        WITH latest_per_derivation AS (
+        WITH policy AS (
+            SELECT
+                GREATEST(
+                    1,
+                    COALESCE(NULLIF(regexp_replace(deployed_interval, '[^0-9]', '', 'g'), '')::INT, 24)
+                ) AS deployed_hours
+            FROM scan_schedule_policy
+            WHERE id = 1
+        ),
+        latest_per_derivation AS (
             SELECT DISTINCT ON (d.id)
                 d.id AS derivation_id,
                 d.derivation_name AS hostname,
@@ -221,7 +242,10 @@ pub async fn get_scan_systems(pool: &PgPool, limit: i64) -> Result<Vec<ScanSyste
             MAX(e.name) AS environment,
             COUNT(*)::BIGINT AS total_configs,
             COUNT(*) FILTER (WHERE l.completed_at >= NOW() - INTERVAL '30 days')::BIGINT AS scanned,
-            COUNT(*) FILTER (WHERE l.completed_at IS NOT NULL AND l.completed_at < NOW() - INTERVAL '30 days')::BIGINT AS stale,
+            COUNT(*) FILTER (
+                WHERE l.completed_at IS NOT NULL
+                AND l.completed_at < NOW() - (SELECT deployed_hours * INTERVAL '1 hour' FROM policy)
+            )::BIGINT AS stale,
             COUNT(*) FILTER (WHERE l.store_path IS NULL)::BIGINT AS needs_build,
             COUNT(*) FILTER (WHERE l.completed_at IS NULL)::BIGINT AS unscanned,
             COALESCE(MAX(l.critical_count), 0)::BIGINT AS current_crit,
