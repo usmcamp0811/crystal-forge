@@ -20,6 +20,7 @@ pub mod eval_logs;
 pub mod flake_credentials;
 pub mod flakes;
 pub mod hardening_scans;
+pub mod scanning;
 pub mod status;
 pub mod system_states;
 pub mod systems;
