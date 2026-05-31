@@ -6,6 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-05-31 15:57'
+updated_date: '2026-05-31 15:59'
 labels:
   - design-parity
   - verification
@@ -51,4 +52,6 @@ Risk: Medium.
 - [ ] #2 web-ui check asserts core design-required interactions for each primary view
 - [ ] #3 Check output clearly identifies visual and behavior regressions
 - [ ] #4 Parity tasks reference this harness as the acceptance proof mechanism
+- [ ] #5 Screenshot coverage includes every in-scope view and state (loading, empty, error, populated, modal/tab variants)
+- [ ] #6 Assertion coverage verifies critical user flows and state transitions for each in-scope view
 <!-- AC:END -->
