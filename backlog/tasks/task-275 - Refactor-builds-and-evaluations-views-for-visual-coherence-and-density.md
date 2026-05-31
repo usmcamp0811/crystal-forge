@@ -4,6 +4,7 @@ title: Refactor builds and evaluations views for visual coherence and density
 status: Backlog
 assignee: []
 created_date: '2026-04-18 01:56'
+updated_date: '2026-05-31 15:59'
 labels:
   - ui
   - ux
@@ -11,8 +12,10 @@ labels:
   - builds
   - evaluations
   - dioxus
+milestone: m-16
 dependencies: []
 priority: medium
+ordinal: 0
 ---
 
 ## Description
@@ -123,4 +126,6 @@ The implementing agent will:
 - [ ] #10 Information density is improved - key data is visible without excessive scrolling or clicking
 - [ ] #11 Search and filter controls work and are consistently positioned
 - [ ] #12 Running AUTH_MODE=dev nix run .#web-ui.dx-serve provides hot-reload during development
+- [ ] #13 web-ui check must include assertion-based verification for builds/evaluations interaction correctness
+- [ ] #14 web-ui check must include screenshots for all targeted builds/evaluations parity states
 <!-- AC:END -->
