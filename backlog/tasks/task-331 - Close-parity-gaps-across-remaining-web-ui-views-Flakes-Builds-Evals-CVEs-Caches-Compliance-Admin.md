@@ -3,10 +3,10 @@ id: TASK-331
 title: >-
   Close parity gaps across remaining web-ui views (Flakes, Builds, Evals, CVEs,
   Caches, Compliance, Admin)
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-05-31 15:56'
-updated_date: '2026-05-31 15:59'
+updated_date: '2026-05-31 16:07'
 labels:
   - design-parity
   - multi-view
