@@ -167,12 +167,17 @@ pub fn ScanningView() -> Element {
                     } else {
                         div {
                             style: "padding:10px 16px; border-top: 1px solid var(--cf-divider);",
-                            div {
-                                style: "display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:10px;",
+                                div {
+                                    style: "display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:10px;",
                                 input {
                                     class: "input focus-ring",
                                     style: "max-width:220px;",
                                     placeholder: "Search systems…",
+                                }
+                                div {
+                                    style: "display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:10px;",
+                                    span { class: "page-subtitle", "Freshness bars: green=fresh · amber=stale · gray=never scanned" }
+                                    button { class: "btn btn-ghost focus-ring xs", "Expand all" }
                                 }
                                 select {
                                     class: "input focus-ring",
@@ -241,6 +246,29 @@ pub fn ScanningView() -> Element {
                                         td {
                                             div { style: "display:flex; gap:4px;",
                                                 span { class: "chip chip-warning", style: "font-size:10px;", "1H" }
+                                            }
+                                        }
+                                        td { div { class: "row-actions", button { class: "btn-icon focus-ring", "↻" } } }
+                                    }
+                                    tr {
+                                        td {
+                                            div { style: "font-weight:600; font-size:13px;", "ops-jumpbox" }
+                                            div { class: "mono", style: "font-size:11px; color:var(--cf-text-muted);", "github:acme/ops" }
+                                        }
+                                        td { span { class: "chip chip-critical", style: "font-size:10px;", "WAN" } }
+                                        td { class: "mono", style: "font-size:12px;", "2" }
+                                        td {
+                                            div { style: "display:flex; align-items:center; gap:8px; min-width:120px;",
+                                                div { style: "flex:1; height:5px; background:var(--cf-subtle-bg); border-radius:99px; overflow:hidden; display:flex;",
+                                                    div { style: "width:50%; background:#34d399;" }
+                                                    div { style: "width:50%; background:#4b5563;" }
+                                                }
+                                                span { class: "mono", style: "font-size:11px; color:var(--cf-text-muted);", "1/2" }
+                                            }
+                                        }
+                                        td {
+                                            div { style: "display:flex; gap:4px;",
+                                                span { class: "chip chip-healthy", style: "font-size:10px;", "clean" }
                                             }
                                         }
                                         td { div { class: "row-actions", button { class: "btn-icon focus-ring", "↻" } } }
@@ -360,6 +388,20 @@ pub fn ScanningView() -> Element {
                                 class: "sd-callout sd-callout-info",
                                 style: "font-size:11px; margin-top:12px;",
                                 div { "Estimated load: deployed configs at every 24h dominate builder cost." }
+                            }
+                            div {
+                                style: "display:flex; align-items:flex-start; justify-content:space-between; gap:16px; padding:12px 0 0;",
+                                div {
+                                    div { style: "font-size:13px; font-weight:600;", "Retry policy" }
+                                    div { style: "font-size:11px; color:var(--cf-text-muted); margin-top:2px; line-height:1.5;", "Automatic retry attempts after transient scanner failures." }
+                                }
+                                select {
+                                    class: "input focus-ring",
+                                    style: "width:120px;",
+                                    option { value: "none", "Disabled" }
+                                    option { value: "1", selected: true, "1 retry" }
+                                    option { value: "2", "2 retries" }
+                                }
                             }
                         }
                         div {
