@@ -22,13 +22,16 @@ use tracing::{debug, error, info, warn};
 
 // ⬇️ bring in the commit-eval helpers you said you added in queries/commits.rs
 use crate::queries::build_jobs::create_build_jobs_for_commit;
-use crate::queries::builders::cleanup_expired_build_logs;
+use crate::queries::builders::{
+    cleanup_expired_build_logs, mark_stale_builders_offline, requeue_orphaned_building_jobs,
+};
 use crate::queries::commits::{
     get_commits_pending_evaluation, mark_commit_evaluation_complete, mark_commit_evaluation_failed,
     mark_commit_evaluation_started, reset_stuck_commit_evaluations,
 };
 use crate::queries::deployment_policies::list_enabled_deployment_policies;
 use crate::queries::derivations::{cleanup_partial_derivations, reset_stuck_builds};
+use crate::services::hardening_scans::trigger_commit_hardening_scans;
 
 fn custom_field_name(name: &str, id: uuid::Uuid) -> String {
     let mut slug = name
@@ -256,6 +259,62 @@ fn parse_deployment_policy_record(
                 }
             }
         }
+        "time_window" => {
+            match serde_json::from_value::<crate::models::deployment_policies::TimeWindowConfig>(
+                cfg.clone(),
+            ) {
+                Ok(config) => Some(DeploymentPolicy::TimeWindow { config }),
+                Err(err) => {
+                    warn!(
+                        "Skipping time_window policy '{}' ({}): invalid config: {}",
+                        record.name, record.id, err
+                    );
+                    None
+                }
+            }
+        }
+        "require_approvals" => {
+            match serde_json::from_value::<crate::models::deployment_policies::ApprovalConfig>(
+                cfg.clone(),
+            ) {
+                Ok(config) => Some(DeploymentPolicy::RequireApprovals { config }),
+                Err(err) => {
+                    warn!(
+                        "Skipping require_approvals policy '{}' ({}): invalid config: {}",
+                        record.name, record.id, err
+                    );
+                    None
+                }
+            }
+        }
+        "canary_rollout" => {
+            match serde_json::from_value::<crate::models::deployment_policies::CanaryConfig>(
+                cfg.clone(),
+            ) {
+                Ok(config) => Some(DeploymentPolicy::CanaryRollout { config }),
+                Err(err) => {
+                    warn!(
+                        "Skipping canary_rollout policy '{}' ({}): invalid config: {}",
+                        record.name, record.id, err
+                    );
+                    None
+                }
+            }
+        }
+        "cve_threshold" => {
+            match serde_json::from_value::<crate::models::deployment_policies::CveThresholdConfig>(
+                cfg.clone(),
+            ) {
+                Ok(config) => Some(DeploymentPolicy::CveThreshold { config }),
+                Err(err) => {
+                    warn!(
+                        "Skipping cve_threshold policy '{}' ({}): invalid config: {}",
+                        record.name, record.id, err
+                    );
+                    None
+                }
+            }
+        }
         other => {
             warn!(
                 "Skipping unsupported deployment policy type '{}' for policy '{}' ({})",
@@ -348,6 +407,11 @@ pub fn spawn_background_tasks(
         flake_config.commit_evaluation_interval,
         cf_state,
         queue_notifier.clone(),
+    ));
+    tokio::spawn(run_builder_recovery_loop(
+        target_pool,
+        cfg.builder.heartbeat_interval,
+        queue_notifier,
     ));
     tokio::spawn(run_commit_artifact_hydration_loop(artifact_pool));
     tokio::spawn(run_build_log_retention_loop(
@@ -525,6 +589,65 @@ pub async fn run_commit_evaluation_loop(
                 debug!("🔔 Eval loop: notified of new work");
             }
         }
+    }
+}
+
+fn builder_stale_timeout_secs(heartbeat_interval: Duration) -> i64 {
+    let heartbeat_secs = heartbeat_interval.as_secs().max(15);
+    ((heartbeat_secs * 3).max(60)) as i64
+}
+
+async fn recover_orphaned_build_jobs_cycle(
+    pool: &PgPool,
+    stale_timeout_secs: i64,
+    queue_notifier: &Arc<QueueNotifier>,
+) -> Result<()> {
+    let stale = mark_stale_builders_offline(pool, stale_timeout_secs).await?;
+    if stale > 0 {
+        warn!(
+            "🧹 Marked {} stale builders offline (timeout={}s)",
+            stale, stale_timeout_secs
+        );
+    }
+
+    let recovered = requeue_orphaned_building_jobs(pool).await?;
+    if !recovered.is_empty() {
+        warn!(
+            "🔄 Re-queued {} orphaned build jobs stuck in building",
+            recovered.len()
+        );
+        queue_notifier.notify_build_queue();
+    }
+
+    Ok(())
+}
+
+async fn run_builder_recovery_loop(
+    pool: PgPool,
+    heartbeat_interval: Duration,
+    queue_notifier: Arc<QueueNotifier>,
+) {
+    let tick_secs = heartbeat_interval.as_secs().max(15);
+    let stale_timeout_secs = builder_stale_timeout_secs(heartbeat_interval);
+    info!(
+        "🔁 Starting builder recovery loop (tick={}s, stale_timeout={}s)",
+        tick_secs, stale_timeout_secs
+    );
+
+    if let Err(err) =
+        recover_orphaned_build_jobs_cycle(&pool, stale_timeout_secs, &queue_notifier).await
+    {
+        error!("❌ Initial builder recovery cycle failed: {:#}", err);
+    }
+
+    let mut ticker = interval(Duration::from_secs(tick_secs));
+    loop {
+        if let Err(err) =
+            recover_orphaned_build_jobs_cycle(&pool, stale_timeout_secs, &queue_notifier).await
+        {
+            error!("❌ Builder recovery cycle failed: {:#}", err);
+        }
+        ticker.tick().await;
     }
 }
 
@@ -742,6 +865,30 @@ async fn process_pending_commits(
                     }
                 }
 
+                match trigger_commit_hardening_scans(
+                    pool.clone(),
+                    commit.id,
+                    &flake.repo_url,
+                    &commit.git_commit_hash,
+                )
+                .await
+                {
+                    Ok(count) => {
+                        if count > 0 {
+                            info!(
+                                "🛡️ Queued {} hardening scans for commit {}",
+                                count, commit.git_commit_hash
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        warn!(
+                            "Failed to queue hardening scans for commit {}: {}",
+                            commit.git_commit_hash, err
+                        );
+                    }
+                }
+
                 let total = results.len();
                 let with_agent = policy_checks
                     .iter()
@@ -830,8 +977,8 @@ fn select_next_pending_commit_id_for_cycle(
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_custom_policy_expression, parse_deployment_policy_record,
-        select_next_pending_commit_id_for_cycle,
+        builder_stale_timeout_secs, normalize_custom_policy_expression,
+        parse_deployment_policy_record, select_next_pending_commit_id_for_cycle,
     };
     use crate::models::deployment_policies::{DeploymentPolicy, DeploymentPolicyRecord};
     use chrono::Utc;
@@ -923,6 +1070,22 @@ mod tests {
             }
             _ => panic!("expected CustomCheck variant"),
         }
+    }
+
+    #[test]
+    fn test_builder_stale_timeout_secs_floor_and_multiplier() {
+        assert_eq!(
+            builder_stale_timeout_secs(std::time::Duration::from_secs(5)),
+            60
+        );
+        assert_eq!(
+            builder_stale_timeout_secs(std::time::Duration::from_secs(20)),
+            60
+        );
+        assert_eq!(
+            builder_stale_timeout_secs(std::time::Duration::from_secs(30)),
+            90
+        );
     }
 }
 

@@ -48,6 +48,14 @@ pub struct EnvironmentNamesLoadResult {
     pub redirect_to_login: bool,
 }
 
+/// Result of loading environment names + colors.
+#[derive(Debug, Clone)]
+pub struct EnvironmentColorsLoadResult {
+    pub colors: Vec<(String, String)>,
+    pub notice: Option<String>,
+    pub redirect_to_login: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct PoliciesLoadResult {
     pub policies: Vec<PolicyOption>,
@@ -136,6 +144,38 @@ pub async fn load_environment_names_with_fallback() -> EnvironmentNamesLoadResul
     }
 }
 
+/// Fetch environment names and color hex values from backend.
+///
+/// Falls back to deterministic environment palette when the API is unavailable.
+pub async fn load_environment_colors_with_fallback() -> EnvironmentColorsLoadResult {
+    match fetch_environments().await {
+        Ok(items) => {
+            let mut colors: Vec<(String, String)> =
+                items.into_iter().map(|e| (e.name, e.color_hex)).collect();
+            colors.sort_by_key(|(name, _)| name.to_ascii_lowercase());
+            colors.dedup_by(|(a, _), (b, _)| a.eq_ignore_ascii_case(b));
+
+            EnvironmentColorsLoadResult {
+                colors,
+                notice: None,
+                redirect_to_login: false,
+            }
+        }
+        Err(error) if should_redirect_to_login(&error) => EnvironmentColorsLoadResult {
+            colors: fallback_environment_color_pairs(),
+            notice: None,
+            redirect_to_login: true,
+        },
+        Err(error) => EnvironmentColorsLoadResult {
+            colors: fallback_environment_color_pairs(),
+            notice: Some(format!(
+                "Environments API unavailable for color mapping, using fallback palette: {error}"
+            )),
+            redirect_to_login: false,
+        },
+    }
+}
+
 /// Fetch policy options from backend for environment requirements modal.
 pub async fn load_policies_with_fallback() -> PoliciesLoadResult {
     match fetch_policies().await {
@@ -179,6 +219,13 @@ fn fallback_environment_names() -> Vec<String> {
         "development".to_string(),
         "remote".to_string(),
     ]
+}
+
+fn fallback_environment_color_pairs() -> Vec<(String, String)> {
+    fallback_environments(Uuid::from_u128(1))
+        .into_iter()
+        .map(|env| (env.name, env.color_hex))
+        .collect()
 }
 
 /// Deterministic fallback environment list used when the API is unavailable.

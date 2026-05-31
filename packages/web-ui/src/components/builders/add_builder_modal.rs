@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 use crate::api::{self, models::CreateBuilderRequest};
 use crate::components::builders::generate_ed25519_keypair;
+use crate::components::{Icon, IconName};
 use crate::theme;
 
 #[component]
@@ -14,6 +15,8 @@ pub fn AddBuilderModal(
     show_onboarding_callouts: bool,
 ) -> Element {
     let mut name = use_signal(|| String::new());
+    let mut host = use_signal(|| String::new());
+    let mut arch = use_signal(|| String::from("x86_64-linux"));
     let mut public_key = use_signal(|| String::new());
     let mut private_key = use_signal(|| String::new());
     let mut max_cpu_cores = use_signal(|| String::new());
@@ -58,6 +61,12 @@ pub fn AddBuilderModal(
 
         let request = CreateBuilderRequest {
             name: name().trim().to_string(),
+            host: if host().trim().is_empty() {
+                None
+            } else {
+                Some(host().trim().to_string())
+            },
+            arch: arch(),
             public_key: public_key().trim().to_string(),
             max_cpu_cores: max_cpu_cores()
                 .trim()
@@ -74,6 +83,7 @@ pub fn AddBuilderModal(
                 .parse::<i32>()
                 .ok()
                 .filter(|&n| n > 0),
+            enabled: true, // Default to enabled
             environment_ids: selected_environments(),
         };
 
@@ -90,7 +100,7 @@ pub fn AddBuilderModal(
 
     rsx! {
         div {
-            class: "fixed inset-0 z-[60] bg-black/60 flex items-center justify-center p-4 overflow-y-auto",
+            class: "modal-backdrop",
             onclick: move |_| {
                 if !is_submitting() {
                     on_close.call(())
@@ -98,18 +108,23 @@ pub fn AddBuilderModal(
             },
 
             div {
-                class: "{theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl p-6 w-full max-w-2xl max-h-[90vh] overflow-y-auto shadow-2xl my-auto",
+                class: "modal",
+                style: "width:min(620px,96vw); max-height:92vh;",
                 onclick: move |e| e.stop_propagation(),
 
                 // Header
                 div {
-                    class: "flex items-center justify-between mb-6",
-                    h2 {
-                        class: "text-xl font-semibold text-white",
-                        "Add Builder"
+                    class: "modal-head",
+                    style: "display:flex; align-items:center; justify-content:space-between;",
+                    div {
+                        h2 {
+                            Icon { name: IconName::Plus, size: 14 }
+                            " Add builder"
+                        }
+                        p { "Register a new Nix build worker." }
                     }
                     button {
-                        class: "text-slate-400 hover:text-white transition-colors",
+                        class: "btn btn-ghost focus-ring",
                         onclick: move |_| on_close.call(()),
                         disabled: is_submitting(),
                         "✕"
@@ -127,18 +142,22 @@ pub fn AddBuilderModal(
 
                 // Form
                 div {
-                    class: "space-y-4",
+                    class: "modal-body",
+                    style: "overflow-y:auto;",
+
+                    div {
+                        class: "space-y-4",
 
                     // Name
                     div {
-                        class: "relative overflow-visible",
+                        class: "field relative overflow-visible",
                         label {
                             class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
                             "Builder Name"
                             span { class: "text-red-400", " *" }
                         }
                         input {
-                            class: "w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded text-white placeholder-slate-500 focus:outline-none focus:border-blue-500",
+                            class: "input focus-ring mono",
                             r#type: "text",
                             placeholder: "e.g., builder-01",
                             value: "{name}",
@@ -162,6 +181,48 @@ pub fn AddBuilderModal(
                         }
                     }
 
+                    // Host and Architecture
+                    div {
+                        class: "grid grid-cols-2 gap-4",
+                        div {
+                            class: "field",
+                            label {
+                                class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
+                                "Host (SSH endpoint)"
+                            }
+                            input {
+                                class: "input focus-ring mono",
+                                r#type: "text",
+                                placeholder: "e.g., builder-01.lab.internal",
+                                value: "{host}",
+                                oninput: move |e| host.set(e.value()),
+                                disabled: is_submitting(),
+                            }
+                            p {
+                                class: "text-xs {theme::text::SECONDARY} mt-1",
+                                "Optional SSH endpoint for the builder"
+                            }
+                        }
+                        div {
+                            class: "field",
+                            label {
+                                class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
+                                "Architecture"
+                                span { class: "text-red-400", " *" }
+                            }
+                            select {
+                                class: "input focus-ring",
+                                value: "{arch}",
+                                onchange: move |e| arch.set(e.value()),
+                                disabled: is_submitting(),
+                                option { value: "x86_64-linux", "x86_64-linux" }
+                                option { value: "aarch64-linux", "aarch64-linux" }
+                                option { value: "aarch64-darwin", "aarch64-darwin" }
+                                option { value: "x86_64-darwin", "x86_64-darwin" }
+                            }
+                        }
+                    }
+
                     // Keypair section
                     div {
                         class: "border border-slate-700 rounded p-4 space-y-3",
@@ -173,10 +234,10 @@ pub fn AddBuilderModal(
                                 "Authentication Keypair"
                             }
                             button {
-                                class: "px-3 py-1 rounded-lg text-sm font-medium text-white transition-colors {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING}",
+                                class: "btn btn-primary focus-ring",
                                 onclick: generate_keypair,
                                 disabled: is_submitting(),
-                                "🔑 Generate Keypair"
+                                "Generate Keypair"
                             }
                         }
                         p {
@@ -427,17 +488,20 @@ pub fn AddBuilderModal(
                     }
                 }
 
+                }
+
                 // Footer buttons
                 div {
-                    class: "flex justify-end gap-3 mt-6 pt-4 border-t border-slate-700",
+                    class: "modal-foot",
+                    style: "display:flex; justify-content:flex-end; gap:12px;",
                     button {
-                        class: "px-4 py-2 text-slate-400 hover:text-white transition-colors",
+                        class: "btn btn-ghost focus-ring",
                         onclick: move |_| on_close.call(()),
                         disabled: is_submitting(),
                         "Cancel"
                     }
                     button {
-                        class: "px-4 py-2 rounded-lg text-sm font-medium text-white transition-colors {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING} disabled:opacity-50 disabled:cursor-not-allowed",
+                        class: "btn btn-primary focus-ring",
                         onclick: handle_submit,
                         disabled: is_submitting() || name().trim().is_empty() || public_key().trim().is_empty(),
                         if is_submitting() {

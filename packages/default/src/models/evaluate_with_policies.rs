@@ -5,11 +5,13 @@ use std::collections::HashMap;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use tokio::time::Duration;
+use tokio::time::{Duration, Instant};
 
 const MOCK_EVAL_TOTAL_DURATION_MS: u64 = 30_000;
 const MOCK_EVAL_MIN_PER_SYSTEM_MS: u64 = 5_000;
 const MOCK_EVAL_STAGE_COUNT: u64 = 5;
+const EVAL_OUTPUT_IDLE_TIMEOUT_SECS: u64 = 300;
+const EVAL_PROGRESS_HEARTBEAT_SECS: u64 = 30;
 use tracing::{debug, error, info, warn};
 
 use crate::config::{BuildConfig, ServerConfig};
@@ -25,6 +27,7 @@ use crate::queries::derivations::{
 };
 use crate::queries::systems::list_configuration_names_for_flake;
 use crate::queue::QueueNotifier;
+use crate::services::hardening_scans::trigger_immediate_hardening_scan;
 
 /// NixEvalJobResult with meta field
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +122,54 @@ async fn resolve_expected_store_path(
     }
 }
 
+/// Helper function to broadcast eval log via WebSocket AND persist to database.
+/// 
+/// This ensures logs are both:
+/// - Streamed in real-time to connected WebSocket clients
+/// - Persisted to eval_logs table for historical access
+async fn broadcast_and_persist_eval_log(
+    pool: &PgPool,
+    state: Option<&crate::handlers::agent_request::CFState>,
+    commit_id: i32,
+    sequence: &mut i32,
+    message: String,
+) {
+    let lower = message.to_ascii_lowercase();
+
+    // Broadcast via WebSocket (existing infrastructure)
+    if let Some(state) = state {
+        crate::handlers::api::commits::broadcast_eval_log(state, commit_id, message.clone()).await;
+    }
+
+    // Persist to database (new functionality)
+    // Parse log level from message format if possible
+    let log_level = if message.starts_with("❌") || lower.contains("error") {
+        Some("error")
+    } else if message.starts_with("⚠️") || lower.contains("warning") {
+        Some("warn")
+    } else if message.starts_with("✅") {
+        Some("info")
+    } else if message.starts_with("🐛") || message.starts_with("DEBUG:") {
+        Some("debug")
+    } else {
+        Some("info")
+    };
+
+    if let Err(e) = crate::queries::eval_logs::insert_eval_log(
+        pool,
+        commit_id,
+        *sequence,
+        log_level,
+        &message,
+    )
+    .await
+    {
+        warn!("Failed to persist eval log for commit {}: {}", commit_id, e);
+    }
+
+    *sequence += 1;
+}
+
 /// Evaluate a flake's nixosConfigurations with nix-eval-jobs and policy checking
 ///
 /// FIXED: Now properly:
@@ -137,6 +188,13 @@ pub async fn evaluate_with_nix_eval_jobs(
     cf_state: Option<&crate::handlers::agent_request::CFState>,
     queue_notifier: Option<&QueueNotifier>,
 ) -> Result<(Vec<NixEvalJobResult>, Vec<PolicyCheckResult>)> {
+    // Re-evaluation safety: clear previous persisted logs for this commit so
+    // (commit_id, log_sequence) uniqueness cannot collide on subsequent runs.
+    crate::queries::eval_logs::delete_eval_logs_by_commit(pool, commit.id).await?;
+
+    // Sequence counter for log persistence (1-indexed)
+    let mut log_sequence = 1i32;
+    
     let flake_ref = build_flake_reference(repo_url, commit_hash);
     let allowed_systems = load_allowed_systems(pool, flake, target_system).await?;
 
@@ -166,25 +224,27 @@ pub async fn evaluate_with_nix_eval_jobs(
             target_system,
             server_config.eval_workers
         );
-        crate::handlers::api::commits::broadcast_eval_log(state, commit.id, start_msg).await;
+        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, start_msg).await;
 
         if !policies.is_empty() {
             let policy_msg = format!("📋 Checking {} deployment policies:", policies.len());
-            crate::handlers::api::commits::broadcast_eval_log(state, commit.id, policy_msg).await;
+            broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, policy_msg).await;
             for policy in policies {
                 let policy_detail = format!(
                     "   • {} (strict: {})",
                     policy.description(),
                     policy.is_strict()
                 );
-                crate::handlers::api::commits::broadcast_eval_log(state, commit.id, policy_detail)
+                broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, policy_detail)
                     .await;
             }
         }
 
-        crate::handlers::api::commits::broadcast_eval_log(
-            state,
+        broadcast_and_persist_eval_log(
+            pool,
+            Some(state),
             commit.id,
+            &mut log_sequence,
             "⏳ Evaluating nixosConfigurations...".to_string(),
         )
         .await;
@@ -238,6 +298,8 @@ pub async fn evaluate_with_nix_eval_jobs(
     let mut policy_checks = Vec::new();
     let mut found_target = false;
     let mut stderr_output = Vec::new();
+    let mut stderr_log_batch: Vec<(i32, Option<String>, String)> = Vec::new();
+    const STDERR_LOG_BATCH_SIZE: usize = 100;
     let mut stdout_done = false;
     let mut stderr_done = false;
 
@@ -247,6 +309,9 @@ pub async fn evaluate_with_nix_eval_jobs(
     // Cancellation poll interval: check the DB every 2 seconds while eval runs.
     let mut cancel_ticker = tokio::time::interval(Duration::from_secs(2));
     cancel_ticker.tick().await; // consume the immediate first tick
+    let mut progress_ticker = tokio::time::interval(Duration::from_secs(EVAL_PROGRESS_HEARTBEAT_SECS));
+    progress_ticker.tick().await; // consume immediate first tick
+    let mut last_output_at = Instant::now();
 
     loop {
         tokio::select! {
@@ -270,9 +335,37 @@ pub async fn evaluate_with_nix_eval_jobs(
                     }
                 }
             }
+            _ = progress_ticker.tick() => {
+                let idle_for = Instant::now().duration_since(last_output_at);
+                if idle_for >= Duration::from_secs(EVAL_OUTPUT_IDLE_TIMEOUT_SECS) {
+                    let timeout_msg = format!(
+                        "❌ Evaluation produced no output for {}s; terminating nix-eval-jobs",
+                        EVAL_OUTPUT_IDLE_TIMEOUT_SECS
+                    );
+                    error!("{} (commit_id={})", timeout_msg, commit.id);
+
+                    if let Some(state) = cf_state {
+                        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, timeout_msg)
+                            .await;
+                    }
+
+                    let _ = child.kill().await;
+                    bail!(
+                        "evaluation timed out after {}s without nix-eval-jobs output",
+                        EVAL_OUTPUT_IDLE_TIMEOUT_SECS
+                    );
+                }
+
+                debug!(
+                    "nix-eval-jobs still running for commit {} (idle {}s)",
+                    commit.id,
+                    idle_for.as_secs()
+                );
+            }
             line_result = stdout_reader.next_line(), if !stdout_done => {
                 match line_result? {
                     Some(line) if !line.trim().is_empty() => {
+                        last_output_at = Instant::now();
                         match serde_json::from_str::<NixEvalJobResult>(&line) {
                             Ok(result) => {
                                 let system_name = result.attr.clone();
@@ -314,10 +407,10 @@ pub async fn evaluate_with_nix_eval_jobs(
                                             })
                                             .unwrap_or_else(|| "Unknown error".to_string());
                                         let log_msg = format!("❌ {}: {}", system_name, error_msg);
-                                        crate::handlers::api::commits::broadcast_eval_log(state, commit.id, log_msg).await;
+                                        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, log_msg).await;
                                     } else {
                                         let log_msg = format!("✅ {} evaluated successfully", system_name);
-                                        crate::handlers::api::commits::broadcast_eval_log(state, commit.id, log_msg).await;
+                                        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, log_msg).await;
                                     }
 
                                     // Broadcast in-progress status to WebSocket clients.
@@ -357,7 +450,7 @@ pub async fn evaluate_with_nix_eval_jobs(
                                                 // Broadcast policy warnings to logs
                                                 if let Some(state) = cf_state {
                                                     let log_msg = format!("⚠️  {}: {}", system_name, warning);
-                                                    crate::handlers::api::commits::broadcast_eval_log(state, commit.id, log_msg).await;
+                                                    broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, log_msg).await;
                                                 }
                                             }
                                         } else if let Some(true) = cf_agent_enabled {
@@ -366,7 +459,7 @@ pub async fn evaluate_with_nix_eval_jobs(
                                             // Broadcast policy success to logs
                                             if let Some(state) = cf_state {
                                                 let log_msg = format!("✅ {}: Crystal Forge agent enabled", system_name);
-                                                crate::handlers::api::commits::broadcast_eval_log(state, commit.id, log_msg).await;
+                                                broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, log_msg).await;
                                             }
                                         }
 
@@ -393,9 +486,7 @@ pub async fn evaluate_with_nix_eval_jobs(
                                             Some(error_msg.clone()),
                                         )
                                         .await;
-                                        crate::handlers::api::commits::broadcast_eval_log(
-                                            state,
-                                            commit.id,
+                                        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
                                             format!("❌ {}: {}", system_name, error_msg),
                                         )
                                         .await;
@@ -408,9 +499,7 @@ pub async fn evaluate_with_nix_eval_jobs(
                                             None,
                                         )
                                         .await;
-                                        crate::handlers::api::commits::broadcast_eval_log(
-                                            state,
-                                            commit.id,
+                                        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
                                             format!(
                                                 "✅ {}: policy passed (CF enabled), queued for build",
                                                 system_name
@@ -426,9 +515,7 @@ pub async fn evaluate_with_nix_eval_jobs(
                                             Some("CF agent not enabled in configuration".to_string()),
                                         )
                                         .await;
-                                        crate::handlers::api::commits::broadcast_eval_log(
-                                            state,
-                                            commit.id,
+                                        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
                                             format!(
                                                 "⚠️ {}: policy failed (CF agent not enabled)",
                                                 system_name
@@ -488,6 +575,38 @@ pub async fn evaluate_with_nix_eval_jobs(
                                                             );
                                                         }
 
+                                                        // ── AUTOMATIC HARDENING SCAN ─────────────────────
+                                                        // Trigger hardening scan automatically after successful eval
+                                                        // Note: trigger_immediate_hardening_scan spawns its own background task
+                                                        match trigger_immediate_hardening_scan(
+                                                            pool.clone(),
+                                                            deriv.id,
+                                                            &flake_ref,
+                                                            &system_name,
+                                                        )
+                                                        .await
+                                                        {
+                                                            Ok(scan_id) => {
+                                                                debug!(
+                                                                    "🔒 Automatically triggered hardening scan {} for {}",
+                                                                    scan_id, system_name
+                                                                );
+                                                                if let Some(state) = cf_state {
+                                                                    broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
+                                                                        format!("🔒 {}: hardening scan queued", system_name),
+                                                                    )
+                                                                    .await;
+                                                                }
+                                                            }
+                                                            Err(e) => {
+                                                                warn!(
+                                                                    "⚠️  Failed to trigger automatic hardening scan for {}: {}",
+                                                                    system_name, e
+                                                                );
+                                                            }
+                                                        }
+                                                        // ─────────────────────────────────────────────────
+
                                                         // ── INCREMENTAL BUILD QUEUE ──────────────────────
                                                         // Only enqueue if policy passed.
                                                         if cf_agent_enabled == Some(true) {
@@ -498,9 +617,7 @@ pub async fn evaluate_with_nix_eval_jobs(
                                                                         system_name, deriv.id
                                                                     );
                                                                     if let Some(state) = cf_state {
-                                                                        crate::handlers::api::commits::broadcast_eval_log(
-                                                                            state,
-                                                                            commit.id,
+                                                                        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
                                                                             format!("🚀 {}: build job queued incrementally", system_name),
                                                                         ).await;
                                                                     }
@@ -574,6 +691,7 @@ pub async fn evaluate_with_nix_eval_jobs(
             line_result = stderr_reader.next_line(), if !stderr_done => {
                 match line_result? {
                     Some(line) => {
+                        last_output_at = Instant::now();
                         if line.contains("error:") {
                             error!("nix-eval-jobs stderr: {}", line);
                         } else {
@@ -582,7 +700,35 @@ pub async fn evaluate_with_nix_eval_jobs(
 
                         // Broadcast stderr to WebSocket clients
                         if let Some(state) = cf_state {
+                            // Keep live streaming immediate.
                             crate::handlers::api::commits::broadcast_eval_log(state, commit.id, line.clone()).await;
+
+                            // Persist stderr logs in batches to avoid per-line DB latency on hot path.
+                            let level = if line.to_ascii_lowercase().contains("error") {
+                                Some("error".to_string())
+                            } else if line.to_ascii_lowercase().contains("warn") {
+                                Some("warn".to_string())
+                            } else {
+                                Some("debug".to_string())
+                            };
+                            stderr_log_batch.push((log_sequence, level, line.clone()));
+                            log_sequence += 1;
+
+                            if stderr_log_batch.len() >= STDERR_LOG_BATCH_SIZE {
+                                if let Err(e) = crate::queries::eval_logs::insert_eval_logs_batch(
+                                    pool,
+                                    commit.id,
+                                    &stderr_log_batch,
+                                )
+                                .await
+                                {
+                                    warn!(
+                                        "Failed to batch-persist stderr logs for commit {}: {}",
+                                        commit.id, e
+                                    );
+                                }
+                                stderr_log_batch.clear();
+                            }
                         }
 
                         stderr_output.push(line);
@@ -594,6 +740,22 @@ pub async fn evaluate_with_nix_eval_jobs(
 
         if stdout_done && stderr_done {
             break;
+        }
+    }
+
+    // Flush any remaining buffered stderr logs.
+    if !stderr_log_batch.is_empty() {
+        if let Err(e) = crate::queries::eval_logs::insert_eval_logs_batch(
+            pool,
+            commit.id,
+            &stderr_log_batch,
+        )
+        .await
+        {
+            warn!(
+                "Failed to flush batched stderr logs for commit {}: {}",
+                commit.id, e
+            );
         }
     }
 
@@ -736,64 +898,48 @@ pub async fn evaluate_with_nix_eval_jobs(
 
     // Broadcast comprehensive summary to WebSocket clients
     if let Some(state) = cf_state {
-        crate::handlers::api::commits::broadcast_eval_log(
-            state,
-            commit.id,
+        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
             "".to_string(), // Blank line for readability
         )
         .await;
 
-        crate::handlers::api::commits::broadcast_eval_log(
-            state,
-            commit.id,
+        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
             "═══════════════════════════════════════".to_string(),
         )
         .await;
 
-        crate::handlers::api::commits::broadcast_eval_log(
-            state,
-            commit.id,
+        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
             "📊 Evaluation Summary".to_string(),
         )
         .await;
 
-        crate::handlers::api::commits::broadcast_eval_log(
-            state,
-            commit.id,
+        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
             "═══════════════════════════════════════".to_string(),
         )
         .await;
 
-        crate::handlers::api::commits::broadcast_eval_log(
-            state,
-            commit.id,
+        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
             format!("✅ Successful: {} systems", successful),
         )
         .await;
 
         if failed > 0 {
-            crate::handlers::api::commits::broadcast_eval_log(
-                state,
-                commit.id,
+            broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
                 format!("❌ Failed: {} systems", failed),
             )
             .await;
         }
 
-        crate::handlers::api::commits::broadcast_eval_log(
-            state,
-            commit.id,
+        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
             format!("📦 Total: {} nixosConfigurations", total_systems),
         )
         .await;
 
         if !policy_checks.is_empty() {
-            crate::handlers::api::commits::broadcast_eval_log(state, commit.id, "".to_string())
+            broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, "".to_string())
                 .await;
 
-            crate::handlers::api::commits::broadcast_eval_log(
-                state,
-                commit.id,
+            broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
                 format!(
                     "🔐 Policy Compliance: {:.1}% ({}/{})",
                     coverage,
@@ -805,12 +951,10 @@ pub async fn evaluate_with_nix_eval_jobs(
         }
 
         if evaluated_derivations.len() > 0 {
-            crate::handlers::api::commits::broadcast_eval_log(state, commit.id, "".to_string())
+            broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, "".to_string())
                 .await;
 
-            crate::handlers::api::commits::broadcast_eval_log(
-                state,
-                commit.id,
+            broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
                 format!(
                     "🚀 {} derivations ready for build queue",
                     evaluated_derivations.len()
@@ -819,9 +963,7 @@ pub async fn evaluate_with_nix_eval_jobs(
             .await;
         }
 
-        crate::handlers::api::commits::broadcast_eval_log(
-            state,
-            commit.id,
+        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
             "═══════════════════════════════════════".to_string(),
         )
         .await;
@@ -849,6 +991,13 @@ pub async fn evaluate_with_mock_eval_jobs(
     cf_state: Option<&crate::handlers::agent_request::CFState>,
     queue_notifier: Option<&QueueNotifier>,
 ) -> Result<(Vec<NixEvalJobResult>, Vec<PolicyCheckResult>)> {
+    // Re-evaluation safety: clear previous persisted logs for this commit so
+    // (commit_id, log_sequence) uniqueness cannot collide on subsequent runs.
+    crate::queries::eval_logs::delete_eval_logs_by_commit(pool, commit.id).await?;
+
+    // Sequence counter for persisted/mock streamed logs (1-indexed)
+    let mut log_sequence = 1i32;
+
     let systems = resolve_mock_systems(&flake.name, target_system, configured_systems)?;
     let stage_delay = mock_eval_stage_delay(systems.len());
 
@@ -856,9 +1005,7 @@ pub async fn evaluate_with_mock_eval_jobs(
         .await?;
 
     if let Some(state) = cf_state {
-        crate::handlers::api::commits::broadcast_eval_log(
-            state,
-            commit.id,
+        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
             format!(
                 "🧪 MOCK MODE: evaluating {} system(s) for {}@{}",
                 systems.len(),
@@ -882,9 +1029,7 @@ pub async fn evaluate_with_mock_eval_jobs(
                 None,
             )
             .await;
-            crate::handlers::api::commits::broadcast_eval_log(
-                state,
-                commit.id,
+            broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
                 format!(
                     "⏳ {}: queued in mock pipeline (system {}/{})",
                     system_name,
@@ -903,9 +1048,7 @@ pub async fn evaluate_with_mock_eval_jobs(
             (95, "finalizing derivation metadata"),
         ] {
             if let Some(state) = cf_state {
-                crate::handlers::api::commits::broadcast_eval_log(
-                    state,
-                    commit.id,
+                broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
                     format!("⏳ {} [{}%]: {}", system_name, progress, stage),
                 )
                 .await;
@@ -951,9 +1094,7 @@ pub async fn evaluate_with_mock_eval_jobs(
                         system_name, derivation.id
                     );
                     if let Some(state) = cf_state {
-                        crate::handlers::api::commits::broadcast_eval_log(
-                            state,
-                            commit.id,
+                        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
                             format!("🚀 {}: build job queued incrementally (mock)", system_name),
                         )
                         .await;
@@ -1018,9 +1159,7 @@ pub async fn evaluate_with_mock_eval_jobs(
                     Some("Mock policy failure".to_string()),
                 )
                 .await;
-                crate::handlers::api::commits::broadcast_eval_log(
-                    state,
-                    commit.id,
+                broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
                     format!(
                         "⚠️ {}: policy check failed (mock), build skipped",
                         system_name
@@ -1036,9 +1175,7 @@ pub async fn evaluate_with_mock_eval_jobs(
                     None,
                 )
                 .await;
-                crate::handlers::api::commits::broadcast_eval_log(
-                    state,
-                    commit.id,
+                broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
                     format!(
                         "✅ {}: policy passed (CF enabled), queued for build",
                         system_name

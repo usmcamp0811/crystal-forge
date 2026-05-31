@@ -1,0 +1,292 @@
+{
+  "name": "Crystal Forge Design System",
+  "version": "1.0.0",
+  "description": "Complete color palette extracted from Crystal Forge web-UI for Figma import",
+  "themes": {
+    "dark": {
+      "brand": {
+        "purple": {
+          "default": "#82699b",
+          "hover": "#8616e0"
+        },
+        "berry": {
+          "default": "#6f1649",
+          "hover": "#a3748e"
+        }
+      },
+      "surface": {
+        "page": "#030712",
+        "sidebar": "#111827",
+        "card": "#111827",
+        "cardBorder": "#1f2937",
+        "divider": "#1f2937",
+        "subtle": "rgba(31, 41, 55, 0.5)"
+      },
+      "text": {
+        "primary": "#f3f4f6",
+        "secondary": "#9ca3af",
+        "muted": "#6b7280",
+        "disabled": "#4b5563",
+        "action": "#d6c3e8"
+      },
+      "interactive": {
+        "hoverBg": "rgba(31, 41, 55, 0.5)",
+        "focusRing": "rgba(59, 130, 246, 0.5)",
+        "inputBg": "#111827",
+        "inputBorder": "#374151",
+        "inputBorderFocus": "#3b82f6"
+      },
+      "semantic": {
+        "success": "#059669",
+        "successHover": "#047857"
+      },
+      "chips": {
+        "info": {
+          "bg": "#23354b",
+          "border": "#406084"
+        },
+        "warning": {
+          "bg": "#493e26",
+          "border": "#8c7041"
+        },
+        "olive": {
+          "bg": "#3b2f00",
+          "border": "#7a6000"
+        },
+        "slate": {
+          "bg": "#2b303b",
+          "border": "#495264"
+        },
+        "teal": {
+          "bg": "#23363a",
+          "border": "#3d6870"
+        },
+        "blue": {
+          "bg": "#253449",
+          "border": "#3e5b82"
+        },
+        "violet": {
+          "bg": "rgba(130, 105, 155, 0.22)",
+          "border": "#82699b",
+          "text": "#e5d8f3"
+        }
+      },
+      "timeline": {
+        "line": "#4b5563",
+        "tick": "#374151",
+        "nodeBorderDefault": "#111827",
+        "nodeBorderLatest": "#f9fafb",
+        "nodeGlow": "rgba(255, 255, 255, 0.45)",
+        "nodeTextDefault": "#f9fafb",
+        "nodeTextLatest": "#f9fafb",
+        "ringBuilding": "#42ff65",
+        "ringQueued": "#e57c00",
+        "ringIdle": "#9ca3af",
+        "nodeEmptyBg": "#4b5563"
+      }
+    },
+    "light": {
+      "brand": {
+        "purple": {
+          "default": "#654a84",
+          "hover": "#573f72"
+        },
+        "berry": {
+          "default": "#9d2f67",
+          "hover": "#7f2551"
+        }
+      },
+      "surface": {
+        "page": "#eef2f7",
+        "sidebar": "#ffffff",
+        "card": "#ffffff",
+        "cardBorder": "#d1d9e6",
+        "divider": "#d7dfea",
+        "subtle": "#eef3f9"
+      },
+      "text": {
+        "primary": "#1f2937",
+        "secondary": "#4b5563",
+        "muted": "#6b7280",
+        "disabled": "#9ca3af",
+        "action": "#6f4f89"
+      },
+      "interactive": {
+        "hoverBg": "#eef3f9",
+        "focusRing": "rgba(59, 130, 246, 0.35)",
+        "inputBg": "#ffffff",
+        "inputBorder": "#b9c6d8",
+        "inputBorderFocus": "#4f83d8"
+      },
+      "semantic": {
+        "success": "#059669",
+        "successHover": "#047857"
+      },
+      "chips": {
+        "info": {
+          "bg": "#e8f2ff",
+          "border": "#95b6de"
+        },
+        "warning": {
+          "bg": "#fff3df",
+          "border": "#d3ad6e"
+        },
+        "olive": {
+          "bg": "#f8f2d8",
+          "border": "#cfbe76"
+        },
+        "slate": {
+          "bg": "#eef2f7",
+          "border": "#bcc8d8"
+        },
+        "teal": {
+          "bg": "#e5f5f6",
+          "border": "#89c3ca"
+        },
+        "blue": {
+          "bg": "#e8f0ff",
+          "border": "#90acda"
+        },
+        "violet": {
+          "bg": "rgba(130, 105, 155, 0.16)",
+          "border": "#82699b",
+          "text": "#503868"
+        }
+      },
+      "timeline": {
+        "line": "#9fb0c9",
+        "tick": "#bccbde",
+        "nodeBorderDefault": "#dbe5f3",
+        "nodeBorderLatest": "#1f2937",
+        "nodeGlow": "rgba(59, 130, 246, 0.25)",
+        "nodeTextDefault": "#ffffff",
+        "nodeTextLatest": "#ffffff",
+        "ringBuilding": "#10b981",
+        "ringQueued": "#d97706",
+        "ringIdle": "#64748b",
+        "nodeEmptyBg": "#94a3b8"
+      }
+    }
+  },
+  "statusColors": {
+    "health": {
+      "healthy": {
+        "text": "#34d399",
+        "bg": "rgba(52, 211, 153, 0.12)",
+        "border": "rgba(52, 211, 153, 0.25)"
+      },
+      "warning": {
+        "text": "#fbbf24",
+        "bg": "rgba(251, 191, 36, 0.12)",
+        "border": "rgba(251, 191, 36, 0.25)"
+      },
+      "critical": {
+        "text": "#f87171",
+        "bg": "rgba(248, 113, 113, 0.12)",
+        "border": "rgba(248, 113, 113, 0.25)"
+      },
+      "offline": {
+        "text": "#6b7280",
+        "bg": "rgba(107, 114, 128, 0.12)",
+        "border": "rgba(107, 114, 128, 0.25)"
+      }
+    },
+    "deployment": {
+      "upToDate": {
+        "text": "#34d399",
+        "bg": "rgba(52, 211, 153, 0.12)"
+      },
+      "behind": {
+        "text": "#fbbf24",
+        "bg": "rgba(251, 191, 36, 0.12)"
+      },
+      "ahead": {
+        "text": "#60a5fa",
+        "bg": "rgba(96, 165, 250, 0.12)"
+      },
+      "neverDeployed": {
+        "text": "#6b7280",
+        "bg": "rgba(107, 114, 128, 0.12)"
+      }
+    },
+    "cve": {
+      "critical": {
+        "text": "#ef4444",
+        "bg": "rgba(239, 68, 68, 0.12)"
+      },
+      "high": {
+        "text": "#fb923c",
+        "bg": "rgba(251, 146, 60, 0.12)"
+      },
+      "medium": {
+        "text": "#facc15",
+        "bg": "rgba(250, 204, 21, 0.12)"
+      },
+      "low": {
+        "text": "#60a5fa",
+        "bg": "rgba(96, 165, 250, 0.12)"
+      }
+    },
+    "pipeline": {
+      "dryRun": "#9ca3af",
+      "readyForBuild": "#60a5fa",
+      "building": "#818cf8",
+      "buildComplete": "#a78bfa",
+      "readyForDeploy": "#34d399",
+      "unknown": "#6b7280"
+    }
+  },
+  "tailwindReferences": {
+    "note": "The following Tailwind classes are commonly used and map to these exact colors",
+    "emerald": {
+      "400": "#34d399",
+      "500": "#10b981",
+      "600": "#059669"
+    },
+    "amber": {
+      "400": "#fbbf24"
+    },
+    "red": {
+      "400": "#f87171",
+      "500": "#ef4444",
+      "600": "#dc2626"
+    },
+    "orange": {
+      "400": "#fb923c"
+    },
+    "yellow": {
+      "400": "#facc15"
+    },
+    "blue": {
+      "400": "#60a5fa",
+      "500": "#3b82f6"
+    },
+    "indigo": {
+      "400": "#818cf8"
+    },
+    "violet": {
+      "400": "#a78bfa",
+      "500": "#8b5cf6",
+      "600": "#7c3aed"
+    },
+    "gray": {
+      "400": "#9ca3af",
+      "500": "#6b7280",
+      "600": "#4b5563",
+      "700": "#374151",
+      "800": "#1f2937",
+      "900": "#111827",
+      "950": "#030712"
+    },
+    "zinc": {
+      "50": "#fafafa",
+      "400": "#a1a1aa",
+      "500": "#71717a",
+      "600": "#52525b",
+      "700": "#3f3f46",
+      "800": "#27272a",
+      "900": "#18181b",
+      "950": "#0f0f0f"
+    }
+  }
+}

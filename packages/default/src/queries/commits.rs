@@ -528,21 +528,16 @@ fn validate_eval_queue_reorder_payload(
 /// - `pending → cancelled` immediately (sets cancellation_requested = FALSE)
 /// - `in_progress → cancelling` (sets cancellation_requested = TRUE so the loop kills the subprocess)
 /// - Returns `NotFound` if no matching row, `AlreadyTerminal` for complete/failed/cancelled rows.
-pub async fn cancel_commit_evaluation(
-    pool: &PgPool,
-    commit_id: i32,
-) -> Result<CancelEvalOutcome> {
+pub async fn cancel_commit_evaluation(pool: &PgPool, commit_id: i32) -> Result<CancelEvalOutcome> {
     #[derive(sqlx::FromRow)]
     struct Row {
         evaluation_status: Option<String>,
     }
 
-    let current = sqlx::query_as::<_, Row>(
-        "SELECT evaluation_status FROM commits WHERE id = $1",
-    )
-    .bind(commit_id)
-    .fetch_optional(pool)
-    .await?;
+    let current = sqlx::query_as::<_, Row>("SELECT evaluation_status FROM commits WHERE id = $1")
+        .bind(commit_id)
+        .fetch_optional(pool)
+        .await?;
 
     let Some(row) = current else {
         return Ok(CancelEvalOutcome::NotFound);
@@ -628,12 +623,11 @@ pub async fn force_cancel_commit_evaluation(pool: &PgPool, commit_id: i32) -> Re
 /// Called periodically from inside `evaluate_with_nix_eval_jobs` to allow
 /// cooperative cancellation without holding a lock.
 pub async fn check_cancellation_requested(pool: &PgPool, commit_id: i32) -> Result<bool> {
-    let flag: Option<bool> = sqlx::query_scalar(
-        "SELECT cancellation_requested FROM commits WHERE id = $1",
-    )
-    .bind(commit_id)
-    .fetch_optional(pool)
-    .await?;
+    let flag: Option<bool> =
+        sqlx::query_scalar("SELECT cancellation_requested FROM commits WHERE id = $1")
+            .bind(commit_id)
+            .fetch_optional(pool)
+            .await?;
     Ok(flag.unwrap_or(false))
 }
 
@@ -772,6 +766,88 @@ pub async fn list_eval_history(
         limit,
         items,
     })
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct EvalPolicySystemRow {
+    pub system_name: String,
+    pub policy_status: String,
+}
+
+pub async fn fetch_eval_policy_matrix(pool: &PgPool, commit_id: i32) -> Result<Vec<EvalPolicySystemRow>> {
+    let rows = sqlx::query_as::<_, EvalPolicySystemRow>(
+        r#"
+        SELECT
+            d.derivation_name AS system_name,
+            CASE
+                WHEN d.cf_agent_enabled IS TRUE THEN 'pass'
+                WHEN d.cf_agent_enabled IS FALSE THEN 'fail'
+                WHEN d.status_id = 6 OR d.error_message IS NOT NULL THEN 'warn'
+                ELSE 'warn'
+            END AS policy_status
+        FROM derivations d
+        WHERE d.commit_id = $1
+          AND d.derivation_type = 'nixos'
+        ORDER BY d.derivation_name ASC
+        "#,
+    )
+    .bind(commit_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows)
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct EvalDependencyPackageRow {
+    pub package_name: String,
+    pub ready_count: i64,
+    pub pending_count: i64,
+    pub failed_count: i64,
+}
+
+pub async fn fetch_eval_dependency_breakdown(
+    pool: &PgPool,
+    commit_id: i32,
+) -> Result<Vec<EvalDependencyPackageRow>> {
+    // Evaluation writes one nixos-type derivation per NixOS system config.
+    // We map each system to a row showing:
+    //   ready_count  = built (store_path populated, status BuildComplete)
+    //   pending_count = evaluated but not yet built (DryRunComplete, BuildPending/InProgress)
+    //   failed_count  = eval or build failed
+    //
+    // status_id reference:
+    //   3 = DryRunPending, 4 = DryRunInProgress, 5 = DryRunComplete
+    //   6 = DryRunFailed,  7 = BuildPending,     8 = BuildInProgress
+    //  10 = BuildComplete, 12 = BuildFailed
+    let rows = sqlx::query_as::<_, EvalDependencyPackageRow>(
+        r#"
+        SELECT
+            COALESCE(NULLIF(BTRIM(d.derivation_name), ''), 'unknown') AS package_name,
+            -- ready = build complete or has a store_path
+            COUNT(*) FILTER (
+                WHERE d.status_id = 10
+                   OR (d.store_path IS NOT NULL AND d.store_path != '')
+            )::BIGINT AS ready_count,
+            -- pending = evaluated (drv known) but not yet built
+            COUNT(*) FILTER (
+                WHERE d.status_id IN (5, 7, 8)
+                  AND (d.store_path IS NULL OR d.store_path = '')
+            )::BIGINT AS pending_count,
+            -- failed = eval or build failed
+            COUNT(*) FILTER (WHERE d.status_id IN (6, 12))::BIGINT AS failed_count
+        FROM derivations d
+        WHERE d.commit_id = $1
+          AND d.derivation_type = 'nixos'
+        GROUP BY COALESCE(NULLIF(BTRIM(d.derivation_name), ''), 'unknown')
+        ORDER BY package_name ASC
+        "#,
+    )
+    .bind(commit_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows)
 }
 
 #[cfg(test)]

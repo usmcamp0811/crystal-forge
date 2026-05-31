@@ -13,8 +13,9 @@ use serde::{Deserialize, Serialize};
 use tokio::time::{Duration, interval};
 
 use crate::api::models::{
-    ApiError, CancelEvalOutcome, EvalHistoryPage, EvalQueueItem, EvalQueueSummary,
-    ReorderEvalQueueRequest,
+    ApiError, CancelEvalOutcome, EvalDependencyGraphResponse, EvalDependencyPackageRow,
+    EvalHistoryPage, EvalPolicyMatrixResponse, EvalPolicySystemRow, EvalQueueItem,
+    EvalQueueSummary, ReorderEvalQueueRequest,
 };
 use crate::handlers::agent_request::CFState;
 use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_above};
@@ -280,6 +281,131 @@ async fn handle_eval_stream(mut socket: WebSocket, commit_id: i32, state: CFStat
     }
 
     tracing::info!("WebSocket connection closed for commit {} eval", commit_id);
+}
+
+/// Fetch historical evaluation logs from database for a specific commit.
+/// 
+/// This endpoint retrieves persisted logs for completed/failed/cancelled evaluations.
+/// For in-progress evaluations, clients should use the WebSocket stream instead.
+pub async fn get_eval_logs_history(
+    Path(commit_id): Path<i32>,
+    State(state): State<CFState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if require_viewer_or_above(&state.pool, &headers)
+        .await
+        .is_none()
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+
+    let logs = match crate::queries::eval_logs::fetch_eval_logs_by_commit(&state.pool, commit_id)
+        .await
+    {
+        Ok(logs) => logs,
+        Err(e) => {
+            tracing::error!("Failed to fetch eval logs for commit {}: {}", commit_id, e);
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let entries: Vec<EvalLogEntry> = logs
+        .into_iter()
+        .map(|row| EvalLogEntry {
+            timestamp: row.log_timestamp,
+            sequence: row.log_sequence,
+            level: row.log_level,
+            message: row.log_message,
+        })
+        .collect();
+
+    Json(entries).into_response()
+}
+
+/// Fetch policy matrix data for a commit evaluation.
+/// GET /api/v1/commits/:commit_id/eval/policy-matrix
+pub async fn get_eval_policy_matrix(
+    Path(commit_id): Path<i32>,
+    State(state): State<CFState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if require_viewer_or_above(&state.pool, &headers)
+        .await
+        .is_none()
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+
+    let rows = match crate::queries::commits::fetch_eval_policy_matrix(&state.pool, commit_id).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!("Failed to fetch eval policy matrix for commit {}: {}", commit_id, e);
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let body = EvalPolicyMatrixResponse {
+        commit_id,
+        policies: vec!["cf.agent_enabled".to_string()],
+        systems: rows
+            .into_iter()
+            .map(|row| EvalPolicySystemRow {
+                system_name: row.system_name,
+                results: vec![row.policy_status],
+            })
+            .collect(),
+    };
+
+    Json(body).into_response()
+}
+
+/// Fetch dependency/derivation package breakdown for a commit evaluation.
+/// GET /api/v1/commits/:commit_id/eval/dependency-graph
+pub async fn get_eval_dependency_graph(
+    Path(commit_id): Path<i32>,
+    State(state): State<CFState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if require_viewer_or_above(&state.pool, &headers)
+        .await
+        .is_none()
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+
+    let rows = match crate::queries::commits::fetch_eval_dependency_breakdown(&state.pool, commit_id).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!("Failed to fetch eval dependency graph for commit {}: {}", commit_id, e);
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let total_packages = rows.len() as i64;
+    let body = EvalDependencyGraphResponse {
+        commit_id,
+        total_packages,
+        packages: rows
+            .into_iter()
+            .map(|row| EvalDependencyPackageRow {
+                package_name: row.package_name,
+                ready_count: row.ready_count,
+                pending_count: row.pending_count,
+                failed_count: row.failed_count,
+            })
+            .collect(),
+    };
+
+    Json(body).into_response()
+}
+
+/// DTO for a single evaluation log entry (REST API response).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvalLogEntry {
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub sequence: i32,
+    pub level: Option<String>,
+    pub message: String,
 }
 
 /// Ensure a broadcast channel exists for this commit (create if needed)

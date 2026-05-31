@@ -32,6 +32,8 @@ let
       eval_workers = cfg.server.eval_workers;
       eval_max_memory_mb = cfg.server.eval_max_memory_mb;
       eval_check_cache = cfg.server.eval_check_cache;
+      allow_private_cache_test_targets =
+        cfg.server.allow_private_cache_test_targets;
     } // lib.optionalAttrs (cfg.server.role_mapping != { }) {
       role_mapping = cfg.server.role_mapping;
     };
@@ -208,6 +210,16 @@ let
       ${lib.optionalString (cfg.auth.ssh_key_path == null
         && (cfg.build.enable || cfg.server.enable)) ''
           SSH_KEY_PATH="/var/lib/crystal-forge/.ssh/id_ed25519"
+
+          # Fix SSH key permissions before any operations (if key exists)
+          if [ -f "$SSH_KEY_PATH" ]; then
+            if [ -w "$SSH_KEY_PATH" ]; then
+              chmod 600 "$SSH_KEY_PATH"
+            else
+              echo "Skipping SSH key permission fix for read-only key: $SSH_KEY_PATH"
+            fi
+          fi
+          
           if [ ! -f "$SSH_KEY_PATH" ]; then
             echo "Generating SSH key for Crystal Forge Git authentication..."
             ${pkgs.openssh}/bin/ssh-keygen -t ed25519 -f "$SSH_KEY_PATH" -N "" -C "crystal-forge@$(${pkgs.nettools}/bin/hostname)"
@@ -220,6 +232,34 @@ let
           fi
 
           ${pkgs.gnused}/bin/sed -i '/\[auth\]/a ssh_key_path = "/var/lib/crystal-forge/.ssh/id_ed25519"' "$generatedConfigPath"
+        ''}
+
+      ${lib.optionalString (cfg.build.enable && cfg.build.api_mode && cfg.build.api_key_file == null) ''
+          BUILDER_API_KEY_PATH="/var/lib/crystal-forge/builder-api.key"
+          
+          if [ ! -f "$BUILDER_API_KEY_PATH" ]; then
+            echo "Generating builder API key for Crystal Forge API mode..."
+            ${pkgs.crystal-forge.default.server}/bin/cf-keygen -y -f "$BUILDER_API_KEY_PATH"
+            echo "Builder API key generated at $BUILDER_API_KEY_PATH"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "📋 BUILDER REGISTRATION REQUIRED"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo ""
+            echo "Register this builder in the Crystal Forge UI with the following public key:"
+            echo ""
+            cat "$BUILDER_API_KEY_PATH.pub"
+            echo ""
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          fi
+          
+          # Always normalize permissions (even if key already existed)
+          chown crystal-forge:crystal-forge "$BUILDER_API_KEY_PATH"
+          chmod 600 "$BUILDER_API_KEY_PATH"
+          
+          if [ -f "$BUILDER_API_KEY_PATH.pub" ]; then
+            chown crystal-forge:crystal-forge "$BUILDER_API_KEY_PATH.pub"
+            chmod 644 "$BUILDER_API_KEY_PATH.pub"
+          fi
         ''}
 
       chmod 600 "$generatedConfigPath"
@@ -852,6 +892,81 @@ in {
         example =
           [ "MemorySwapMax=4G" "TasksMax=5000" "IOWeight=100" "CPUWeight=100" ];
       };
+
+      # === BUILDER API MODE ===
+
+      api_mode = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = lib.mdDoc ''
+          Use builder API mode (recommended).
+
+          When enabled, the builder authenticates to the Crystal Forge server
+          via API using a private key, rather than connecting directly to the
+          database (legacy mode).
+
+          **Benefits of API mode:**
+          - No database credentials needed on builder machines
+          - Better security isolation
+          - Supports distributed builds across networks
+          - Builder registration via server UI
+
+          **Default**: false (legacy mode for backward compatibility)
+
+          **Migration**: Set to true to use API mode. After enabling, the
+          builder API key will be auto-generated and displayed in systemd
+          logs. Register the builder using the public key in the UI.
+
+          **Deprecation**: Legacy database mode (false) is deprecated and
+          will be removed in a future release. New deployments should use
+          API mode (true).
+        '';
+      };
+
+      api_key_file = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        description = lib.mdDoc ''
+          Path to builder API private key.
+
+          If null, the module will auto-generate a key at
+          `/var/lib/crystal-forge/builder-api.key` on first start.
+
+          **Auto-generation behavior:**
+          - Key is generated using `cf-keygen -y`
+          - Public key is displayed in systemd logs for registration
+          - Key has 0600 permissions for security
+
+          **Manual key provision:**
+          Set this option to use a pre-existing key file.
+
+          **Note**: Only used when `api_mode = true`
+        '';
+        example = "/run/secrets/crystal-forge-builder-key";
+      };
+
+      server_url = lib.mkOption {
+        type = lib.types.str;
+        default = "http://127.0.0.1:3000";
+        description = lib.mdDoc ''
+          Crystal Forge server URL for builder API mode.
+
+          The builder connects to this endpoint to:
+          - Authenticate using its private key
+          - Fetch build jobs
+          - Submit build results
+
+          **Default**: "http://127.0.0.1:3000" (local server)
+
+          **Examples:**
+          - Local: "http://127.0.0.1:3000"
+          - Same network: "http://crystal-forge.local:3000"
+          - Remote: "https://crystal-forge.example.com"
+
+          **Note**: Only used when `api_mode = true`
+        '';
+        example = "https://crystal-forge.example.com";
+      };
     };
 
     vulnix = {
@@ -1304,6 +1419,18 @@ in {
         '';
       };
 
+      allow_private_cache_test_targets = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = lib.mdDoc ''
+          Allow `/api/v1/caches/test-credentials` to test private, loopback,
+          and other non-routable cache endpoints.
+
+          Keep disabled unless you explicitly need to test internal Attic/cache
+          hosts from the admin UI.
+        '';
+      };
+
       role_mapping = lib.mkOption {
         type = lib.types.attrsOf lib.types.str;
         default = { };
@@ -1719,6 +1846,14 @@ in {
           NIX_CONFIG_DIR = "/dev/null";
           GC_MARKERS = "1";
         }
+        # Add Builder API mode environment variables
+        (lib.mkIf cfg.build.api_mode {
+          CRYSTAL_FORGE__BUILDER__PRIVATE_KEY_PATH =
+            if cfg.build.api_key_file != null
+            then toString cfg.build.api_key_file
+            else "/var/lib/crystal-forge/builder-api.key";
+          CRYSTAL_FORGE__BUILDER__SERVER_URL = cfg.build.server_url;
+        })
         # Add Attic-specific environment variables if using Attic cache
         (lib.mkIf (cfg.cache.cache_type == "Attic") {
           # Force these to be available even if not in envFromProps
@@ -1834,6 +1969,7 @@ in {
       path = with pkgs; [
         nix
         git
+        openssh
         nix-fast-build
         nix-eval-jobs
         vulnix
@@ -2041,6 +2177,24 @@ in {
         RestartSec = 5;
       };
     };
+
+    warnings = lib.optional (cfg.build.enable && !cfg.build.api_mode) ''
+      Crystal Forge builder is using legacy database mode, which is deprecated.
+      
+      Current configuration (api_mode = false) uses direct database access:
+      - Requires database credentials on builder machines
+      - Has weaker security isolation
+      - Does not support distributed builds across networks
+      
+      Recommended migration to API mode:
+        1. Set: services.crystal-forge.build.api_mode = true;
+        2. Deploy the configuration (builder API key will be auto-generated)
+        3. Check systemd logs for the builder public key
+        4. Register the builder in Crystal Forge UI using the public key
+      
+      Legacy database mode will be removed in a future release.
+      For more information, see the deployment documentation.
+    '';
 
     assertions = [
       {

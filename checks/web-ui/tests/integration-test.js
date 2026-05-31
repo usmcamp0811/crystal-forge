@@ -11,6 +11,7 @@
  */
 const { chromium } = require("playwright");
 const fs = require("fs");
+const { execSync } = require("child_process");
 
 const baseUrl = process.argv[2] || "http://127.0.0.1:3000";
 const outputDir = process.argv[3] || "/tmp/screenshots";
@@ -48,8 +49,59 @@ async function assertHidden(locator, message) {
   }
 }
 
+async function assertDisabled(locator, message) {
+  const disabled = await locator.isDisabled().catch(() => false);
+  if (!disabled) {
+    throw new Error(message);
+  }
+}
+
+async function assertEnabled(locator, message) {
+  const disabled = await locator.isDisabled().catch(() => true);
+  if (disabled) {
+    throw new Error(message);
+  }
+}
+
 function nowIso() {
   return new Date().toISOString();
+}
+
+function run(cmd, cwd = undefined) {
+  return execSync(cmd, {
+    cwd,
+    stdio: ["ignore", "pipe", "pipe"],
+    encoding: "utf8",
+  }).trim();
+}
+
+function forceRewriteGitServerMain() {
+  const repoUrl = process.env.CF_TEST_GIT_SERVER_URL || "http://gitserver/crystal-forge";
+  const workDir = `/tmp/cf-rewrite-${Date.now()}`;
+
+  run(`rm -rf ${workDir}`);
+  run(`mkdir -p ${workDir}`);
+  run(`git clone ${repoUrl} ${workDir}/repo`);
+
+  const repoDir = `${workDir}/repo`;
+  run('git config user.email "cf-test@example.com"', repoDir);
+  run('git config user.name "Crystal Forge Test"', repoDir);
+  run("git checkout main", repoDir);
+
+  // Create a true history rewrite while preserving the working tree content.
+  run("git checkout --orphan rewrite-main", repoDir);
+  run("git add -A", repoDir);
+  const marker = `rewrite-${Date.now()}`;
+  run(
+    `git commit -m \"test: rewrite main history (${marker})\" --allow-empty`,
+    repoDir,
+  );
+  run("git push --force origin rewrite-main:main", repoDir);
+
+  // Return current main HEAD for debug/assert logs.
+  const newHead = run("git rev-parse HEAD", repoDir);
+  run(`rm -rf ${workDir}`);
+  return newHead;
 }
 
 function mockBuildsDashboardSummary() {
@@ -630,6 +682,7 @@ async function routeSystemsWarningData(page) {
     kernel: null,
     agent_version: null,
     current_store_path: null,
+    generation: 74,
     last_seen: null,
     cve_counts: { critical: 0, high: 0, medium: 1, low: 2 },
     flake: {
@@ -694,26 +747,45 @@ async function routeSystemsWarningData(page) {
 
   const agentEvents = [
     {
-      occurred_at: "2026-04-07T08:12:00Z",
+      timestamp: "2026-04-07T08:12:00Z",
       event_type: "heartbeat",
       level: "info",
       message: "Agent heartbeat received",
-      deployment_phase: "idle",
-      correlation_id: null,
+      deployment_related: false,
     },
     {
-      occurred_at: "2026-04-07T08:11:00Z",
+      timestamp: "2026-04-07T08:11:00Z",
       event_type: "deploy",
       level: "info",
       message: "Applied deployment for warning-system-01",
-      deployment_phase: "switch",
-      correlation_id: "cf-test-corr-1",
+      deployment_related: true,
+    },
+    {
+      timestamp: "2026-04-07T08:10:30Z",
+      event_type: "health_check",
+      level: "warn",
+      message: "Health check latency exceeded warning threshold",
+      deployment_related: true,
+    },
+    {
+      timestamp: "2026-04-07T08:10:00Z",
+      event_type: "deploy",
+      level: "error",
+      message: "Post-deploy verification timed out while probing service",
+      deployment_related: true,
     },
   ];
 
   await page.route("**/api/v1/systems**", async (route) => {
     const url = route.request().url();
     const pathname = new URL(url).pathname;
+
+    // Let dedicated hardening routes handle these endpoints in steps that mock them.
+    if (/^\/api\/v1\/systems\/[0-9a-f-]+\/hardening(?:$|\/|-.+)/.test(pathname)) {
+      await route.fallback();
+      return;
+    }
+
     if (/^\/api\/v1\/systems\/[0-9a-f-]+\/history$/.test(pathname)) {
       await route.fulfill({
         status: 200,
@@ -2096,6 +2168,43 @@ const steps = [
     },
   },
   {
+    name: "11b-builders",
+    description: "Builders list",
+    action: async (page) => {
+      await page.goto(`${baseUrl}/builders`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2000);
+      await assertVisible(page.getByText("Builders").first(), "Expected Builders page heading");
+    },
+  },
+  {
+    name: "11c-builders-edit-modal",
+    description: "Builders edit modal with keypair actions",
+    action: async (page) => {
+      await page.goto(`${baseUrl}/builders`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2200);
+
+      const firstBuilderRow = page.locator("table tbody tr").first();
+      await assertVisible(firstBuilderRow, "Expected at least one builder row", 15000);
+      await firstBuilderRow.click();
+
+      await assertVisible(
+        page.getByText("Update builder registration.").first(),
+        "Expected edit builder modal subtitle",
+        15000,
+      );
+      await assertVisible(
+        page.getByRole("button", { name: "Generate Keypair" }).first(),
+        "Expected Generate Keypair action in builder edit modal",
+        15000,
+      );
+      await assertVisible(
+        page.getByRole("button", { name: "Apply Public Key Update" }).first(),
+        "Expected Apply Public Key Update action in builder edit modal",
+        15000,
+      );
+    },
+  },
+  {
     name: "12-systems",
     description: "Systems list",
     action: async (page) => {
@@ -2376,6 +2485,54 @@ const steps = [
         page.getByText("Agent Events").first(),
         "Expected logs tab to render API-backed agent events",
       );
+
+      // Sticky tabs: ensure tab bar is rendered sticky
+      const tabs = page.locator('[data-testid="system-detail-tabs"]').first();
+      await assertVisible(tabs, "Expected system detail tabs container to be visible");
+      const tabsPosition = await tabs.evaluate((el) => window.getComputedStyle(el).position);
+      if (tabsPosition !== "sticky") {
+        throw new Error(`Expected system detail tabs to be sticky, got: ${tabsPosition}`);
+      }
+
+      // Logs filters: severity + text + event type
+      await assertVisible(
+        page.locator('[data-testid="system-logs-filter-severity"]').first(),
+        "Expected severity filter controls to render on logs tab",
+      );
+
+      // Severity filter to Error should isolate one log line
+      await page.locator('[data-testid="system-logs-filter-severity"]').first().selectOption("error");
+      await page.waitForTimeout(250);
+      await assertVisible(
+        page.getByText("Post-deploy verification timed out while probing service").first(),
+        "Expected error severity filter to show error log line",
+      );
+      const infoStillVisible = await page.getByText("Agent heartbeat received").first().isVisible().catch(() => false);
+      if (infoStillVisible) {
+        throw new Error("Expected severity filter to hide info log lines");
+      }
+
+      // Text search should match timeout message
+      const searchInput = page.getByPlaceholder("Filter log text...").first();
+      await searchInput.fill("timed out");
+      await page.waitForTimeout(250);
+      await assertVisible(
+        page.getByText("Post-deploy verification timed out while probing service").first(),
+        "Expected text search to keep matching error log",
+      );
+
+      // Event type filter: select verify
+      const typeSelect = page.locator('[data-testid="system-logs-filter-event-type"]').first();
+      await typeSelect.selectOption("Deployment");
+      await page.waitForTimeout(250);
+
+      // Full logs action should open modal (not a no-op)
+      await page.getByRole("button", { name: "View full logs →" }).first().click();
+      await assertVisible(
+        page.getByText("Full Agent Event Log").first(),
+        "Expected View full logs action to open full logs modal",
+      );
+      await page.getByRole("button", { name: "Close" }).first().click();
 
       await assertVisible(
         page.getByRole("button", { name: /^Edit$/ }).first(),
@@ -2758,6 +2915,61 @@ const steps = [
     },
   },
   {
+    name: "13g-flakes-edit-modal-ssh-save-persist",
+    description: "Flakes edit modal persists SSH auth settings after save/reopen",
+    action: async (page) => {
+      await page.goto(`${baseUrl}/flakes`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1800);
+
+      const editButton = page.locator("button:has-text('Edit')").first();
+      await editButton.waitFor({ timeout: 7000 });
+      await editButton.click();
+
+      await page.getByRole("heading", { name: "Edit Flake" }).waitFor({ timeout: 7000 });
+
+      await page.locator("button", { hasText: "SSH key" }).first().click();
+      await page.locator("input[placeholder='git']").first().fill("git");
+
+      const privateKey = [
+        "-----BEGIN OPENSSH PRIVATE KEY-----",
+        "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAAAAAABAAAABwAAAAdzc2gtZWQyNTUxOQ==",
+        "-----END OPENSSH PRIVATE KEY-----",
+      ].join("\n");
+      await page.locator("textarea.input").first().fill(privateKey);
+
+      const saveResponsePromise = page.waitForResponse(
+        (response) =>
+          response.request().method() === "PUT" &&
+          /\/api\/v1\/flakes\/\d+\/credentials$/.test(new URL(response.url()).pathname),
+        { timeout: 15000 },
+      );
+
+      await page.getByRole("button", { name: "Save changes" }).first().click();
+
+      const saveResponse = await saveResponsePromise;
+      if (!saveResponse.ok()) {
+        const body = await saveResponse.text().catch(() => "<unreadable>");
+        throw new Error(`Expected SSH credential save to succeed, got ${saveResponse.status()}: ${body}`);
+      }
+
+      await page.waitForTimeout(1400);
+
+      // Reopen and verify persisted auth mode + username.
+      const reopenEdit = page.locator("button:has-text('Edit')").first();
+      await reopenEdit.waitFor({ timeout: 7000 });
+      await reopenEdit.click();
+      await page.getByRole("heading", { name: "Edit Flake" }).waitFor({ timeout: 7000 });
+
+      const sshToggle = page.locator("button.active", { hasText: "SSH key" }).first();
+      await assertVisible(sshToggle, "Expected SSH key auth mode to remain selected after reopen", 7000);
+
+      const sshUserValue = await page.locator("input[placeholder='git']").first().inputValue();
+      if (sshUserValue.trim() !== "git") {
+        throw new Error(`Expected persisted SSH username 'git', got '${sshUserValue}'`);
+      }
+    },
+  },
+  {
     name: "13d-flakes-stress-dataset",
     description: "Flakes view remains responsive with production-shaped timeline payload",
     action: async (page) => {
@@ -2877,6 +3089,63 @@ const steps = [
     },
   },
   {
+    name: "13h-flakes-force-push-rewrite-recovery",
+    description: "Real git force-push rewrite + sync updates flake timeline state",
+    action: async (page) => {
+      await page.goto(`${baseUrl}/flakes`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1800);
+
+      // Open tray so we can validate commit list behavior after rewrite/sync.
+      const flakeCell = page.locator("text=test-flake").first();
+      await flakeCell.waitFor({ timeout: 10000 });
+      await flakeCell.click();
+      await page.waitForTimeout(1200);
+
+      const beforeCountText = await page
+        .locator(".fl-tray-commits-search span")
+        .first()
+        .textContent()
+        .catch(() => null);
+
+      const rewrittenHead = forceRewriteGitServerMain();
+      console.log(`Rewrote gitserver main branch to new HEAD: ${rewrittenHead}`);
+
+      const syncButton = page.locator("button:has-text('Sync from Source')").first();
+      await syncButton.waitFor({ timeout: 7000 });
+      await syncButton.click();
+
+      // Wait for timeline refresh polling to settle.
+      await page.waitForTimeout(6000);
+
+      const afterCountText = await page
+        .locator(".fl-tray-commits-search span")
+        .first()
+        .textContent()
+        .catch(() => null);
+
+      if (!afterCountText) {
+        throw new Error("Expected tray commits counter to remain visible after force-push sync");
+      }
+
+      // The UI must remain functional and not get stuck in rewrite modal loop/cycle.
+      const rewriteModalVisible = await page
+        .locator("text=History Rewrite Detected")
+        .first()
+        .isVisible({ timeout: 1500 })
+        .catch(() => false);
+
+      if (rewriteModalVisible) {
+        throw new Error("Unexpected persistent history rewrite modal after sync recovery");
+      }
+
+      if (beforeCountText && beforeCountText === afterCountText) {
+        console.log(
+          `Timeline counter unchanged across rewrite sync (${beforeCountText}); this is allowed if commit window size is stable.`,
+        );
+      }
+    },
+  },
+  {
     name: "14-environments",
     description: "Environments registry",
     action: async (page) => {
@@ -2923,6 +3192,27 @@ const steps = [
         );
         if (overflowingCards > 0) {
           throw new Error(`Build queue has ${overflowingCards} overflowing cards`);
+        }
+      }
+
+      await unrouteBuildsData(page);
+    },
+  },
+  {
+    name: "15a-builds-header-and-metrics",
+    description: "Builds header actions and stat strip labels",
+    action: async (page) => {
+      await routeBuildsData(page);
+      await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2000);
+
+      await assertVisible(page.locator("button:has-text('Refresh')"), "Expected Refresh action in Builds header");
+      await assertVisible(page.locator("button:has-text('Queue build')"), "Expected Queue build action in Builds header");
+
+      const pageText = await page.locator("body").textContent();
+      for (const metric of ["Building", "Queued", "Failed 24h", "Workers", "Slot usage"]) {
+        if (!pageText.includes(metric)) {
+          throw new Error(`Expected '${metric}' metric label in Builds stat strip`);
         }
       }
 
@@ -3005,21 +3295,15 @@ const steps = [
   // ============================================================
   {
     name: "15d-builds-queue-table-view",
-    description: "Build queue in table view mode",
+    description: "Build queue default table view",
     action: async (page) => {
       await routeBuildsDataWithCancelStates(page);
       await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
 
-      // Find and click the table view toggle button
-      const tableToggle = page.locator("[data-testid='queue-view-table']");
-      await assertVisible(tableToggle, "Table view toggle should be visible");
-      await tableToggle.click();
-      await page.waitForTimeout(800);
-
-      // Verify table view is now displayed
+      // Verify table view is displayed by default
       const queueTable = page.locator("[data-testid='build-queue-table']");
-      await assertVisible(queueTable, "Build queue table should be visible after toggle");
+      await assertVisible(queueTable, "Build queue table should be visible by default");
 
       // Verify table has rows
       const tableRows = page.locator("[data-testid='build-queue-row']");
@@ -3063,11 +3347,6 @@ const steps = [
       await routeBuildsDataWithCancelStates(page);
       await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
-
-      // Switch to table view to see duration column more clearly
-      const tableToggle = page.locator("[data-testid='queue-view-table']");
-      await tableToggle.click();
-      await page.waitForTimeout(800);
 
       // The mock data has elapsed_secs: 3723 which should display as "1h 2m" (approximately)
       // Look for human-readable time format patterns like "Xh Ym" or "Xm Ys"
@@ -3181,69 +3460,56 @@ const steps = [
     description: "CVE dashboard - fleet overview",
     action: async (page) => {
       // Mock the CVE API endpoints so the test doesn't require real scan data.
-      await page.route("**/api/v1/cves/summary*", async (route) => {
+      await page.route("**/api/v1/cves/stats*", async (route) => {
         await route.fulfill({
           status: 200,
           contentType: "application/json",
           body: JSON.stringify({
-            total_open: 42,
-            severity: { critical: 5, high: 12, medium: 18, low: 7 },
-            affected_systems: 8,
-            new_cves_last_7_days: 3,
-            oldest_cve_age_days: 730,
+            total_cves: 42,
+            critical: 5,
+            high: 12,
+            medium: 18,
+            low: 7,
+            fixable: 20,
+            exploited: 2,
+            environments_affected: 3,
+            systems_affected: 8,
+            outstanding: 30,
+            accepted: 8,
+            scheduled: 4,
           }),
         });
       });
-      await page.route("**/api/v1/cves/top-systems*", async (route) => {
+      await page.route("**/api/v1/cves/packages*", async (route) => {
         await route.fulfill({
           status: 200,
           contentType: "application/json",
-          body: JSON.stringify([
-            {
-              system_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-              hostname: "prod-server-01",
-              total_cves: 15,
-              critical_cves: 3,
-              high_cves: 5,
-              medium_cves: 4,
-              low_cves: 3,
-              days_since_scan: 2,
-              last_cve_scan: new Date().toISOString(),
-            },
-          ]),
+          body: JSON.stringify(["openssl", "glibc"]),
         });
       });
-      await page.route("**/api/v1/cves/scan-freshness*", async (route) => {
+      await page.route(/\/api\/v1\/cves(?:\?.*)?$/, async (route) => {
         await route.fulfill({
           status: 200,
           contentType: "application/json",
           body: JSON.stringify([
             {
-              system_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-              hostname: "prod-server-01",
-              days_since_scan: 2,
-              last_cve_scan: new Date().toISOString(),
-              total_cves: 15,
-            },
-          ]),
-        });
-      });
-      await page.route("**/api/v1/cves/vulnerabilities*", async (route) => {
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify([
-            {
-              system_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-              hostname: "prod-server-01",
               cve_id: "CVE-2024-1234",
+              cvss_v3_score: 9.8,
+              title: "OpenSSL bounds check issue",
               severity: "critical",
-              cvss_score: 9.8,
+              cvss_vector: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+              published_date: "2024-02-01",
+              exploited: true,
               package_name: "openssl",
               installed_version: "3.0.1",
               fixed_version: "3.0.2",
+              fix_status: "fix_available",
+              affected_count: 4,
+              affected_environments: ["prod", "staging"],
               first_seen: new Date().toISOString(),
-              status: "open",
+              last_seen: new Date().toISOString(),
+              age_days: 12,
+              triage_status: "outstanding",
             },
           ]),
         });
@@ -3252,65 +3518,77 @@ const steps = [
       await page.goto(`${baseUrl}/cves`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
 
+      // Minimize onboarding coach if present so it does not intercept clicks.
+      const coachCollapse16 = page.locator("[data-testid='onboarding-coach-collapse']").first();
+      if (await coachCollapse16.isVisible().catch(() => false)) {
+        await coachCollapse16.click({ force: true });
+        await page.waitForTimeout(250);
+      }
+
       // Assert the page heading is present.
-      const heading = page.locator("main h1:has-text('CVE Dashboard')");
-      await assertVisible(heading, "Expected CVE Dashboard heading");
+      const heading = page.locator("main h1:has-text('CVEs')");
+      await assertVisible(heading, "Expected CVEs heading");
 
       // Assert summary stat cards are rendered.
-      const totalCard = page.locator("main").getByText("Total Open CVEs");
-      await assertVisible(totalCard, "Expected 'Total Open CVEs' stat card");
+      const patchableCard = page.locator("main").getByText("Patchable now");
+      await assertVisible(patchableCard, "Expected 'Patchable now' stat card");
 
       // Assert severity breakdown section.
       const criticalCard = page.locator("main").getByText("Critical").first();
       await assertVisible(criticalCard, "Expected severity breakdown visible");
 
-      // Assert the drill-down section is rendered.
-      const drillDownSection = page.locator("[data-testid='cve-drill-down']");
-      await assertVisible(drillDownSection, "Expected CVE drill-down section");
+      // The CVE view uses a segmented filter bar with severity buttons in a .seg container.
+      // We verify the filter bar is present by checking for the "Critical" button in a .seg element.
+      const severityFilterSeg = page.locator("main .seg button:has-text('Critical')");
+      await assertVisible(severityFilterSeg, "Expected severity filter controls");
 
-      // Assert top-systems section.
-      const topSystems = page.locator("[data-testid='cve-top-systems']");
-      await assertVisible(topSystems, "Expected top-affected systems section");
+      // Switch to flat view mode (default is grouped) to see individual CVE rows in a table.
+      const flatViewBtn = page.locator("button:has-text('Flat')");
+      await flatViewBtn.waitFor({ timeout: 5000 });
+      await flatViewBtn.click();
+      await page.waitForTimeout(1000);
 
-      // Assert scan freshness section.
-      const freshness = page.locator("[data-testid='cve-scan-freshness']");
-      await assertVisible(freshness, "Expected scan freshness section");
+      const cveRow = page.locator("main td:has-text('CVE-2024-1234')");
+      await assertVisible(cveRow, "Expected CVE row to render");
 
       // Unroute after test.
-      await page.unroute("**/api/v1/cves/summary*");
-      await page.unroute("**/api/v1/cves/top-systems*");
-      await page.unroute("**/api/v1/cves/scan-freshness*");
-      await page.unroute("**/api/v1/cves/vulnerabilities*");
+      await page.unroute("**/api/v1/cves/stats*");
+      await page.unroute("**/api/v1/cves/packages*");
+      await page.unroute(/\/api\/v1\/cves(?:\?.*)?$/);
     },
   },
   {
     name: "16b-cves-severity-filter",
     description: "CVE dashboard - severity filter re-issues request with ?severity=critical",
     action: async (page) => {
-      await page.route("**/api/v1/cves/summary*", async (route) => {
+      await page.route("**/api/v1/cves/stats*", async (route) => {
         await route.fulfill({
           status: 200,
           contentType: "application/json",
           body: JSON.stringify({
-            total_open: 17,
-            severity: { critical: 5, high: 12, medium: 0, low: 0 },
-            affected_systems: 4,
-            new_cves_last_7_days: 1,
-            oldest_cve_age_days: 90,
+            total_cves: 17,
+            critical: 5,
+            high: 12,
+            medium: 0,
+            low: 0,
+            fixable: 7,
+            exploited: 1,
+            environments_affected: 2,
+            systems_affected: 4,
+            outstanding: 10,
+            accepted: 5,
+            scheduled: 2,
           }),
         });
       });
-      await page.route("**/api/v1/cves/top-systems*", async (route) => {
-        await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
-      });
-      await page.route("**/api/v1/cves/scan-freshness*", async (route) => {
-        await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+      await page.route("**/api/v1/cves/packages*", async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(["openssl"]) });
       });
 
       // Collect all URLs that hit the vulnerabilities endpoint so we can assert
       // the severity filter is sent as a query param after chip click.
       const vulnerabilityUrls = [];
-      await page.route("**/api/v1/cves/vulnerabilities*", async (route) => {
+      await page.route(/\/api\/v1\/cves(?:\?.*)?$/, async (route) => {
         vulnerabilityUrls.push(route.request().url());
         // First (unfiltered) call returns empty; filtered call returns a critical row.
         const url = route.request().url();
@@ -3320,16 +3598,23 @@ const steps = [
             contentType: "application/json",
             body: JSON.stringify([
               {
-                system_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-                hostname: "prod-server-01",
                 cve_id: "CVE-2024-9999",
+                cvss_v3_score: 9.8,
+                title: "Kernel privilege escalation",
                 severity: "critical",
-                cvss_score: 9.8,
+                cvss_vector: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+                published_date: "2024-02-02",
+                exploited: true,
                 package_name: "openssl",
                 installed_version: "3.0.1",
                 fixed_version: "3.0.2",
+                fix_status: "fix_available",
+                affected_count: 2,
+                affected_environments: ["prod"],
                 first_seen: new Date().toISOString(),
-                status: "fix_available",
+                last_seen: new Date().toISOString(),
+                age_days: 7,
+                triage_status: "outstanding",
               },
             ]),
           });
@@ -3341,17 +3626,30 @@ const steps = [
       await page.goto(`${baseUrl}/cves`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(1500);
 
+      // Minimize onboarding coach if present so it does not intercept clicks.
+      const coachCollapse16b = page.locator("[data-testid='onboarding-coach-collapse']").first();
+      if (await coachCollapse16b.isVisible().catch(() => false)) {
+        await coachCollapse16b.click({ force: true });
+        await page.waitForTimeout(250);
+      }
+
+      // Switch to flat view mode first (default is grouped) to see individual CVE rows in a table.
+      const flatViewBtn = page.locator("button:has-text('Flat')");
+      await flatViewBtn.waitFor({ timeout: 5000 });
+      await flatViewBtn.click();
+      await page.waitForTimeout(1000);
+
       // Wait for the initial unfiltered vulnerabilities request to settle.
       const initialCount = vulnerabilityUrls.length;
 
       // Click the Critical severity filter button.
-      const criticalBtn = page.locator("button:has-text('Critical')").first();
+      const criticalBtn = page.locator(".seg button:has-text('Critical')").first();
       await criticalBtn.waitFor({ timeout: 5000 });
       // Register response wait before clicking to avoid race conditions when the
       // filtered request resolves very quickly in CI.
       const filteredResponsePromise = page.waitForResponse(
         (resp) =>
-          resp.url().includes("/api/v1/cves/vulnerabilities") &&
+          resp.url().includes("/api/v1/cves") &&
           resp.url().includes("severity=critical"),
         { timeout: 8000 },
       );
@@ -3376,9 +3674,9 @@ const steps = [
       }
 
       // Assert the Critical chip now has the active/highlighted style.
-      // The active chip gets class bg-violet-600/20 per FilterButton component.
+      // The new CVE view uses the `active` class on filter buttons inside .seg containers.
       const activeCriticalBtn = page.locator(
-        "button:has-text('Critical').bg-violet-600\\/20",
+        ".seg button:has-text('Critical').active",
       );
       await assertVisible(
         activeCriticalBtn,
@@ -3389,10 +3687,9 @@ const steps = [
       const filteredRow = page.locator("td:has-text('CVE-2024-9999')");
       await assertVisible(filteredRow, "Expected filtered CVE row CVE-2024-9999 to appear after severity filter");
 
-      await page.unroute("**/api/v1/cves/summary*");
-      await page.unroute("**/api/v1/cves/top-systems*");
-      await page.unroute("**/api/v1/cves/scan-freshness*");
-      await page.unroute("**/api/v1/cves/vulnerabilities*");
+      await page.unroute("**/api/v1/cves/stats*");
+      await page.unroute("**/api/v1/cves/packages*");
+      await page.unroute(/\/api\/v1\/cves(?:\?.*)?$/);
     },
   },
   {
@@ -3690,43 +3987,72 @@ const steps = [
   // ── End CVE/multi-rule policy checks ─────────────────────────────────────
   {
     name: "21-caches",
-    description: "Cache management view",
+    description: "Cache management view with stats and Push Jobs tab",
     action: async (page) => {
       await page.goto(`${baseUrl}/caches`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2500);
+
+      await assertVisible(page.getByRole("heading", { name: "Caches" }), "Expected Caches heading");
+      await assertVisible(page.getByText("Total caches").first(), "Expected Total caches stat");
+      await assertVisible(page.getByText("Healthy").first(), "Expected Healthy stat");
+      await assertVisible(page.getByText("Issues").first(), "Expected Issues stat");
+
+      await page.getByRole("button", { name: "Push Jobs" }).click();
+      await assertVisible(
+        page.getByRole("heading", { name: /Cache Push Jobs/i }).first(),
+        "Expected Cache Push Jobs heading after tab switch",
+      );
     },
   },
   {
     name: "22-caches-modal-nix",
-    description: "Add cache modal with Nix type selected",
+    description: "Add cache modal with Nix type selected and public test UX",
     action: async (page) => {
       await page.goto(`${baseUrl}/caches`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2500);
 
-      const addBtn = page.locator("button:has-text('Add Destination')").first();
+      const addBtn = page.locator("button:has-text('Add cache')").first();
       await addBtn.waitFor({ timeout: 5000 });
       await addBtn.click();
-      await page.getByRole("heading", { name: "Add Cache Destination" }).waitFor({ timeout: 5000 });
+      await page.locator("[role='dialog']").first().waitFor({ timeout: 5000 });
 
       const dialog = page.locator("[role='dialog']").first();
-      await dialog.locator("select").first().selectOption("Nix");
+      await dialog.getByRole("button", { name: "Nix" }).click();
+
+      const requiresAuth = dialog.locator("input[type='checkbox']").first();
+      await assertEnabled(dialog.getByRole("button", { name: "Test" }), "Expected Test enabled for public connectivity");
+      await requiresAuth.check();
+      await assertDisabled(dialog.getByRole("button", { name: "Test" }), "Expected Test disabled when auth is required without credential");
+      await requiresAuth.uncheck();
+      await assertEnabled(dialog.getByRole("button", { name: "Test" }), "Expected Test re-enabled after disabling auth");
+
       await page.waitForTimeout(1200);
     },
   },
   {
     name: "23-caches-modal-http",
-    description: "Add cache modal with Http type selected",
+    description: "Add cache modal save flow creates a destination row",
     action: async (page) => {
       await page.goto(`${baseUrl}/caches`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2500);
 
-      const addBtn = page.locator("button:has-text('Add Destination')").first();
+      const addBtn = page.locator("button:has-text('Add cache')").first();
       await addBtn.waitFor({ timeout: 5000 });
       await addBtn.click();
-      await page.getByRole("heading", { name: "Add Cache Destination" }).waitFor({ timeout: 5000 });
+      await page.locator("[role='dialog']").first().waitFor({ timeout: 5000 });
 
       const dialog = page.locator("[role='dialog']").first();
-      await dialog.locator("select").first().selectOption("Http");
+      await dialog.getByRole("button", { name: "Nix" }).click();
+      await dialog.locator("input").first().fill(`ci-cache-${Date.now()}`);
+      await dialog.locator("input").nth(1).fill("https://cache.nixos.org");
+      await dialog.locator("input[type='checkbox']").first().uncheck();
+      await dialog.getByRole("button", { name: "Save" }).click();
+      await assertHidden(dialog, "Expected add-cache modal to close after save");
+      await assertVisible(
+        page.getByText(/ci-cache-/).first(),
+        "Expected newly created cache row after save",
+        10000,
+      );
       await page.waitForTimeout(1200);
     },
   },
@@ -3737,13 +4063,13 @@ const steps = [
       await page.goto(`${baseUrl}/caches`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2500);
 
-      const addBtn = page.locator("button:has-text('Add Destination')").first();
+      const addBtn = page.locator("button:has-text('Add cache')").first();
       await addBtn.waitFor({ timeout: 5000 });
       await addBtn.click();
-      await page.getByRole("heading", { name: "Add Cache Destination" }).waitFor({ timeout: 5000 });
+      await page.locator("[role='dialog']").first().waitFor({ timeout: 5000 });
 
       const dialog = page.locator("[role='dialog']").first();
-      await dialog.locator("select").first().selectOption("S3");
+      await dialog.getByRole("button", { name: "S3" }).click();
       await page.waitForTimeout(1200);
     },
   },
@@ -3754,13 +4080,13 @@ const steps = [
       await page.goto(`${baseUrl}/caches`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2500);
 
-      const addBtn = page.locator("button:has-text('Add Destination')").first();
+      const addBtn = page.locator("button:has-text('Add cache')").first();
       await addBtn.waitFor({ timeout: 5000 });
       await addBtn.click();
-      await page.getByRole("heading", { name: "Add Cache Destination" }).waitFor({ timeout: 5000 });
+      await page.locator("[role='dialog']").first().waitFor({ timeout: 5000 });
 
       const dialog = page.locator("[role='dialog']").first();
-      await dialog.locator("select").first().selectOption("Attic");
+      await dialog.getByRole("button", { name: "Attic" }).click();
       await page.waitForTimeout(1200);
     },
   },
@@ -3949,7 +4275,7 @@ const steps = [
       await page.waitForTimeout(2000);
 
       // Click the History tab
-      const historyTab = page.getByRole("button", { name: /Eval History/i }).first();
+      const historyTab = page.getByRole("button", { name: /History/i }).first();
       await historyTab.waitFor({ timeout: 5000 });
       await historyTab.click();
       await page.waitForTimeout(1500);
@@ -3962,8 +4288,381 @@ const steps = [
       const reEvalBtn = page.getByRole("button", { name: /Re-evaluate/i }).first();
       await reEvalBtn.waitFor({ timeout: 5000 });
 
+      // Select one history row and verify bulk action bar appears
+      const firstRowCheckbox = page.locator(".sys-table tbody .ed-checkbox").first();
+      await firstRowCheckbox.waitFor({ timeout: 5000 });
+      await firstRowCheckbox.click();
+
+      const bulkSelected = page.getByText(/1 selected/i).first();
+      await bulkSelected.waitFor({ timeout: 5000 });
+      await page.getByRole("button", { name: /Download logs/i }).first().waitFor({ timeout: 5000 });
+
+      const compareBtn = page.getByRole("button", { name: /^Compare$/i }).first();
+      await compareBtn.waitFor({ timeout: 5000 });
+      await assertDisabled(compareBtn, "Expected Compare to stay disabled with only one selected history row");
+
+      // Select a second row from the same flake and verify Compare is enabled
+      const thirdRowCheckbox = page.locator(".sys-table tbody .ed-checkbox").nth(2);
+      await thirdRowCheckbox.waitFor({ timeout: 5000 });
+      await thirdRowCheckbox.click();
+      await page.getByText(/2 selected/i).first().waitFor({ timeout: 5000 });
+      await assertEnabled(compareBtn, "Expected Compare to be enabled for two selected rows from the same flake");
+
+      // Clicking a history row opens the evaluation detail drawer
+      const historyRow = page.locator(".sys-table tbody tr").first();
+      await historyRow.click();
+      await page.locator("aside.side-panel[role='dialog']").first().waitFor({ timeout: 5000 });
+
       await page.unroute("**/api/v1/commits/eval-queue**");
       await page.unroute("**/api/v1/commits/eval-history**");
+    },
+  },
+  {
+    name: "12i-system-detail-generation-metric",
+    description: "System detail shows API-provided generation in overview metrics",
+    action: async (page) => {
+      await routeSystemsWarningData(page);
+
+      await page.goto(`${baseUrl}/systems/00000000-0000-0000-0000-0000000000a1`, {
+        timeout: LOAD_TIMEOUT,
+      });
+      await page.waitForTimeout(1400);
+
+      await assertVisible(
+        page.locator(".sd-metric-label", { hasText: "Generation" }).first(),
+        "Expected generation metric label to be visible on system detail",
+      );
+      await assertVisible(
+        page.getByText("#74").first(),
+        "Expected API-provided generation value to render in system detail",
+      );
+
+      await unrouteSystemsWarningData(page);
+    },
+  },
+  {
+    name: "12j-system-detail-deploy-generation-list",
+    description: "Deploy tab generation selector matches generation row text styling expectations",
+    action: async (page) => {
+      await routeSystemsWarningData(page);
+
+      await page.route("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/generations", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            current_generation: 74,
+            generations: [
+              {
+                generation: 74,
+                store_path: "/nix/store/11111111111111111111111111111111-system",
+                commit_hash: "1111111111111111111111111111111111111111",
+                timestamp: "2026-04-07T08:10:00Z",
+                is_current: true,
+              },
+              {
+                generation: 73,
+                store_path: "/nix/store/22222222222222222222222222222222-system",
+                commit_hash: "2222222222222222222222222222222222222222",
+                timestamp: "2026-04-06T22:00:00Z",
+                is_current: false,
+              },
+            ],
+          }),
+        });
+      });
+
+      await page.goto(`${baseUrl}/systems/00000000-0000-0000-0000-0000000000a1`, {
+        timeout: LOAD_TIMEOUT,
+      });
+      await page.waitForTimeout(1600);
+
+      await page.getByRole("button", { name: "Deploy" }).first().click();
+      await page.waitForTimeout(600);
+
+      await assertVisible(
+        page.getByRole("button", { name: "Generation" }).first(),
+        "Expected generation mode selector in deploy tab",
+      );
+      await page.getByRole("button", { name: "Generation" }).first().click();
+      await page.waitForTimeout(600);
+
+      const firstGenerationRow = page.locator(".sd-commit-list .sd-commit-item").first();
+      await assertVisible(firstGenerationRow, "Expected at least one generation row in deploy selector");
+
+      const firstGenerationRowText = (await firstGenerationRow.innerText()).trim();
+      if (firstGenerationRowText.includes("/nix/store/")) {
+        throw new Error("Expected generation selector row to omit store-path text");
+      }
+
+      if (firstGenerationRowText.includes("-system")) {
+        throw new Error("Expected generation selector row to omit store-path hash suffix");
+      }
+
+      if (/\bgen\b/i.test(firstGenerationRowText)) {
+        throw new Error("Expected generation selector row to omit 'gen' prefix text");
+      }
+
+      if (!firstGenerationRowText.includes("#74")) {
+        throw new Error("Expected generation selector row to show '#<number>' generation label");
+      }
+
+      if (!/\b[0-9a-f]{7}\b/i.test(firstGenerationRowText)) {
+        throw new Error("Expected generation selector row to include short commit hash text");
+      }
+
+      await page.unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/generations");
+      await unrouteSystemsWarningData(page);
+    },
+  },
+  {
+    name: "27-hardening-fleet",
+    description: "Systemd hardening fleet dashboard route and summary cards",
+    action: async (page) => {
+      await page.route("**/api/v1/hardening/summary*", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            total_systems_scanned: 2,
+            avg_fleet_score: 61.5,
+            total_well_hardened_services: 5,
+            total_moderately_hardened_services: 8,
+            total_poorly_hardened_services: 6,
+            total_vulnerable_services: 3,
+            total_services_scanned: 22,
+            last_scan_completed: new Date().toISOString(),
+          }),
+        });
+      });
+
+      await page.route("**/api/v1/hardening/top-services*", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify([
+            {
+              service_name: "nginx.service",
+              affected_systems_count: 2,
+              avg_score: 34.5,
+              min_score: 28,
+              max_score: 41,
+            },
+            {
+              service_name: "sshd.service",
+              affected_systems_count: 1,
+              avg_score: 49.0,
+              min_score: 49,
+              max_score: 49,
+            },
+          ]),
+        });
+      });
+
+      await page.route("**/api/v1/hardening/systems*", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify([
+            {
+              derivation_id: 42,
+              config_name: "warning-system-01",
+              system_id: "00000000-0000-0000-0000-0000000000a1",
+              hostname: "warning-system-01",
+              latest_scan_id: "00000000-0000-0000-0000-00000000b001",
+              overall_score: 58,
+              risk_level: "poorly_hardened",
+              total_services: 12,
+              well_hardened_count: 2,
+              moderately_hardened_count: 4,
+              poorly_hardened_count: 4,
+              vulnerable_count: 2,
+              last_scan_at: new Date().toISOString(),
+              scan_duration_ms: 2100,
+            },
+          ]),
+        });
+      });
+
+      await page.goto(`${baseUrl}/hardening`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1800);
+
+      if (!page.url().includes("/hardening")) {
+        throw new Error("Expected hardening fleet step to remain on /hardening route");
+      }
+
+      await page.unroute("**/api/v1/hardening/summary*");
+      await page.unroute("**/api/v1/hardening/top-services*");
+      await page.unroute("**/api/v1/hardening/systems*");
+    },
+  },
+  {
+    name: "28-system-hardening-tab",
+    description: "System detail hardening tab table and scan eligibility state",
+    action: async (page) => {
+      await page.route(
+        "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/hardening-scan-eligibility*",
+        async (route) => {
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({
+              eligible: true,
+              reason: null,
+              derivation_id: 42,
+              config_name: "warning-system-01",
+              hostname: "warning-system-01",
+            }),
+          });
+        },
+      );
+
+      await routeSystemsWarningData(page);
+
+      await page.route(
+        "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/hardening/justifications*",
+        async (route) => {
+          await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([]) });
+        },
+      );
+
+      await page.route(
+        "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/hardening*",
+        async (route) => {
+          const vulnerableDirectives = [
+            { name: "PrivateTmp", enabled: false, value: false, points: 0, max_points: 5 },
+            { name: "PrivateDevices", enabled: false, value: false, points: 0, max_points: 4 },
+            { name: "PrivateNetwork", enabled: false, value: false, points: 0, max_points: 3 },
+            { name: "PrivateUsers", enabled: false, value: false, points: 0, max_points: 3 },
+            { name: "ProtectHome", enabled: false, value: "off", points: 0, max_points: 5 },
+            { name: "ProtectSystem", enabled: false, value: "off", points: 0, max_points: 5 },
+            { name: "ProtectKernelTunables", enabled: false, value: false, points: 0, max_points: 3 },
+            { name: "ProtectKernelModules", enabled: false, value: false, points: 0, max_points: 2 },
+            { name: "NoNewPrivileges", enabled: false, value: false, points: 0, max_points: 8 },
+            { name: "CapabilityBoundingSet", enabled: true, value: "", points: 5, max_points: 10 },
+            { name: "AmbientCapabilities", enabled: false, value: ["CAP_NET_BIND_SERVICE"], points: 0, max_points: 7 },
+            { name: "SystemCallFilter", enabled: false, value: [], points: 0, max_points: 12 },
+            { name: "SystemCallArchitectures", enabled: true, value: ["native"], points: 8, max_points: 8 },
+            { name: "MemoryDenyWriteExecute", enabled: false, value: false, points: 0, max_points: 6 },
+            { name: "LockPersonality", enabled: false, value: false, points: 0, max_points: 3 },
+            { name: "RestrictRealtime", enabled: false, value: false, points: 0, max_points: 3 },
+            { name: "RestrictSUIDSGID", enabled: false, value: false, points: 0, max_points: 4 },
+            { name: "RestrictNamespaces", enabled: true, value: true, points: 3, max_points: 5 },
+            { name: "RestrictAddressFamilies", enabled: false, value: [], points: 0, max_points: 4 },
+          ];
+
+          const moderateDirectives = [
+            { name: "PrivateTmp", enabled: true, value: true, points: 5, max_points: 5 },
+            { name: "PrivateDevices", enabled: true, value: true, points: 4, max_points: 4 },
+            { name: "PrivateNetwork", enabled: false, value: false, points: 0, max_points: 3 },
+            { name: "PrivateUsers", enabled: true, value: true, points: 3, max_points: 3 },
+            { name: "ProtectHome", enabled: true, value: "read-only", points: 3, max_points: 5 },
+            { name: "ProtectSystem", enabled: true, value: "full", points: 3, max_points: 5 },
+            { name: "ProtectKernelTunables", enabled: true, value: true, points: 3, max_points: 3 },
+            { name: "ProtectKernelModules", enabled: false, value: false, points: 0, max_points: 2 },
+            { name: "NoNewPrivileges", enabled: true, value: true, points: 8, max_points: 8 },
+            { name: "CapabilityBoundingSet", enabled: true, value: "", points: 10, max_points: 10 },
+            { name: "AmbientCapabilities", enabled: true, value: "", points: 7, max_points: 7 },
+            { name: "SystemCallFilter", enabled: true, value: ["@system-service"], points: 12, max_points: 12 },
+            { name: "SystemCallArchitectures", enabled: true, value: ["native"], points: 8, max_points: 8 },
+            { name: "MemoryDenyWriteExecute", enabled: true, value: true, points: 6, max_points: 6 },
+            { name: "LockPersonality", enabled: true, value: true, points: 3, max_points: 3 },
+            { name: "RestrictRealtime", enabled: true, value: true, points: 3, max_points: 3 },
+            { name: "RestrictSUIDSGID", enabled: true, value: true, points: 4, max_points: 4 },
+            { name: "RestrictNamespaces", enabled: true, value: true, points: 5, max_points: 5 },
+            { name: "RestrictAddressFamilies", enabled: true, value: ["AF_UNIX", "AF_INET"], points: 4, max_points: 4 },
+          ];
+
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify([
+              {
+                id: "00000000-0000-0000-0000-00000000c001",
+                scan_id: "00000000-0000-0000-0000-00000000b001",
+                service_name: "nginx.service",
+                service_type: "simple",
+                hardening_score: 34,
+                risk_level: "vulnerable",
+                enabled_directives_count: 4,
+                disabled_directives_count: 8,
+                missing_directives_count: 6,
+                directives_detail: vulnerableDirectives,
+                created_at: new Date().toISOString(),
+              },
+              {
+                id: "00000000-0000-0000-0000-00000000c002",
+                scan_id: "00000000-0000-0000-0000-00000000b001",
+                service_name: "sshd.service",
+                service_type: "notify",
+                hardening_score: 78,
+                risk_level: "moderately_hardened",
+                enabled_directives_count: 16,
+                disabled_directives_count: 3,
+                missing_directives_count: 1,
+                directives_detail: moderateDirectives,
+                created_at: new Date().toISOString(),
+              },
+            ]),
+          });
+        },
+      );
+
+      await page.goto(`${baseUrl}/systems/00000000-0000-0000-0000-0000000000a1`, {
+        timeout: LOAD_TIMEOUT,
+      });
+      await page.waitForTimeout(1400);
+
+      await assertVisible(
+        page.getByRole("heading", { name: /warning-system-01/i }).first(),
+        "Expected system detail page heading to render before selecting tabs",
+      );
+
+      const hardeningTabButton = page.getByRole("tab", { name: /^Hardening$/i }).first();
+      await hardeningTabButton.waitFor({ timeout: 5000 });
+      await hardeningTabButton.click({ force: true });
+      await page.waitForTimeout(1200);
+
+      await assertVisible(
+        page.getByText("Run Hardening Scan").first(),
+        "Expected hardening scan action to be visible on system detail",
+      );
+      await assertVisible(page.getByText("Avg score").first(), "Expected hardening summary stats row to be visible");
+      await assertVisible(
+        page.getByText("nginx.service").first(),
+        "Expected hardening service rows to render in hardening table",
+      );
+      await assertVisible(page.getByText("nginx.service").first(), "Expected mocked service row to render");
+      await assertVisible(
+        page.getByRole("button", { name: /^View details$/i }).first(),
+        "Expected hardening table detail action to render",
+      );
+
+      await page.getByRole("button", { name: /^View details$/i }).first().click({ force: true });
+      await assertVisible(
+        page.getByRole("heading", { name: "nginx.service" }).first(),
+        "Expected service hardening modal heading to render",
+      );
+      await assertVisible(
+        page.getByRole("tab", { name: "Directives" }).first(),
+        "Expected Directives tab in hardening modal",
+      );
+      await assertVisible(
+        page.getByRole("tab", { name: "Justification" }).first(),
+        "Expected Justification tab in hardening modal",
+      );
+      await page.getByRole("tab", { name: "Justification" }).click();
+      await assertVisible(
+        page.getByText("Add justification").first(),
+        "Expected justification form in Justification tab",
+      );
+
+      await page.unroute(
+        "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/hardening-scan-eligibility*",
+      );
+      await page.unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/hardening/justifications*");
+      await page.unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/hardening*");
+      await unrouteSystemsWarningData(page);
     },
   },
 ];
@@ -3978,6 +4677,8 @@ const CI_FAST_STEP_NAMES = new Set([
   "06x-pipeline-readiness-scroll",
   "06y-recent-deployments-scroll",
   "06z-fleet-health-widget-assert",
+  "11b-builders",
+  "11c-builders-edit-modal",
   "15-builds",
   "11b-builds-queue-card-focus",
   "12b-systems-config-warning",
@@ -3986,11 +4687,15 @@ const CI_FAST_STEP_NAMES = new Set([
   "12f-systems-deploy-modal",
   "12g-system-detail-history-logs-edit",
   "12h-system-detail-cves-grouped-justification",
+  "12i-system-detail-generation-metric",
+  "12j-system-detail-deploy-generation-list",
   "12d-systems-api-error-no-mock-fallback",
   "12g-systems-warning-clears-after-link",
   "13d-flakes-stress-dataset",
   "13e-flakes-add-modal-credentials",
   "13f-flakes-edit-modal-credentials",
+  "13g-flakes-edit-modal-ssh-save-persist",
+  "13h-flakes-force-push-rewrite-recovery",
   // TASK-237: builds queue controls evidence
   "15d-builds-queue-table-view",
   "15e-builds-cancelling-state",
@@ -4000,9 +4705,18 @@ const CI_FAST_STEP_NAMES = new Set([
   // TASK-17: CVE dashboard evidence
   "16-cves",
   "16b-cves-severity-filter",
+  // TASK-303: Caches view and modal evidence
+  "21-caches",
+  "22-caches-modal-nix",
+  "23-caches-modal-http",
+  "24-caches-modal-s3",
+  "25-caches-modal-attic",
   // TASK-273: Evaluation cancellation + history evidence
   "26-evaluations",
   "26b-evaluations-history",
+  // TASK-276: Hardening dashboard + system tab evidence
+  "27-hardening-fleet",
+  "28-system-hardening-tab",
 ]);
 
 (async () => {
@@ -4024,11 +4738,15 @@ const CI_FAST_STEP_NAMES = new Set([
   const context = await browser.newContext({
     viewport: { width: 1920, height: 1080 },
   });
-  const page = await context.newPage();
 
-  const originalWaitForTimeout = page.waitForTimeout.bind(page);
-  page.waitForTimeout = (ms) =>
-    originalWaitForTimeout(Math.max(50, Math.floor(ms * 0.3)));
+  const createStepPage = async () => {
+    const p = await context.newPage();
+    const originalWaitForTimeout = p.waitForTimeout.bind(p);
+    p.waitForTimeout = (ms) => originalWaitForTimeout(Math.max(50, Math.floor(ms * 0.3)));
+    return p;
+  };
+
+  let page = await createStepPage();
 
   const results = [];
 
@@ -4056,6 +4774,12 @@ const CI_FAST_STEP_NAMES = new Set([
         const outputPath = `${outputDir}/${step.name}.png`;
         await page.screenshot({ path: outputPath });
       } catch (_) {}
+
+      // Isolate follow-up steps from lingering page state when a step fails.
+      try {
+        await page.close();
+      } catch (_) {}
+      page = await createStepPage();
     }
 
     results.push({

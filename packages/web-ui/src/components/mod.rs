@@ -33,6 +33,7 @@ pub mod eval_log_modal;
 pub mod filters;
 pub mod flake;
 pub mod forms;
+pub mod heartbeat_spinner;
 pub mod modals;
 pub mod notifications;
 pub mod onboarding;
@@ -41,14 +42,18 @@ pub mod system;
 pub mod tables;
 
 // Top-level component modules
+pub mod chips;
+pub mod icon;
 pub mod layout;
 pub mod loading;
 pub mod stat_card;
 pub mod status_badge;
+pub mod systems_stat_strip;
 pub mod widget_grid;
 
 // Re-exports for convenience
 pub use charts::{DonutArc, DonutChartWithLegend, DonutSegment};
+pub use chips::{Chip, ChipVariant, EnvBadge, StatusDot};
 pub use cve::CvesTab;
 pub use diff::DiffViewer;
 pub use eval_log_modal::EvalLogModal;
@@ -56,6 +61,8 @@ pub use filters::{
     DeploymentFilterDropdown, EnvironmentFilterDropdown, HealthFilterDropdown, MultiSelectDropdown,
     ViewToggle,
 };
+pub use heartbeat_spinner::HeartbeatSpinner;
+pub use icon::{Icon, IconName};
 pub use layout::{AppShell, Card, SidebarNav, TopBar};
 pub use loading::{ErrorMessage, LoadingSpinner};
 pub use modals::{ConfirmDialog, RollbackConfirmDialog, SyncConfirmDialog};
@@ -67,5 +74,6 @@ pub use system::{
     AgentCard, BooleanRow, HardwareCard, InfoRow, InfoRowMono, LogLine, LogsTab, NetworkCard,
     SecurityCard, StatusBadge, SystemInfoCard,
 };
+pub use systems_stat_strip::{SystemsStatStrip, SystemsStats};
 pub use tables::{SortDirection, SortableHeader};
 pub use widget_grid::{GridWidget, WidgetGrid};

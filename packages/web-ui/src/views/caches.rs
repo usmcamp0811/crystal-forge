@@ -184,11 +184,95 @@ enum CachesTab {
     PushJobs,
 }
 
+#[derive(Clone, PartialEq)]
+enum LocalCredentialKind {
+    AwsKey,
+    AwsRole,
+    AtticToken,
+    NixToken,
+}
+
+#[derive(Clone, PartialEq)]
+struct LocalCredential {
+    id: String,
+    name: String,
+    kind: LocalCredentialKind,
+    access_key_id: Option<String>,
+    secret_access_key: Option<String>,
+    role_arn: Option<String>,
+    token: Option<String>,
+}
+
+fn credential_label(cred: &LocalCredential) -> String {
+    let suffix = match cred.kind {
+        LocalCredentialKind::AwsKey => "AWS key",
+        LocalCredentialKind::AwsRole => "IAM role",
+        LocalCredentialKind::AtticToken => "Attic token",
+        LocalCredentialKind::NixToken => "Nix token",
+    };
+    format!("{} ({})", cred.name, suffix)
+}
+
+fn credential_matches_cache_type(cred: &LocalCredential, cache_type: &str) -> bool {
+    match cache_type {
+        "s3" => matches!(
+            cred.kind,
+            LocalCredentialKind::AwsKey | LocalCredentialKind::AwsRole
+        ),
+        "attic" => matches!(cred.kind, LocalCredentialKind::AtticToken),
+        _ => matches!(cred.kind, LocalCredentialKind::NixToken),
+    }
+}
+
+fn api_cache_type(cache_type: &str) -> String {
+    match cache_type {
+        "s3" => "S3".to_string(),
+        "attic" => "Attic".to_string(),
+        "nix" => "Nix".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn credential_fields_for_request(
+    selected_credential: Option<&LocalCredential>,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
+    let s3_profile = selected_credential.and_then(|cred| match cred.kind {
+        LocalCredentialKind::AwsRole => cred.role_arn.clone(),
+        _ => None,
+    });
+    let s3_access_key_id = selected_credential.and_then(|cred| cred.access_key_id.clone());
+    let s3_secret_access_key = selected_credential.and_then(|cred| cred.secret_access_key.clone());
+    let attic_token = selected_credential.and_then(|cred| match cred.kind {
+        LocalCredentialKind::AtticToken | LocalCredentialKind::NixToken => cred.token.clone(),
+        _ => None,
+    });
+
+    (
+        s3_profile,
+        s3_access_key_id,
+        s3_secret_access_key,
+        attic_token,
+    )
+}
+
 /// Cache management page
 #[component]
 pub fn CachesView() -> Element {
     let mut active_tab = use_signal(|| CachesTab::Destinations);
     let from_setup = use_signal(came_from_setup);
+    let mut show_add_modal = use_signal(|| false);
+
+    // Load destinations for stats display
+    let mut refresh_nonce = use_signal(|| 0_u32);
+    let destinations = use_resource(move || {
+        let _nonce = refresh_nonce();
+        async move { client::fetch_cache_destinations(false).await }
+    });
 
     rsx! {
         div {
@@ -204,37 +288,112 @@ pub fn CachesView() -> Element {
                 }
             }
 
-            header {
-                class: "flex flex-col gap-4",
+            // Page header matching mockup (JSX lines 23-33)
+            div {
+                class: "page-head",
                 div {
-                    h1 { class: "{theme::typography::PAGE_TITLE} {theme::text::PRIMARY}", "Cache Management" }
+                    h1 { class: "page-title", "Caches" }
                     p {
-                        class: "text-sm {theme::text::SECONDARY}",
-                        "Configure binary cache destinations and monitor artifact push jobs."
+                        class: "page-subtitle",
+                        // Show totals: X destinations · Y healthy
+                        match destinations.read().as_ref() {
+                            Some(Ok(dests)) => {
+                                let total = dests.len();
+                                let healthy = dests.iter().filter(|d| d.enabled).count();
+                                rsx! { "{total} destinations · {healthy} healthy" }
+                            },
+                            _ => rsx! { "Loading…" }
+                        }
                     }
                 }
+                // + Add cache button (mockup lines 30-32)
+                button {
+                    class: "btn btn-primary focus-ring",
+                    onclick: move |_| {
+                        active_tab.set(CachesTab::Destinations);
+                        show_add_modal.set(true);
+                    },
+                    svg {
+                        width: "14",
+                        height: "14",
+                        view_box: "0 0 24 24",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        style: "display:inline-block; vertical-align:text-bottom; margin-right:4px;",
+                        line { x1: "12", y1: "5", x2: "12", y2: "19" }
+                        line { x1: "5", y1: "12", x2: "19", y2: "12" }
+                    }
+                    " Add cache"
+                }
+            }
 
-                // Tabs
-                div {
-                    class: "flex border-b {theme::surface::DIVIDER}",
-                    button {
-                        class: if active_tab() == CachesTab::Destinations {
-                            "px-4 py-2 border-b-2 border-blue-500 text-blue-400 font-medium"
-                        } else {
-                            "px-4 py-2 border-b-2 border-transparent {theme::text::SECONDARY} hover:{theme::text::PRIMARY} transition-colors"
-                        },
-                        onclick: move |_| active_tab.set(CachesTab::Destinations),
-                        "Cache Destinations"
+            // Stat strip matching mockup (JSX lines 35-48)
+            div {
+                class: "stat-strip",
+                match destinations.read().as_ref() {
+                    Some(Ok(dests)) => {
+                        let total = dests.len();
+                        let healthy = dests.iter().filter(|d| d.enabled).count();
+                        let issues = total - healthy;
+                        rsx! {
+                            div {
+                                class: "stat",
+                                span { class: "stat-accent", style: "--stat-color: #a78bfa;" }
+                                div { class: "stat-label", "Total caches" }
+                                div { class: "stat-value", "{total}" }
+                            }
+                            div {
+                                class: "stat",
+                                span { class: "stat-accent", style: "--stat-color: #34d399;" }
+                                div { class: "stat-label", "Healthy" }
+                                div { class: "stat-value", "{healthy}" }
+                            }
+                            div {
+                                class: "stat",
+                                span { class: "stat-accent", style: "--stat-color: #fbbf24;" }
+                                div { class: "stat-label", "Issues" }
+                                div { class: "stat-value", "{issues}" }
+                            }
+                            div {
+                                class: "stat",
+                                span { class: "stat-accent", style: "--stat-color: #60a5fa;" }
+                                div { class: "stat-label", "Paths cached" }
+                                div { class: "stat-value", "—" }
+                            }
+                        }
+                    },
+                    _ => rsx! {
+                        div {
+                            class: "stat",
+                            span { class: "stat-accent", style: "--stat-color: #a78bfa;" }
+                            div { class: "stat-label", "Total caches" }
+                            div { class: "stat-value", "—" }
+                        }
                     }
-                    button {
-                        class: if active_tab() == CachesTab::PushJobs {
-                            "px-4 py-2 border-b-2 border-blue-500 text-blue-400 font-medium"
-                        } else {
-                            "px-4 py-2 border-b-2 border-transparent {theme::text::SECONDARY} hover:{theme::text::PRIMARY} transition-colors"
-                        },
-                        onclick: move |_| active_tab.set(CachesTab::PushJobs),
-                        "Push Jobs"
-                    }
+                }
+            }
+
+            // Tabs
+            div {
+                class: "flex border-b {theme::surface::DIVIDER}",
+                button {
+                    class: if active_tab() == CachesTab::Destinations {
+                        "px-4 py-2 border-b-2 border-blue-500 text-blue-400 font-medium"
+                    } else {
+                        "px-4 py-2 border-b-2 border-transparent {theme::text::SECONDARY} hover:{theme::text::PRIMARY} transition-colors"
+                    },
+                    onclick: move |_| active_tab.set(CachesTab::Destinations),
+                    "Cache Destinations"
+                }
+                button {
+                    class: if active_tab() == CachesTab::PushJobs {
+                        "px-4 py-2 border-b-2 border-blue-500 text-blue-400 font-medium"
+                    } else {
+                        "px-4 py-2 border-b-2 border-transparent {theme::text::SECONDARY} hover:{theme::text::PRIMARY} transition-colors"
+                    },
+                    onclick: move |_| active_tab.set(CachesTab::PushJobs),
+                    "Push Jobs"
                 }
             }
 
@@ -243,6 +402,8 @@ pub fn CachesView() -> Element {
                 CachesTab::Destinations => rsx! {
                     CacheDestinationsList {
                         show_onboarding_hint: from_setup(),
+                        refresh_nonce: refresh_nonce,
+                        show_add_modal: show_add_modal,
                     }
                 },
                 CachesTab::PushJobs => rsx! {
@@ -255,37 +416,82 @@ pub fn CachesView() -> Element {
 
 /// List of cache destinations with CRUD operations
 #[component]
-fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
-    let mut refresh_nonce = use_signal(|| 0_u32);
+fn CacheDestinationsList(
+    show_onboarding_hint: bool,
+    refresh_nonce: Signal<u32>,
+    mut show_add_modal: Signal<bool>,
+) -> Element {
     let destinations = use_resource(move || {
         let _nonce = refresh_nonce();
         async move { client::fetch_cache_destinations(false).await }
     });
 
-    let mut show_add_modal = use_signal(|| false);
-    let mut add_name = use_signal(String::new);
-    let mut add_type = use_signal(|| "Nix".to_string());
-    let mut add_push_to = use_signal(String::new);
-    let mut add_attic_cache_name = use_signal(String::new);
-    let mut add_attic_public_key = use_signal(String::new);
-    let mut add_attic_token = use_signal(String::new);
-    let mut add_signing_key_path = use_signal(String::new);
-    let mut add_compression = use_signal(String::new);
-    let mut add_s3_region = use_signal(String::new);
-    let mut add_s3_profile = use_signal(String::new);
-    let mut add_s3_access_key_id = use_signal(String::new);
-    let mut add_s3_secret_access_key = use_signal(String::new);
-    let mut add_s3_session_token = use_signal(String::new);
-    let mut add_s3_endpoint_url = use_signal(String::new);
-    let mut add_environment_ids = use_signal(|| Vec::<Uuid>::new());
-    let mut add_error = use_signal(|| None::<String>);
-    let mut add_field_errors = use_signal(|| std::collections::HashMap::<String, String>::new());
-    let mut add_submitting = use_signal(|| false);
+    let mut search_query = use_signal(String::new);
+    let mut edit_destination = use_signal(|| None::<CacheDestination>);
+
+    // Unified form state for both add and edit (simplified to match mockup)
+    let mut form_name = use_signal(String::new);
+    let mut form_type = use_signal(|| "s3".to_string());
+    let mut form_url = use_signal(String::new);
+    let mut form_requires_auth = use_signal(|| true);
+    let mut form_cred_id = use_signal(String::new);
+    let mut form_environment_ids = use_signal(|| Vec::<Uuid>::new());
+    let mut form_testing = use_signal(|| None::<String>);
+    let mut form_test_error = use_signal(|| None::<String>);
+    let mut form_save_error = use_signal(|| None::<String>);
+    let mut form_show_cred_modal = use_signal(|| false);
+    let mut local_credentials = use_signal(Vec::<LocalCredential>::new);
+
+    // Pre-populate form when switching between add/edit
+    use_effect(move || {
+        if let Some(dest) = edit_destination() {
+            // Edit mode - populate from existing cache
+            form_name.set(dest.name.clone());
+            form_type.set(dest.cache_type.to_lowercase());
+            form_url.set(dest.push_to.clone().unwrap_or_default());
+            // Infer requires auth from any credential/config indicator.
+            // Secrets are redacted by API, so rely on durable config fields too.
+            let has_auth = dest.s3_secret_access_key.is_some()
+                || dest.s3_access_key_id.is_some()
+                || dest.attic_token.is_some()
+                || dest
+                    .s3_profile
+                    .as_ref()
+                    .is_some_and(|v| !v.trim().is_empty())
+                || dest
+                    .attic_cache_name
+                    .as_ref()
+                    .is_some_and(|v| !v.trim().is_empty())
+                || matches!(dest.cache_type.as_str(), "S3" | "Attic" | "s3" | "attic");
+            form_requires_auth.set(has_auth);
+            form_cred_id.set(String::new());
+            form_testing.set(None);
+            form_test_error.set(None);
+            form_save_error.set(None);
+            form_show_cred_modal.set(false);
+
+            // Load environment assignments
+            let cache_id = dest.id;
+            form_environment_ids.set(Vec::new());
+            spawn(async move {
+                if let Ok(env_ids) = client::get_cache_environments(cache_id).await {
+                    form_environment_ids.set(env_ids);
+                }
+            });
+        } else if show_add_modal() {
+            // Add mode - reset to defaults
+            form_name.set(String::new());
+            form_type.set("s3".to_string());
+            form_url.set(String::new());
+            form_requires_auth.set(true);
+            form_cred_id.set(String::new());
+            form_environment_ids.set(Vec::new());
+            form_testing.set(None);
+            form_test_error.set(None);
+            form_save_error.set(None);
+        }
+    });
     let mut dismiss_add_target_callout = use_signal(|| false);
-    let mut show_cache_name_callout = use_signal(|| false);
-    let mut show_cache_type_callout = use_signal(|| false);
-    let mut show_cache_endpoint_callout = use_signal(|| false);
-    let mut show_cache_env_callout = use_signal(|| false);
 
     // Fetch available environments for assignment
     let environments = use_resource(|| async move { client::fetch_environments().await });
@@ -298,63 +504,114 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
         div {
             class: "space-y-4",
 
-            // Header with Add button
+            // Filter bar matching mockup (JSX lines 50-56)
             div {
-                class: "flex justify-between items-center",
-                h2 {
-                    class: "{theme::typography::SECTION_TITLE} {theme::text::PRIMARY}",
-                    "Cache Destinations"
-                }
+                class: "filterbar",
                 div {
-                    class: "relative",
-                    button {
-                        class: if show_add_target_callout {
-                            "px-4 py-2 rounded-lg text-sm font-medium {theme::interactive::PRIMARY_BTN} animate-pulse ring-2 ring-blue-300/70 ring-offset-2 ring-offset-slate-950"
-                        } else {
-                            "px-4 py-2 rounded-lg text-sm font-medium {theme::interactive::PRIMARY_BTN}"
-                        },
-                        onclick: move |_| {
-                            dismiss_add_target_callout.set(true);
-                            show_add_modal.set(true);
-                            if show_onboarding_hint {
-                                show_cache_name_callout.set(true);
-                                show_cache_type_callout.set(false);
-                                show_cache_endpoint_callout.set(false);
-                                show_cache_env_callout.set(false);
-                            }
-                        },
-                        "+ Add Destination"
+                    class: "filter-search",
+                    style: "max-width:320px;",
+                    // Search icon (simplified inline SVG)
+                    svg {
+                        width: "16",
+                        height: "16",
+                        view_box: "0 0 24 24",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        circle { cx: "11", cy: "11", r: "8" }
+                        path { d: "m21 21-4.3-4.3" }
                     }
-                    if show_add_target_callout {
-                        div {
-                            "data-testid": "setup-coach-caches-target-callout",
-                            style: "position:absolute; right:0; top:calc(100% + 10px); background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; width:220px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
-                            div {
-                                style: "position:absolute; top:-6px; right:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
-                            }
-                            p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
-                            p { style: "margin:2px 0 0 0;", "Click Add Destination to create your first cache endpoint." }
-                        }
+                    input {
+                        class: "input focus-ring",
+                        placeholder: "Search caches…",
+                        value: "{search_query}",
+                        oninput: move |evt| search_query.set(evt.value())
+                    }
+                }
+                span {
+                    class: "filter-count",
+                    // Show filtered count
+                    match destinations.read().as_ref() {
+                        Some(Ok(dests)) => {
+                            let query = search_query().to_lowercase();
+                            let filtered = if query.is_empty() {
+                                dests.len()
+                            } else {
+                                dests.iter().filter(|d| {
+                                    d.name.to_lowercase().contains(&query) ||
+                                    d.push_to.as_ref().map(|u| u.to_lowercase().contains(&query)).unwrap_or(false)
+                                }).count()
+                            };
+                            rsx! { "{filtered} caches" }
+                        },
+                        _ => rsx! { "— caches" }
                     }
                 }
             }
 
-            // List
+            if show_add_target_callout {
+                div {
+                    "data-testid": "setup-coach-caches-target-callout",
+                    style: "position:relative; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; margin-bottom:16px;",
+                    p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
+                    p { style: "margin:2px 0 0 0;", "Click Add cache (in the page header above) to create your first cache endpoint." }
+                }
+            }
+
+            // List - table format matching mockup (JSX lines 58-76)
             match &*destinations.read_unchecked() {
-                Some(Ok(dests)) => rsx! {
-                    if dests.is_empty() {
-                        div {
-                            class: "{theme::presets::CARD} text-center py-12",
-                            p { class: "{theme::text::SECONDARY}", "No cache destinations configured." }
-                            p { class: "{theme::text::MUTED} text-sm mt-2", "Add your first cache destination to start pushing build artifacts." }
-                        }
+                Some(Ok(dests)) => {
+                    // Filter destinations based on search query
+                    let query = search_query().to_lowercase();
+                    let filtered: Vec<_> = if query.is_empty() {
+                        dests.iter().collect()
                     } else {
-                        div {
-                            class: "grid gap-4",
-                            for dest in dests {
-                                CacheDestinationCard {
-                                    destination: dest.clone(),
-                                    on_change: move |_| refresh_nonce.set(refresh_nonce() + 1),
+                        dests.iter().filter(|d| {
+                            d.name.to_lowercase().contains(&query) ||
+                            d.push_to.as_ref().map(|u| u.to_lowercase().contains(&query)).unwrap_or(false)
+                        }).collect()
+                    };
+
+                    rsx! {
+                        if filtered.is_empty() && !query.is_empty() {
+                            div {
+                                class: "{theme::presets::CARD} text-center py-12",
+                                p { class: "{theme::text::SECONDARY}", "No caches match \"{query}\"" }
+                            }
+                        } else if dests.is_empty() {
+                            div {
+                                class: "{theme::presets::CARD} text-center py-12",
+                                p { class: "{theme::text::SECONDARY}", "No cache destinations configured." }
+                                p { class: "{theme::text::MUTED} text-sm mt-2", "Add your first cache destination to start pushing build artifacts." }
+                            }
+                        } else {
+                            // Table structure matching mockup
+                            div {
+                                class: "card",
+                                style: "overflow:hidden;",
+                                table {
+                                    class: "sys-table",
+                                    thead {
+                                        tr {
+                                            th { "Cache" }
+                                            th { "Type" }
+                                            th { "Status" }
+                                            th { "Storage" }
+                                            th { "Paths" }
+                                            th { "Last push" }
+                                            th { "Environments" }
+                                            th { style: "text-align:right;", " " }
+                                        }
+                                    }
+                                    tbody {
+                                        for dest in filtered {
+                                            CacheDestinationRow {
+                                                destination: dest.clone(),
+                                                on_edit: move |d: CacheDestination| edit_destination.set(Some(d)),
+                                                on_change: move |_| refresh_nonce.set(refresh_nonce() + 1),
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -374,669 +631,805 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
                 },
             }
 
-            // Add modal
+            // Add modal - matching JSX mockup CacheFormModal (add mode)
             if show_add_modal() {
                 div {
-                    class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
-                    tabindex: "0",
-                    onclick: move |_| show_add_modal.set(false),
-                    onkeydown: move |evt| {
-                        if evt.key() == Key::Escape {
-                            show_add_modal.set(false);
-                        }
+                    class: "modal-backdrop",
+                    onclick: move |_| {
+                        form_show_cred_modal.set(false);
+                        show_add_modal.set(false)
                     },
                     div {
-                        class: "relative {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl shadow-2xl p-6 w-full cf-modal-panel-44 flex flex-col",
-                        style: "max-height: calc(100dvh - 2rem);",
-                        role: "dialog",
-                        aria_modal: "true",
-                        aria_labelledby: "add-cache-destination-modal-title",
+                        class: "modal",
                         onclick: move |e| e.stop_propagation(),
-
-                        // Header
+                        style: "width:min(620px,96vw); max-height:92vh;",
                         div {
-                            class: "flex justify-between items-center mb-6 shrink-0",
-                            h3 {
-                                id: "add-cache-destination-modal-title",
-                                class: "{theme::typography::SECTION_TITLE} {theme::text::PRIMARY}",
-                                "Add Cache Destination"
+                            class: "modal-head",
+                            h2 {
+                                svg {
+                                    width: "14", height: "14", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2",
+                                    style: "margin-right:6px; vertical-align:text-bottom; display:inline-block;",
+                                    line { x1: "12", y1: "5", x2: "12", y2: "19" }
+                                    line { x1: "5", y1: "12", x2: "19", y2: "12" }
+                                }
+                                "Add cache destination"
                             }
-                            button {
-                                r#type: "button",
-                                class: "{theme::text::SECONDARY} hover:{theme::text::PRIMARY} text-lg",
-                                title: "Close add cache destination modal",
-                                aria_label: "Close add cache destination modal",
-                                onclick: move |_| {
-                                    show_add_modal.set(false);
-                                    show_cache_name_callout.set(false);
-                                    show_cache_type_callout.set(false);
-                                    show_cache_endpoint_callout.set(false);
-                                    show_cache_env_callout.set(false);
-                                },
-                                "✕"
-                            }
+                            p { "Register a new binary cache destination." }
                         }
-
-                        // Scrollable body
                         div {
-                            class: "flex-1 min-h-0 overflow-y-auto space-y-4 pr-1",
-                            div {
-                                class: "relative overflow-visible",
-                                label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Name *" }
+                            class: "modal-body",
+                            style: "overflow-y:auto;",
+                            div { class: "field", label { "Name" }
+                                input { class: "input focus-ring", value: form_name(), oninput: move |evt| form_name.set(evt.value()), placeholder: "e.g. crystal-forge-prod-cache" }
+                            }
+                            div { class: "field", label { "Type" }
+                                div { class: "seg",
+                                    for (val, label) in [("s3", "S3-compatible"), ("attic", "Attic"), ("nix", "Nix HTTPS")] {
+                                        button {
+                                            class: if form_type() == val { "active" } else { "" },
+                                            onclick: move |_| {
+                                                form_testing.set(None);
+                                                form_type.set(val.to_string())
+                                            },
+                                            "{label}"
+                                        }
+                                    }
+                                }
+                            }
+                            div { class: "field", label { "URL" }
                                 input {
-                                    class: if add_field_errors().contains_key("name") {
-                                        "w-full rounded-lg border px-3 py-2 text-sm {theme::text::PRIMARY} cf-policy-modal-field-error focus:outline-none"
-                                    } else {
-                                        "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} {theme::text::PRIMARY} focus:outline-none"
-                                    },
-                                    placeholder: "main-cache",
-                                    value: add_name(),
-                                    onfocus: move |_| show_cache_name_callout.set(false),
-                                    oninput: move |evt| {
-                                        let value = evt.value();
-                                        add_name.set(value.clone());
-                                        show_cache_name_callout.set(false);
-                                        if show_onboarding_hint && !value.trim().is_empty() {
-                                            show_cache_type_callout.set(true);
-                                        }
-                                        let mut errors = add_field_errors();
-                                        errors.remove("name");
-                                        add_field_errors.set(errors);
-                                    },
-                                }
-                                if show_cache_name_callout() {
-                                    div {
-                                        "data-testid": "setup-coach-cache-field-name",
-                                        style: "position:absolute; left:0; top:calc(100% + 8px); width:min(420px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
-                                        div {
-                                            style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
-                                        }
-                                        p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
-                                        p { style: "margin:2px 0 0 0;", "Choose a clear cache name (for example: primary-cache or edge-cache-eu) so teams know where artifacts are published." }
-                                    }
-                                }
-                                if let Some(err) = add_field_errors().get("name") {
-                                    p { class: "text-[11px] text-red-300 mt-1", "{err}" }
+                                    class: "input focus-ring mono", style: "font-size:12px;", value: form_url(), oninput: move |evt| { form_testing.set(None); form_url.set(evt.value()) },
+                                    placeholder: match form_type().as_str() { "s3" => "s3://bucket?region=us-east-1", "attic" => "attic://host/cache", _ => "https://cache.nixos.org" }
                                 }
                             }
-
-                            div {
-                                class: "relative overflow-visible",
-                                label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Type" }
-                                select {
-                                    class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
-                                    value: add_type(),
-                                    onfocus: move |_| show_cache_type_callout.set(false),
-                                    onchange: move |evt| {
-                                        add_type.set(evt.value());
-                                        show_cache_type_callout.set(false);
-                                        if show_onboarding_hint
-                                            && !add_name().trim().is_empty()
-                                            && add_push_to().trim().is_empty()
-                                        {
-                                            show_cache_endpoint_callout.set(true);
-                                        }
-                                    },
-                                    option { class: "text-slate-900 bg-white", value: "Nix", "Nix" }
-                                    option { class: "text-slate-900 bg-white", value: "Http", "Http" }
-                                    option { class: "text-slate-900 bg-white", value: "S3", "S3" }
-                                    option { class: "text-slate-900 bg-white", value: "Attic", "Attic" }
-                                }
-                                if show_cache_type_callout() && !add_name().trim().is_empty() {
-                                    div {
-                                        "data-testid": "setup-coach-cache-field-type",
-                                        style: "position:absolute; left:0; top:calc(100% + 8px); width:min(420px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
-                                        div {
-                                            style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
-                                        }
-                                        p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
-                                        p { style: "margin:2px 0 0 0;", "Choose a cache type. Nix/Http are simple URL-based endpoints, S3 is object storage, and Attic is a dedicated binary cache service." }
-                                    }
-                                }
+                            label {
+                                style: "display:flex; gap:8px; align-items:center; font-size:13px; cursor:pointer;",
+                                input { r#type: "checkbox", checked: form_requires_auth(), onchange: move |evt| { form_testing.set(None); form_requires_auth.set(evt.checked()) }, style: "accent-color:var(--cf-brand-purple);" }
+                                span { "Requires authentication" }
                             }
-
-                            // Type-specific required fields
-                            if add_type() == "Attic" {
-                                div {
-                                    class: "relative overflow-visible",
-                                    div {
-                                        class: "flex items-baseline justify-between gap-2",
-                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Cache Name (on Attic server) *" }
-                                        if !add_field_errors().contains_key("attic_cache_name") {
-                                            span { class: "text-[11px] {theme::text::MUTED}", "Name of cache configured in your Attic server" }
-                                        }
-                                    }
-                                    input {
-                                        class: if add_field_errors().contains_key("attic_cache_name") {
-                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::text::PRIMARY} cf-policy-modal-field-error focus:outline-none"
-                                        } else {
-                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} {theme::text::PRIMARY} focus:outline-none"
-                                        },
-                                        placeholder: "my-binary-cache",
-                                        value: add_attic_cache_name(),
-                                        oninput: move |evt| {
-                                            add_attic_cache_name.set(evt.value());
-                                            let mut errors = add_field_errors();
-                                            errors.remove("attic_cache_name");
-                                            add_field_errors.set(errors);
-                                        },
-                                    }
-                                    if let Some(err) = add_field_errors().get("attic_cache_name") {
-                                        p { class: "text-[11px] text-red-300 mt-1", "{err}" }
-                                    }
-                                }
-                                div {
-                                    div {
-                                        class: "flex items-baseline justify-between gap-2",
-                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Attic Server URL *" }
-                                        if !add_field_errors().contains_key("push_to") {
-                                            span { class: "text-[11px] {theme::text::MUTED}", "Base URL for your Attic instance" }
-                                        }
-                                    }
-                                    input {
-                                        class: if add_field_errors().contains_key("push_to") {
-                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::text::PRIMARY} cf-policy-modal-field-error focus:outline-none"
-                                        } else {
-                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} {theme::text::PRIMARY} focus:outline-none"
-                                        },
-                                        placeholder: "https://attic.example.com",
-                                        value: add_push_to(),
-                                        onfocus: move |_| {
-                                            show_cache_type_callout.set(false);
-                                            if show_onboarding_hint
-                                                && !add_name().trim().is_empty()
-                                                && add_push_to().trim().is_empty()
-                                            {
-                                                show_cache_endpoint_callout.set(true);
-                                            } else {
-                                                show_cache_endpoint_callout.set(false);
+                            if form_requires_auth() {
+                                div { class: "field", label { "Credential" }
+                                    div { style: "display:flex; gap:8px;",
+                                        select {
+                                            class: "input focus-ring", style: "flex:1;", value: form_cred_id(),
+                                            onchange: move |evt| {
+                                                form_testing.set(None);
+                                                form_test_error.set(None);
+                                                let v = evt.value();
+                                                if v == "__new__" { form_show_cred_modal.set(true); } else { form_cred_id.set(v); }
+                                            },
+                                            option { value: "", "Select a credential…" }
+                                            for cred in local_credentials().into_iter().filter(|cred| credential_matches_cache_type(cred, &form_type())) {
+                                                option { value: "{cred.id}", "{credential_label(&cred)}" }
                                             }
-                                        },
-                                        oninput: move |evt| {
-                                            let value = evt.value();
-                                            add_push_to.set(value.clone());
-                                            show_cache_type_callout.set(false);
-                                            show_cache_endpoint_callout.set(false);
-                                            if show_onboarding_hint && !value.trim().is_empty() {
-                                                show_cache_env_callout.set(true);
-                                            }
-                                            let mut errors = add_field_errors();
-                                            errors.remove("push_to");
-                                            add_field_errors.set(errors);
-                                        },
-                                    }
-                                    if show_cache_endpoint_callout() {
-                                        div {
-                                            "data-testid": "setup-coach-cache-field-endpoint",
-                                            style: "position:absolute; left:0; top:calc(100% + 8px); width:min(420px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
-                                            div {
-                                                style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
-                                            }
-                                            p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
-                                            p { style: "margin:2px 0 0 0;", "Set the cache server endpoint that systems/builders will push artifacts to." }
+                                            option { value: "__new__", "+ Add new credential…" }
                                         }
-                                    }
-                                    if let Some(err) = add_field_errors().get("push_to") {
-                                        p { class: "text-[11px] text-red-300 mt-1", "{err}" }
-                                    }
-                                }
-                                div {
-                                    class: "relative overflow-visible",
-                                    div {
-                                        class: "flex items-baseline justify-between gap-2",
-                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Attic Public Key *" }
-                                        if !add_field_errors().contains_key("attic_public_key") {
-                                            span { class: "text-[11px] {theme::text::MUTED}", "Used by agents as trusted-public-key" }
-                                        }
-                                    }
-                                    input {
-                                        class: if add_field_errors().contains_key("attic_public_key") {
-                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::text::PRIMARY} cf-policy-modal-field-error focus:outline-none"
-                                        } else {
-                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} {theme::text::PRIMARY} focus:outline-none"
-                                        },
-                                        placeholder: "cache.example.org-1:AbCdEf...",
-                                        value: add_attic_public_key(),
-                                        oninput: move |evt| {
-                                            add_attic_public_key.set(evt.value());
-                                            let mut errors = add_field_errors();
-                                            errors.remove("attic_public_key");
-                                            add_field_errors.set(errors);
-                                        },
-                                    }
-                                    if let Some(err) = add_field_errors().get("attic_public_key") {
-                                        p { class: "text-[11px] text-red-300 mt-1", "{err}" }
-                                    }
-                                }
-                                div {
-                                    div {
-                                        class: "flex items-baseline justify-between gap-2",
-                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Attic Token *" }
-                                        span { class: "text-[11px] {theme::text::MUTED}", "Authentication token required for Attic cache server" }
-                                    }
-                                    input {
-                                        r#type: "password",
-                                        class: if add_field_errors().contains_key("attic_token") {
-                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::text::PRIMARY} cf-policy-modal-field-error focus:outline-none"
-                                        } else {
-                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} {theme::text::PRIMARY} focus:outline-none"
-                                        },
-                                        placeholder: "attic-token-xyz...",
-                                        value: add_attic_token(),
-                                        oninput: move |evt| {
-                                            add_attic_token.set(evt.value());
-                                            let mut errors = add_field_errors();
-                                            errors.remove("attic_token");
-                                            add_field_errors.set(errors);
-                                        },
-                                    }
-                                    if let Some(err) = add_field_errors().get("attic_token") {
-                                        p { class: "text-[11px] text-red-300 mt-1", "{err}" }
-                                    }
-                                }
-                            } else {
-                                div {
-                                    div {
-                                        class: "flex items-baseline justify-between gap-2",
-                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Destination URL *" }
-                                        if !add_field_errors().contains_key("push_to") {
-                                            span { class: "text-[11px] {theme::text::MUTED}", "Full URL to the cache destination" }
-                                        }
-                                    }
-                                    input {
-                                        class: if add_field_errors().contains_key("push_to") {
-                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::text::PRIMARY} cf-policy-modal-field-error focus:outline-none"
-                                        } else {
-                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} {theme::text::PRIMARY} focus:outline-none"
-                                        },
-                                        placeholder: "https://cache.example.com or s3://bucket",
-                                        value: add_push_to(),
-                                        onfocus: move |_| {
-                                            show_cache_type_callout.set(false);
-                                            if show_onboarding_hint
-                                                && !add_name().trim().is_empty()
-                                                && add_push_to().trim().is_empty()
-                                            {
-                                                show_cache_endpoint_callout.set(true);
-                                            } else {
-                                                show_cache_endpoint_callout.set(false);
-                                            }
-                                        },
-                                        oninput: move |evt| {
-                                            let value = evt.value();
-                                            add_push_to.set(value.clone());
-                                            show_cache_type_callout.set(false);
-                                            show_cache_endpoint_callout.set(false);
-                                            if show_onboarding_hint && !value.trim().is_empty() {
-                                                show_cache_env_callout.set(true);
-                                            }
-                                            let mut errors = add_field_errors();
-                                            errors.remove("push_to");
-                                            add_field_errors.set(errors);
-                                        },
-                                    }
-                                    if show_cache_endpoint_callout() {
-                                        div {
-                                            "data-testid": "setup-coach-cache-field-endpoint",
-                                            style: "position:absolute; left:0; top:calc(100% + 8px); width:min(420px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
-                                            div {
-                                                style: "position:absolute; top:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
-                                            }
-                                            p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
-                                            p { style: "margin:2px 0 0 0;", "Use the full cache destination URL (HTTP/S or S3) where artifacts should be uploaded." }
-                                        }
-                                    }
-                                    if let Some(err) = add_field_errors().get("push_to") {
-                                        p { class: "text-[11px] text-red-300 mt-1", "{err}" }
-                                    }
-                                }
-                            }
-
-                            // S3-specific fields
-                            if add_type() == "S3" {
-                                div {
-                                    class: "grid grid-cols-2 gap-4",
-                                    div {
-                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "S3 Region *" }
-                                        input {
-                                            class: if add_field_errors().contains_key("s3_region") {
-                                                "w-full px-3 py-2 rounded-lg text-sm {theme::text::PRIMARY} cf-policy-modal-field-error"
-                                            } else {
-                                                "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}"
-                                            },
-                                            placeholder: "us-east-1",
-                                            value: add_s3_region(),
-                                            oninput: move |evt| {
-                                                add_s3_region.set(evt.value());
-                                                let mut errors = add_field_errors();
-                                                errors.remove("s3_region");
-                                                add_field_errors.set(errors);
-                                            },
-                                        }
-                                        if let Some(err) = add_field_errors().get("s3_region") {
-                                            p { class: "text-[11px] text-red-300 mt-1", "{err}" }
-                                        }
-                                    }
-                                    div {
-                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "S3 Profile (optional)" }
-                                        input {
-                                            class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
-                                            placeholder: "default",
-                                            value: add_s3_profile(),
-                                            oninput: move |evt| add_s3_profile.set(evt.value()),
-                                        }
-                                    }
-                                }
-                                div {
-                                    class: "grid grid-cols-2 gap-4",
-                                    div {
-                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "AWS Access Key ID *" }
-                                        input {
-                                            class: if add_field_errors().contains_key("s3_access_key_id") {
-                                                "w-full px-3 py-2 rounded-lg text-sm {theme::text::PRIMARY} cf-policy-modal-field-error"
-                                            } else {
-                                                "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}"
-                                            },
-                                            placeholder: "AKIA...",
-                                            value: add_s3_access_key_id(),
-                                            oninput: move |evt| {
-                                                add_s3_access_key_id.set(evt.value());
-                                                let mut errors = add_field_errors();
-                                                errors.remove("s3_access_key_id");
-                                                add_field_errors.set(errors);
-                                            },
-                                        }
-                                        if let Some(err) = add_field_errors().get("s3_access_key_id") {
-                                            p { class: "text-[11px] text-red-300 mt-1", "{err}" }
-                                        }
-                                    }
-                                    div {
-                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "AWS Secret Access Key *" }
-                                        input {
-                                            r#type: "password",
-                                            class: if add_field_errors().contains_key("s3_secret_access_key") {
-                                                "w-full px-3 py-2 rounded-lg text-sm {theme::text::PRIMARY} cf-policy-modal-field-error"
-                                            } else {
-                                                "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}"
-                                            },
-                                            placeholder: "••••••••",
-                                            value: add_s3_secret_access_key(),
-                                            oninput: move |evt| {
-                                                add_s3_secret_access_key.set(evt.value());
-                                                let mut errors = add_field_errors();
-                                                errors.remove("s3_secret_access_key");
-                                                add_field_errors.set(errors);
-                                            },
-                                        }
-                                        if let Some(err) = add_field_errors().get("s3_secret_access_key") {
-                                            p { class: "text-[11px] text-red-300 mt-1", "{err}" }
-                                        }
-                                    }
-                                }
-                                div {
-                                    class: "grid grid-cols-2 gap-4",
-                                    div {
-                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "AWS Session Token (optional)" }
-                                        input {
-                                            r#type: "password",
-                                            class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
-                                            placeholder: "session token",
-                                            value: add_s3_session_token(),
-                                            oninput: move |evt| add_s3_session_token.set(evt.value()),
-                                        }
-                                    }
-                                    div {
-                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "S3 Endpoint URL *" }
-                                        input {
-                                            class: if add_field_errors().contains_key("s3_endpoint_url") {
-                                                "w-full px-3 py-2 rounded-lg text-sm {theme::text::PRIMARY} cf-policy-modal-field-error"
-                                            } else {
-                                                "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}"
-                                            },
-                                            placeholder: "https://s3.us-east-1.amazonaws.com",
-                                            value: add_s3_endpoint_url(),
-                                            oninput: move |evt| {
-                                                add_s3_endpoint_url.set(evt.value());
-                                                let mut errors = add_field_errors();
-                                                errors.remove("s3_endpoint_url");
-                                                add_field_errors.set(errors);
-                                            },
-                                        }
-                                        if let Some(err) = add_field_errors().get("s3_endpoint_url") {
-                                            p { class: "text-[11px] text-red-300 mt-1", "{err}" }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Signing key (only for Nix binary cache types, not Attic)
-                            if add_type() != "Attic" {
-                                div {
-                                    div {
-                                        class: "flex items-baseline justify-between gap-2",
-                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Signing Key Path (optional)" }
-                                        span { class: "text-[11px] {theme::text::MUTED}", "Path to Nix cache signing key for signature verification" }
-                                    }
-                                    input {
-                                        class: "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} {theme::text::PRIMARY} focus:outline-none",
-                                        placeholder: "/path/to/cache-priv-key.pem",
-                                        value: add_signing_key_path(),
-                                        oninput: move |evt| add_signing_key_path.set(evt.value()),
-                                    }
-                                }
-                            }
-
-                            div {
-                                label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Compression (optional)" }
-                                select {
-                                    class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
-                                    value: add_compression(),
-                                    onchange: move |evt| add_compression.set(evt.value()),
-                                    option { class: "text-slate-900 bg-white", value: "", selected: add_compression().is_empty(), "(default)" }
-                                    option { class: "text-slate-900 bg-white", value: "none", selected: add_compression() == "none", "None" }
-                                    option { class: "text-slate-900 bg-white", value: "xz", selected: add_compression() == "xz", "XZ" }
-                                    option { class: "text-slate-900 bg-white", value: "zstd", selected: add_compression() == "zstd", "Zstandard" }
-                                }
-                            }
-
-                            // Environment assignment
-                            div {
-                                class: "relative overflow-visible",
-                                div {
-                                    class: "flex items-baseline justify-between gap-2",
-                                    label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Environments (optional)" }
-                                    span { class: "text-[11px] {theme::text::MUTED}", "Leave empty for global cache (all environments)" }
-                                }
-                                if let Some(Ok(envs)) = environments.read().as_ref() {
-                                    div {
-                                        class: "flex flex-wrap gap-2 p-2 rounded-lg border {theme::interactive::INPUT}",
-                                        if envs.is_empty() {
-                                            p { class: "text-xs {theme::text::MUTED}", "No environments available" }
-                                        } else {
-                                            for env in envs {
-                                                {
-                                                    let env_id = env.id;
-                                                    let is_selected = add_environment_ids().contains(&env_id);
-                                                    rsx! {
-                                                        button {
-                                                            r#type: "button",
-                                                            class: if is_selected {
-                                                                "px-2 py-1 text-xs rounded border cf-chip-blue {theme::text::PRIMARY}"
-                                                            } else {
-                                                                "px-2 py-1 text-xs rounded border {theme::surface::CARD_BORDER} {theme::text::MUTED} hover:{theme::text::SECONDARY}"
-                                                            },
-                                                            onclick: move |_| {
-                                                                show_cache_env_callout.set(false);
-                                                                let mut selected = add_environment_ids();
-                                                                if is_selected {
-                                                                    selected.retain(|&id| id != env_id);
-                                                                } else {
-                                                                    selected.push(env_id);
-                                                                }
-                                                                add_environment_ids.set(selected);
-                                                            },
-                                                            "{env.name}"
+                                        button {
+                                            class: "btn btn-ghost focus-ring xs", disabled: form_requires_auth() && form_cred_id().is_empty(),
+                                            onclick: move |_| {
+                                                form_testing.set(Some("running".to_string()));
+                                                form_test_error.set(None);
+                                                let cache_type = form_type();
+                                                let url_value = form_url();
+                                                if cache_type == "s3" && s3_endpoint_url_from_form(&cache_type, &url_value).is_none() {
+                                                    form_testing.set(Some("fail".to_string()));
+                                                    form_test_error.set(Some("S3 test requires an HTTPS endpoint URL (e.g. https://s3.us-east-1.amazonaws.com).".to_string()));
+                                                    return;
+                                                }
+                                                let selected_credential = local_credentials()
+                                                    .into_iter()
+                                                    .find(|cred| cred.id == form_cred_id());
+                                                let (s3_profile, s3_access_key_id, s3_secret_access_key, attic_token) =
+                                                    credential_fields_for_request(selected_credential.as_ref());
+                                                let req = CreateCacheDestination {
+                                                    name: form_name(),
+                                                    cache_type: api_cache_type(&form_type()),
+                                                    push_to: if form_url().trim().is_empty() {
+                                                        None
+                                                    } else {
+                                                        Some(form_url())
+                                                    },
+                                                    s3_endpoint_url: s3_endpoint_url_from_form(&cache_type, &url_value),
+                                                    enabled: Some(true),
+                                                    s3_profile,
+                                                    s3_access_key_id,
+                                                    s3_secret_access_key,
+                                                    attic_token,
+                                                    attic_cache_name: None,
+                                                    ..Default::default()
+                                                };
+                                                spawn(async move {
+                                                    match client::test_cache_destination_credentials(&req).await {
+                                                        Ok(result) if result.ok => form_testing.set(Some("ok".to_string())),
+                                                        Ok(result) => {
+                                                            form_testing.set(Some("fail".to_string()));
+                                                            form_test_error.set(Some(result.message));
                                                         }
+                                                        Err(e) => {
+                                                            form_testing.set(Some("fail".to_string()));
+                                                            form_test_error.set(Some(e.to_string()));
+                                                        }
+                                                    }
+                                                });
+                                            },
+                                            match form_testing().as_deref() { Some("running") => "Testing…", Some("ok") => "✓ Connected", Some("fail") => "✗ Failed", _ => "Test" }
+                                        }
+                                    }
+                                    if local_credentials().is_empty() {
+                                        div { class: "help", "Saved credentials are not available yet. Disable authentication to test public connectivity, or add a credential in this form." }
+                                    }
+                                    if let Some(err) = form_test_error() {
+                                        div { class: "help", style: "color: var(--cf-danger);", "Test failed: {err}" }
+                                    }
+                                }
+                            }
+                            div { class: "field", label { "Assigned environments" }
+                                if let Some(Ok(envs)) = environments.read().as_ref() {
+                                    div { style: "display:flex; flex-wrap:wrap; gap:6px;",
+                                        for env in envs {
+                                            {
+                                                let env_id = env.id;
+                                                let env_name = env.name.clone();
+                                                let is_selected = form_environment_ids().contains(&env_id);
+                                                let color = normalize_env_color(&env.color_hex);
+                                                rsx! {
+                                                    button {
+                                                        class: "focus-ring",
+                                                        onclick: move |_| { let mut ids = form_environment_ids(); if is_selected { ids.retain(|&id| id != env_id); } else { ids.push(env_id); } form_environment_ids.set(ids); },
+                                                        style: if is_selected { format!("padding: 3px 7px; border-radius: 999px; font-size: 10px; border: 1px solid {}; background: color-mix(in oklab, {} 14%, var(--cf-card-bg)); color: {}; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; font-family: inherit; font-weight: 400;", color, color, color) } else { "padding: 3px 7px; border-radius: 999px; font-size: 10px; border: 1px solid var(--cf-card-border); background: transparent; color: var(--cf-text-secondary); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; font-family: inherit; font-weight: 400;".to_string() },
+                                                        span { style: "width:6px; height:6px; border-radius:50%; background:{color};" }
+                                                        "{env_name}"
                                                     }
                                                 }
                                             }
                                         }
                                     }
-                                    if show_cache_env_callout() {
-                                        div {
-                                            "data-testid": "setup-coach-cache-field-environments",
-                                            style: "position:absolute; left:0; bottom:calc(100% + 10px); width:min(440px, 92vw); z-index:70; background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
-                                            div {
-                                                style: "position:absolute; bottom:-6px; left:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-right:1px solid rgba(96,165,250,0.75); border-bottom:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
-                                            }
-                                            p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
-                                            p { style: "margin:2px 0 0 0;", "Choose specific environments for targeted cache routing, or leave empty to make this a global cache for all environments." }
-                                        }
-                                    }
-                                } else {
-                                    p { class: "text-xs {theme::text::MUTED}", "Loading environments..." }
+                                    div { class: "help", "Crystal Forge will push builds for systems in these environments to this cache." }
                                 }
                             }
-
-                            if let Some(err) = add_error() {
-                                p { class: "text-sm text-red-400", "{err}" }
-                            }
                         }
-
-                        // Footer
                         div {
-                            class: "mt-6 flex justify-end gap-3 shrink-0 pt-4 border-t {theme::surface::DIVIDER}",
+                            class: "modal-foot",
                             button {
-                                class: "px-4 py-2 rounded-lg text-sm font-medium {theme::interactive::GHOST_BTN} {theme::text::SECONDARY}",
+                                class: "btn btn-ghost focus-ring",
                                 onclick: move |_| {
-                                    show_add_modal.set(false);
-                                    add_error.set(None);
-                                    add_field_errors.set(std::collections::HashMap::new());
-                                    show_cache_name_callout.set(false);
-                                    show_cache_type_callout.set(false);
-                                    show_cache_endpoint_callout.set(false);
-                                    show_cache_env_callout.set(false);
+                                    form_show_cred_modal.set(false);
+                                    show_add_modal.set(false)
                                 },
                                 "Cancel"
                             }
                             button {
-                                class: "px-4 py-2 rounded-lg text-sm font-medium {theme::interactive::PRIMARY_BTN}",
-                                disabled: add_submitting(),
+                                class: "btn btn-primary focus-ring",
                                 onclick: move |_| {
-                                    let name = add_name().trim().to_string();
-                                    let cache_type = add_type();
-                                    let push_to = add_push_to().trim().to_string();
-                                    let attic_cache_name = add_attic_cache_name().trim().to_string();
-                                    let attic_public_key = add_attic_public_key().trim().to_string();
-
-                                    let errors = validate_cache_destination_form(&CacheFormValidationInput {
-                                        name: name.clone(),
-                                        cache_type: cache_type.clone(),
-                                        push_to: push_to.clone(),
-                                        attic_cache_name: attic_cache_name.clone(),
-                                        attic_public_key: attic_public_key.clone(),
-                                        attic_token: add_attic_token(),
-                                        s3_region: add_s3_region(),
-                                        s3_access_key_id: add_s3_access_key_id(),
-                                        s3_secret_access_key: add_s3_secret_access_key(),
-                                        s3_endpoint_url: add_s3_endpoint_url(),
-                                        require_attic_token: cache_type == "Attic",
-                                        require_s3_secret_access_key: cache_type == "S3",
-                                    });
-
-                                    // If there are validation errors, display them and stop
-                                    if !errors.is_empty() {
-                                        add_field_errors.set(errors);
-                                        add_error.set(Some("Please fix the errors above".to_string()));
-                                        return;
-                                    }
-
-                                    // Clear any previous errors
-                                    add_field_errors.set(std::collections::HashMap::new());
-                                    add_error.set(None);
-
-                                    add_submitting.set(true);
-                                    add_error.set(None);
-
-                                    let attic_token_val = add_attic_token();
-                                    let signing_key_path_val = add_signing_key_path();
-                                    let compression_val = add_compression();
-                                    let s3_region_val = add_s3_region();
-                                    let s3_profile_val = add_s3_profile();
-                                    let s3_access_key_id_val = add_s3_access_key_id();
-                                    let s3_secret_access_key_val = add_s3_secret_access_key();
-                                    let s3_session_token_val = add_s3_session_token();
-                                    let s3_endpoint_url_val = add_s3_endpoint_url();
-
+                                    form_save_error.set(None);
+                                    let cache_type = form_type();
+                                    let url_value = form_url();
+                                    let req = CreateCacheDestination {
+                                        name: form_name(),
+                                        cache_type: api_cache_type(&cache_type),
+                                        push_to: if form_url().trim().is_empty() { None } else { Some(form_url()) },
+                                        s3_endpoint_url: s3_endpoint_url_from_form(&cache_type, &url_value),
+                                        enabled: Some(true),
+                                        environment_ids: if form_environment_ids().is_empty() { None } else { Some(form_environment_ids()) },
+                                        s3_profile: {
+                                            let selected_credential = local_credentials()
+                                                .into_iter()
+                                                .find(|cred| cred.id == form_cred_id());
+                                            let (s3_profile, _, _, _) = credential_fields_for_request(selected_credential.as_ref());
+                                            s3_profile
+                                        },
+                                        s3_access_key_id: {
+                                            let selected_credential = local_credentials()
+                                                .into_iter()
+                                                .find(|cred| cred.id == form_cred_id());
+                                            let (_, s3_access_key_id, _, _) = credential_fields_for_request(selected_credential.as_ref());
+                                            s3_access_key_id
+                                        },
+                                        s3_secret_access_key: {
+                                            let selected_credential = local_credentials()
+                                                .into_iter()
+                                                .find(|cred| cred.id == form_cred_id());
+                                            let (_, _, s3_secret_access_key, _) = credential_fields_for_request(selected_credential.as_ref());
+                                            s3_secret_access_key
+                                        },
+                                        attic_token: {
+                                            let selected_credential = local_credentials()
+                                                .into_iter()
+                                                .find(|cred| cred.id == form_cred_id());
+                                            let (_, _, _, attic_token) = credential_fields_for_request(selected_credential.as_ref());
+                                            attic_token
+                                        },
+                                        attic_cache_name: None,
+                                        ..Default::default()
+                                    };
                                     spawn(async move {
-                                        let req = CreateCacheDestination {
-                                            name,
-                                            cache_type: cache_type.clone(),
-                                            push_to: if push_to.trim().is_empty() {
-                                                None
-                                            } else {
-                                                Some(push_to)
-                                            },
-                                            enabled: Some(true),
-                                            signing_key_path: if signing_key_path_val.trim().is_empty() { None } else { Some(signing_key_path_val.trim().to_string()) },
-                                            compression: if compression_val.trim().is_empty() { None } else { Some(compression_val.trim().to_string()) },
-                                            s3_region: if s3_region_val.trim().is_empty() { None } else { Some(s3_region_val.trim().to_string()) },
-                                            s3_profile: if s3_profile_val.trim().is_empty() { None } else { Some(s3_profile_val.trim().to_string()) },
-                                            s3_access_key_id: if s3_access_key_id_val.trim().is_empty() { None } else { Some(s3_access_key_id_val.trim().to_string()) },
-                                            s3_secret_access_key: if s3_secret_access_key_val.trim().is_empty() { None } else { Some(s3_secret_access_key_val.trim().to_string()) },
-                                            s3_session_token: if s3_session_token_val.trim().is_empty() { None } else { Some(s3_session_token_val.trim().to_string()) },
-                                            s3_endpoint_url: if s3_endpoint_url_val.trim().is_empty() { None } else { Some(s3_endpoint_url_val.trim().to_string()) },
-                                            attic_token: if attic_token_val.trim().is_empty() { None } else { Some(attic_token_val.trim().to_string()) },
-                                            attic_cache_name: if cache_type == "Attic" { Some(attic_cache_name) } else { None },
-                                            attic_public_key: if cache_type == "Attic" {
-                                                if attic_public_key.trim().is_empty() { None } else { Some(attic_public_key.trim().to_string()) }
-                                            } else {
-                                                None
-                                            },
-                                            attic_ignore_upstream_cache_filter: Some(true),
-                                            attic_jobs: Some(5),
-                                            parallel_uploads: Some(1),
-                                            max_retries: Some(3),
-                                            retry_delay_seconds: Some(5),
-                                            push_timeout_seconds: Some(3600),
-                                            force_repush: Some(false),
-                                            require_sigs: Some(true),
-                                            environment_ids: if add_environment_ids().is_empty() {
-                                                None
-                                            } else {
-                                                Some(add_environment_ids())
-                                            },
-                                        };
-
                                         match client::create_cache_destination(&req).await {
                                             Ok(_) => {
+                                                form_show_cred_modal.set(false);
                                                 show_add_modal.set(false);
-                                                add_name.set(String::new());
-                                                add_push_to.set(String::new());
-                                                add_attic_cache_name.set(String::new());
-                                                add_attic_public_key.set(String::new());
-                                                add_attic_token.set(String::new());
-                                                add_signing_key_path.set(String::new());
-                                                add_compression.set(String::new());
-                                                add_s3_region.set(String::new());
-                                                add_s3_profile.set(String::new());
-                                                add_s3_access_key_id.set(String::new());
-                                                add_s3_secret_access_key.set(String::new());
-                                                add_s3_session_token.set(String::new());
-                                                add_s3_endpoint_url.set(String::new());
-                                                add_environment_ids.set(Vec::new());
                                                 refresh_nonce.set(refresh_nonce() + 1);
                                             }
                                             Err(e) => {
-                                                add_error.set(Some(format!("Failed to create destination: {e}")));
+                                                form_save_error.set(Some(format!("Failed to create destination: {e}")));
                                             }
                                         }
-                                        add_submitting.set(false);
                                     });
                                 },
-                                if add_submitting() { "Creating..." } else { "Create Destination" }
+                                svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", style: "display:inline-block; vertical-align:text-bottom;", polyline { points: "20 6 9 17 4 12" } }
+                                " Add cache"
+                            }
+                            if let Some(err) = form_save_error() {
+                                div { class: "help", style: "color: var(--cf-danger); margin-left:auto;", "{err}" }
                             }
                         }
+                    }
+                }
+            }
+
+            // Edit modal - matching JSX mockup (lines 155-284)
+            if let Some(dest) = edit_destination() {
+                div {
+                    class: "modal-backdrop",
+                    onclick: move |_| edit_destination.set(None),
+                    div {
+                        class: "modal",
+                        onclick: move |e| e.stop_propagation(),
+                        style: "width:min(620px,96vw); max-height:92vh;",
+
+                        // Modal head
+                        div {
+                            class: "modal-head",
+                            h2 {
+                                // Gear icon (simple cog/settings icon)
+                                svg {
+                                    width: "14",
+                                    height: "14",
+                                    view_box: "0 0 24 24",
+                                    fill: "none",
+                                    stroke: "currentColor",
+                                    stroke_width: "1.75",
+                                    stroke_linecap: "round",
+                                    stroke_linejoin: "round",
+                                    style: "margin-right:6px; vertical-align:text-bottom;",
+                                    circle { cx: "12", cy: "12", r: "3" }
+                                    path { d: "M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3h.1a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8v.1a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" }
+                                }
+                                "Edit {dest.name}"
+                            }
+                            p { "Update binary cache destination." }
+                        }
+
+                        // Modal body
+                        div {
+                            class: "modal-body",
+                            style: "overflow-y:auto;",
+
+                            // Name
+                            div {
+                                class: "field",
+                                label { "Name" }
+                                input {
+                                    class: "input focus-ring",
+                                    value: form_name(),
+                                    oninput: move |evt| form_name.set(evt.value()),
+                                    placeholder: "e.g. crystal-forge-prod-cache"
+                                }
+                            }
+
+                            // Type (segmented button)
+                            div {
+                                class: "field",
+                                label { "Type" }
+                                div {
+                                    class: "seg",
+                                    for (val, label) in [("s3", "S3-compatible"), ("attic", "Attic"), ("nix", "Nix HTTPS")] {
+                                        button {
+                                            class: if form_type() == val { "active" } else { "" },
+                                            onclick: move |_| {
+                                                form_testing.set(None);
+                                                form_type.set(val.to_string())
+                                            },
+                                            "{label}"
+                                        }
+                                    }
+                                }
+                            }
+
+                            // URL
+                            div {
+                                class: "field",
+                                label { "URL" }
+                                input {
+                                    class: "input focus-ring mono",
+                                    style: "font-size:12px;",
+                                    value: form_url(),
+                                    oninput: move |evt| { form_testing.set(None); form_url.set(evt.value()) },
+                                    placeholder: match form_type().as_str() {
+                                        "s3" => "s3://bucket?region=us-east-1",
+                                        "attic" => "attic://host/cache",
+                                        _ => "https://cache.nixos.org"
+                                    }
+                                }
+                            }
+
+                            // Requires authentication checkbox
+                            label {
+                                style: "display:flex; gap:8px; align-items:center; font-size:13px; cursor:pointer;",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: form_requires_auth(),
+                                    onchange: move |evt| { form_testing.set(None); form_requires_auth.set(evt.checked()) },
+                                    style: "accent-color:var(--cf-brand-purple);"
+                                }
+                                span { "Requires authentication" }
+                            }
+
+                            // Credential dropdown (if auth required)
+                            if form_requires_auth() {
+                                div {
+                                    class: "field",
+                                    label { "Credential" }
+                                    div {
+                                        style: "display:flex; gap:8px;",
+                                        select {
+                                            class: "input focus-ring",
+                                            style: "flex:1;",
+                                            value: form_cred_id(),
+                                            onchange: move |evt| {
+                                                form_testing.set(None);
+                                                form_test_error.set(None);
+                                                let val = evt.value();
+                                                if val == "__new__" {
+                                                    form_show_cred_modal.set(true);
+                                                } else {
+                                                    form_cred_id.set(val);
+                                                }
+                                            },
+                                            option { value: "", "Select a credential…" }
+                                            for cred in local_credentials().into_iter().filter(|cred| credential_matches_cache_type(cred, &form_type())) {
+                                                option { value: "{cred.id}", "{credential_label(&cred)}" }
+                                            }
+                                            option { value: "__new__", "+ Add new credential…" }
+                                        }
+                                        button {
+                                            class: "btn btn-ghost focus-ring xs",
+                                            disabled: form_requires_auth() && form_cred_id().is_empty(),
+                                            onclick: move |_| {
+                                                form_testing.set(Some("running".to_string()));
+                                                form_test_error.set(None);
+                                                let cache_type = form_type();
+                                                let url_value = form_url();
+                                                if cache_type == "s3" && s3_endpoint_url_from_form(&cache_type, &url_value).is_none() {
+                                                    form_testing.set(Some("fail".to_string()));
+                                                    form_test_error.set(Some("S3 test requires an HTTPS endpoint URL (e.g. https://s3.us-east-1.amazonaws.com).".to_string()));
+                                                    return;
+                                                }
+                                                let selected_credential = local_credentials()
+                                                    .into_iter()
+                                                    .find(|cred| cred.id == form_cred_id());
+                                                let (s3_profile, s3_access_key_id, s3_secret_access_key, attic_token) =
+                                                    credential_fields_for_request(selected_credential.as_ref());
+                                                let req = CreateCacheDestination {
+                                                    name: form_name(),
+                                                    cache_type: api_cache_type(&form_type()),
+                                                    push_to: if form_url().trim().is_empty() {
+                                                        None
+                                                    } else {
+                                                        Some(form_url())
+                                                    },
+                                                    s3_endpoint_url: s3_endpoint_url_from_form(&cache_type, &url_value),
+                                                    enabled: Some(true),
+                                                    s3_profile,
+                                                    s3_access_key_id,
+                                                    s3_secret_access_key,
+                                                    attic_token,
+                                                    attic_cache_name: None,
+                                                    ..Default::default()
+                                                };
+                                                spawn(async move {
+                                                    match client::test_cache_destination_credentials(&req).await {
+                                                        Ok(result) if result.ok => form_testing.set(Some("ok".to_string())),
+                                                        Ok(result) => {
+                                                            form_testing.set(Some("fail".to_string()));
+                                                            form_test_error.set(Some(result.message));
+                                                        }
+                                                        Err(e) => {
+                                                            form_testing.set(Some("fail".to_string()));
+                                                            form_test_error.set(Some(e.to_string()));
+                                                        }
+                                                    }
+                                                });
+                                            },
+                                            match form_testing().as_deref() {
+                                                Some("running") => "Testing…",
+                                                Some("ok") => "✓ Connected",
+                                                Some("fail") => "✗ Failed",
+                                                _ => "Test"
+                                            }
+                                        }
+                                    }
+                                    if local_credentials().is_empty() {
+                                        div { class: "help", "Saved credentials are not available yet. Disable authentication to test public connectivity, or add a credential in this form." }
+                                    }
+                                    if let Some(err) = form_test_error() {
+                                        div { class: "help", style: "color: var(--cf-danger);", "Test failed: {err}" }
+                                    }
+                                }
+                            }
+
+                            // Assigned environments
+                            div {
+                                class: "field",
+                                label { "Assigned environments" }
+                                if let Some(Ok(envs)) = environments.read().as_ref() {
+                                    div {
+                                        style: "display:flex; flex-wrap:wrap; gap:6px;",
+                                        for env in envs {
+                                            {
+                                                let env_id = env.id;
+                                                let env_name = env.name.clone();
+                                                let is_selected = form_environment_ids().contains(&env_id);
+                                                let color = normalize_env_color(&env.color_hex);
+
+                                                rsx! {
+                                                    button {
+                                                        class: "focus-ring",
+                                                        onclick: move |_| {
+                                                            let mut ids = form_environment_ids();
+                                                            if is_selected {
+                                                                ids.retain(|&id| id != env_id);
+                                                            } else {
+                                                                ids.push(env_id);
+                                                            }
+                                                            form_environment_ids.set(ids);
+                                                        },
+                                                        style: if is_selected {
+                                                            format!("padding: 3px 7px; border-radius: 999px; font-size: 10px; border: 1px solid {}; background: color-mix(in oklab, {} 14%, var(--cf-card-bg)); color: {}; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; font-family: inherit; font-weight: 400;", color, color, color)
+                                                        } else {
+                                                            format!("padding: 3px 7px; border-radius: 999px; font-size: 10px; border: 1px solid var(--cf-card-border); background: transparent; color: var(--cf-text-secondary); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; font-family: inherit; font-weight: 400;")
+                                                        },
+                                                        span {
+                                                            style: "width:6px; height:6px; border-radius:50%; background:{color};"
+                                                        }
+                                                        "{env_name}"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    div {
+                                        class: "help",
+                                        "Crystal Forge will push builds for systems in these environments to this cache."
+                                    }
+                                }
+                            }
+                        }
+
+                        // Modal foot
+                        div {
+                            class: "modal-foot",
+                            button {
+                                class: "btn btn-ghost focus-ring",
+                                onclick: move |_| edit_destination.set(None),
+                                "Cancel"
+                            }
+                            button {
+                                class: "btn btn-primary focus-ring",
+                                onclick: move |_| {
+                                    let cache_id = dest.id;
+                                    form_save_error.set(None);
+                                    spawn(async move {
+                                        let cache_type = form_type();
+                                        let url_value = form_url();
+                                        // Update basic cache fields
+                                        let req = UpdateCacheDestination {
+                                            name: Some(form_name()),
+                                            cache_type: Some(api_cache_type(&cache_type)),
+                                            push_to: if form_url().trim().is_empty() { None } else { Some(form_url()) },
+                                            s3_endpoint_url: s3_endpoint_url_from_form(&cache_type, &url_value),
+                                            s3_profile: {
+                                                let selected_credential = local_credentials()
+                                                    .into_iter()
+                                                    .find(|cred| cred.id == form_cred_id());
+                                                let (s3_profile, _, _, _) = credential_fields_for_request(selected_credential.as_ref());
+                                                s3_profile
+                                            },
+                                            s3_access_key_id: {
+                                                let selected_credential = local_credentials()
+                                                    .into_iter()
+                                                    .find(|cred| cred.id == form_cred_id());
+                                                let (_, s3_access_key_id, _, _) = credential_fields_for_request(selected_credential.as_ref());
+                                                s3_access_key_id
+                                            },
+                                            s3_secret_access_key: {
+                                                let selected_credential = local_credentials()
+                                                    .into_iter()
+                                                    .find(|cred| cred.id == form_cred_id());
+                                                let (_, _, s3_secret_access_key, _) = credential_fields_for_request(selected_credential.as_ref());
+                                                s3_secret_access_key
+                                            },
+                                            attic_token: {
+                                                let selected_credential = local_credentials()
+                                                    .into_iter()
+                                                    .find(|cred| cred.id == form_cred_id());
+                                                let (_, _, _, attic_token) = credential_fields_for_request(selected_credential.as_ref());
+                                                attic_token
+                                            },
+                                            attic_cache_name: None,
+                                            ..Default::default()
+                                        };
+
+                                        match client::update_cache_destination(cache_id, &req).await {
+                                            Ok(_) => {
+                                                // Update environment assignments
+                                                match client::assign_cache_environments(cache_id, form_environment_ids()).await {
+                                                    Ok(_) => {
+                                                        edit_destination.set(None);
+                                                        refresh_nonce.set(refresh_nonce() + 1);
+                                                    }
+                                                    Err(e) => {
+                                                        form_save_error.set(Some(format!("Failed to assign environments: {e}")));
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                form_save_error.set(Some(format!("Failed to update destination: {e}")));
+                                            }
+                                        }
+                                    });
+                                },
+                                // Check icon
+                                svg {
+                                    width: "13",
+                                    height: "13",
+                                    view_box: "0 0 24 24",
+                                    fill: "none",
+                                    stroke: "currentColor",
+                                    stroke_width: "2",
+                                    style: "display:inline-block; vertical-align:text-bottom;",
+                                    polyline { points: "20 6 9 17 4 12" }
+                                }
+                                " Save changes"
+                            }
+                            if let Some(err) = form_save_error() {
+                                div { class: "help", style: "color: var(--cf-danger); margin-left:auto;", "{err}" }
+                            }
+                        }
+                    }
+
+                }
+            }
+
+            // Nested credential modal available from both add and edit flows
+            if form_show_cred_modal() {
+                CacheCredModal {
+                    cache_type: form_type(),
+                    on_close: move |new_credential: Option<LocalCredential>| {
+                        form_show_cred_modal.set(false);
+                        if let Some(credential) = new_credential {
+                            let cred_id = credential.id.clone();
+                            let mut creds = local_credentials();
+                            creds.retain(|existing| existing.id != cred_id);
+                            creds.push(credential);
+                            local_credentials.set(creds);
+                            form_cred_id.set(cred_id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Cache credential modal (mockup lines 286-359)
+#[component]
+fn CacheCredModal(cache_type: String, on_close: EventHandler<Option<LocalCredential>>) -> Element {
+    let mut cred_kind = use_signal(|| {
+        if cache_type == "s3" {
+            "aws-key"
+        } else if cache_type == "attic" {
+            "attic-token"
+        } else {
+            "nix-token"
+        }
+    });
+    let mut cred_name = use_signal(String::new);
+    let mut cred_access_key = use_signal(String::new);
+    let mut cred_secret_key = use_signal(String::new);
+    let mut cred_token = use_signal(String::new);
+    let mut cred_role_arn = use_signal(String::new);
+
+    rsx! {
+        div {
+            class: "modal-backdrop",
+            style: "z-index:95;",
+            onclick: move |_| on_close.call(None),
+            div {
+                class: "modal",
+                style: "width:min(520px,96vw);",
+                onclick: move |e| e.stop_propagation(),
+
+                div {
+                    class: "modal-head",
+                    h2 {
+                        svg {
+                            width: "14",
+                            height: "14",
+                            view_box: "0 0 24 24",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            style: "margin-right:6px; vertical-align:text-bottom;",
+                            circle { cx: "7.5", cy: "12", r: "3.5" }
+                            path { d: "M11 12h10" }
+                            path { d: "M18 12v3" }
+                            path { d: "M15.5 12v2" }
+                        }
+                        "Add credential"
+                    }
+                    p {
+                        if cache_type == "s3" {
+                            "Saved credentials can be reused across S3 caches. Secrets are encrypted at rest."
+                        } else if cache_type == "attic" {
+                            "Saved credentials can be reused across Attic caches. Secrets are encrypted at rest."
+                        } else {
+                            "Saved credentials can be reused across Nix HTTPS caches. Secrets are encrypted at rest."
+                        }
+                    }
+                }
+
+                div {
+                    class: "modal-body",
+
+                    div {
+                        class: "field",
+                        label { "Name" }
+                        input {
+                            class: "input focus-ring",
+                            value: cred_name(),
+                            oninput: move |evt| cred_name.set(evt.value()),
+                            placeholder: "e.g. aws-prod-role"
+                        }
+                    }
+
+                    div {
+                        class: "field",
+                        label { "Type" }
+                        div {
+                            class: "seg",
+                            if cache_type == "s3" {
+                                button {
+                                    class: if cred_kind() == "aws-key" { "active" } else { "" },
+                                    onclick: move |_| cred_kind.set("aws-key"),
+                                    "AWS access key"
+                                }
+                                button {
+                                    class: if cred_kind() == "aws-role" { "active" } else { "" },
+                                    onclick: move |_| cred_kind.set("aws-role"),
+                                    "IAM role (IRSA)"
+                                }
+                            } else if cache_type == "attic" {
+                                button {
+                                    class: "active",
+                                    "Attic token"
+                                }
+                            } else {
+                                button {
+                                    class: "active",
+                                    "Nix HTTPS token"
+                                }
+                            }
+                        }
+                    }
+
+                    if cred_kind() == "aws-key" {
+                        div {
+                            class: "field",
+                            label { "Access key ID" }
+                            input {
+                                class: "input focus-ring mono",
+                                style: "font-size:12px;",
+                                value: cred_access_key(),
+                                oninput: move |evt| cred_access_key.set(evt.value()),
+                                placeholder: "AKIA…"
+                            }
+                        }
+                        div {
+                            class: "field",
+                            label { "Secret access key" }
+                            input {
+                                r#type: "password",
+                                class: "input focus-ring mono",
+                                style: "font-size:12px;",
+                                value: cred_secret_key(),
+                                oninput: move |evt| cred_secret_key.set(evt.value()),
+                                placeholder: "•••••••••••••••••"
+                            }
+                        }
+                    }
+
+                    if cred_kind() == "aws-role" {
+                        div {
+                            class: "field",
+                            label { "Role ARN" }
+                            input {
+                                class: "input focus-ring mono",
+                                style: "font-size:12px;",
+                                value: cred_role_arn(),
+                                oninput: move |evt| cred_role_arn.set(evt.value()),
+                                placeholder: "arn:aws:iam::123456789012:role/cache-pusher"
+                            }
+                            div {
+                                class: "help",
+                                "Crystal Forge must be running with permission to assume this role."
+                            }
+                        }
+                    }
+
+                    if cred_kind() == "attic-token" || cred_kind() == "nix-token" {
+                        div {
+                            class: "field",
+                            label { "Token" }
+                            input {
+                                r#type: "password",
+                                class: "input focus-ring mono",
+                                style: "font-size:12px;",
+                                value: cred_token(),
+                                oninput: move |evt| cred_token.set(evt.value()),
+                                placeholder: "•••••••••••••••••"
+                            }
+                            div {
+                                class: "help",
+                                if cred_kind() == "attic-token" {
+                                    "Attic / cache-server bearer token with push permission."
+                                } else {
+                                    "HTTPS cache bearer token or equivalent secret."
+                                }
+                            }
+                        }
+                    }
+                }
+
+                div {
+                    class: "modal-foot",
+                    button {
+                        class: "btn btn-ghost focus-ring",
+                        onclick: move |_| on_close.call(None),
+                        "Cancel"
+                    }
+                    button {
+                        class: "btn btn-primary focus-ring",
+                        disabled: cred_name().trim().is_empty(),
+                        onclick: move |_| {
+                            let name = cred_name();
+                            let cred_id = format!("cred-{}", name.to_lowercase().replace(|c: char| !c.is_ascii_alphanumeric(), "-"));
+                            let credential = LocalCredential {
+                                id: cred_id,
+                                name,
+                                kind: match cred_kind() {
+                                    "aws-key" => LocalCredentialKind::AwsKey,
+                                    "aws-role" => LocalCredentialKind::AwsRole,
+                                    "attic-token" => LocalCredentialKind::AtticToken,
+                                    _ => LocalCredentialKind::NixToken,
+                                },
+                                access_key_id: if cred_kind() == "aws-key" { Some(cred_access_key()) } else { None },
+                                secret_access_key: if cred_kind() == "aws-key" { Some(cred_secret_key()) } else { None },
+                                role_arn: if cred_kind() == "aws-role" { Some(cred_role_arn()) } else { None },
+                                token: if cred_kind() == "attic-token" || cred_kind() == "nix-token" { Some(cred_token()) } else { None },
+                            };
+                            on_close.call(Some(credential));
+                        },
+                        svg {
+                            width: "13",
+                            height: "13",
+                            view_box: "0 0 24 24",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            style: "display:inline-block; vertical-align:text-bottom;",
+                            polyline { points: "20 6 9 17 4 12" }
+                        }
+                        " Save credential"
                     }
                 }
             }
@@ -1046,6 +1439,240 @@ fn CacheDestinationsList(show_onboarding_hint: bool) -> Element {
 
 /// Individual cache destination card
 #[component]
+/// Cache destination table row matching mockup (JSX lines 89-153)
+#[component]
+fn CacheDestinationRow(
+    destination: CacheDestination,
+    on_edit: EventHandler<CacheDestination>,
+    on_change: EventHandler<()>,
+) -> Element {
+    let mut show_delete_confirm = use_signal(|| false);
+
+    // Status mapping
+    let (status_cls, status_color, status_label) = if destination.enabled {
+        ("chip-healthy", "#34d399", "healthy")
+    } else {
+        ("chip-critical", "#f87171", "error")
+    };
+
+    // Type icon glyph family
+    let is_link_icon = matches!(destination.cache_type.as_str(), "Nix" | "Http");
+
+    // Fetch environment assignments
+    let cache_id = destination.id;
+    let env_ids = use_resource(move || async move {
+        client::get_cache_environments(cache_id)
+            .await
+            .unwrap_or_default()
+    });
+    let environments = use_resource(|| async move { client::fetch_environments().await });
+
+    let dest_for_click = destination.clone();
+    let dest_for_edit_btn = destination.clone();
+
+    rsx! {
+        tr {
+            style: "cursor:pointer;",
+            onclick: move |_| on_edit.call(dest_for_click.clone()),
+
+            // Cache column
+            td {
+                div {
+                    style: "font-weight:600; font-size:13px; display:flex; align-items:center; gap:6px;",
+                    // Icon (inline SVG)
+                    if is_link_icon {
+                        svg {
+                            width: "12",
+                            height: "12",
+                            view_box: "0 0 24 24",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "1.75",
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            style: "opacity:0.6;",
+                            path { d: "M10 13a5 5 0 0 0 7.07 0l2.83-2.83a5 5 0 0 0-7.07-7.07L10 5" }
+                            path { d: "M14 11a5 5 0 0 0-7.07 0L4.1 13.83a5 5 0 0 0 7.07 7.07L14 19" }
+                        }
+                    } else {
+                        svg {
+                            width: "12",
+                            height: "12",
+                            view_box: "0 0 24 24",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "1.75",
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            style: "opacity:0.6;",
+                            path { d: "M12 3v12" }
+                            path { d: "m7 10 5 5 5-5" }
+                            path { d: "M5 21h14" }
+                        }
+                    }
+                    "{destination.name}"
+                }
+                if let Some(ref url) = destination.push_to {
+                    div {
+                        class: "mono",
+                        style: "font-size:11px; color:var(--cf-text-muted);",
+                        "{url}"
+                    }
+                }
+            }
+
+            // Type column
+            td {
+                span {
+                    class: "chip chip-unknown mono",
+                    style: "font-size:10px;",
+                    "{destination.cache_type}"
+                }
+            }
+
+            // Status column
+            td {
+                span {
+                    class: "chip {status_cls}",
+                    title: "{status_label}",
+                    span {
+                        class: "chip-dot",
+                        style: "background: {status_color};",
+                    }
+                    "{status_label}"
+                }
+            }
+
+            // Storage column with usage bar (mockup lines 115-132)
+            td {
+                div {
+                    style: "min-width:120px; height:30px; display:flex; flex-direction:column; justify-content:center; gap:3px;",
+                    // Mock storage data (TODO: replace with real API data when available)
+                    {
+                        // Generate deterministic mock storage based on cache ID
+                        let used = ((destination.id as f64 * 37.0) % 80.0 + 10.0) as i32;
+                        let total = 100;
+                        let unit = "GB";
+                        let usage_pct = (used as f64 / total as f64) * 100.0;
+                        let bar_color = if usage_pct > 85.0 { "#fbbf24" } else { "#34d399" };
+
+                        rsx! {
+                            div {
+                                style: "font-size:11px; color:var(--cf-text-secondary);",
+                                span { class: "mono", "{used}/{total} {unit}" }
+                            }
+                            div {
+                                style: "height:4px; background:var(--cf-subtle-bg); border-radius:99px; overflow:hidden;",
+                                div {
+                                    style: "width:{usage_pct}%; height:100%; background:{bar_color};"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Paths column (mockup line 133)
+            td {
+                class: "mono",
+                style: "font-size:12px;",
+                "—"
+            }
+
+            // Last push column
+            td {
+                style: "font-size:12px; color:var(--cf-text-secondary);",
+                if let Some(ref last_used) = destination.last_used_at {
+                    {format!("{}", last_used.format("%Y-%m-%d %H:%M"))}
+                } else {
+                    "—"
+                }
+            }
+
+            // Environments column
+            td {
+                div {
+                    style: "display:flex; gap:4px; flex-wrap:wrap;",
+                    match (env_ids.read().as_ref(), environments.read().as_ref()) {
+                        (Some(ids), Some(Ok(all_envs))) if !ids.is_empty() => {
+                            let matching_envs: Vec<_> = all_envs.iter()
+                                .filter(|e| ids.contains(&e.id))
+                                .take(3)
+                                .collect();
+
+                            rsx! {
+                                for env in matching_envs {
+                                    EnvBadge { env_name: env.name.clone(), color_hex: env.color_hex.clone() }
+                                }
+                                if ids.len() > 3 {
+                                    span {
+                                        class: "chip chip-unknown",
+                                        style: "font-size:10px;",
+                                        "+{ids.len() - 3}"
+                                    }
+                                }
+                            }
+                        },
+                        _ => rsx! {
+                            span {
+                                style: "font-size:11px; color:var(--cf-text-muted);",
+                                "none"
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Actions column
+            td {
+                div {
+                    class: "row-actions",
+                    button {
+                        class: "btn-icon focus-ring",
+                        title: "Edit",
+                        onclick: move |e| {
+                            e.stop_propagation();
+                            on_edit.call(dest_for_edit_btn.clone());
+                        },
+                        // Gear icon (simple cog/settings icon)
+                        svg {
+                            width: "14",
+                            height: "14",
+                            view_box: "0 0 24 24",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "1.75",
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            circle { cx: "12", cy: "12", r: "3" }
+                            path { d: "M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3h.1a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8v.1a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" }
+                        }
+                    }
+                }
+            }
+        }
+
+
+    }
+}
+
+/// Environment badge component
+#[component]
+fn EnvBadge(env_name: String, color_hex: String) -> Element {
+    let color = normalize_env_color(&color_hex);
+
+    rsx! {
+        span {
+            class: "chip chip-env",
+            style: "font-size:10px; padding:3px 7px; border:1px solid {color}; background:color-mix(in oklab, {color} 14%, var(--cf-card-bg)); color:{color};",
+            span {
+                style: "width:5px; height:5px; border-radius:50%; background:{color}; display:inline-block; margin-right:4px;",
+            }
+            "{env_name}"
+        }
+    }
+}
+
 fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<()>) -> Element {
     let enabled_badge_class = if destination.enabled {
         format!(
@@ -1557,14 +2184,16 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                             for env in envs {
                                                 {
                                                     let env_id = env.id;
+                                                    let env_name = env.name.clone();
+                                                    let color = normalize_env_color(&env.color_hex);
                                                     let is_selected = edit_selected_environments().contains(&env_id);
                                                     rsx! {
                                                         button {
                                                             r#type: "button",
-                                                            class: if is_selected {
-                                                                "px-2 py-1 text-xs rounded border cf-chip-blue {theme::text::PRIMARY}"
+                                                            style: if is_selected {
+                                                                format!("padding: 3px 7px; border-radius: 999px; font-size: 10px; border: 1px solid {}; background: color-mix(in oklab, {} 14%, var(--cf-card-bg)); color: {}; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; font-family: inherit; font-weight: 400;", color, color, color)
                                                             } else {
-                                                                "px-2 py-1 text-xs rounded border {theme::surface::CARD_BORDER} {theme::text::MUTED} hover:{theme::text::SECONDARY}"
+                                                                "padding: 3px 7px; border-radius: 999px; font-size: 10px; border: 1px solid var(--cf-card-border); background: transparent; color: var(--cf-text-secondary); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; font-family: inherit; font-weight: 400;".to_string()
                                                             },
                                                             onclick: move |_| {
                                                                 let mut selected = edit_selected_environments();
@@ -1575,7 +2204,8 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                                                 }
                                                                 edit_selected_environments.set(selected);
                                                             },
-                                                            "{env.name}"
+                                                            span { style: "width:6px; height:6px; border-radius:50%; background:{color};" }
+                                                            "{env_name}"
                                                         }
                                                     }
                                                 }
@@ -1768,6 +2398,24 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                 }
             }
         }
+    }
+}
+
+fn normalize_env_color(color_hex: &str) -> &str {
+    let trimmed = color_hex.trim();
+    if trimmed.is_empty() {
+        "#6b7280"
+    } else {
+        trimmed
+    }
+}
+
+fn s3_endpoint_url_from_form(cache_type: &str, url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    if cache_type == "s3" && is_http_url(trimmed) {
+        Some(trimmed.to_string())
+    } else {
+        None
     }
 }
 

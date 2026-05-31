@@ -318,6 +318,142 @@ pub struct CveScanFreshnessRow {
     pub total_cves: i64,
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Advanced CVE Dashboard DTOs (TASK-322)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Filter parameters for CVE list queries.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CveFilters {
+    pub severity: Option<String>,
+    pub fix_status: Option<String>,
+    pub triage_status: Option<String>,
+    pub package: Option<String>,
+    pub search: Option<String>,
+    pub sort: Option<String>,
+    pub limit: Option<i64>,
+}
+
+/// CVE list item for table views.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CveListItem {
+    pub cve_id: String,
+    pub cvss_v3_score: Option<f32>,
+    pub severity: String,
+    pub title: String,
+    pub cvss_vector: Option<String>,
+    pub published_date: Option<chrono::NaiveDate>,
+    pub exploited: bool,
+    pub package_name: Option<String>,
+    pub installed_version: Option<String>,
+    pub fixed_version: Option<String>,
+    pub fix_status: String,
+    pub affected_count: i64,
+    pub affected_environments: Option<Vec<String>>,
+    pub first_seen: Option<DateTime<Utc>>,
+    pub last_seen: Option<DateTime<Utc>>,
+    pub age_days: i32,
+    pub triage_status: String,
+}
+
+/// CVE package group with aggregated statistics.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CvePackageGroup {
+    pub package_name: String,
+    pub cve_count: i64,
+    pub critical_count: i64,
+    pub high_count: i64,
+    pub medium_count: i64,
+    pub low_count: i64,
+    pub environments_count: i64,
+    pub total_affected_systems: i64,
+    pub fixable_count: i64,
+    pub outstanding_count: i64,
+    pub exploited_count: i64,
+    pub max_cvss: Option<f32>,
+    pub severity_score: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cves: Option<Vec<CveListItem>>,
+}
+
+/// Detailed CVE information for the drawer view.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CveDetail {
+    pub cve_id: String,
+    pub cvss_v3_score: Option<f32>,
+    pub severity: String,
+    pub title: String,
+    pub cvss_vector: Option<String>,
+    pub cwe_id: Option<String>,
+    pub published_date: Option<chrono::NaiveDate>,
+    pub modified_date: Option<chrono::NaiveDate>,
+    pub exploited: bool,
+    pub package_name: Option<String>,
+    pub installed_version: Option<String>,
+    pub fixed_version: Option<String>,
+    pub detection_method: Option<String>,
+    pub fix_status: String,
+}
+
+/// System affected by a CVE (for drawer detail view).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CveAffectedSystemDetail {
+    pub system_id: Uuid,
+    pub hostname: String,
+    pub environment: Option<String>,
+    pub primary_ip_address: Option<String>,
+    pub flake_name: Option<String>,
+    pub flake_id: Option<i32>,
+    pub commit_hash: Option<String>,
+    pub deployment_policy: String,
+    pub current_package_version: Option<String>,
+}
+
+/// CVE justification (triage) record.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CveJustification {
+    pub system_id: Option<Uuid>,
+    pub cve_id: String,
+    pub category: String,
+    pub reason: String,
+    pub updated_by: Option<Uuid>,
+    pub updated_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+    pub updated_by_username: Option<String>,
+}
+
+/// Input for creating/updating a CVE justification.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CveJustificationInput {
+    pub system_id: Option<Uuid>,
+    pub category: String,
+    pub reason: String,
+}
+
+/// Fleet-wide CVE statistics.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CveFleetStats {
+    pub total_cves: i64,
+    pub critical: i64,
+    pub high: i64,
+    pub medium: i64,
+    pub low: i64,
+    pub exploited: i64,
+    pub fixable: i64,
+    pub environments_affected: i64,
+    pub systems_affected: i64,
+    pub outstanding: i64,
+    pub accepted: i64,
+    pub scheduled: i64,
+}
+
+/// Response from fleet rescan trigger.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetRescanResponse {
+    pub enqueued_count: i64,
+    pub message: String,
+}
+
 /// A single recent deployment event.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RecentDeployment {
@@ -373,6 +509,10 @@ pub struct SystemDetail {
     pub kernel: Option<String>,
     pub agent_version: Option<String>,
     pub current_store_path: Option<String>,
+    #[serde(default)]
+    pub generation: Option<i32>,
+    #[serde(default)]
+    pub generation_matches_current_store_path: Option<bool>,
     pub hardware: SystemHardwareInfo,
     pub network: SystemNetworkInfo,
     pub security: SystemSecurityInfo,
@@ -473,6 +613,24 @@ pub struct UpdateFlakeCredentialRequest {
     pub username: Option<String>,
     pub secret: Option<String>,
     pub ssh_username: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TestFlakeCredentialRequest {
+    pub repo_url: Option<String>,
+    pub branch: Option<String>,
+    pub auth_type: String,
+    pub username: Option<String>,
+    pub secret: Option<String>,
+    pub ssh_username: Option<String>,
+    pub use_stored_secret_if_empty: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TestFlakeCredentialResponse {
+    pub ok: bool,
+    pub message: String,
+    pub branch: String,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -859,6 +1017,46 @@ pub struct EvalHistoryPage {
     pub items: Vec<EvalHistoryItem>,
 }
 
+/// A single evaluation log entry (persisted to database).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvalLogEntry {
+    pub timestamp: DateTime<Utc>,
+    pub sequence: i32,
+    pub level: Option<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvalPolicyMatrixResponse {
+    pub commit_id: i32,
+    pub policies: Vec<String>,
+    pub systems: Vec<EvalPolicySystemRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvalPolicySystemRow {
+    pub system_name: String,
+    pub results: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvalDependencyGraphResponse {
+    pub commit_id: i32,
+    pub total_packages: i64,
+    pub packages: Vec<EvalDependencyPackageRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvalDependencyPackageRow {
+    pub package_name: String,
+    /// Built (store_path present / BuildComplete).
+    pub ready_count: i64,
+    /// Evaluated but not yet built.
+    pub pending_count: i64,
+    /// Eval or build failed.
+    pub failed_count: i64,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Pagination
 // ─────────────────────────────────────────────────────────────────────────────
@@ -900,6 +1098,11 @@ pub struct SystemRollbackRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemRollbackGenerationRequest {
+    pub store_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeploySystemRequest {
     pub commit_sha: String,
 }
@@ -917,6 +1120,33 @@ pub struct CommitInfo {
     pub message: String,
     pub author: String,
     pub timestamp: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemGenerationsResponse {
+    pub generations: Vec<SystemGeneration>,
+    pub current_generation: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemGeneration {
+    pub generation: i32,
+    pub store_path: Option<String>,
+    pub commit_hash: Option<String>,
+    pub timestamp: DateTime<Utc>,
+    pub is_current: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VerifyGenerationClosureRequest {
+    pub store_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VerifyGenerationClosureResponse {
+    pub available: bool,
+    pub message: String,
+    pub last_seen_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -977,6 +1207,109 @@ pub struct CveScanStatusResponse {
     pub high_count: i32,
     pub medium_count: i32,
     pub low_count: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HardeningFleetSummaryResponse {
+    pub total_systems_scanned: i64,
+    pub avg_fleet_score: Option<f64>,
+    pub total_well_hardened_services: i64,
+    pub total_moderately_hardened_services: i64,
+    pub total_poorly_hardened_services: i64,
+    pub total_vulnerable_services: i64,
+    pub total_services_scanned: i64,
+    pub last_scan_completed: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HardeningTopServiceResponse {
+    pub service_name: String,
+    pub affected_systems_count: i64,
+    pub avg_score: f64,
+    pub min_score: i32,
+    pub max_score: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HardeningSystemPostureResponse {
+    pub system_id: Option<Uuid>,
+    pub derivation_id: i32,
+    pub config_name: String,
+    pub hostname: Option<String>,
+    pub environment_name: Option<String>,
+    pub latest_scan_id: Option<Uuid>,
+    pub overall_score: Option<i32>,
+    pub risk_level: Option<String>,
+    pub total_services: Option<i32>,
+    pub well_hardened_count: Option<i32>,
+    pub moderately_hardened_count: Option<i32>,
+    pub poorly_hardened_count: Option<i32>,
+    pub vulnerable_count: Option<i32>,
+    pub last_scan_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HardeningServiceResultResponse {
+    pub id: Uuid,
+    pub scan_id: Uuid,
+    pub service_name: String,
+    pub service_type: Option<String>,
+    pub hardening_score: i32,
+    pub risk_level: String,
+    pub directives_detail: serde_json::Value,
+    pub enabled_directives_count: i32,
+    pub disabled_directives_count: i32,
+    pub missing_directives_count: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HardeningJustificationResponse {
+    pub id: Uuid,
+    pub system_id: Uuid,
+    pub service_name: String,
+    pub directive_name: Option<String>,
+    pub category: Option<String>,
+    pub reason: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaveHardeningJustificationRequest {
+    pub directive_name: Option<String>,
+    pub category: Option<String>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HardeningScanEligibilityResponse {
+    pub eligible: bool,
+    pub reason: Option<String>,
+    pub derivation_id: Option<i32>,
+    pub config_name: Option<String>,
+    pub hostname: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HardeningScanTriggerResponse {
+    pub scan_id: uuid::Uuid,
+    pub status: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HardeningScanStatusResponse {
+    pub scan_id: uuid::Uuid,
+    pub derivation_id: i32,
+    pub status: String,
+    pub error_message: Option<String>,
+    pub scheduled_at: Option<DateTime<Utc>>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub attempts: i32,
+    pub total_services: i32,
+    pub overall_score: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1375,38 +1708,64 @@ pub enum BuilderStatus {
     Inactive,
     #[serde(alias = "Offline")]
     Offline,
+    #[serde(alias = "Draining")]
+    Draining,
 }
 
 impl BuilderStatus {
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Active => "Active",
-            Self::Inactive => "Inactive",
-            Self::Offline => "Offline",
+            Self::Active => "running",
+            Self::Inactive => "paused",
+            Self::Offline => "offline",
+            Self::Draining => "draining",
         }
     }
 
     pub fn color_class(&self) -> &'static str {
         match self {
             Self::Active => "text-emerald-400",
-            Self::Inactive => "text-slate-400",
+            Self::Inactive => "text-amber-400",
             Self::Offline => "text-red-400",
+            Self::Draining => "text-blue-400",
         }
     }
 
     pub fn bg_class(&self) -> &'static str {
         match self {
             Self::Active => "bg-emerald-500/10",
-            Self::Inactive => "bg-slate-500/10",
+            Self::Inactive => "bg-amber-500/10",
             Self::Offline => "bg-red-500/10",
+            Self::Draining => "bg-blue-500/10",
         }
     }
 
     pub fn dot_class(&self) -> &'static str {
         match self {
             Self::Active => "bg-emerald-400",
-            Self::Inactive => "bg-slate-400",
+            Self::Inactive => "bg-amber-400",
             Self::Offline => "bg-red-400",
+            Self::Draining => "bg-blue-400",
+        }
+    }
+
+    /// JSX-compatible chip class matching BuildersView.jsx
+    pub fn chip_class(&self) -> &'static str {
+        match self {
+            Self::Active => "chip-healthy",
+            Self::Inactive => "chip-warning",
+            Self::Offline => "chip-critical",
+            Self::Draining => "chip-info",
+        }
+    }
+
+    /// JSX-compatible dot color matching BuildersView.jsx
+    pub fn dot_color(&self) -> &'static str {
+        match self {
+            Self::Active => "#34d399",
+            Self::Inactive => "#fbbf24",
+            Self::Offline => "#f87171",
+            Self::Draining => "#60a5fa",
         }
     }
 }
@@ -1416,10 +1775,14 @@ impl BuilderStatus {
 pub struct BuilderSummary {
     pub id: Uuid,
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    pub arch: String,
     pub status: BuilderStatus,
     pub max_cpu_cores: Option<i32>,
     pub max_memory_mb: Option<i32>,
     pub max_concurrent_jobs: i32,
+    pub enabled: bool,
     pub last_heartbeat_at: Option<DateTime<Utc>>,
     pub assigned_environment_count: i32,
     #[serde(default)]
@@ -1433,11 +1796,15 @@ pub struct BuilderSummary {
 pub struct BuilderDetail {
     pub id: Uuid,
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    pub arch: String,
     pub public_key: String,
     pub status: BuilderStatus,
     pub max_cpu_cores: Option<i32>,
     pub max_memory_mb: Option<i32>,
     pub max_concurrent_jobs: i32,
+    pub enabled: bool,
     pub last_heartbeat_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -1459,6 +1826,10 @@ pub struct BuilderCreatedResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateBuilderRequest {
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(default = "default_arch")]
+    pub arch: String,
     pub public_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_cpu_cores: Option<i32>,
@@ -1466,8 +1837,18 @@ pub struct CreateBuilderRequest {
     pub max_memory_mb: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_concurrent_jobs: Option<i32>,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
     #[serde(default)]
     pub environment_ids: Vec<Uuid>,
+}
+
+fn default_arch() -> String {
+    "x86_64-linux".to_string()
+}
+
+fn default_enabled() -> bool {
+    true
 }
 
 /// Update builder request
@@ -1476,6 +1857,10 @@ pub struct UpdateBuilderRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<BuilderStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_cpu_cores: Option<i32>,
@@ -1483,6 +1868,8 @@ pub struct UpdateBuilderRequest {
     pub max_memory_mb: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_concurrent_jobs: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
 }
 
 /// Update builder environments request
@@ -1602,6 +1989,14 @@ pub struct UpdateCacheDestination {
     pub force_repush: Option<bool>,
     pub require_sigs: Option<bool>,
     pub environment_ids: Option<Vec<Uuid>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CacheCredentialTestResult {
+    pub ok: bool,
+    pub status_code: Option<u16>,
+    pub message: String,
+    pub tested_url: Option<String>,
 }
 
 /// Cache push job status and details

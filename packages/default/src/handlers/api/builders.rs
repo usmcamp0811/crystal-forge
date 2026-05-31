@@ -19,7 +19,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::handlers::agent_request::CFState;
-use crate::handlers::api::rbac::{require_admin, require_viewer_or_above};
+use crate::handlers::api::rbac::{
+    require_admin, require_operator_or_admin, require_viewer_or_above,
+};
 use crate::handlers::builder_request::{
     authenticate_builder_request, authenticate_builder_request_allow_inactive,
 };
@@ -64,6 +66,8 @@ pub async fn create_builder(
             "Builder name too long (max 255 characters)".to_string(),
         ));
     }
+
+    validate_builder_arch(&request.arch)?;
 
     // Validate public key if provided (prevent DoS via oversized input)
     if let Some(ref pk) = request.public_key {
@@ -142,6 +146,18 @@ fn map_create_builder_error(error: &anyhow::Error) -> (StatusCode, String) {
     )
 }
 
+fn validate_builder_arch(arch: &str) -> Result<(), (StatusCode, String)> {
+    let valid_arches = ["x86_64-linux", "aarch64-linux", "aarch64-darwin", "x86_64-darwin"];
+    if !valid_arches.contains(&arch) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("Invalid architecture. Must be one of: {}", valid_arches.join(", ")),
+        ));
+    }
+
+    Ok(())
+}
+
 /// GET /api/v1/builders - List all builders (admin-only)
 pub async fn list_builders(
     State(state): State<CFState>,
@@ -186,16 +202,25 @@ pub async fn update_builder(
     Path(builder_id): Path<Uuid>,
     headers: axum::http::HeaderMap,
     Json(request): Json<UpdateBuilderRequest>,
-) -> Result<Json<Builder>, StatusCode> {
+) -> Result<Json<Builder>, (StatusCode, String)> {
     // Verify admin authorization
     let Some(_admin_user) = require_admin(&state.pool, &headers).await else {
-        return Err(StatusCode::FORBIDDEN);
+        return Err((StatusCode::FORBIDDEN, "Admin access required".to_string()));
     };
+
+    if let Some(ref arch) = request.arch {
+        validate_builder_arch(arch)?;
+    }
 
     // Update builder
     let builder = builders::update_builder(&state.pool, &builder_id, &request)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to update builder".to_string(),
+            )
+        })?;
 
     Ok(Json(builder))
 }
@@ -351,17 +376,20 @@ pub async fn cancel_build_job(
         })
 }
 
-/// POST /api/v1/build-jobs/:id/requeue - Requeue a cancelled/failed build job (admin-only)
+/// POST /api/v1/build-jobs/:id/requeue - Requeue a terminal build job (operator/admin)
 pub async fn requeue_build_job(
     State(state): State<CFState>,
     Path(job_id): Path<Uuid>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<BuildJob>, (StatusCode, String)> {
-    let Some(_admin_user) = require_admin(&state.pool, &headers).await else {
-        return Err((StatusCode::FORBIDDEN, "Admin access required".to_string()));
+    let Some(_operator_or_admin) = require_operator_or_admin(&state.pool, &headers).await else {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Operator or admin access required".to_string(),
+        ));
     };
 
-    builders::requeue_cancelled_job(&state.pool, &job_id)
+    builders::requeue_build_job_as_new_attempt(&state.pool, &job_id)
         .await
         .map(Json)
         .map_err(|e| {
@@ -428,9 +456,17 @@ pub async fn finalize_cancelled_job(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    builders::finalize_cancelled_job(&state.pool, &job_id)
+    builders::finalize_cancelled_job(&state.pool, &job_id, &builder_id)
         .await
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+        .map_err(|err| {
+            tracing::warn!(
+                builder_id = %builder_id,
+                job_id = %job_id,
+                error = %err,
+                "Rejected finalize-cancelled transition due to lease/state mismatch"
+            );
+            StatusCode::CONFLICT
+        })?;
 
     cleanup_build_log_channel(&state, job_id).await;
     Ok(StatusCode::OK)
@@ -714,9 +750,17 @@ pub async fn complete_job(
     }
 
     // Mark job as complete
-    builders::mark_job_complete(&state.pool, &job_id)
+    builders::mark_job_complete(&state.pool, &job_id, &builder_id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|err| {
+            tracing::warn!(
+                builder_id = %builder_id,
+                job_id = %job_id,
+                error = %err,
+                "Rejected complete transition due to lease/state mismatch"
+            );
+            StatusCode::CONFLICT
+        })?;
 
     cleanup_build_log_channel(&state, job_id).await;
 
@@ -761,10 +805,19 @@ pub async fn fail_job(
     let updated_job = builders::mark_job_failed_with_retry(
         &state.pool,
         &job_id,
+        &builder_id,
         request.error_message.as_deref(),
     )
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|err| {
+        tracing::warn!(
+            builder_id = %builder_id,
+            job_id = %job_id,
+            error = %err,
+            "Rejected fail transition due to lease/state mismatch"
+        );
+        StatusCode::CONFLICT
+    })?;
 
     // Return 200 for re-queued jobs, 202 for permanently failed jobs
     if updated_job.status == "queued" {

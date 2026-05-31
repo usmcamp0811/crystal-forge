@@ -13,10 +13,11 @@ use crate::api::models::{
     ApiError, AuditAction, CommitInfo, CreateSystemRequest, CveScanEligibilityResponse,
     CveScanStatusResponse, CveScanTriggerResponse, CveSummary, DeploySystemRequest,
     DeploymentStatus, PipelineStage, SaveSystemCveJustificationRequest, SortOrder,
-    SystemAgentEvent, SystemCommitsResponse, SystemDetail, SystemHardwareInfo, SystemHistoryEntry,
-    SystemMutationResponse, SystemNetworkInfo, SystemRollbackRequest, SystemSecurityInfo,
-    SystemSummary, SystemVulnerability, SystemsListParams, UpdateSystemPublicKeyRequest,
-    UpdateSystemRequest,
+    SystemAgentEvent, SystemCommitsResponse, SystemDetail, SystemGeneration,
+    SystemGenerationsResponse, SystemHardwareInfo, SystemHistoryEntry, SystemMutationResponse,
+    SystemNetworkInfo, SystemRollbackGenerationRequest, SystemRollbackRequest, SystemSecurityInfo, SystemSummary,
+    SystemVulnerability, SystemsListParams, UpdateSystemPublicKeyRequest, UpdateSystemRequest,
+    VerifyGenerationClosureRequest, VerifyGenerationClosureResponse,
 };
 use crate::auth::models::Role;
 use crate::handlers::api::rbac::{
@@ -24,6 +25,9 @@ use crate::handlers::api::rbac::{
 };
 use crate::models::auth_identity::AuthRole;
 use crate::queries::cve_scans::{get_scan_by_id, resolve_system_cve_scan_target};
+use crate::queries::system_states::{
+    fetch_system_generations, find_generation_store_path_last_seen,
+};
 use crate::queries::systems::{
     SystemAccessRow, SystemDetailRow, SystemListRow, commit_belongs_to_system_flake,
     deactivate_system, find_system_access_row, get_system_detail_by_id,
@@ -951,6 +955,75 @@ pub async fn rollback_system(
         .into_response()
 }
 
+pub async fn rollback_system_generation(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(system_id): Path<Uuid>,
+    Json(payload): Json<SystemRollbackGenerationRequest>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+
+    if !caller_role.can_mutate_systems() {
+        return forbidden_mutation();
+    }
+
+    let store_path = payload.store_path.trim();
+    if store_path.is_empty() {
+        return bad_request("store_path is required");
+    }
+
+    let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+
+    let row = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+
+    if !caller_role.can_access_system_environment(row.environment_id, &environment_memberships) {
+        return not_found();
+    }
+
+    if update_system_desired_target(&pool, system_id, store_path)
+        .await
+        .is_err()
+    {
+        return internal_error("Failed to request generation rollback");
+    }
+
+    if record_system_mutation_audit(
+        &pool,
+        user_id,
+        AuditAction::SystemRollbackRequested,
+        format!("{} ({})", row.hostname, row.id),
+        extract_request_origin(&headers),
+        serde_json::json!({ "operation": "rollback_generation", "store_path": store_path }),
+    )
+    .await
+    .is_err()
+    {
+        return internal_error("Failed to write audit event");
+    }
+
+    (
+        StatusCode::ACCEPTED,
+        Json(SystemMutationResponse {
+            status: "accepted".to_string(),
+            message: format!("Generation rollback requested for {}", row.hostname),
+        }),
+    )
+        .into_response()
+}
+
 pub async fn update_system_public_key(
     State(pool): State<PgPool>,
     headers: HeaderMap,
@@ -1173,6 +1246,8 @@ fn detail_row_to_api_model(row: SystemDetailRow) -> SystemDetail {
         kernel: row.kernel,
         agent_version: row.agent_version,
         current_store_path: row.current_store_path,
+        generation: row.generation,
+        generation_matches_current_store_path: row.generation_matches_current_store_path,
         hardware: SystemHardwareInfo {
             cpu_brand: row.cpu_brand,
             cpu_cores: row.cpu_cores,
@@ -1535,6 +1610,188 @@ pub async fn get_system_commits(
     (StatusCode::OK, Json(response)).into_response()
 }
 
+pub async fn get_system_generations(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(system_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ApiError {
+                error: "forbidden".to_string(),
+                message: "Authentication required".to_string(),
+                details: None,
+            }),
+        )
+            .into_response();
+    };
+
+    let Some(caller_role) = highest_role(&roles) else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ApiError {
+                error: "forbidden".to_string(),
+                message: "Authentication required".to_string(),
+                details: None,
+            }),
+        )
+            .into_response();
+    };
+
+    let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    error: "internal_error".to_string(),
+                    message: "Failed to load environment memberships".to_string(),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let row = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiError {
+                    error: "not_found".to_string(),
+                    message: "System not found".to_string(),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    error: "internal_error".to_string(),
+                    message: "Failed to load system".to_string(),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    if !caller_role.can_access_system_environment(row.environment_id, &environment_memberships) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(ApiError {
+                error: "not_found".to_string(),
+                message: "System not found".to_string(),
+                details: None,
+            }),
+        )
+            .into_response();
+    }
+
+    // Fetch generation history
+    let generation_rows = match fetch_system_generations(&pool, system_id).await {
+        Ok(rows) => rows,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    error: "internal_error".to_string(),
+                    message: "Failed to load system generations".to_string(),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    // Get current generation from system detail
+    let current_generation = match get_system_detail_by_id(&pool, system_id).await {
+        Ok(Some(detail)) => detail.generation,
+        _ => None,
+    };
+
+    let generations = generation_rows
+        .into_iter()
+        .map(|row| SystemGeneration {
+            generation: row.generation,
+            store_path: row.store_path,
+            commit_hash: row.commit_hash,
+            timestamp: row.timestamp,
+            is_current: Some(row.generation) == current_generation,
+        })
+        .collect::<Vec<_>>();
+
+    let response = SystemGenerationsResponse {
+        generations,
+        current_generation,
+    };
+
+    (StatusCode::OK, Json(response)).into_response()
+}
+
+pub async fn verify_generation_closure(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(system_id): Path<Uuid>,
+    Json(payload): Json<VerifyGenerationClosureRequest>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+
+    let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+
+    let row = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+
+    if !caller_role.can_access_system_environment(row.environment_id, &environment_memberships) {
+        return not_found();
+    }
+
+    let store_path = payload.store_path.trim();
+    if store_path.is_empty() {
+        return bad_request("store_path is required");
+    }
+
+    let last_seen_at = match find_generation_store_path_last_seen(&pool, system_id, store_path).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to verify generation closure"),
+    };
+
+    let response = if let Some(last_seen_at) = last_seen_at {
+        VerifyGenerationClosureResponse {
+            available: true,
+            message: format!(
+                "Closure is available. Store path was reported by agent at {}.",
+                last_seen_at.to_rfc3339()
+            ),
+            last_seen_at: Some(last_seen_at),
+        }
+    } else {
+        VerifyGenerationClosureResponse {
+            available: false,
+            message: "Closure not yet reported by agent for this system/store path.".to_string(),
+            last_seen_at: None,
+        }
+    };
+
+    (StatusCode::OK, Json(response)).into_response()
+}
+
 pub async fn get_system_history(
     State(pool): State<PgPool>,
     headers: HeaderMap,
@@ -1664,8 +1921,17 @@ async fn record_system_mutation_audit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::session::{SESSION_COOKIE_NAME, hash_token};
+    use crate::models::auth_identity::AuthRole;
+    use crate::models::public_key::PublicKey;
+    use crate::models::systems::System;
+    use crate::queries::auth_identity::{create_user_session, sync_user_role};
+    use crate::queries::systems::insert_system;
+    use crate::queries::users::insert_user;
     use axum::extract::State;
+    use axum::http::header;
     use chrono::Utc;
+    use ed25519_dalek::SigningKey;
     use sqlx::postgres::PgPoolOptions;
 
     #[test]
@@ -1897,6 +2163,117 @@ mod tests {
         .into_response();
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn rollback_system_generation_requires_authenticated_role() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+
+        let response = rollback_system_generation(
+            State(pool),
+            HeaderMap::new(),
+            Path(Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid")),
+            Json(SystemRollbackGenerationRequest {
+                store_path: "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-system".to_string(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    async fn test_pool_from_env() -> PgPool {
+        let db_url = std::env::var("DATABASE_URL")
+            .expect("DATABASE_URL must be set for rollback generation DB tests");
+
+        PgPool::connect(&db_url)
+            .await
+            .expect("failed to connect to DATABASE_URL")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn rollback_system_generation_updates_desired_target_to_store_path() {
+        let pool = test_pool_from_env().await;
+
+        let suffix = Uuid::new_v4().simple().to_string();
+        let hostname = format!("task294-rollback-gen-{suffix}");
+        let store_path = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-system".to_string();
+
+        let user = insert_user(&pool, &format!("{suffix}@example.com"), Some("Task 294 Tester"))
+            .await
+            .expect("insert_user should succeed");
+        sync_user_role(&pool, user.id, AuthRole::Admin)
+            .await
+            .expect("sync_user_role should succeed");
+
+        let session_token = format!("session-{suffix}");
+        let session_token_hash = hash_token(&session_token);
+        create_user_session(
+            &pool,
+            user.id,
+            session_token_hash,
+            Utc::now() + chrono::Duration::hours(1),
+            Some("test-agent".to_string()),
+            Some("127.0.0.1".to_string()),
+        )
+        .await
+        .expect("create_user_session should succeed");
+
+        let signing_key = SigningKey::from_bytes(&[9u8; 32]);
+        let public_key = PublicKey::from_verifying_key(signing_key.verifying_key());
+        let system = System {
+            id: Uuid::new_v4(),
+            hostname: hostname.clone(),
+            environment_id: None,
+            is_active: true,
+            public_key,
+            flake_id: None,
+            derivation: String::new(),
+            system_configuration_name: Some(hostname.clone()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            desired_target: None,
+            deployment_policy: "manual".to_string(),
+        };
+
+        insert_system(&pool, &system)
+            .await
+            .expect("insert_system should succeed");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!("{}={}", SESSION_COOKIE_NAME, session_token)
+                .parse()
+                .expect("cookie header should parse"),
+        );
+
+        let response = rollback_system_generation(
+            State(pool.clone()),
+            headers,
+            Path(system.id),
+            Json(SystemRollbackGenerationRequest {
+                store_path: store_path.clone(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        let desired_target = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT desired_target FROM systems WHERE id = $1",
+        )
+        .bind(system.id)
+        .fetch_one(&pool)
+        .await
+        .expect("query desired_target should succeed");
+
+        assert_eq!(desired_target.as_deref(), Some(store_path.as_str()));
     }
 
     #[tokio::test]

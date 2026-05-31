@@ -1,21 +1,39 @@
-//! Builder card component displaying builder summary info.
+//! Builder card component - pixel-perfect JSX port matching BuildersView.jsx.
 
 use dioxus::prelude::*;
 
 use crate::api::models::BuilderSummary;
-use crate::theme;
+use crate::components::{Icon, IconName};
+
+fn builder_status_chip(builder: &BuilderSummary) -> Element {
+    let chip_class = builder.status.chip_class();
+    let dot_color = builder.status.dot_color();
+    let label = builder.status.label();
+
+    rsx! {
+        span {
+            class: "chip {chip_class}",
+            span {
+                class: "chip-dot",
+                style: "background: {dot_color};"
+            }
+            "{label}"
+        }
+    }
+}
 
 #[component]
 pub fn BuilderCard(builder: BuilderSummary, on_edit: EventHandler<()>) -> Element {
-    let status_label = builder.status.label();
-    let status_dot = builder.status.dot_class();
-    let status_color = builder.status.color_class();
-    let is_inactive = matches!(builder.status, crate::api::models::BuilderStatus::Inactive);
-
-    let inactive_classes = if is_inactive {
-        "opacity-60 saturate-0"
+    let slot_pct = if builder.max_concurrent_jobs > 0 {
+        ((builder.active_jobs as f64 / builder.max_concurrent_jobs as f64) * 100.0).round() as i32
     } else {
-        ""
+        0
+    };
+
+    let rail_color = match builder.status {
+        crate::api::models::BuilderStatus::Active => "#34d399",
+        crate::api::models::BuilderStatus::Inactive => "#fbbf24",
+        _ => "#f87171",
     };
 
     let heartbeat_text = if let Some(heartbeat) = builder.last_heartbeat_at {
@@ -23,7 +41,7 @@ pub fn BuilderCard(builder: BuilderSummary, on_edit: EventHandler<()>) -> Elemen
         let duration = now.signed_duration_since(heartbeat);
 
         if duration.num_seconds() < 60 {
-            format!("{}s ago", duration.num_seconds())
+            "just now".to_string()
         } else if duration.num_minutes() < 60 {
             format!("{}m ago", duration.num_minutes())
         } else if duration.num_hours() < 24 {
@@ -32,102 +50,165 @@ pub fn BuilderCard(builder: BuilderSummary, on_edit: EventHandler<()>) -> Elemen
             format!("{}d ago", duration.num_days())
         }
     } else {
-        "Never".to_string()
+        "never".to_string()
     };
 
-    let cpu_cores_text = if let Some(cores) = builder.max_cpu_cores {
-        cores.to_string()
-    } else {
-        "Unlimited".to_string()
-    };
+    let cores_text = builder
+        .max_cpu_cores
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "∞".to_string());
 
-    let memory_text = if let Some(mem_mb) = builder.max_memory_mb {
-        format!("{} GB", mem_mb / 1024)
-    } else {
-        "Unlimited".to_string()
-    };
+    let mem_text = builder
+        .max_memory_mb
+        .map(|mb| format!("{} GiB", mb / 1024))
+        .unwrap_or_else(|| "∞".to_string());
 
     let environments_text = if builder.assigned_environment_count > 0 {
-        builder.assigned_environment_count.to_string()
+        format!("{} assigned", builder.assigned_environment_count)
     } else {
-        "All (wildcard)".to_string()
+        "All / wildcard".to_string()
     };
+
+    // TODO: Load actual load metric when backend provides it
+    let load: f64 = 0.0;
+
+    // TODO: Load actual completed/failed 24h when backend provides them
+    let completed24h = 0;
+    let failed24h = 0;
 
     rsx! {
         div {
-            class: "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden shadow-sm {inactive_classes}",
-
-            // Header section with purple gradient background (matches flakes color)
+            class: "sys-card",
             div {
-                class: "flex items-center justify-between px-6 py-4 border-b border-gray-800",
-                style: "background: linear-gradient(135deg, rgba(130, 105, 155, 0.42) 0%, rgba(17, 24, 39, 0.92) 100%);",
+                class: "status-rail",
+                style: "--status-color: {rail_color};"
+            }
+            div {
+                class: "sys-card-head",
                 div {
-                    class: "flex-1",
-                    h3 {
-                        class: "text-lg font-semibold text-white mb-1",
-                        "{builder.name}"
+                    class: "sys-title",
+                    div {
+                        class: "sys-hostname",
+                        Icon { name: IconName::Cpu, size: 13 }
+                        " {builder.name}"
                     }
                     div {
-                        class: "flex items-center gap-2 text-xs",
+                        class: "sys-fqdn",
+                        {builder.host.as_deref().unwrap_or("")}
+                    }
+                }
+                {builder_status_chip(&builder)}
+            }
+            div {
+                class: "sys-card-body",
+                div {
+                    div { class: "sys-kv-key", "Arch" }
+                    div { class: "sys-kv-val", "{builder.arch}" }
+                }
+                div {
+                    div { class: "sys-kv-key", "Cores · mem" }
+                    div {
+                        class: "sys-kv-val",
+                        style: "font-family: inherit;",
+                        "{cores_text}c · {mem_text}"
+                    }
+                }
+                div {
+                    div { class: "sys-kv-key", "Environments" }
+                    div {
+                        class: "sys-kv-val",
+                        style: "font-family: inherit;",
+                        "{environments_text}"
+                    }
+                }
+                div {
+                    div { class: "sys-kv-key", "Last seen" }
+                    div {
+                        class: "sys-kv-val",
+                        style: "font-family: inherit;",
+                        "{heartbeat_text}"
+                    }
+                }
+            }
+
+            // Slot use progress bar
+            div {
+                div {
+                    style: "display: flex; justify-content: space-between; font-size: 11px; color: var(--cf-text-muted); margin-bottom: 4px;",
+                    span { "Slot use" }
+                    span {
+                        class: "mono",
+                        "{builder.active_jobs}/{builder.max_concurrent_jobs} · {slot_pct}%"
+                    }
+                }
+                div {
+                    style: "height: 5px; background: var(--cf-subtle-bg); border-radius: 99px; overflow: hidden;",
+                    {
+                        let slot_bg = if slot_pct > 85 { "#fbbf24" } else { "#34d399" };
+                        rsx! {
+                            div {
+                                style: "width: {slot_pct}%; height: 100%; background: {slot_bg};"
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Load progress bar
+            div {
+                div {
+                    style: "display: flex; justify-content: space-between; font-size: 11px; color: var(--cf-text-muted); margin-bottom: 4px;",
+                    span { "Load" }
+                    span {
+                        class: "mono",
+                        "{(load * 100.0).round() as i32}%"
+                    }
+                }
+                div {
+                    style: "height: 5px; background: var(--cf-subtle-bg); border-radius: 99px; overflow: hidden;",
+                    {
+                        let load_bg = if load > 0.85 {
+                            "#f87171"
+                        } else if load > 0.6 {
+                            "#fbbf24"
+                        } else {
+                            "#60a5fa"
+                        };
+                        let load_pct = (load * 100.0).round() as i32;
+                        rsx! {
+                            div {
+                                style: "width: {load_pct}%; height: 100%; background: {load_bg};"
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Footer
+            div {
+                class: "sys-card-foot",
+                div {
+                    class: "chips-row",
+                    span {
+                        class: "chip chip-healthy",
+                        "{completed24h} built"
+                    }
+                    if failed24h > 0 {
                         span {
-                            class: "flex items-center gap-1.5 {status_color}",
-                            span { class: "w-2 h-2 rounded-full {status_dot}" }
-                            "{status_label}"
+                            class: "chip chip-critical",
+                            "{failed24h} failed"
                         }
                     }
                 }
                 button {
-                    class: "px-4 py-2 rounded text-xs font-medium text-white transition-colors {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING}",
-                    onclick: move |_| on_edit.call(()),
-                    "Edit"
-                }
-            }
-
-            // Status section
-            div {
-                class: "px-6 py-3 bg-gray-800/50",
-                p { class: "text-[10px] font-semibold uppercase tracking-wider text-gray-500 mb-2", "Status" }
-                div {
-                    class: "text-sm {theme::text::SECONDARY}",
-                    "Last heartbeat: "
-                    span { class: "text-white", "{heartbeat_text}" }
-                }
-            }
-
-            // Resource Limits section
-            div {
-                class: "px-6 py-3 bg-gray-900",
-                p { class: "text-[10px] font-semibold uppercase tracking-wider text-gray-500 mb-3", "Resource Limits" }
-                div {
-                    class: "grid grid-cols-2 gap-3 text-sm",
-                    div {
-                        span { class: "text-gray-500 text-xs block mb-0.5", "CPU Cores" }
-                        span {
-                            class: "text-gray-200",
-                            "{cpu_cores_text}"
-                        }
-                    }
-                    div {
-                        span { class: "text-gray-500 text-xs block mb-0.5", "Memory" }
-                        span {
-                            class: "text-gray-200",
-                            "{memory_text}"
-                        }
-                    }
-                    div {
-                        span { class: "text-gray-500 text-xs block mb-0.5", "Max Concurrent Jobs" }
-                        span {
-                            class: "text-gray-200",
-                            "{builder.max_concurrent_jobs}"
-                        }
-                    }
-                    div {
-                        span { class: "text-gray-500 text-xs block mb-0.5", "Environments" }
-                        span {
-                            class: "text-gray-200",
-                            "{environments_text}"
-                        }
-                    }
+                    class: "btn btn-subtle focus-ring",
+                    style: "padding: 4px 10px; font-size: 12px;",
+                    onclick: move |e| {
+                        e.stop_propagation();
+                        on_edit.call(())
+                    },
+                    Icon { name: IconName::Gear, size: 12 }
+                    " Edit"
                 }
             }
         }

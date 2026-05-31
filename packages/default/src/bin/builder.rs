@@ -156,7 +156,11 @@ async fn run_api_mode(cfg: &CrystalForgeConfig) -> anyhow::Result<()> {
     // Spawn job polling loop
     let poll_client = api_client.clone();
     let poll_interval = builder_config.poll_interval;
-    let max_concurrent = builder_config.max_concurrent_jobs.unwrap_or(1);
+    let max_concurrent = builder_config
+        .max_concurrent_jobs
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(1);
 
     info!(
         "🔨 Starting job polling loop (max concurrent: {})...",
@@ -167,6 +171,7 @@ async fn run_api_mode(cfg: &CrystalForgeConfig) -> anyhow::Result<()> {
         result = run_api_job_loop(
             poll_client,
             poll_interval,
+            max_concurrent,
             build_config.clone(),
             cache_config.clone(),
             cfg.server.execution_mode,
@@ -213,6 +218,7 @@ async fn run_heartbeat_loop(client: BuilderApiClient, interval: std::time::Durat
 async fn run_api_job_loop(
     client: BuilderApiClient,
     poll_interval: std::time::Duration,
+    max_concurrent: usize,
     build_config: crystal_forge::config::BuildConfig,
     cache_config: crystal_forge::config::CacheConfig,
     execution_mode: crystal_forge::config::ExecutionMode,
@@ -221,8 +227,7 @@ async fn run_api_job_loop(
     let pool = crystal_forge::config::CrystalForgeConfig::db_pool().await?;
     let mut ticker = tokio::time::interval(poll_interval);
 
-    // Limit concurrent builds to max_concurrent_jobs
-    let max_concurrent = build_config.max_concurrent_derivations;
+    // Limit concurrent builds to builder.max_concurrent_jobs
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrent));
     info!(
         "🔨 Starting job polling loop (max concurrent: {})...",
@@ -703,6 +708,7 @@ async fn fail_job_with_db_fallback(
         if let Err(e2) = crystal_forge::queries::builders::mark_job_failed_with_retry(
             pool,
             &job_id,
+            &client.builder_id(),
             Some(error_message),
         )
         .await
@@ -727,7 +733,10 @@ async fn complete_job_with_db_fallback(
             job_id, e
         );
 
-        if let Err(e2) = crystal_forge::queries::builders::mark_job_complete(pool, &job_id).await {
+        if let Err(e2) =
+            crystal_forge::queries::builders::mark_job_complete(pool, &job_id, &client.builder_id())
+                .await
+        {
             error!(
                 "❌ DB fallback failed while marking job {} complete: {}",
                 job_id, e2
@@ -747,8 +756,12 @@ async fn finalize_cancelled_with_db_fallback(
             job_id, e
         );
 
-        if let Err(e2) =
-            crystal_forge::queries::builders::finalize_cancelled_job(pool, &job_id).await
+        if let Err(e2) = crystal_forge::queries::builders::finalize_cancelled_job(
+            pool,
+            &job_id,
+            &client.builder_id(),
+        )
+        .await
         {
             error!(
                 "❌ DB fallback failed while finalizing cancelled job {}: {}",

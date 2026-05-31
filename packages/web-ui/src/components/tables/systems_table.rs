@@ -3,10 +3,11 @@
 use dioxus::prelude::*;
 use uuid::Uuid;
 
-use crate::api::models::SystemSummary;
+use crate::api::models::{DeploymentStatus, HealthStatus, SystemSummary};
+use crate::components::chips::{Chip, ChipVariant, EnvBadge, StatusDot};
+use crate::components::environments::{normalize_color_hex, with_alpha};
+use crate::components::heartbeat_spinner::HeartbeatSpinner;
 use crate::components::tables::{SortDirection, SortableHeader};
-use crate::routes::Route;
-use crate::theme;
 
 /// Column that can be sorted in the systems table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,8 +37,21 @@ pub fn SystemsTable(
     on_edit: EventHandler<Uuid>,
     /// Called when user clicks deploy on a system
     on_deploy: EventHandler<Uuid>,
+    /// Called when user clicks a row/open action
+    on_open: EventHandler<Uuid>,
+    /// Currently selected row (for preview drawer highlight)
+    #[props(default = None)]
+    selected_id: Option<Uuid>,
+    /// Whether to use compact density
+    #[props(default = false)]
+    compact: bool,
+    /// Optional environment name -> color hex mappings from environments API
+    #[props(default)]
+    environment_colors: Vec<(String, String)>,
+    /// Optional flake context tuples (flake_id, name, latest_commit)
+    #[props(default)]
+    flake_context: Vec<(i32, String, Option<String>)>,
 ) -> Element {
-    let navigator = use_navigator();
     let mut sort_column = use_signal(|| None::<SystemsSortColumn>);
     let mut sort_direction = use_signal(|| SortDirection::Asc);
 
@@ -89,146 +103,254 @@ pub fn SystemsTable(
 
     let current_col = *sort_column.read();
     let current_dir = *sort_direction.read();
+    let table_class = if compact {
+        "sys-table compact"
+    } else {
+        "sys-table"
+    };
 
     rsx! {
         div {
-            class: "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden shadow-sm bg-gray-900/60",
+            class: "card",
+            style: "overflow: hidden;",
             div {
                 class: "overflow-x-auto",
                 "data-testid": "systems-table",
                 table {
-                    class: "w-full",
+                    class: "{table_class}",
                     thead {
-                        class: "{theme::surface::SUBTLE_BG}",
                         tr {
-                            SortableHeader {
-                                label: "Hostname",
-                                column: SystemsSortColumn::Hostname,
-                                current_col: current_col,
-                                current_dir: current_dir,
-                                on_sort: move |(col, dir)| {
-                                    sort_column.set(Some(col));
-                                    sort_direction.set(dir);
-                                }
+                            // Host — 22% width matching design
+                            th {
+                                style: "width: 22%;",
+                                "Host"
                             }
-                            SortableHeader {
-                                label: "IP",
-                                column: SystemsSortColumn::Ip,
-                                current_col: current_col,
-                                current_dir: current_dir,
-                                on_sort: move |(col, dir)| {
-                                    sort_column.set(Some(col));
-                                    sort_direction.set(dir);
-                                }
-                            }
-                            SortableHeader {
-                                label: "Environment",
-                                column: SystemsSortColumn::Environment,
-                                current_col: current_col,
-                                current_dir: current_dir,
-                                on_sort: move |(col, dir)| {
-                                    sort_column.set(Some(col));
-                                    sort_direction.set(dir);
-                                }
-                            }
-                            SortableHeader {
-                                label: "Health",
-                                column: SystemsSortColumn::Health,
-                                current_col: current_col,
-                                current_dir: current_dir,
-                                on_sort: move |(col, dir)| {
-                                    sort_column.set(Some(col));
-                                    sort_direction.set(dir);
-                                }
-                            }
-                            SortableHeader {
-                                label: "Deployment",
-                                column: SystemsSortColumn::Deployment,
-                                current_col: current_col,
-                                current_dir: current_dir,
-                                on_sort: move |(col, dir)| {
-                                    sort_column.set(Some(col));
-                                    sort_direction.set(dir);
-                                }
-                            }
-                            SortableHeader {
-                                label: "CVEs",
-                                column: SystemsSortColumn::Cves,
-                                current_col: current_col,
-                                current_dir: current_dir,
-                                on_sort: move |(col, dir)| {
-                                    sort_column.set(Some(col));
-                                    sort_direction.set(dir);
-                                }
-                            }
-                            th { class: "px-4 py-3 text-right text-xs font-medium text-gray-400 uppercase tracking-wider", "Actions" }
+                            th { "Env" }
+                            th { "Status" }
+                            th { "Flake · commit" }
+                            th { "Deploy" }
+                            th { "CVEs" }
+                            th { "Heartbeat" }
+                            // Actions — empty header, right-aligned
+                            th { style: "text-align: right;", " " }
                         }
                     }
                     tbody {
-                        class: "divide-y {theme::surface::DIVIDER}",
                         for system in sorted_systems {
                             tr {
-                                class: "hover:bg-gray-800/40 transition cursor-pointer",
-                                onclick: move |_| {
-                                    navigator.push(Route::SystemDetailView { id: system.id.to_string() });
+                                class: if selected_id == Some(system.id) {
+                                    "cursor-pointer selected"
+                                } else {
+                                    "cursor-pointer"
                                 },
-                                td { class: "{theme::spacing::TABLE_CELL} text-sm text-white", "{system.hostname}" }
+                                onclick: move |_| {
+                                    on_open.call(system.id);
+                                },
+                                // Hostname column with status dot
                                 td {
-                                    class: "{theme::spacing::TABLE_CELL} text-sm text-gray-300 font-mono",
-                                    "{ip_label(&system)}"
-                                }
-                                td { class: "{theme::spacing::TABLE_CELL} text-sm {theme::text::SECONDARY}", "{environment_label(&system)}" }
-                                td { class: "{theme::spacing::TABLE_CELL}",
-                                    span { class: "text-xs {system.health_status.color_class()}", "{system.health_status.label()}" }
-                                }
-                                td { class: "{theme::spacing::TABLE_CELL}",
-                                    span { class: "text-xs {system.deployment_status.color_class()}", "{system.deployment_status.label()}" }
-                                }
-                                td { class: "{theme::spacing::TABLE_CELL} text-xs",
-                                    span { class: "{theme::cve::CRITICAL_TEXT} font-semibold", "{system.cve_counts.critical}" }
-                                    span { class: "text-gray-500", " C  " }
-                                    span { class: "{theme::cve::HIGH_TEXT} font-semibold", "{system.cve_counts.high}" }
-                                    span { class: "text-gray-500", " H  " }
-                                    span { class: "{theme::cve::MEDIUM_TEXT} font-semibold", "{system.cve_counts.medium}" }
-                                    span { class: "text-gray-500", " M  " }
-                                    span { class: "{theme::cve::LOW_TEXT} font-semibold", "{system.cve_counts.low}" }
-                                    span { class: "text-gray-500", " L" }
-                                }
-                                td {
-                                    class: "{theme::spacing::TABLE_CELL} text-right",
                                     div {
-                                        class: "flex gap-2 justify-end",
+                                        class: "sys-host-cell",
+                                        StatusDot {
+                                            color: status_color(&system.health_status).to_string(),
+                                            large: false,
+                                        }
+                                        div {
+                                            class: "min-w-0",
+                                            div {
+                                                class: "hostname",
+                                                "{system.hostname}"
+                                            }
+                                            div {
+                                                class: "fqdn truncate",
+                                                "{system.hostname}.local"
+                                            }
+                                        }
+                                    }
+                                }
+                                // Env
+                                td {
+                                    {
+                                        let env = environment_label(&system);
+
+                                        // Debug: log environment value to console
+                                        #[cfg(debug_assertions)]
+                                        {
+                                            let msg = format!("SystemsTable: hostname={}, environment='{}' (raw: {:?})",
+                                                system.hostname, env, system.environment);
+                                            web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&msg));
+                                        }
+
+                                        let colors = env_colors(&env, &environment_colors);
+                                        rsx! {
+                                            EnvBadge {
+                                                name: env.clone(),
+                                                fg: colors.fg,
+                                                bg: colors.bg,
+                                                border: colors.border,
+                                            }
+                                        }
+                                    }
+                                }
+                                // Status
+                                td {
+                                    Chip {
+                                        variant: health_chip_variant(&system.health_status),
+                                        show_dot: true,
+                                        "{system.health_status.label()}"
+                                    }
+                                }
+                                // Flake · commit
+                                td {
+                                    {
+                                        let (flake_name, flake_commit) = system
+                                            .flake_id
+                                            .and_then(|id| {
+                                                flake_context
+                                                    .iter()
+                                                    .find(|(flake_id, _, _)| *flake_id == id)
+                                                    .map(|(_, name, latest_commit)| {
+                                                        (name.clone(), latest_commit.clone())
+                                                    })
+                                            })
+                                            .unwrap_or_else(|| ("—".to_string(), None));
+                                        let flake_commit_short = flake_commit
+                                            .as_deref()
+                                            .map(|hash| hash.chars().take(8).collect::<String>())
+                                            .unwrap_or_else(|| "—".to_string());
+                                        rsx! {
+                                            div {
+                                                style: "display: flex; flex-direction: column; line-height: 1.3;",
+                                                span {
+                                                    class: "mono",
+                                                    style: "font-size: 12px; color: var(--cf-text-primary)",
+                                                    "{flake_name}"
+                                                }
+                                                span {
+                                                    class: "mono",
+                                                    style: "font-size: 11px; color: var(--cf-text-muted)",
+                                                    "{flake_commit_short}"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                // Deploy
+                                td {
+                                    Chip {
+                                        variant: deployment_chip_variant(&system.deployment_status),
+                                        show_dot: false,
+                                        "{system.deployment_status.label()}"
+                                    }
+                                }
+                                // CVEs
+                                td {
+                                    div {
+                                        style: "display: flex; gap: 6px; flex-wrap: wrap;",
+                                        if system.cve_counts.critical > 0 {
+                                            span { class: "chip chip-critical", "{system.cve_counts.critical} crit" }
+                                        }
+                                        if system.cve_counts.high > 0 {
+                                            span { class: "chip chip-warning", "{system.cve_counts.high} high" }
+                                        }
+                                        if system.cve_counts.critical == 0 && system.cve_counts.high == 0 {
+                                            span { class: "chip chip-healthy", "✓ clean" }
+                                        }
+                                    }
+                                }
+                                // Heartbeat countdown
+                                td {
+                                    {
+                                        let last_seen_text = system
+                                            .last_seen
+                                            .map(|dt| {
+                                                let diff = chrono::Utc::now().signed_duration_since(dt);
+                                                if diff.num_seconds() < 60 {
+                                                    format!("{}s ago", diff.num_seconds().max(0))
+                                                } else if diff.num_minutes() < 60 {
+                                                    format!("{}m ago", diff.num_minutes().max(0))
+                                                } else if diff.num_hours() < 24 {
+                                                    format!("{}h ago", diff.num_hours().max(0))
+                                                } else {
+                                                    format!("{}d ago", diff.num_days().max(0))
+                                                }
+                                            })
+                                            .unwrap_or_else(|| "Never".to_string());
+
+                                        let next_in = system
+                                            .last_seen
+                                            .map(|dt| 60.0 - chrono::Utc::now().signed_duration_since(dt).num_seconds() as f64)
+                                            .unwrap_or(0.0);
+
+                                        rsx! {
+                                            div {
+                                                style: "display: flex; align-items: center; gap: 8px;",
+                                                HeartbeatSpinner {
+                                                    interval_sec: 60,
+                                                    next_in_sec: next_in,
+                                                    size: 20,
+                                                    show_label: false,
+                                                }
+                                                span {
+                                                    class: "text-xs",
+                                                    style: "color: var(--cf-text-secondary)",
+                                                    "{last_seen_text}"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                // Row actions: Deploy | Evaluate | More (matching design)
+                                td {
+                                    div {
+                                        class: "row-actions",
+                                        // Deploy
                                         button {
-                                            class: "text-xs text-purple-400 hover:text-purple-300 px-2 py-1 rounded hover:bg-purple-500/10 transition-colors",
+                                            class: "btn-icon focus-ring",
+                                            title: "Deploy",
                                             onclick: move |evt| {
                                                 evt.stop_propagation();
                                                 on_deploy.call(system.id);
                                             },
-                                            "Deploy"
+                                            svg {
+                                                class: "w-3.5 h-3.5",
+                                                fill: "none",
+                                                stroke: "currentColor",
+                                                stroke_width: "2",
+                                                view_box: "0 0 24 24",
+                                                path { d: "M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" }
+                                            }
                                         }
+                                        // Evaluate
                                         button {
-                                            class: "text-xs text-emerald-400 hover:text-emerald-300 px-2 py-1 rounded hover:bg-emerald-500/10 transition-colors",
+                                            class: "btn-icon focus-ring",
+                                            title: "Evaluate",
                                             onclick: move |evt| {
                                                 evt.stop_propagation();
-                                                on_edit.call(system.id);
                                             },
-                                            "Edit"
+                                            svg {
+                                                class: "w-3.5 h-3.5",
+                                                fill: "none",
+                                                stroke: "currentColor",
+                                                stroke_width: "2",
+                                                view_box: "0 0 24 24",
+                                                path { d: "M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" }
+                                            }
                                         }
+                                        // More
                                         button {
-                                            class: "text-xs text-blue-400 hover:text-blue-300 px-2 py-1 rounded hover:bg-blue-500/10 transition-colors",
+                                            class: "btn-icon focus-ring",
+                                            title: "More",
                                             onclick: move |evt| {
                                                 evt.stop_propagation();
-                                                on_update_key.call(system.id);
                                             },
-                                            "Update Key"
-                                        }
-                                        button {
-                                            class: "text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors",
-                                            onclick: move |evt| {
-                                                evt.stop_propagation();
-                                                on_remove.call(system.id);
-                                            },
-                                            "Remove"
+                                            svg {
+                                                class: "w-3.5 h-3.5",
+                                                fill: "currentColor",
+                                                view_box: "0 0 24 24",
+                                                circle { cx: "5", cy: "12", r: "2" }
+                                                circle { cx: "12", cy: "12", r: "2" }
+                                                circle { cx: "19", cy: "12", r: "2" }
+                                            }
                                         }
                                     }
                                 }
@@ -251,5 +373,88 @@ fn environment_label(system: &SystemSummary) -> String {
     system
         .environment
         .clone()
-        .unwrap_or_else(|| "Unknown".to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Environment color configuration for badges.
+struct EnvColors {
+    fg: String,
+    bg: String,
+    border: String,
+}
+
+fn env_colors(env_name: &str, environment_colors: &[(String, String)]) -> EnvColors {
+    if let Some((_, color_hex)) = environment_colors
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(env_name))
+    {
+        let fg = normalize_color_hex(color_hex);
+        return EnvColors {
+            bg: with_alpha(&fg, 0.10),
+            border: with_alpha(&fg, 0.25),
+            fg,
+        };
+    }
+
+    match env_name.to_lowercase().as_str() {
+        "production" | "prod" => EnvColors {
+            fg: "#f87171".to_string(),
+            bg: "rgba(220,38,38,0.10)".to_string(),
+            border: "rgba(248,113,113,0.25)".to_string(),
+        },
+        "staging" | "stage" => EnvColors {
+            fg: "#fbbf24".to_string(),
+            bg: "rgba(217,119,6,0.10)".to_string(),
+            border: "rgba(251,191,36,0.25)".to_string(),
+        },
+        "dev" | "development" => EnvColors {
+            fg: "#60a5fa".to_string(),
+            bg: "rgba(37,99,235,0.10)".to_string(),
+            border: "rgba(96,165,250,0.25)".to_string(),
+        },
+        "edge" => EnvColors {
+            fg: "#2dd4bf".to_string(),
+            bg: "rgba(15,118,110,0.12)".to_string(),
+            border: "rgba(45,212,191,0.25)".to_string(),
+        },
+        "lab" => EnvColors {
+            fg: "#a78bfa".to_string(),
+            bg: "rgba(124,58,237,0.10)".to_string(),
+            border: "rgba(167,139,250,0.25)".to_string(),
+        },
+        _ => EnvColors {
+            fg: "#6b7280".to_string(),
+            bg: "rgba(107,114,128,0.16)".to_string(),
+            border: "rgba(107,114,128,0.25)".to_string(),
+        },
+    }
+}
+
+fn status_color(health: &HealthStatus) -> &'static str {
+    match health {
+        HealthStatus::Healthy => "#34d399",
+        HealthStatus::Warning => "#fbbf24",
+        HealthStatus::Critical => "#f87171",
+        HealthStatus::Offline => "#6b7280",
+    }
+}
+
+fn health_chip_variant(health: &HealthStatus) -> ChipVariant {
+    match health {
+        HealthStatus::Healthy => ChipVariant::Healthy,
+        HealthStatus::Warning => ChipVariant::Warning,
+        HealthStatus::Critical => ChipVariant::Critical,
+        HealthStatus::Offline => ChipVariant::Unknown,
+    }
+}
+
+fn deployment_chip_variant(status: &DeploymentStatus) -> ChipVariant {
+    match status {
+        DeploymentStatus::UpToDate => ChipVariant::Healthy,
+        DeploymentStatus::Behind => ChipVariant::Warning,
+        DeploymentStatus::Ahead => ChipVariant::Info,
+        DeploymentStatus::NeverDeployed
+        | DeploymentStatus::NoCommitsAvailable
+        | DeploymentStatus::Unknown => ChipVariant::Unknown,
+    }
 }

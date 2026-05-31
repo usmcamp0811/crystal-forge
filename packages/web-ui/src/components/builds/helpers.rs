@@ -11,19 +11,21 @@ use web_sys::{Node, window};
 ///
 /// Examples:
 /// - `git+https://...#nixosConfigurations.test.gray` → `gray`
-/// - `git+https://...#nixosConfigurations.gray` → `gray`
+/// - `nixosConfigurations.test.gray` → `gray`
+/// - `nixosConfigurations.gray` → `gray`
 /// - `gray` → `gray`
 pub fn extract_system_name(hostname: &str) -> &str {
-    // If there's a # (flake attribute path), extract everything after it
-    if let Some(attr_path) = hostname.split('#').nth(1) {
-        // Split by dots and take the last segment (the actual system name)
-        // Examples:
-        //   nixosConfigurations.test.gray -> gray
-        //   nixosConfigurations.gray -> gray
-        attr_path.split('.').last().unwrap_or(attr_path)
+    // Split on # to handle full flake refs, use everything after # or the whole string
+    let attr_path = hostname
+        .rsplit_once('#')
+        .map(|(_, attr_path)| attr_path)
+        .unwrap_or(hostname);
+
+    // If this is a nixosConfigurations path, extract the last segment
+    if attr_path.starts_with("nixosConfigurations.") {
+        attr_path.rsplit('.').next().unwrap_or(attr_path)
     } else {
-        // No flake path, just return the hostname as-is
-        hostname
+        attr_path
     }
 }
 
@@ -120,6 +122,10 @@ pub enum BuildAction {
 pub struct WorkerItem {
     pub id: String,
     pub name: String,
+    pub host: Option<String>,
+    pub arch: Option<String>,
+    pub cpu_cores: Option<i32>,
+    pub memory_gb: Option<i32>,
     pub active_slots: usize,
     pub total_slots: usize,
     pub queue_depth: usize,
@@ -155,7 +161,29 @@ pub struct BuildItem {
     pub summary: String,
 }
 
+/// Helper methods for BuildItem display.
 impl BuildItem {
+    /// Package name for display (JSX: b.pkg).
+    /// Extracts clean system name from flake attribute path (e.g., "daly" from "nixosConfigurations.daly").
+    pub fn pkg(&self) -> String {
+        extract_system_name(&self.hostname).to_string()
+    }
+
+    /// Derivation path for display (JSX: b.drv).
+    /// Synthesizes a Nix store path using commit hash and clean system name.
+    pub fn drv(&self) -> String {
+        // Format: /nix/store/{hash_prefix}-nixos-system-{clean_name}.drv
+        // Use first 11 chars of commit to create plausible store hash prefix
+        let hash_prefix = if self.commit.len() >= 11 {
+            &self.commit[..11]
+        } else {
+            &self.commit
+        };
+        let clean_name = extract_system_name(&self.hostname);
+        format!("/nix/store/{}-nixos-system-{}.drv", hash_prefix, clean_name)
+    }
+
+    /// Status label for display.
     pub fn status_label(&self) -> &'static str {
         self.status.label()
     }
@@ -339,7 +367,8 @@ pub fn selected_build_data(selected_id: Option<i32>, builds: &[BuildItem]) -> Op
     if let Some(id) = selected_id {
         builds.iter().find(|b| b.id == id).cloned()
     } else {
-        builds.first().cloned()
+        // JSX: selected defaults to null, not first build
+        None
     }
 }
 
@@ -350,6 +379,10 @@ pub fn mock_workers() -> Vec<WorkerItem> {
         WorkerItem {
             id: "worker-a".to_string(),
             name: "worker-a".to_string(),
+            host: Some("worker-a.lab".to_string()),
+            arch: Some("x86_64-linux".to_string()),
+            cpu_cores: Some(16),
+            memory_gb: Some(64),
             active_slots: 2,
             total_slots: 4,
             queue_depth: 6,
@@ -358,6 +391,10 @@ pub fn mock_workers() -> Vec<WorkerItem> {
         WorkerItem {
             id: "worker-b".to_string(),
             name: "worker-b".to_string(),
+            host: Some("worker-b.lab".to_string()),
+            arch: Some("x86_64-linux".to_string()),
+            cpu_cores: Some(16),
+            memory_gb: Some(64),
             active_slots: 3,
             total_slots: 4,
             queue_depth: 4,
@@ -535,5 +572,21 @@ pub fn mock_artifacts(build_id: i32) -> Vec<BuildArtifact> {
                 hash: "sha256-csY0+fZq0xobLqD7zh9sPXoW3DkQMY8qv5cz4S9xRMo=",
             },
         ],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_system_name;
+
+    #[test]
+    fn extracts_system_name_from_flake_attribute_paths() {
+        assert_eq!(extract_system_name("nixosConfigurations.daly"), "daly");
+        assert_eq!(extract_system_name("nixosConfigurations.test.gray"), "gray");
+        assert_eq!(
+            extract_system_name("git+https://example.test/repo#nixosConfigurations.test.gray"),
+            "gray"
+        );
+        assert_eq!(extract_system_name("gray"), "gray");
     }
 }
