@@ -1,10 +1,10 @@
 ---
 id: TASK-329
 title: Align global design system tokens and shell layout to CrystalForgelatest
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-05-31 15:56'
-updated_date: '2026-05-31 16:07'
+updated_date: '2026-05-31 16:16'
 labels:
   - design-parity
   - design-system
@@ -52,3 +52,9 @@ Risk: High (shared primitives affect all views).
 - [ ] #4 web-ui check captures shell + primitive screenshot set for both themes
 - [ ] #5 web-ui check includes assertions that token-driven styles render expected computed values/classes for core primitives
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: gpt-5.3-codex on webb in /home/mcamp/code/crystal-forge/TASK-329-global-design-parity
+<!-- SECTION:NOTES:END -->
