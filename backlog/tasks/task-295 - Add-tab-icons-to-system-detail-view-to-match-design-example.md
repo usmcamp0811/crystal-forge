@@ -1,10 +1,10 @@
 ---
 id: TASK-295
 title: Add tab icons to system detail view to match design example
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-05-10 13:28'
-updated_date: '2026-05-31 16:04'
+updated_date: '2026-05-31 16:07'
 labels:
   - ui
   - design-system

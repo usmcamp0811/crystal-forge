@@ -1,10 +1,10 @@
 ---
 id: TASK-275
 title: Refactor builds and evaluations views for visual coherence and density
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-04-18 01:56'
-updated_date: '2026-05-31 16:04'
+updated_date: '2026-05-31 16:07'
 labels:
   - ui
   - ux

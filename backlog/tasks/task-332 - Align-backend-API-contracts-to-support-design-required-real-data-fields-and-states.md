@@ -3,10 +3,10 @@ id: TASK-332
 title: >-
   Align backend API contracts to support design-required real-data fields and
   states
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-05-31 15:56'
-updated_date: '2026-05-31 15:59'
+updated_date: '2026-05-31 16:07'
 labels:
   - design-parity
   - backend-api

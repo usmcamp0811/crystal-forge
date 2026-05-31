@@ -3,9 +3,10 @@ id: TASK-336
 title: >-
   Create Admin view with exact CrystalForgelatest parity and real administrative
   data flows
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-05-31 16:02'
+updated_date: '2026-05-31 16:07'
 labels:
   - design-parity
   - admin

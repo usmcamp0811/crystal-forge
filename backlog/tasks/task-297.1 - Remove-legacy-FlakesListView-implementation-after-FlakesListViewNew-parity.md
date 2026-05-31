@@ -1,10 +1,10 @@
 ---
 id: TASK-297.1
 title: Remove legacy FlakesListView implementation after FlakesListViewNew parity
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-05-15 15:44'
-updated_date: '2026-05-31 16:04'
+updated_date: '2026-05-31 16:07'
 labels:
   - web-ui
   - flakes

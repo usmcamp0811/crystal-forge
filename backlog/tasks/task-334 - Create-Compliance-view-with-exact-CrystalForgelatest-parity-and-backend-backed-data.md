@@ -3,9 +3,10 @@ id: TASK-334
 title: >-
   Create Compliance view with exact CrystalForgelatest parity and backend-backed
   data
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-05-31 16:02'
+updated_date: '2026-05-31 16:07'
 labels:
   - design-parity
   - compliance
