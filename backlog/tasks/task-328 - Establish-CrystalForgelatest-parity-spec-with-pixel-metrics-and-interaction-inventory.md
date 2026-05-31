@@ -6,6 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-05-31 15:56'
+updated_date: '2026-05-31 15:58'
 labels:
   - design-parity
   - ui-ux
@@ -50,4 +51,6 @@ Risk: Medium (spec quality drives all downstream work).
 - [ ] #3 Each matrix row maps to owning implementation files in packages/web-ui
 - [ ] #4 A screenshot target list for web-ui checks is defined for all in-scope views
 - [ ] #5 Interaction inventory includes filter/search/toggle/modal/table/card flows per relevant view
+- [ ] #6 The parity matrix defines mandatory web-ui assertions per view/state (not screenshot-only checks)
+- [ ] #7 The parity matrix requires screenshot coverage for all in-scope states including loading, empty, error, and populated states
 <!-- AC:END -->
