@@ -125,6 +125,43 @@ pub fn ScanningView() -> Element {
                                         }
                                     }
                                 }
+                                tr {
+                                    td {
+                                        div { style: "font-weight:600; font-size:13px;", "builder-image-stable" }
+                                        div { class: "mono", style: "font-size:11px; color:var(--cf-text-muted);", "github:acme/builders · 6f93aa62" }
+                                    }
+                                    td { span { class: "chip chip-info", style: "font-size:10px;", "recent" } }
+                                    td {
+                                        span { class: "chip chip-warning", span { class: "chip-dot", style: "background:#fbbf24;" } "queued" }
+                                    }
+                                    td {
+                                        div { style: "display:flex; gap:4px;",
+                                            span { class: "chip chip-info", style: "font-size:10px;", "3M" }
+                                        }
+                                    }
+                                    td { style: "font-size:12px; color:var(--cf-text-muted);", "14m ago" }
+                                    td { span { class: "chip chip-unknown", style: "font-size:10px;", "on-build" } }
+                                    td {
+                                        div { class: "row-actions", button { class: "btn-icon focus-ring", title: "Rescan now", "↻" } }
+                                    }
+                                }
+                                tr {
+                                    td {
+                                        div { style: "font-weight:600; font-size:13px;", "legacy-edge-node" }
+                                        div { class: "mono", style: "font-size:11px; color:var(--cf-text-muted);", "github:acme/edge · 3dd052ac" }
+                                    }
+                                    td { span { class: "chip chip-unknown", style: "font-size:10px;", "archived" } }
+                                    td {
+                                        span { class: "chip chip-critical", span { class: "chip-dot", style: "background:#f87171;" } "failed" }
+                                        div { style: "font-size:10px; color:#fca5a5; margin-top:3px;", "vulnix timed out" }
+                                    }
+                                    td { span { class: "chip chip-healthy", style: "font-size:10px;", "clean" } }
+                                    td { style: "font-size:12px; color:var(--cf-text-muted);", "2h ago" }
+                                    td { span { class: "chip chip-unknown", style: "font-size:10px;", "manual" } }
+                                    td {
+                                        div { class: "row-actions", button { class: "btn-icon focus-ring", title: "Retry scan", "↻" } }
+                                    }
+                                }
                             }
                         }
                     } else {
@@ -181,6 +218,29 @@ pub fn ScanningView() -> Element {
                                             div { style: "display:flex; gap:4px;",
                                                 span { class: "chip chip-critical", style: "font-size:10px;", "1C" }
                                                 span { class: "chip chip-warning", style: "font-size:10px;", "2H" }
+                                            }
+                                        }
+                                        td { div { class: "row-actions", button { class: "btn-icon focus-ring", "↻" } } }
+                                    }
+                                    tr {
+                                        td {
+                                            div { style: "font-weight:600; font-size:13px;", "gray" }
+                                            div { class: "mono", style: "font-size:11px; color:var(--cf-text-muted);", "github:acme/fleet" }
+                                        }
+                                        td { span { class: "chip chip-warning", style: "font-size:10px;", "WiFi" } }
+                                        td { class: "mono", style: "font-size:12px;", "4" }
+                                        td {
+                                            div { style: "display:flex; align-items:center; gap:8px; min-width:120px;",
+                                                div { style: "flex:1; height:5px; background:var(--cf-subtle-bg); border-radius:99px; overflow:hidden; display:flex;",
+                                                    div { style: "width:75%; background:#34d399;" }
+                                                    div { style: "width:25%; background:#fbbf24;" }
+                                                }
+                                                span { class: "mono", style: "font-size:11px; color:var(--cf-text-muted);", "3/4" }
+                                            }
+                                        }
+                                        td {
+                                            div { style: "display:flex; gap:4px;",
+                                                span { class: "chip chip-warning", style: "font-size:10px;", "1H" }
                                             }
                                         }
                                         td { div { class: "row-actions", button { class: "btn-icon focus-ring", "↻" } } }
