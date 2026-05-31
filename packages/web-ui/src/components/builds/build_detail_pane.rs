@@ -2,13 +2,11 @@
 
 use dioxus::prelude::*;
 
-use crate::components::layout::Card;
-use crate::hooks::websocket::{ConnectionState, use_websocket_build_stream};
 use crate::theme;
 
 use super::helpers::{
-    BuildAction, BuildItem, PendingAction, build_status_badge_class, event_level_class,
-    mock_artifacts, mock_events,
+    BuildAction, BuildItem, BuildStatus, PendingAction, build_status_badge_class,
+    extract_system_name,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,10 +26,12 @@ impl DetailTab {
     }
 }
 
-/// Build detail pane showing logs, events, and artifacts for a selected build.
+/// Build detail side panel matching the mockup structure.
 #[component]
 pub fn BuildDetailPane(
     selected: Option<BuildItem>,
+    on_close: EventHandler<()>,
+    on_log: EventHandler<()>,
     tab: Signal<DetailTab>,
     on_tab_change: EventHandler<DetailTab>,
     follow_logs: Signal<bool>,
@@ -39,339 +39,144 @@ pub fn BuildDetailPane(
     wrap_logs: Signal<bool>,
     log_query: Signal<String>,
 ) -> Element {
-    let mut log_modal_open = use_signal(|| false);
-
     let Some(build) = selected else {
-        return rsx! {
-            Card {
-                title: Some("Build Detail".to_string()),
-                children: rsx! {
-                    p { class: "text-sm {theme::text::SECONDARY}", "Select a queue item to inspect logs and build metadata." }
-                }
-            }
-        };
+        return rsx! { div {} };
     };
 
-    // Use WebSocket for real-time logs and metrics if job_id is available
-    let job_id_str = build.job_id.as_ref().map(|id| id.to_string());
-    let (ws_logs, ws_metrics, ws_state) = match job_id_str.as_ref() {
-        Some(job_id) => {
-            let (logs, metrics, state, _reconnect) = use_websocket_build_stream(job_id);
-            (Some(logs), Some(metrics), Some(state))
-        }
-        None => (None, None, None),
-    };
-
-    let events = mock_events(build.id);
-    let artifacts = mock_artifacts(build.id);
-
-    // Use WebSocket logs if available.
-    // For completed builds with no active WS channel, fall back to stored logs from the API.
-    let logs = if let Some(ws_logs) = ws_logs {
-        let live = ws_logs.read().clone();
-        if live.is_empty() {
-            // WS connected but no frames yet — try stored logs as initial content.
-            stored_logs_filtered(&build, &log_query.read())
-        } else {
-            filtered_logs_from_vec(&live, &log_query.read())
-        }
+    let progress = if matches!(build.status, BuildStatus::Building | BuildStatus::Stopping) {
+        56
     } else {
-        // No WS (no job_id or completed job) — show stored logs.
-        stored_logs_filtered(&build, &log_query.read())
+        0
     };
-
-    rsx! {
-        Card {
-            title: Some("Build Detail".to_string()),
-            children: rsx! {
-                div {
-                    class: "space-y-4",
-                    div {
-                        class: "rounded-lg border {theme::surface::CARD_BORDER} bg-gray-900/70 p-4",
-                        div {
-                            class: "flex flex-col md:flex-row md:items-center md:justify-between gap-3",
-                            div {
-                                p { class: "text-sm text-white font-semibold", "{build.hostname}" }
-                                p { class: "text-xs text-gray-400", "{build.flake} · {build.branch} · {short_commit(&build.commit)}" }
-                                p { class: "text-xs text-gray-500 mt-1", "Queued by {build.started_by} · worker {build.worker_id}" }
-                            }
-                                span {
-                                    class: "inline-flex px-2 py-1 text-[10px] uppercase rounded border {build_status_badge_class(build.status)}",
-                                    "{build.status_label()}"
-                                }
-                        }
-                    }
-
-                    div {
-                        class: "inline-flex rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG}",
-                        for item in [DetailTab::Logs, DetailTab::Events, DetailTab::Artifacts] {
-                            button {
-                                key: "{item.label()}",
-                                class: "px-3 py-2 text-sm font-medium transition",
-                                class: if *tab.read() == item {
-                                    "bg-gray-700 text-white"
-                                } else {
-                                    "text-gray-400 hover:text-white"
-                                },
-                                onclick: move |_| on_tab_change.call(item),
-                                "{item.label()}"
-                            }
-                        }
-                    }
-
-                    if *tab.read() == DetailTab::Logs {
-                        div {
-                            class: "space-y-3",
-
-                            // WebSocket connection status and metrics
-                            if let Some(state) = ws_state.as_ref() {
-                                div {
-                                    class: "flex items-center justify-between gap-3 p-3 rounded-lg border border-gray-700 bg-gray-900/60",
-                                    div {
-                                        class: "flex items-center gap-2",
-                                        // Connection status indicator
-                                        div {
-                                            class: match *state.read() {
-                                                ConnectionState::Connected => "w-2 h-2 rounded-full bg-green-500",
-                                                ConnectionState::Connecting => "w-2 h-2 rounded-full bg-yellow-500 animate-pulse",
-                                                ConnectionState::Disconnected => "w-2 h-2 rounded-full bg-gray-500",
-                                                ConnectionState::Error(_) => "w-2 h-2 rounded-full bg-red-500",
-                                            }
-                                        }
-                                        span {
-                                            class: "text-xs text-gray-300",
-                                            match state.read().clone() {
-                                                ConnectionState::Connected => "Live streaming",
-                                                ConnectionState::Connecting => "Connecting...",
-                                                ConnectionState::Disconnected => "Disconnected",
-                                                ConnectionState::Error(ref e) => e.as_str(),
-                                            }
-                                        }
-                                    }
-                                    // System metrics display
-                                    if let Some(metrics_signal) = ws_metrics {
-                                        if let Some(metrics) = metrics_signal.read().as_ref() {
-                                            div {
-                                                class: "flex items-center gap-4 text-xs",
-                                                div {
-                                                    class: "flex items-center gap-1",
-                                                    span { class: "text-gray-400", "CPU:" }
-                                                    span { class: "text-white font-mono", "{metrics.cpu_percent:.1}%" }
-                                                }
-                                                div {
-                                                    class: "flex items-center gap-1",
-                                                    span { class: "text-gray-400", "RAM:" }
-                                                    span { class: "text-white font-mono",
-                                                        "{metrics.ram_used_mb} MB / {metrics.ram_total_mb} MB"
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            div {
-                                class: "flex flex-wrap gap-2",
-                                TogglePill { label: "Follow", value: follow_logs }
-                                TogglePill { label: "Pause", value: pause_logs }
-                                TogglePill { label: "Wrap", value: wrap_logs }
-                                button {
-                                    class: "text-xs text-white rounded px-3 py-1 {theme::interactive::PRIMARY_BTN}",
-                                    onclick: move |_| log_modal_open.set(true),
-                                    "⛶ Maximize"
-                                }
-                                button {
-                                    class: "text-xs text-gray-300 border border-gray-700 rounded px-2 py-1 hover:bg-gray-700",
-                                    onclick: move |_| log_query.set(String::new()),
-                                    "Clear"
-                                }
-                            }
-                            input {
-                                class: "w-full rounded-lg px-3 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
-                                r#type: "search",
-                                placeholder: "Search logs...",
-                                value: "{log_query.read()}",
-                                oninput: move |evt| log_query.set(evt.value()),
-                            }
-                            pre {
-                                class: "rounded-lg border border-gray-700 bg-gray-950 p-3 text-xs font-mono text-gray-200 overflow-auto",
-                                style: if *wrap_logs.read() { "white-space: pre-wrap; max-height: 22rem;" } else { "white-space: pre; max-height: 22rem;" },
-                                if logs.is_empty() {
-                                    "No log lines match your filter."
-                                } else {
-                                    for line in logs.iter() {
-                                        "{line}\n"
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if *tab.read() == DetailTab::Events {
-                        div {
-                            class: "space-y-2",
-                            for event in events {
-                                div {
-                                    class: "rounded-lg border border-gray-700 bg-gray-900/60 p-3",
-                                    div {
-                                        class: "flex items-center justify-between gap-2",
-                                        p { class: "text-xs text-gray-400", "{event.ts}" }
-                                        span {
-                                            class: "text-[10px] uppercase px-2 py-1 rounded border {event_level_class(event.level)}",
-                                            "{event.level}"
-                                        }
-                                    }
-                                    p { class: "text-sm text-gray-200 mt-1", "{event.message}" }
-                                }
-                            }
-                        }
-                    }
-
-                    if *tab.read() == DetailTab::Artifacts {
-                        div {
-                            class: "space-y-2",
-                            if artifacts.is_empty() {
-                                p { class: "text-sm {theme::text::SECONDARY}", "No artifacts recorded yet for this build." }
-                            } else {
-                                for artifact in artifacts {
-                                    div {
-                                        class: "rounded-lg border border-gray-700 bg-gray-900/60 px-3 py-2 flex items-center justify-between gap-2",
-                                        div {
-                                            p { class: "text-sm text-white", "{artifact.name}" }
-                                            p { class: "text-xs text-gray-500 font-mono", "{artifact.hash}" }
-                                        }
-                                        p { class: "text-xs text-gray-400", "{artifact.size}" }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if *tab.read() == DetailTab::Logs && *log_modal_open.read() {
-                        div {
-                            style: "position: fixed; inset: 0; z-index: 9999; display: flex; align-items: center; justify-content: center; background-color: rgba(0, 0, 0, 0.8); padding: 1rem;",
-                            onclick: move |_| log_modal_open.set(false),
-                            div {
-                                style: "width: 100%; max-width: 90rem; max-height: 90vh; min-height: 0; overflow: hidden; display: flex; flex-direction: column; background-color: rgb(17, 24, 39); border-radius: 0.5rem; border: 1px solid rgb(55, 65, 81); box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);",
-                                onclick: |evt| evt.stop_propagation(),
-                                div {
-                                    class: "flex items-center justify-between p-4 border-b border-gray-700",
-                                    div {
-                                        h3 { class: "text-lg font-semibold text-white", "Build Logs" }
-                                        p { class: "text-sm text-gray-400", "{build.hostname} · {short_commit(&build.commit)}" }
-                                    }
-                                    button {
-                                        class: "text-gray-400 hover:text-white transition-colors",
-                                        onclick: move |_| log_modal_open.set(false),
-                                        "✕"
-                                    }
-                                }
-                                div {
-                                    class: "p-4 border-b border-gray-700 bg-gray-900/70",
-                                    div {
-                                        class: "flex items-center gap-2 text-xs",
-                                        if let Some(state) = ws_state.as_ref() {
-                                            div {
-                                                class: match *state.read() {
-                                                    ConnectionState::Connected => "w-2 h-2 rounded-full bg-green-500",
-                                                    ConnectionState::Connecting => "w-2 h-2 rounded-full bg-yellow-500 animate-pulse",
-                                                    ConnectionState::Disconnected => "w-2 h-2 rounded-full bg-gray-500",
-                                                    ConnectionState::Error(_) => "w-2 h-2 rounded-full bg-red-500",
-                                                }
-                                            }
-                                            span {
-                                                class: "text-gray-300",
-                                                match state.read().clone() {
-                                                    ConnectionState::Connected => "Live streaming",
-                                                    ConnectionState::Connecting => "Connecting...",
-                                                    ConnectionState::Disconnected => "Disconnected",
-                                                    ConnectionState::Error(ref e) => e.as_str(),
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                div {
-                                    style: "flex: 1 1 auto; min-height: 0; min-width: 0; overflow: auto; padding: 1rem; background-color: rgb(3, 7, 18);",
-                                    pre {
-                                        class: "block w-full max-w-full text-xs font-mono text-gray-200",
-                                        style: if *wrap_logs.read() { "white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-all;" } else { "white-space: pre;" },
-                                        if logs.is_empty() {
-                                            "No log lines match your filter."
-                                        } else {
-                                            for line in logs.iter() {
-                                                "{line}\n"
-                                            }
-                                        }
-                                    }
-                                }
-                                div {
-                                    class: "p-4 border-t border-gray-700 flex justify-end",
-                                    button {
-                                        class: "px-4 py-2 rounded-lg font-medium text-sm text-white {theme::interactive::PRIMARY_BTN}",
-                                        onclick: move |_| log_modal_open.set(false),
-                                        "Close"
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn short_commit(commit: &str) -> String {
-    commit.chars().take(7).collect()
-}
-
-/// Return stored logs from the build item, optionally filtered.
-/// Used for completed/historical builds where no active WS stream exists.
-fn stored_logs_filtered(build: &BuildItem, query: &str) -> Vec<String> {
-    let lines: Vec<String> = build
+    let _ = tab;
+    let _ = on_tab_change;
+    let _ = follow_logs;
+    let _ = pause_logs;
+    let _ = wrap_logs;
+    let _ = log_query;
+    let log_line_count = build
         .logs
         .as_deref()
-        .unwrap_or("")
-        .lines()
-        .map(|l| l.to_string())
-        .collect();
-    if query.trim().is_empty() {
-        return lines;
-    }
-    let q = query.to_lowercase();
-    lines
-        .into_iter()
-        .filter(|line| line.to_lowercase().contains(&q))
-        .collect()
-}
+        .map(|text| text.lines().count())
+        .unwrap_or(0);
+    let duration_label = build.runtime.clone().unwrap_or_else(|| "-".to_string());
 
-fn filtered_logs_from_vec(lines: &[String], query: &str) -> Vec<String> {
-    if query.trim().is_empty() {
-        return lines.to_vec();
-    }
-    let q = query.to_lowercase();
-    lines
-        .iter()
-        .filter(|line| line.to_lowercase().contains(&q))
-        .cloned()
-        .collect()
-}
-
-/// Toggle pill button component.
-#[component]
-fn TogglePill(label: &'static str, value: Signal<bool>) -> Element {
     rsx! {
-        button {
-            class: "text-xs rounded border px-2 py-1 transition",
-            class: if *value.read() { "cf-toggle-active" } else { "cf-toggle-inactive" },
-            onclick: move |_| {
-                let next = !*value.read();
-                value.set(next);
-            },
-            "{label}"
+        // Note: The aside.side-panel wrapper is in builds.rs
+        div {
+            // JSX: <div className="panel-head">
+            div {
+                class: "panel-head",
+                // JSX: <div className="panel-title">
+                div {
+                    class: "panel-title",
+                    h2 {
+                        style: "font-size: 15px;",
+                        span {
+                            class: "chip {build_status_badge_class(build.status)}",
+                            style: "margin-right: 6px;",
+                            "{build.status_label()}"
+                        }
+                        // JSX title: Build {b.pkg}
+                        "Build {build.pkg()}"
+                    }
+                    // JSX subtitle: {b.drv} (full derivation path, mono, muted)
+                    span { class: "fqdn mono", "{build.drv()}" }
+                }
+                // JSX: <button className="btn-icon focus-ring"><Icon name="x" size={16} /></button>
+                button {
+                    class: "btn-icon focus-ring",
+                    onclick: move |_| on_close.call(()),
+                    svg {
+                        width: "16",
+                        height: "16",
+                        view_box: "0 0 24 24",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        stroke_linecap: "round",
+                        stroke_linejoin: "round",
+                        line { x1: "18", y1: "6", x2: "6", y2: "18" }
+                        line { x1: "6", y1: "6", x2: "18", y2: "18" }
+                    }
+                }
+            }
+
+            // JSX: <div className="panel-body">
+            div {
+                class: "panel-body",
+                // JSX: <section className="panel-section">
+                section {
+                    class: "panel-section",
+                    // JSX: <dl className="kv-grid">
+                    dl {
+                        class: "kv-grid",
+                dt { class: "{theme::text::MUTED}", "Flake" } dd { class: "{theme::text::SECONDARY}", "{build.flake}" }
+                dt { class: "{theme::text::MUTED}", "Commit" } dd { class: "font-mono {theme::text::SECONDARY} truncate", "{build.commit}" }
+                dt { class: "{theme::text::MUTED}", "Worker" }
+                dd {
+                    class: "font-mono {theme::text::SECONDARY}",
+                    // JSX: b.worker || "unassigned"
+                    if build.worker_id == "unassigned" {
+                        "unassigned"
+                    } else {
+                        "{build.worker_id}"
+                    }
+                }
+                dt { class: "{theme::text::MUTED}", "Arch" } dd { class: "font-mono {theme::text::SECONDARY}", "x86_64-linux" }
+                dt { class: "{theme::text::MUTED}", "Queued" } dd { class: "{theme::text::SECONDARY}", "{build.queued_for}" }
+                dt { class: "{theme::text::MUTED}", "Duration" } dd { class: "font-mono {theme::text::SECONDARY}", "{duration_label}" }
+                dt { class: "{theme::text::MUTED}", "Attempts" } dd { class: "{theme::text::SECONDARY}", "1" }
+                        dt { class: "{theme::text::MUTED}", "Log lines" } dd { class: "{theme::text::SECONDARY}", "{log_line_count}" }
+                    }
+                }
+
+                if progress > 0 && progress < 100 {
+                    // JSX: <section className="panel-section">
+                    section {
+                        class: "panel-section",
+                        h3 { "Progress" }
+                        div {
+                            style: "height: 6px; background: var(--cf-subtle-bg); border-radius: 99px; overflow: hidden;",
+                            div { style: "width: {progress}%; height: 100%; background: {status_color(build.status)};" }
+                        }
+                        div {
+                            style: "font-size: 11px; color: var(--cf-text-muted); margin-top: 4px;",
+                            "{progress}% complete"
+                        }
+                    }
+                }
+            }
+
+            // JSX: <div className="panel-actions">
+            div {
+                class: "panel-actions",
+                // JSX: <button className="btn btn-ghost focus-ring xs">
+                button {
+                    class: "btn btn-ghost focus-ring xs",
+                    onclick: move |_| on_log.call(()),
+                    span { style: "font-size: 12px;", "⌘" }
+                    " Logs"
+                }
+                button {
+                    class: "btn btn-ghost focus-ring xs",
+                    onclick: move |_| on_close.call(()),
+                    span { style: "font-size: 12px;", "✕" }
+                    " Cancel"
+                }
+            }
         }
+    }
+}
+
+fn status_color(status: BuildStatus) -> &'static str {
+    match status {
+        BuildStatus::Queued => "#a78bfa",
+        BuildStatus::Building => "#60a5fa",
+        BuildStatus::Stopping => "#fbbf24",
+        BuildStatus::Failed => "#f87171",
+        BuildStatus::Complete => "#34d399",
+        BuildStatus::Cancelled => "#94a3b8",
     }
 }
 
@@ -380,8 +185,9 @@ fn TogglePill(label: &'static str, value: Signal<bool>) -> Element {
 pub fn QueueActionButton(label: &'static str, onclick: EventHandler<MouseEvent>) -> Element {
     rsx! {
         button {
-            class: "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}",
+            class: "inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}",
             onclick: move |evt| onclick.call(evt),
+            span { class: "text-xs", "+" }
             "{label}"
         }
     }

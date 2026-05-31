@@ -4,7 +4,8 @@ use chrono::Duration;
 use dioxus::prelude::*;
 use std::collections::HashSet;
 
-use crate::api::client::{ApiClientError, fetch_systems};
+use crate::api::client::{ApiClientError, fetch_hardening_top_services, fetch_systems};
+use crate::api::models::HardeningTopServiceResponse;
 use crate::api::models::{
     BuildQueueSummary, BuildStatus, DeploymentStatus, FlakeCommit, FlakeTimeline, HealthStatus,
     SystemSummary, SystemsListParams,
@@ -26,6 +27,7 @@ use crate::routes::Route;
 use crate::state::app_state::AppState;
 use crate::state::auth;
 use crate::theme;
+use crate::views::hardening::render_top_services_compact;
 
 /// Global filter state for the dashboard - shared across all widgets.
 /// Supports multi-select: empty set means "all flakes", otherwise only selected flakes.
@@ -130,6 +132,14 @@ fn default_widget_positions() -> Vec<WidgetPosition> {
             width: 4,
             height: 2,
         },
+        WidgetPosition {
+            id: "hardening-top-services",
+            title: "Top Vulnerable Services",
+            col: 0,
+            row: 9,
+            width: 2,
+            height: 4,
+        },
     ]
 }
 
@@ -153,6 +163,13 @@ pub fn DashboardView() -> Element {
     let timelines_notice = use_signal(|| None::<String>);
     let loading_timelines = use_signal(|| true);
     let dashboard_systems = use_signal(Vec::<SystemSummary>::new);
+    let hardening_top_services = use_resource(move || async move {
+        if is_admin_user {
+            Some(fetch_hardening_top_services(Some(10)).await)
+        } else {
+            None
+        }
+    });
 
     {
         let mut dashboard = dashboard.clone();
@@ -543,6 +560,20 @@ pub fn DashboardView() -> Element {
                             }
                         }
                     }
+                }
+            }
+            "hardening-top-services" => {
+                if !is_admin_user {
+                    return rsx! {};
+                }
+                match &*hardening_top_services.read_unchecked() {
+                    Some(Some(Ok(rows))) => render_top_services_compact(rows),
+                    Some(Some(Err(_))) => rsx! {
+                        p { class: "text-xs {theme::text::SECONDARY}", "Unable to load hardening service risk data." }
+                    },
+                    _ => rsx! {
+                        p { class: "text-xs {theme::text::SECONDARY}", "Loading hardening service risk..." }
+                    },
                 }
             }
             _ => rsx! { div { "Unknown widget" } },

@@ -6,6 +6,7 @@ pub mod deployment;
 pub mod derivations;
 pub mod flake;
 pub mod handlers;
+pub mod hardening;
 pub mod log;
 pub mod models;
 pub mod queries;

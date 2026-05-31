@@ -20,8 +20,8 @@ use crystal_forge::{
         agent_request::CFState,
         api::{
             admin, auth_dev, auth_local, auth_oidc, auth_session, auth_status, auth_whoami,
-            builders, caches, commits, config_health, dashboard, deployment_policies, environments,
-            flakes, setup_wizard, systems,
+            builders, caches, commits, config_health, cves, dashboard, deployment_policies, deployments,
+            environments, flakes, hardening, setup_wizard, systems,
         },
         status,
         webhook::webhook_handler,
@@ -182,6 +182,29 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/cves/scan-freshness",
             get(dashboard::cve_scan_freshness),
         )
+        // Advanced CVE dashboard endpoints (TASK-322)
+        .route("/api/v1/cves", get(cves::list_cves))
+        .route("/api/v1/cves/grouped", get(cves::list_cves_grouped))
+        .route("/api/v1/cves/stats", get(cves::get_fleet_stats))
+        .route("/api/v1/cves/packages", get(cves::list_package_names))
+        .route("/api/v1/cves/rescan-fleet", post(cves::trigger_fleet_rescan))
+        .route("/api/v1/cves/export", get(cves::export_cves))
+        .route("/api/v1/cves/:cve_id", get(cves::get_cve_detail))
+        .route("/api/v1/cves/:cve_id/systems", get(cves::get_cve_systems))
+        .route("/api/v1/cves/:cve_id/justification", post(cves::save_justification).delete(cves::revoke_justification))
+        .route("/api/v1/cves/:cve_id/justifications", get(cves::list_justifications))
+        .route(
+            "/api/v1/hardening/summary",
+            get(hardening::hardening_fleet_summary),
+        )
+        .route(
+            "/api/v1/hardening/top-services",
+            get(hardening::hardening_top_services),
+        )
+        .route(
+            "/api/v1/hardening/systems",
+            get(hardening::hardening_system_postures),
+        )
         .route(
             "/api/v1/systems",
             get(systems::list_systems).post(systems::create_system),
@@ -203,10 +226,34 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/systems/:id/cve-scan",
             post(systems::trigger_system_cve_scan),
         )
+        .route(
+            "/api/v1/systems/:id/hardening",
+            get(hardening::get_system_hardening),
+        )
+        .route(
+            "/api/v1/systems/:id/hardening/justifications",
+            get(hardening::get_system_hardening_justifications),
+        )
+        .route(
+            "/api/v1/systems/:id/hardening/:service_name/justification",
+            put(hardening::save_hardening_justification),
+        )
+        .route(
+            "/api/v1/systems/:id/hardening-scan-eligibility",
+            get(hardening::get_system_hardening_scan_eligibility),
+        )
+        .route(
+            "/api/v1/systems/:id/hardening-scan",
+            post(hardening::trigger_system_hardening_scan_handler),
+        )
         .route("/api/v1/systems/:id/sync", post(systems::sync_system))
         .route(
             "/api/v1/systems/:id/rollback",
             post(systems::rollback_system),
+        )
+        .route(
+            "/api/v1/systems/:id/rollback-generation",
+            post(systems::rollback_system_generation),
         )
         .route(
             "/api/v1/systems/:id/public-key",
@@ -220,6 +267,14 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/systems/:id/commits",
             get(systems::get_system_commits),
+        )
+        .route(
+            "/api/v1/systems/:id/generations",
+            get(systems::get_system_generations),
+        )
+        .route(
+            "/api/v1/systems/:id/verify-generation-closure",
+            post(systems::verify_generation_closure),
         )
         .route(
             "/api/v1/systems/:id/history",
@@ -261,6 +316,19 @@ async fn main() -> anyhow::Result<()> {
                 .put(deployment_policies::update_deployment_policy)
                 .delete(deployment_policies::delete_deployment_policy),
         )
+        // Deployment policy workflow endpoints (approvals, rollout status)
+        .route(
+            "/api/v1/deployments/commit/:commit_id/approve",
+            post(deployments::submit_commit_approval),
+        )
+        .route(
+            "/api/v1/deployments/commit/:commit_id/approvals/:policy_id",
+            get(deployments::get_commit_approval_status),
+        )
+        .route(
+            "/api/v1/deployments/commit/:commit_id/rollout/:policy_id",
+            get(deployments::get_commit_rollout_status),
+        )
         .route("/api/v1/flakes", get(flakes::list_flakes))
         .route("/api/v1/flakes", post(flakes::create_flake))
         .route("/api/v1/flakes/sync", post(flakes::sync_all_flakes_handler))
@@ -280,6 +348,10 @@ async fn main() -> anyhow::Result<()> {
                 .patch(flakes::patch_flake_credentials)
                 .delete(flakes::delete_flake_credentials_handler),
         )
+        .route(
+            "/api/v1/flakes/:id/credentials/test",
+            post(flakes::test_flake_credentials),
+        )
         .route("/api/v1/flakes/:id/refresh", post(flakes::refresh_flake))
         .route(
             "/api/v1/flakes/:id/accept-rewrite",
@@ -291,6 +363,10 @@ async fn main() -> anyhow::Result<()> {
             get(flakes::get_commit_diff_handler),
         )
         .route("/api/v1/cve-scans/:id", get(systems::get_cve_scan_status))
+        .route(
+            "/api/v1/hardening-scans/:id",
+            get(hardening::get_hardening_scan_status),
+        )
         // Builder management (admin endpoints)
         .route(
             "/api/v1/builders",
@@ -391,6 +467,18 @@ async fn main() -> anyhow::Result<()> {
             get(commits::stream_eval_logs),
         )
         .route(
+            "/api/v1/commits/:commit_id/eval/logs",
+            get(commits::get_eval_logs_history),
+        )
+        .route(
+            "/api/v1/commits/:commit_id/eval/policy-matrix",
+            get(commits::get_eval_policy_matrix),
+        )
+        .route(
+            "/api/v1/commits/:commit_id/eval/dependency-graph",
+            get(commits::get_eval_dependency_graph),
+        )
+        .route(
             "/api/v1/commits/:commit_id/re-evaluate",
             post(commits::re_evaluate_commit),
         )
@@ -439,6 +527,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/caches",
             get(caches::list_cache_destinations).post(caches::create_cache_destination),
+        )
+        .route(
+            "/api/v1/caches/test-credentials",
+            post(caches::test_cache_destination_credentials),
         )
         .route(
             "/api/v1/caches/:id",

@@ -1,0 +1,124 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            cve_id as \"cve_id!\",\n            cvss_v3_score::real as \"cvss_v3_score?\",\n            UPPER(COALESCE(severity, 'UNKNOWN')) as \"severity!\",\n            COALESCE(title, '') as \"title!\",\n            cvss_vector as \"cvss_vector?\",\n            published_date as \"published_date?\",\n            COALESCE(exploited, FALSE) as \"exploited!\",\n            package_name as \"package_name?\",\n            installed_version as \"installed_version?\",\n            fixed_version as \"fixed_version?\",\n            COALESCE(fix_status, 'open') as \"fix_status!\",\n            COALESCE(affected_count, 0)::bigint as \"affected_count!\",\n            affected_environments as \"affected_environments?: Vec<String>\",\n            first_seen as \"first_seen?\",\n            last_seen as \"last_seen?\",\n            COALESCE(age_days, 0)::int as \"age_days!\",\n            LOWER(COALESCE(triage_status, 'outstanding')) as \"triage_status!\"\n        FROM view_cve_list_with_metadata\n        WHERE\n            ($1::text IS NULL OR UPPER(severity) = $1)\n            AND (\n                $2::text IS NULL\n                OR ($2 = 'available' AND fix_status = 'fix_available')\n                OR ($2 = 'pending' AND fix_status = 'open')\n                OR ($2 = 'exploited' AND exploited = TRUE)\n            )\n            AND ($3::text IS NULL OR LOWER(triage_status) = LOWER($3))\n            AND ($4::text IS NULL OR package_name ILIKE $4)\n            AND (\n                $5::text IS NULL\n                OR cve_id ILIKE $5\n                OR package_name ILIKE $5\n                OR title ILIKE $5\n            )\n        ORDER BY\n            CASE\n                WHEN $6 = 'severity' THEN\n                    CASE UPPER(severity)\n                        WHEN 'CRITICAL' THEN 1\n                        WHEN 'HIGH' THEN 2\n                        WHEN 'MEDIUM' THEN 3\n                        WHEN 'LOW' THEN 4\n                        ELSE 5\n                    END\n                ELSE NULL\n            END ASC NULLS LAST,\n            CASE WHEN $6 = 'severity' THEN cvss_v3_score END DESC NULLS LAST,\n            CASE WHEN $6 = 'cvss' THEN cvss_v3_score END DESC NULLS LAST,\n            CASE WHEN $6 = 'age' THEN age_days END ASC NULLS LAST,\n            CASE WHEN $6 = 'affected' THEN affected_count END DESC NULLS LAST,\n            cve_id ASC\n        LIMIT $7\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "cve_id!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "cvss_v3_score?",
+        "type_info": "Float4"
+      },
+      {
+        "ordinal": 2,
+        "name": "severity!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "title!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "cvss_vector?",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "published_date?",
+        "type_info": "Date"
+      },
+      {
+        "ordinal": 6,
+        "name": "exploited!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 7,
+        "name": "package_name?",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 8,
+        "name": "installed_version?",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 9,
+        "name": "fixed_version?",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 10,
+        "name": "fix_status!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 11,
+        "name": "affected_count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 12,
+        "name": "affected_environments?: Vec<String>",
+        "type_info": "VarcharArray"
+      },
+      {
+        "ordinal": 13,
+        "name": "first_seen?",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 14,
+        "name": "last_seen?",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 15,
+        "name": "age_days!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 16,
+        "name": "triage_status!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      true,
+      null,
+      null,
+      null,
+      true,
+      true,
+      null,
+      true,
+      true,
+      true,
+      null,
+      null,
+      true,
+      true,
+      true,
+      null,
+      null
+    ]
+  },
+  "hash": "e49dc60dc9ffd1a78769bcc3310788ef3e6553a26bd9d38e78982db29bbdc32f"
+}

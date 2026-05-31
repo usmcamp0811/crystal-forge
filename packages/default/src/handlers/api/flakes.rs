@@ -13,15 +13,17 @@ use tracing::{error, info, warn};
 use crate::api::models::{
     ApiError, CommitDiffResponse, CreateFlakeCredentialRequest, CreateFlakeRequest,
     CveScanTriggerResponse, FlakeCommitSystemPath, FlakeCredentialSummary, FlakeRegistryItem,
-    FlakeTimeline, UpdateFlakeCredentialRequest, UpdateFlakeRequest,
+    FlakeTimeline, TestFlakeCredentialRequest, TestFlakeCredentialResponse,
+    UpdateFlakeCredentialRequest, UpdateFlakeRequest,
 };
 use crate::auth::extractors::{AuthenticatedUser, RequireAdmin, RequireAuth, RequireOperator};
 use crate::config::CrystalForgeConfig;
 use crate::flake::commits::sync_commits_for_flake;
 use crate::flake::commits::{
     GitCommitMetadata, branch_exists, branch_exists_with_creds, get_commit_changed_files,
-    get_commit_diff, get_commit_metadata, get_commit_nixos_configurations, infer_default_branch,
-    infer_default_branch_with_creds, is_history_rewrite_error,
+    get_commit_diff_with_creds, get_commit_metadata, get_commit_nixos_configurations,
+    get_recent_branch_commit_hashes_with_creds, infer_default_branch, infer_default_branch_with_creds,
+    is_history_rewrite_error,
 };
 use crate::flake::credentials::FlakeCredentialEnv;
 use crate::handlers::agent_request::CFState;
@@ -42,6 +44,42 @@ use crate::queries::users::get_by_email;
 use crate::services::cve_scans::{CveScanError, trigger_immediate_cve_scan};
 
 const MAX_HYDRATION_COMMITS_PER_REQUEST: usize = 20;
+
+fn parse_timeline_limit(params: &HashMap<String, String>) -> i64 {
+    params
+        .get("limit")
+        .and_then(|v| v.parse::<i64>().ok())
+        .map(|v| v.clamp(1, 500))
+        .unwrap_or(10)
+}
+
+fn apply_remote_commit_order(timeline: &mut FlakeTimeline, remote_hashes: &[String]) {
+    let remote_positions: HashMap<String, usize> = remote_hashes
+        .iter()
+        .enumerate()
+        .map(|(idx, hash)| (hash.clone(), idx))
+        .collect();
+
+    timeline
+        .commits
+        .retain(|commit| remote_positions.contains_key(&commit.hash));
+
+    timeline.commits.sort_by_key(|commit| {
+        remote_positions
+            .get(&commit.hash)
+            .copied()
+            .unwrap_or(usize::MAX)
+    });
+}
+
+fn apply_remote_commit_order_if_available(
+    timeline: &mut FlakeTimeline,
+    remote_hashes: Option<&[String]>,
+) {
+    if let Some(hashes) = remote_hashes {
+        apply_remote_commit_order(timeline, hashes);
+    }
+}
 
 pub async fn list_flakes(State(pool): State<PgPool>, headers: HeaderMap) -> impl IntoResponse {
     if require_viewer_or_above(&pool, &headers).await.is_none() {
@@ -112,11 +150,13 @@ pub async fn get_flake_timelines(
         _ => None,
     };
 
-    // Fetch up to 10 most recent commits per flake
+    // Parse optional limit parameter (default 10, max 500 for tray view)
+    let max_commits = parse_timeline_limit(&params);
+
     let fetch_result = if use_dashboard_view {
-        fetch_dashboard_flake_timelines(&pool, 10, flake_ids.as_deref()).await
+        fetch_dashboard_flake_timelines(&pool, max_commits, flake_ids.as_deref()).await
     } else {
-        fetch_flake_timelines(&pool, 10, flake_ids.as_deref()).await
+        fetch_flake_timelines(&pool, max_commits, flake_ids.as_deref()).await
     };
 
     match fetch_result {
@@ -124,6 +164,55 @@ pub async fn get_flake_timelines(
             // Dashboard view doesn't need git metadata (message/author), skip hydration
             if use_dashboard_view {
                 return (StatusCode::OK, Json(timelines)).into_response();
+            }
+
+            // For flakes view, treat remote branch history as source of truth for commit order/visibility.
+            // This prevents stale DB rows from showing after force-push/rewrite while keeping audit history intact.
+            for timeline in &mut timelines {
+                let flake = match get_flake_by_id(&pool, timeline.flake_id).await {
+                    Ok(flake) => flake,
+                    Err(err) => {
+                        warn!(
+                            "Failed to load flake {} for remote-order timeline filter: {err:#}",
+                            timeline.flake_id
+                        );
+                        continue;
+                    }
+                };
+
+                let creds = FlakeCredentialEnv::load(&pool, timeline.flake_id)
+                    .await
+                    .unwrap_or_else(|e| {
+                        warn!(
+                            "Failed to load credentials for flake {} during timeline reorder: {e:#}",
+                            timeline.flake_id
+                        );
+                        None
+                    });
+
+                let remote_hashes = match get_recent_branch_commit_hashes_with_creds(
+                    &flake.repo_url,
+                    &flake.branch,
+                    max_commits as usize,
+                    creds.as_ref(),
+                )
+                .await
+                {
+                    Ok(hashes) => hashes,
+                    Err(err) => {
+                        warn!(
+                            "Failed to fetch remote commit order for flake {} ({} @ {}): {err:#}",
+                            flake.id,
+                            flake.repo_url,
+                            flake.branch
+                        );
+                        // Keep DB-backed timeline when remote ordering is unavailable.
+                        // This preserves cached visibility while avoiding destructive empty states.
+                        continue;
+                    }
+                };
+
+                apply_remote_commit_order_if_available(timeline, Some(&remote_hashes));
             }
 
             let mut remaining_hydration_budget = MAX_HYDRATION_COMMITS_PER_REQUEST;
@@ -556,6 +645,15 @@ fn normalize_author_email(email: &str) -> Option<String> {
     }
 }
 
+fn is_commit_unresolvable_error(error_text: &str) -> bool {
+    let normalized = error_text.to_ascii_lowercase();
+    normalized.contains("could not find commit")
+        || normalized.contains("failed to fetch commit")
+        || normalized.contains("git show failed")
+        || normalized.contains("bad object")
+        || normalized.contains("unknown revision")
+}
+
 /// Get the git diff for a specific commit in a flake.
 ///
 /// **Authorization**: Requires Viewer role or above.
@@ -584,8 +682,21 @@ pub async fn get_commit_diff_handler(
         }
     };
 
+    let creds = FlakeCredentialEnv::load(&pool, flake_id)
+        .await
+        .unwrap_or_else(|e| {
+            warn!(
+                "Failed to load credentials for flake {} during commit diff request: {e:#}",
+                flake_id
+            );
+            None
+        });
+
     // Fetch the diff from git
-    match get_commit_diff(&flake.repo_url, &flake.branch, &commit_hash).await {
+    let initial_diff =
+        get_commit_diff_with_creds(&flake.repo_url, &flake.branch, &commit_hash, creds.as_ref())
+            .await;
+    match initial_diff {
         Ok(diff) => (
             StatusCode::OK,
             Json(CommitDiffResponse {
@@ -594,14 +705,89 @@ pub async fn get_commit_diff_handler(
             }),
         )
             .into_response(),
-        Err(e) => {
-            error!("Failed to fetch commit diff for {}: {e:#}", commit_hash);
+        Err(initial_error) => {
+            let initial_error_text = initial_error.to_string();
+
+            if is_commit_unresolvable_error(&initial_error_text) {
+                if let Err(refresh_error) =
+                    crate::flake::eval::refresh_flake_cache_with_creds(
+                        &flake.repo_url,
+                        &flake.branch,
+                        creds.as_ref(),
+                    )
+                    .await
+                {
+                    warn!(
+                        "Failed to refresh flake cache before diff retry for {} (flake_id={}): {refresh_error:#}",
+                        commit_hash,
+                        flake_id
+                    );
+                }
+
+                match get_commit_diff_with_creds(
+                    &flake.repo_url,
+                    &flake.branch,
+                    &commit_hash,
+                    creds.as_ref(),
+                )
+                .await
+                {
+                    Ok(diff) => {
+                        return (
+                            StatusCode::OK,
+                            Json(CommitDiffResponse {
+                                commit_hash: commit_hash.clone(),
+                                diff,
+                            }),
+                        )
+                            .into_response();
+                    }
+                    Err(retry_error) => {
+                        let retry_error_text = retry_error.to_string();
+                        if is_commit_unresolvable_error(&retry_error_text) {
+                            warn!(
+                                "Commit diff unavailable after refresh/retry for {} (flake_id={}): {retry_error:#}",
+                                commit_hash,
+                                flake_id
+                            );
+                            return (
+                                StatusCode::NOT_FOUND,
+                                Json(ApiError {
+                                    error: "commit_diff_unavailable".to_string(),
+                                    message: format!(
+                                        "Commit {} could not be resolved in the current repository history. It may have been rewritten or removed; refresh and select a newer commit.",
+                                        commit_hash
+                                    ),
+                                    details: Some(serde_json::json!({"error": retry_error_text})),
+                                }),
+                            )
+                                .into_response();
+                        }
+
+                        error!(
+                            "Failed to fetch commit diff for {} after refresh/retry: {retry_error:#}",
+                            commit_hash
+                        );
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(ApiError {
+                                error: "internal_error".to_string(),
+                                message: format!("Failed to fetch diff for commit {}", commit_hash),
+                                details: Some(serde_json::json!({"error": retry_error_text})),
+                            }),
+                        )
+                            .into_response();
+                    }
+                }
+            }
+
+            error!("Failed to fetch commit diff for {}: {initial_error:#}", commit_hash);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ApiError {
                     error: "internal_error".to_string(),
                     message: format!("Failed to fetch diff for commit {}", commit_hash),
-                    details: Some(serde_json::json!({"error": e.to_string()})),
+                    details: Some(serde_json::json!({"error": initial_error_text})),
                 }),
             )
                 .into_response()
@@ -1007,6 +1193,104 @@ pub async fn delete_flake_credentials_handler(
             )
                 .into_response()
         }
+    }
+}
+
+pub async fn test_flake_credentials(
+    RequireAdmin(_user): RequireAdmin,
+    State(pool): State<PgPool>,
+    Path(flake_id): Path<i32>,
+    Json(payload): Json<TestFlakeCredentialRequest>,
+) -> impl IntoResponse {
+    let flake = match get_flake_by_id(&pool, flake_id).await {
+        Ok(flake) => flake,
+        Err(_) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiError {
+                    error: "not_found".to_string(),
+                    message: "Flake not found".to_string(),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let repo_url = payload
+        .repo_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&flake.repo_url)
+        .to_string();
+    let branch = payload
+        .branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&flake.branch)
+        .to_string();
+
+    let mut secret = payload.secret.clone();
+    if payload.use_stored_secret_if_empty
+        && secret.as_deref().is_none_or(|value| value.trim().is_empty())
+    {
+        if let Ok(Some(existing)) = get_flake_credential(&pool, flake_id).await {
+            secret = existing.secret_encrypted;
+        }
+    }
+
+    let creds = match FlakeCredentialEnv::from_inline(
+        flake_id,
+        &repo_url,
+        payload.auth_type,
+        payload.username,
+        secret,
+        payload.ssh_username,
+    ) {
+        Ok(creds) => creds,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiError {
+                    error: "validation_error".to_string(),
+                    message: err.to_string(),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    match branch_exists_with_creds(&repo_url, &branch, creds.as_ref()).await {
+        Ok(true) => (
+            StatusCode::OK,
+            Json(TestFlakeCredentialResponse {
+                ok: true,
+                message: format!("Connected to {repo_url} on branch {branch}."),
+                branch,
+            }),
+        )
+            .into_response(),
+        Ok(false) => (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "branch_not_found".to_string(),
+                message: format!("Connected, but branch '{branch}' was not found on remote."),
+                details: Some(serde_json::json!({ "repo_url": repo_url })),
+            }),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "connection_test_failed".to_string(),
+                message: format!("Credential test failed: {err}"),
+                details: Some(serde_json::json!({ "repo_url": repo_url, "branch": branch })),
+            }),
+        )
+            .into_response(),
     }
 }
 
@@ -1470,7 +1754,10 @@ pub async fn accept_flake_history_rewrite(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(ApiError {
                         error: "history_resync_failed".to_string(),
-                        message: "History reset completed but re-sync failed".to_string(),
+                        message: format!(
+                            "History reset completed but re-sync failed: {}",
+                            e
+                        ),
                         details: Some(serde_json::json!({
                             "error": e.to_string(),
                             "deleted_commits": deleted_commits
@@ -1772,7 +2059,7 @@ pub async fn sync_flake_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ApiError {
                     error: "internal_error".to_string(),
-                    message: format!("Failed to sync {} from source", flake.name),
+                    message: format!("Failed to sync {} from source: {}", flake.name, e),
                     details: Some(serde_json::json!({"error": e.to_string()})),
                 }),
             )
@@ -2033,6 +2320,8 @@ fn looks_like_repo_url(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::models::FlakeCommit;
+    use chrono::Utc;
 
     #[test]
     fn create_payload_requires_name() {
@@ -2170,6 +2459,139 @@ mod tests {
     // in auth/extractors.rs. These handlers now use RequireOperator and RequireAdmin extractors
     // which enforce authorization before the handler is called, so unit tests at this level
     // cannot test authorization behavior. Integration tests should test the full request path.
+
+    #[test]
+    fn timeline_limit_defaults_to_ten() {
+        let params = HashMap::new();
+        assert_eq!(parse_timeline_limit(&params), 10);
+    }
+
+    #[test]
+    fn apply_remote_commit_order_if_available_keeps_db_commits_when_remote_unavailable() {
+        let original = vec![
+            FlakeCommit {
+                id: 1,
+                hash: "aaa1111".to_string(),
+                message: "one".to_string(),
+                author: "dev".to_string(),
+                committed_at: Utc::now(),
+                system_count: 0,
+                commits_behind: 0,
+                systems: vec![],
+                system_paths: vec![],
+                build_status: None,
+                evaluation_status: None,
+                evaluation_error_message: None,
+                metadata: None,
+            },
+            FlakeCommit {
+                id: 2,
+                hash: "bbb2222".to_string(),
+                message: "two".to_string(),
+                author: "dev".to_string(),
+                committed_at: Utc::now(),
+                system_count: 0,
+                commits_behind: 0,
+                systems: vec![],
+                system_paths: vec![],
+                build_status: None,
+                evaluation_status: None,
+                evaluation_error_message: None,
+                metadata: None,
+            },
+        ];
+
+        let mut timeline = FlakeTimeline {
+            flake_id: 7,
+            flake_name: "flake-a".to_string(),
+            repo_url: "https://example.invalid/repo".to_string(),
+            commits: original.clone(),
+        };
+
+        apply_remote_commit_order_if_available(&mut timeline, None);
+
+        assert_eq!(timeline.commits, original);
+    }
+
+    #[test]
+    fn apply_remote_commit_order_if_available_filters_and_sorts_by_remote_order() {
+        let mut timeline = FlakeTimeline {
+            flake_id: 7,
+            flake_name: "flake-a".to_string(),
+            repo_url: "https://example.invalid/repo".to_string(),
+            commits: vec![
+                FlakeCommit {
+                    id: 1,
+                    hash: "aaa1111".to_string(),
+                    message: "one".to_string(),
+                    author: "dev".to_string(),
+                    committed_at: Utc::now(),
+                    system_count: 0,
+                    commits_behind: 0,
+                    systems: vec![],
+                    system_paths: vec![],
+                    build_status: None,
+                    evaluation_status: None,
+                    evaluation_error_message: None,
+                    metadata: None,
+                },
+                FlakeCommit {
+                    id: 2,
+                    hash: "bbb2222".to_string(),
+                    message: "two".to_string(),
+                    author: "dev".to_string(),
+                    committed_at: Utc::now(),
+                    system_count: 0,
+                    commits_behind: 0,
+                    systems: vec![],
+                    system_paths: vec![],
+                    build_status: None,
+                    evaluation_status: None,
+                    evaluation_error_message: None,
+                    metadata: None,
+                },
+                FlakeCommit {
+                    id: 3,
+                    hash: "ccc3333".to_string(),
+                    message: "three".to_string(),
+                    author: "dev".to_string(),
+                    committed_at: Utc::now(),
+                    system_count: 0,
+                    commits_behind: 0,
+                    systems: vec![],
+                    system_paths: vec![],
+                    build_status: None,
+                    evaluation_status: None,
+                    evaluation_error_message: None,
+                    metadata: None,
+                },
+            ],
+        };
+
+        let remote_hashes = vec!["ccc3333".to_string(), "aaa1111".to_string()];
+        apply_remote_commit_order_if_available(&mut timeline, Some(&remote_hashes));
+
+        let hashes: Vec<String> = timeline.commits.iter().map(|c| c.hash.clone()).collect();
+        assert_eq!(hashes, vec!["ccc3333".to_string(), "aaa1111".to_string()]);
+    }
+
+    #[test]
+    fn timeline_limit_clamps_to_bounds() {
+        let mut low = HashMap::new();
+        low.insert("limit".to_string(), "0".to_string());
+        assert_eq!(parse_timeline_limit(&low), 1);
+
+        let mut high = HashMap::new();
+        high.insert("limit".to_string(), "999".to_string());
+        assert_eq!(parse_timeline_limit(&high), 500);
+    }
+
+    #[test]
+    fn timeline_limit_ignores_invalid_values() {
+        let mut params = HashMap::new();
+        params.insert("limit".to_string(), "not-a-number".to_string());
+        assert_eq!(parse_timeline_limit(&params), 10);
+    }
 
     #[cfg(test)]
     mod delete_tests {

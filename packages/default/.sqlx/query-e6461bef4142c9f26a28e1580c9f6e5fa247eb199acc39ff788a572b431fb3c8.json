@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO hardening_scans (\n            id, derivation_id, status, attempts,\n            total_services, well_hardened_count, moderately_hardened_count,\n            poorly_hardened_count, vulnerable_count\n        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Varchar",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e6461bef4142c9f26a28e1580c9f6e5fa247eb199acc39ff788a572b431fb3c8"
+}

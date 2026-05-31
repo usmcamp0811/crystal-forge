@@ -6,14 +6,218 @@ use axum::{
 };
 use serde::Deserialize;
 use sqlx::PgPool;
+use std::net::IpAddr;
+use std::net::SocketAddr;
+use std::time::Duration;
 use url::Url;
 
 use crate::api::models::ApiError;
+use crate::config::ServerConfig;
 use crate::handlers::api::rbac::{authenticated_user_roles, require_admin as require_admin_user};
 use crate::models::cache_destination::{
     CacheDestination, CreateCacheDestination, UpdateCacheDestination,
 };
 use crate::queries::{cache_destinations, cache_push};
+
+fn normalize_test_url(cache_type: &str, push_to: Option<&str>, s3_endpoint_url: Option<&str>) -> Option<String> {
+    let cache_type = cache_type.to_lowercase();
+
+    match cache_type.as_str() {
+        "s3" => s3_endpoint_url
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        "attic" => push_to.and_then(|raw| {
+            let raw = raw.trim();
+            if raw.is_empty() {
+                return None;
+            }
+            if raw.starts_with("http://") || raw.starts_with("https://") {
+                return Some(raw.to_string());
+            }
+            if let Some(rest) = raw.strip_prefix("attic://") {
+                let host = rest.split('/').next().unwrap_or_default().trim();
+                if host.is_empty() {
+                    return None;
+                }
+                return Some(format!("https://{host}"));
+            }
+            None
+        }),
+        _ => push_to
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct CacheCredentialTestResult {
+    ok: bool,
+    status_code: Option<u16>,
+    message: String,
+    tested_url: Option<String>,
+}
+
+fn validate_cache_test_url(url: &Url, allow_private_targets: bool) -> Result<(), String> {
+    match url.scheme() {
+        "https" => {}
+        other => {
+            return Err(format!(
+                "Unsupported cache test URL scheme: {other}. Only https is allowed"
+            ));
+        }
+    }
+
+    let host = url
+        .host_str()
+        .ok_or_else(|| "Cache test URL must include a host".to_string())?;
+
+    let blocked_host = !allow_private_targets
+        && (host.eq_ignore_ascii_case("localhost")
+            || host.ends_with(".localhost")
+            || host.ends_with(".local")
+            || host.ends_with(".internal"));
+
+    if blocked_host {
+        return Err("Refusing to test localhost or internal cache endpoint".to_string());
+    }
+
+    let host_for_ip_parse = host.trim_start_matches('[').trim_end_matches(']');
+    if !allow_private_targets {
+        if let Ok(ip) = host_for_ip_parse.parse::<IpAddr>() {
+            reject_non_public_ip(ip)?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn validate_cache_test_url_resolves_publicly(
+    url: &Url,
+    allow_private_targets: bool,
+) -> Result<(), String> {
+    validate_cache_test_url(url, allow_private_targets)?;
+
+    let host = url
+        .host_str()
+        .ok_or_else(|| "Cache test URL must include a host".to_string())?;
+
+    if host.parse::<IpAddr>().is_ok() {
+        return Ok(());
+    }
+
+    let port = url.port_or_known_default().unwrap_or(443);
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|e| format!("Failed to resolve cache test host: {e}"))?
+        .collect();
+
+    if allow_private_targets {
+        if addrs.is_empty() {
+            return Err("Cache test host did not resolve to any addresses".to_string());
+        }
+        Ok(())
+    } else {
+        validate_resolved_addrs_public(&addrs)
+    }
+}
+
+fn validate_resolved_addrs_public(addrs: &[SocketAddr]) -> Result<(), String> {
+    if addrs.is_empty() {
+        return Err("Cache test host did not resolve to any addresses".to_string());
+    }
+
+    for addr in addrs {
+        reject_non_public_ip(addr.ip())?;
+    }
+
+    Ok(())
+}
+
+fn reject_non_public_ip(ip: IpAddr) -> Result<(), String> {
+    match ip {
+        IpAddr::V4(v4) => {
+            if v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || v4.is_unspecified()
+            {
+                return Err("Refusing to test private, loopback, or non-routable IP".to_string());
+            }
+        }
+        IpAddr::V6(v6) => {
+            if v6.is_loopback() || v6.is_unspecified() || v6.is_unique_local() || v6.is_unicast_link_local() {
+                return Err("Refusing to test private, loopback, or non-routable IP".to_string());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn sanitize_test_url_for_response(url: &Url) -> String {
+    let mut sanitized = url.clone();
+    let _ = sanitized.set_username("");
+    let _ = sanitized.set_password(None);
+    sanitized.to_string()
+}
+
+async fn run_cache_destination_test(
+    create: &CreateCacheDestination,
+    allow_private_targets: bool,
+) -> Result<CacheCredentialTestResult, String> {
+    let cache_type = create.cache_type.trim();
+    if !matches!(cache_type, "S3" | "Attic" | "Http" | "Nix" | "s3" | "attic" | "http" | "nix") {
+        return Err(format!(
+            "Validation failed: Invalid cache_type: {cache_type}. Must be one of: S3, Attic, Http, Nix"
+        ));
+    }
+
+    let Some(test_url) = normalize_test_url(
+        &create.cache_type,
+        create.push_to.as_deref(),
+        create.s3_endpoint_url.as_deref(),
+    ) else {
+        return Err("No testable endpoint URL derived from cache configuration".to_string());
+    };
+
+    let parsed_url = Url::parse(&test_url).map_err(|e| format!("Invalid cache test URL: {e}"))?;
+    validate_cache_test_url_resolves_publicly(&parsed_url, allow_private_targets).await?;
+    let tested_url = sanitize_test_url_for_response(&parsed_url);
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| format!("Failed to initialize HTTP client: {e}"))?;
+
+    let mut request = client.get(parsed_url.clone());
+    if let Some(token) = create.attic_token.as_ref().filter(|t| !t.trim().is_empty()) {
+        request = request.bearer_auth(token.trim());
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|e| format!("Connectivity test failed: {e}"))?;
+
+    if response.status().is_success() {
+        Ok(CacheCredentialTestResult {
+            ok: true,
+            status_code: Some(response.status().as_u16()),
+            message: "Connection successful".to_string(),
+            tested_url: Some(tested_url),
+        })
+    } else {
+        Ok(CacheCredentialTestResult {
+            ok: false,
+            status_code: Some(response.status().as_u16()),
+            message: format!("Endpoint responded with status {}", response.status()),
+            tested_url: Some(tested_url),
+        })
+    }
+}
 
 fn redact_cache_secrets(mut destination: CacheDestination) -> CacheDestination {
     destination.push_to = destination
@@ -194,6 +398,136 @@ pub async fn create_cache_destination(
             )
                 .into_response()
         }
+    }
+}
+
+/// POST /api/caches/test-credentials - Test cache destination configuration (admin only)
+pub async fn test_cache_destination_credentials(
+    State(pool): State<PgPool>,
+    State(server_config): State<ServerConfig>,
+    headers: HeaderMap,
+    Json(create): Json<CreateCacheDestination>,
+) -> impl IntoResponse {
+    if require_admin_user(&pool, &headers).await.is_none() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ApiError {
+                error: "forbidden".to_string(),
+                message: "Admin role required".to_string(),
+                details: None,
+            }),
+        )
+            .into_response();
+    }
+
+    match run_cache_destination_test(&create, server_config.allow_private_cache_test_targets).await {
+        Ok(result) => (StatusCode::OK, Json(result)).into_response(),
+        Err(message) => (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "invalid_cache_test_config".to_string(),
+                message,
+                details: None,
+            }),
+        )
+            .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        normalize_test_url, sanitize_test_url_for_response, validate_cache_test_url,
+        validate_cache_test_url_resolves_publicly, validate_resolved_addrs_public,
+    };
+    use std::net::{Ipv4Addr, SocketAddr};
+    use url::Url;
+
+    #[test]
+    fn normalize_test_url_handles_attic_scheme() {
+        let normalized = normalize_test_url("Attic", Some("attic://cache.example.com/team"), None);
+        assert_eq!(normalized.as_deref(), Some("https://cache.example.com"));
+    }
+
+    #[test]
+    fn validate_cache_test_url_rejects_http() {
+        let url = Url::parse("http://cache.example.com").unwrap();
+        let err = validate_cache_test_url(&url, false).unwrap_err();
+        assert!(err.contains("Only https is allowed"));
+    }
+
+    #[test]
+    fn validate_cache_test_url_rejects_localhost() {
+        let url = Url::parse("https://localhost/cache").unwrap();
+        let err = validate_cache_test_url(&url, false).unwrap_err();
+        assert!(err.contains("localhost or internal"));
+    }
+
+    #[test]
+    fn validate_cache_test_url_rejects_private_ip() {
+        let url = Url::parse("https://10.0.0.8/cache").unwrap();
+        let err = validate_cache_test_url(&url, false).unwrap_err();
+        assert!(err.contains("private, loopback, or non-routable IP"));
+    }
+
+    #[test]
+    fn validate_cache_test_url_rejects_local_suffixes() {
+        let internal = Url::parse("https://cache.internal").unwrap();
+        let local = Url::parse("https://cache.local").unwrap();
+        assert!(validate_cache_test_url(&internal, false).is_err());
+        assert!(validate_cache_test_url(&local, false).is_err());
+    }
+
+    #[test]
+    fn validate_cache_test_url_rejects_loopback_and_link_local_ips() {
+        let ipv4_loopback = Url::parse("https://127.0.0.1/cache").unwrap();
+        let link_local = Url::parse("https://169.254.169.254/latest").unwrap();
+        let ipv6_loopback = Url::parse("https://[::1]/cache").unwrap();
+
+        assert!(validate_cache_test_url(&ipv4_loopback, false).is_err());
+        assert!(validate_cache_test_url(&link_local, false).is_err());
+        assert!(validate_cache_test_url(&ipv6_loopback, false).is_err());
+    }
+
+    #[test]
+    fn validate_cache_test_url_allows_public_https_host() {
+        let url = Url::parse("https://cache.nixos.org").unwrap();
+        assert!(validate_cache_test_url(&url, false).is_ok());
+    }
+
+    #[test]
+    fn validate_cache_test_url_allows_private_when_enabled() {
+        let loopback = Url::parse("https://127.0.0.1/cache").unwrap();
+        assert!(validate_cache_test_url(&loopback, true).is_ok());
+    }
+
+    #[tokio::test]
+    async fn validate_cache_test_url_dns_rejects_localhost_resolution() {
+        let url = Url::parse("https://localhost").unwrap();
+        assert!(validate_cache_test_url_resolves_publicly(&url, false)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn validate_cache_test_url_dns_allows_localhost_when_enabled() {
+        let url = Url::parse("https://localhost").unwrap();
+        assert!(validate_cache_test_url_resolves_publicly(&url, true)
+            .await
+            .is_ok());
+    }
+
+    #[test]
+    fn validate_resolved_addrs_public_rejects_private_resolution() {
+        let addrs = vec![SocketAddr::from((Ipv4Addr::new(10, 0, 0, 8), 443))];
+        assert!(validate_resolved_addrs_public(&addrs).is_err());
+    }
+
+    #[test]
+    fn sanitize_test_url_strips_embedded_credentials() {
+        let url = Url::parse("https://user:secret@example.com/cache").unwrap();
+        let sanitized = sanitize_test_url_for_response(&url);
+        assert_eq!(sanitized, "https://example.com/cache");
     }
 }
 

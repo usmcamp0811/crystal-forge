@@ -4,6 +4,7 @@ title: Add heartbeat countdown timer to system detail view
 status: Backlog
 assignee: []
 created_date: '2026-04-05 22:33'
+updated_date: '2026-04-20 03:01'
 labels:
   - frontend
   - ux
@@ -11,7 +12,8 @@ labels:
   - systems
   - agents
   - observability
-dependencies: []
+dependencies:
+  - TASK-279
 references:
   - packages/web-ui/src/views/system_detail.rs
   - packages/default/src/handlers/api/systems.rs
@@ -81,3 +83,9 @@ Add a live countdown timer to the system detail view showing time remaining unti
 - [ ] #6 Backend API provides necessary data: last heartbeat timestamp and heartbeat interval for the system
 - [ ] #7 Countdown calculation happens client-side without requiring continuous API polling
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+TASK-279 covers the server→agent interval propagation and DTO/API surface. TASK-247 picks up the UI-side work once that interval is available in the web-ui SystemDetail response. The two should be worked sequentially: TASK-279 first, then TASK-247.
+<!-- SECTION:NOTES:END -->

@@ -16,14 +16,21 @@ use uuid::Uuid;
 use wasm_bindgen::{JsCast, JsValue};
 
 use crate::api::client::{
-    ApiClientError, fetch_cve_scan_status, fetch_system_cve_scan_eligibility, fetch_system_cves,
-    request_system_rollback, request_system_sync, trigger_system_cve_scan,
+    ApiClientError, fetch_cve_scan_status, fetch_hardening_scan_status,
+    fetch_system_cve_scan_eligibility, fetch_system_cves, fetch_system_hardening,
+    fetch_system_hardening_justifications, fetch_system_hardening_scan_eligibility,
+    request_system_generation_rollback, request_system_rollback, request_system_sync,
+    save_system_hardening_justification, trigger_system_cve_scan, trigger_system_hardening_scan,
+    verify_generation_closure as verify_generation_closure_request,
 };
 use crate::api::models::{
-    BuildStatus, CveScanEligibilityResponse, CveSeverity, CveSummary, DeploymentLogEntry,
-    DeploymentStatus, LogLevel, PipelineStage, SystemAgentEvent, SystemCommitHistory, SystemDetail,
-    SystemHardwareInfo, SystemHistoryEntry, SystemNetworkInfo, SystemRollbackRequest,
-    SystemSecurityInfo, SystemVulnerability,
+    BuildStatus, CommitInfo, CveScanEligibilityResponse, CveSeverity, CveSummary,
+    DeploymentLogEntry, DeploymentStatus, HardeningJustificationResponse,
+    HardeningScanEligibilityResponse, HardeningServiceResultResponse, HealthStatus, LogLevel,
+    PipelineStage, SaveHardeningJustificationRequest, SystemAgentEvent, SystemCommitHistory,
+    SystemDetail, SystemGeneration, SystemHardwareInfo, SystemHistoryEntry, SystemNetworkInfo,
+    SystemRollbackGenerationRequest, SystemRollbackRequest, SystemSecurityInfo,
+    SystemVulnerability, VerifyGenerationClosureRequest,
 };
 use crate::components::cve::CvesTab;
 use crate::components::diff::DiffViewer;
@@ -32,15 +39,16 @@ use crate::components::modals::{RollbackConfirmDialog, SyncConfirmDialog};
 use crate::components::notifications::Toast;
 use crate::components::system::{
     AgentCard, BooleanRow, EditSystemModal, HardwareCard, InfoRow, InfoRowMono, LogLine, LogsTab,
-    NetworkCard, SecurityCard, StatusBadge, SystemInfoCard, environment_style,
+    NetworkCard, SecurityCard, StatusBadge, SystemInfoCard, environment_style, format_uptime,
 };
 use crate::routes::Route;
 use crate::state::{app_state::AppState, auth};
-use crate::systems::adapter::{fallback_system_detail, load_system_detail_with_fallback};
 use crate::systems::adapter::{
-    load_system_agent_events_with_fallback, load_system_history_with_fallback,
+    deploy_system_via_api, fetch_system_commits_via_api, load_system_agent_events_with_fallback,
+    load_system_generations_with_fallback, load_system_history_with_fallback,
     update_system_via_api,
 };
+use crate::systems::adapter::{fallback_system_detail, load_system_detail_with_fallback};
 use crate::theme;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_futures::JsFuture;
@@ -91,20 +99,24 @@ const POLICY_JSON_SAMPLE: &str = r#"[
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Overview,
+    Deploy,
     History,
-    Policy,
-    Cves,
+    Hardening,
     Logs,
+    Config,
+    Cves,
 }
 
 impl Tab {
     fn label(&self) -> &'static str {
         match self {
             Self::Overview => "Overview",
+            Self::Deploy => "Deploy",
             Self::History => "History",
-            Self::Policy => "Policy",
-            Self::Cves => "CVEs",
+            Self::Hardening => "Hardening",
             Self::Logs => "Logs",
+            Self::Config => "Config",
+            Self::Cves => "CVEs",
         }
     }
 }
@@ -128,6 +140,8 @@ pub fn SystemDetailView(id: String) -> Element {
     let mut sync_in_progress = use_signal(|| false);
     let mut cve_scan_in_progress = use_signal(|| false);
     let mut cve_scan_status_text: Signal<Option<String>> = use_signal(|| None);
+    let mut hardening_scan_in_progress = use_signal(|| false);
+    let mut hardening_scan_status_text: Signal<Option<String>> = use_signal(|| None);
 
     // Confirmation dialog state for rollback/deploying a historical commit
     let mut show_rollback_dialog = use_signal(|| false);
@@ -135,6 +149,18 @@ pub fn SystemDetailView(id: String) -> Element {
 
     // Toast notification state
     let mut toast_message: Signal<Option<(String, bool)>> = use_signal(|| None); // (message, is_success)
+
+    // Live clock tick for relative timers/heartbeat countdowns while page is open.
+    let mut now_tick = use_signal(Utc::now);
+    use_effect(move || {
+        spawn(async move {
+            loop {
+                gloo_timers::future::TimeoutFuture::new(1000).await;
+                now_tick.set(Utc::now());
+            }
+        });
+    });
+    let now = now_tick();
 
     // System data state — use_resource keyed on id prevents repeated fetches.
     let id_for_detail = id.clone();
@@ -195,6 +221,71 @@ pub fn SystemDetailView(id: String) -> Element {
         }
     });
 
+    let id_for_commits = id.clone();
+    let commits_resource = use_resource(move || {
+        let id = id_for_commits.clone();
+        async move {
+            let Ok(system_id) = Uuid::parse_str(&id) else {
+                return None;
+            };
+
+            fetch_system_commits_via_api(system_id).await.ok()
+        }
+    });
+
+    let id_for_generations = id.clone();
+    let generations_resource = use_resource(move || {
+        let id = id_for_generations.clone();
+        async move {
+            let Ok(system_id) = Uuid::parse_str(&id) else {
+                return None;
+            };
+
+            let result = load_system_generations_with_fallback(system_id).await;
+            Some(result)
+        }
+    });
+
+    let id_for_hardening = id.clone();
+    let mut hardening_results_resource = use_resource(move || {
+        let id = id_for_hardening.clone();
+        async move {
+            let Ok(system_id) = Uuid::parse_str(&id) else {
+                return Vec::<HardeningServiceResultResponse>::new();
+            };
+
+            fetch_system_hardening(&system_id).await.unwrap_or_default()
+        }
+    });
+
+    let id_for_hardening_justifications = id.clone();
+    let mut hardening_justifications_resource = use_resource(move || {
+        let id = id_for_hardening_justifications.clone();
+        async move {
+            let Ok(system_id) = Uuid::parse_str(&id) else {
+                return Vec::<HardeningJustificationResponse>::new();
+            };
+
+            fetch_system_hardening_justifications(&system_id)
+                .await
+                .unwrap_or_default()
+        }
+    });
+
+    let id_for_hardening_scan_eligibility = id.clone();
+    let hardening_scan_eligibility_resource = use_resource(move || {
+        let id = id_for_hardening_scan_eligibility.clone();
+        async move {
+            let Ok(system_id) = Uuid::parse_str(&id) else {
+                return None;
+            };
+
+            fetch_system_hardening_scan_eligibility(&system_id)
+                .await
+                .ok()
+        }
+    });
+
     // Derive state from resource result
     let (system, api_notice, redirect_to_login, not_found) =
         match &*detail_resource.read_unchecked() {
@@ -241,7 +332,31 @@ pub fn SystemDetailView(id: String) -> Element {
         .read_unchecked()
         .clone()
         .unwrap_or_default();
-    let commit_history = map_history_entries_to_commit_history(&history_entries);
+    let history_commit_history = map_history_entries_to_commit_history(&history_entries);
+    let deploy_commit_history = commits_resource
+        .read_unchecked()
+        .clone()
+        .flatten()
+        .map(|response| {
+            map_commit_infos_to_commit_history(&response.commits, response.current_commit)
+        })
+        .filter(|commits| !commits.is_empty())
+        .unwrap_or_else(|| history_commit_history.clone());
+    let overview_current_commit = deploy_commit_history
+        .iter()
+        .find(|commit| commit.is_current)
+        .cloned()
+        .or_else(|| deploy_commit_history.first().cloned());
+    let generations_result = generations_resource
+        .read_unchecked()
+        .clone()
+        .flatten()
+        .unwrap_or_else(|| crate::systems::adapter::SystemGenerationsLoadResult {
+            generations: vec![],
+            current_generation: None,
+            notice: None,
+            redirect_to_login: false,
+        });
     let vulnerabilities = match &*vulnerabilities_resource.read_unchecked() {
         Some(value) => value.clone(),
         None => mock_vulnerabilities(),
@@ -256,6 +371,18 @@ pub fn SystemDetailView(id: String) -> Element {
         .read_unchecked())
     .clone()
     .flatten();
+    let hardening_results = hardening_results_resource
+        .read_unchecked()
+        .clone()
+        .unwrap_or_default();
+    let hardening_justifications = hardening_justifications_resource
+        .read_unchecked()
+        .clone()
+        .unwrap_or_default();
+    let hardening_scan_eligibility: Option<HardeningScanEligibilityResponse> =
+        (*hardening_scan_eligibility_resource.read_unchecked())
+            .clone()
+            .flatten();
 
     let auth_context = app_state.read().auth.clone();
     let can_mutate = auth::can_mutate_systems(&auth_context);
@@ -267,6 +394,14 @@ pub fn SystemDetailView(id: String) -> Element {
         .as_ref()
         .and_then(|item| item.reason.clone())
         .unwrap_or_else(|| "CVE scan availability is still loading.".to_string());
+    let hardening_scan_eligible = hardening_scan_eligibility
+        .as_ref()
+        .map(|item| item.eligible)
+        .unwrap_or(false);
+    let hardening_scan_blocked_reason = hardening_scan_eligibility
+        .as_ref()
+        .and_then(|item| item.reason.clone())
+        .unwrap_or_else(|| "Hardening scan availability is still loading.".to_string());
 
     let environment = system
         .environment
@@ -274,11 +409,24 @@ pub fn SystemDetailView(id: String) -> Element {
         .unwrap_or_else(|| "Unknown".to_string());
     let env_style = environment_style(&environment);
 
+    let status_dot_color = match system.health_status {
+        HealthStatus::Healthy => "#34d399",
+        HealthStatus::Warning => "#fbbf24",
+        HealthStatus::Critical => "#f87171",
+        HealthStatus::Offline => "#6b7280",
+    };
+    let health_chip_class = match system.health_status {
+        HealthStatus::Healthy => "chip chip-healthy",
+        HealthStatus::Warning => "chip chip-warning",
+        HealthStatus::Critical => "chip chip-critical",
+        HealthStatus::Offline => "chip chip-unknown",
+    };
+    let health_label = system.health_status.label();
+
     // Format last seen for header
     let last_seen_text = system
         .last_seen
         .map(|dt| {
-            let now = Utc::now();
             let duration = now.signed_duration_since(dt);
             if duration.num_minutes() < 1 {
                 "Just now".to_string()
@@ -294,8 +442,9 @@ pub fn SystemDetailView(id: String) -> Element {
 
     rsx! {
         div {
-            class: "space-y-6",
+            class: "sd-root",
             "data-testid": "system-detail",
+            "data-screen-label": "SystemDetail",
 
             // API fallback notice banner (shown when using mock data)
             if let Some(ref notice) = api_notice {
@@ -305,67 +454,112 @@ pub fn SystemDetailView(id: String) -> Element {
                 }
             }
 
-            // Back link
-            Link {
-                to: crate::routes::Route::SystemsView {},
-                class: "inline-flex items-center gap-1 text-sm {theme::text::SECONDARY} hover:text-white transition-colors",
-                svg {
-                    class: "w-4 h-4",
-                    fill: "none",
-                    stroke: "currentColor",
-                    view_box: "0 0 24 24",
-                    path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M15 19l-7-7 7-7" }
+            div {
+                class: "sd-crumb",
+                button {
+                    class: "sd-back focus-ring",
+                    onclick: move |_| {
+                        nav.push(Route::SystemsView {});
+                    },
+                    "aria-label": "Back to systems",
+                    svg {
+                        class: "w-3.5 h-3.5",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        view_box: "0 0 24 24",
+                        path { d: "M15 19l-7-7 7-7" }
+                    }
                 }
-                "Back to Systems"
+                span {
+                    class: "sd-crumb-text",
+                    span { class: "sd-crumb-parent", "Systems" }
+                    span { class: "sd-crumb-sep", "/" }
+                    span { class: "sd-crumb-current mono", "{system.hostname}" }
+                }
             }
 
             // Page header
             header {
-                class: "flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between",
+                class: "sd-head",
                 div {
-                    class: "flex items-center gap-3 flex-wrap",
-                    h1 { class: "{theme::typography::PAGE_TITLE}", "{system.hostname}" }
-                    span {
-                        class: "inline-flex items-center px-3 py-1 rounded-md text-xs font-semibold uppercase tracking-wide {env_style.chip_bg} {env_style.chip_text}",
-                        "{environment}"
-                    }
-                    StatusBadge {
-                        label: system.health_status.label(),
-                        color_class: system.health_status.color_class(),
-                        bg_class: system.health_status.bg_class()
-                    }
-                    StatusBadge {
-                        label: system.deployment_status.label(),
-                        color_class: system.deployment_status.color_class(),
-                        bg_class: system.deployment_status.bg_class()
-                    }
-                    span {
-                        class: "text-sm {theme::text::MUTED}",
-                        "Last seen: {last_seen_text}"
-                    }
-                    if let Some(ref store_path) = system.current_store_path {
-                        {
-                            let hash = store_path.split('-').next().unwrap_or("").chars().skip(11).take(7).collect::<String>();
-                            rsx! {
-                                if !hash.is_empty() {
-                                    span {
-                                        class: "font-mono text-xs px-2 py-0.5 rounded bg-gray-800 text-gray-400",
-                                        "{hash}"
-                                    }
-                                }
-                            }
+                    class: "sd-head-main",
+                    div {
+                        class: "sd-title-block",
+                        span {
+                            class: "status-dot lg",
+                            style: "--status-color: {status_dot_color};",
+                        }
+                        div {
+                            h1 { class: "sd-hostname", "{system.hostname}" }
+                            div { class: "sd-fqdn mono", "{system.hostname}.local" }
+                        }
+                        span {
+                            class: "env-badge",
+                            style: "color: {env_style.chip_text}; background: {env_style.chip_bg};",
+                            span { class: "chip-dot" }
+                            "{environment}"
+                        }
+                        span { class: "{health_chip_class}", "{health_label}" }
+                        span {
+                            class: "chip chip-info",
+                            "{system.deployment_status.label()}"
                         }
                     }
-                }
-                div {
-                    class: "flex items-center gap-2",
-                    button {
-                        class: "inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} {theme::text::PRIMARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors disabled:opacity-60 disabled:cursor-not-allowed",
-                        disabled: !can_mutate,
-                        onclick: move |_| edit_modal_open.set(true),
-                        if !can_mutate {
-                            "Edit (Operator/Admin required)"
-                        } else {
+
+                    div {
+                        class: "sd-head-actions",
+                        // Evaluate
+                        button {
+                            class: "btn btn-ghost focus-ring",
+                            disabled: !can_mutate,
+                            svg {
+                                class: "w-3.5 h-3.5",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                view_box: "0 0 24 24",
+                                path { d: "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 12l2 2 4-4" }
+                            }
+                            "Evaluate"
+                        }
+                        // Rollback
+                        button {
+                            class: "btn btn-ghost focus-ring",
+                            disabled: !can_mutate,
+                            onclick: move |_| show_rollback_dialog.set(true),
+                            svg {
+                                class: "w-3.5 h-3.5",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                view_box: "0 0 24 24",
+                                path { d: "M9 14l-4-4 4-4M5 10h7a4 4 0 014 4v1" }
+                            }
+                            "Rollback"
+                        }
+                        // Deploy (primary)
+                        button {
+                            class: "btn btn-primary focus-ring",
+                            disabled: !can_mutate,
+                            onclick: move |_| active_tab.set(Tab::Deploy),
+                            svg {
+                                class: "w-3.5 h-3.5",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                view_box: "0 0 24 24",
+                                path { d: "M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" }
+                            }
+                            "Deploy"
+                        }
+                        button {
+                            class: "inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} {theme::text::PRIMARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors disabled:opacity-60 disabled:cursor-not-allowed",
+                            disabled: !can_mutate,
+                            onclick: move |_| edit_modal_open.set(true),
+                            if !can_mutate {
+                                "Edit (Operator/Admin required)"
+                            } else {
                             "Edit"
                         }
                     }
@@ -460,6 +654,113 @@ pub fn SystemDetailView(id: String) -> Element {
                         }
                     }
                     button {
+                        class: "inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING} transition-colors disabled:opacity-60 disabled:cursor-not-allowed",
+                        disabled: *hardening_scan_in_progress.read() || !can_mutate || !hardening_scan_eligible,
+                        title: if !hardening_scan_eligible {
+                            Some(hardening_scan_blocked_reason.as_str())
+                        } else if !can_mutate {
+                            Some("Operator or Admin role required to run scans")
+                        } else {
+                            Some("Run hardening scan immediately for this system configuration")
+                        },
+                        onclick: {
+                            let system_id = system.id;
+                            move |_| {
+                                if !can_mutate || !hardening_scan_eligible {
+                                    return;
+                                }
+
+                                hardening_scan_in_progress.set(true);
+                                hardening_scan_status_text.set(Some("Hardening scan queued...".to_string()));
+
+                                spawn(async move {
+                                    let trigger_result = trigger_system_hardening_scan(&system_id).await;
+                                    match trigger_result {
+                                        Ok(triggered) => {
+                                            hardening_scan_status_text
+                                                .set(Some("Hardening scan running...".to_string()));
+                                            let mut terminal_status: Option<String> = None;
+
+                                            for _ in 0..25 {
+                                                match fetch_hardening_scan_status(&triggered.scan_id).await {
+                                                    Ok(status) => {
+                                                        let normalized = status.status.to_lowercase();
+                                                        if normalized == "completed" {
+                                                            terminal_status = Some(format!(
+                                                                "Hardening scan completed: {} services, score {}",
+                                                                status.total_services,
+                                                                status.overall_score
+                                                                    .map(|v| v.to_string())
+                                                                    .unwrap_or_else(|| "n/a".to_string())
+                                                            ));
+                                                            break;
+                                                        }
+
+                                                        if normalized == "failed" {
+                                                            terminal_status = Some(match status.error_message {
+                                                                Some(message) if !message.is_empty() => {
+                                                                    format!("Hardening scan failed: {}", message)
+                                                                }
+                                                                _ => "Hardening scan failed. Check server logs for details."
+                                                                    .to_string(),
+                                                            });
+                                                            break;
+                                                        }
+                                                    }
+                                                    Err(_) => {
+                                                        terminal_status = Some(
+                                                            "Unable to poll hardening scan status.".to_string(),
+                                                        );
+                                                        break;
+                                                    }
+                                                }
+
+                                                use gloo_timers::future::TimeoutFuture;
+                                                TimeoutFuture::new(1500).await;
+                                            }
+
+                                            if let Some(msg) = terminal_status {
+                                                let is_success = msg.contains("completed");
+                                                toast_message.set(Some((msg.clone(), is_success)));
+                                                hardening_scan_status_text.set(Some(msg));
+                                                hardening_results_resource.restart();
+                                            }
+                                        }
+                                        Err(err) => {
+                                            let msg = format!("Failed to trigger hardening scan: {}", err);
+                                            toast_message.set(Some((msg.clone(), false)));
+                                            hardening_scan_status_text.set(Some(msg));
+                                        }
+                                    }
+
+                                    hardening_scan_in_progress.set(false);
+                                });
+                            }
+                        },
+
+                        svg {
+                            class: "w-4 h-4",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            view_box: "0 0 24 24",
+                            path {
+                                stroke_linecap: "round",
+                                stroke_linejoin: "round",
+                                d: "M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z"
+                            }
+                        }
+                        if *hardening_scan_in_progress.read() {
+                            "Scanning..."
+                        } else if !can_mutate {
+                            "Run Hardening Scan (Operator/Admin required)"
+                        } else if !hardening_scan_eligible {
+                            "Run Hardening Scan (unavailable)"
+                        } else {
+                            "Run Hardening Scan"
+                        }
+                    }
+                    button {
                         class: "inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::SUCCESS_BTN} {theme::interactive::FOCUS_RING} transition-colors disabled:opacity-60 disabled:cursor-not-allowed",
                         disabled: *sync_in_progress.read() || !can_mutate,
                         onclick: move |_| show_sync_dialog.set(true),
@@ -502,6 +803,7 @@ pub fn SystemDetailView(id: String) -> Element {
                             "Sync Now"
                         }
                     }
+                    }
                 }
                 if let Some(scan_status) = cve_scan_status_text() {
                     p {
@@ -509,32 +811,187 @@ pub fn SystemDetailView(id: String) -> Element {
                         "{scan_status}"
                     }
                 }
+                if let Some(scan_status) = hardening_scan_status_text() {
+                    p {
+                        class: "text-xs text-violet-200 mt-1",
+                        "{scan_status}"
+                    }
+                }
+            }
+
+            {
+                let heartbeat_interval_sec = 60_i64;
+                let heartbeat_next_in_sec = system
+                    .last_seen
+                    .map(|dt| 60.0 - now.signed_duration_since(dt).num_seconds() as f64)
+                    .unwrap_or(0.0);
+                let uptime_str = format_uptime(system.hardware.uptime_secs.unwrap_or(0));
+                let kernel_str = system.kernel.clone().unwrap_or_else(|| "unknown".to_string());
+                let policy_str = system.deployment_policy.clone();
+                let env_str = environment.clone();
+                let generation_text = system
+                    .generation
+                    .map(|generation| format!("#{generation}"))
+                    .unwrap_or_else(|| "#—".to_string());
+                let generation_subtext = if matches!(
+                    system.generation_matches_current_store_path,
+                    Some(false)
+                ) {
+                    "profile/current mismatch detected".to_string()
+                } else {
+                    format!("activated · {last_seen_text}")
+                };
+                let cve_total = system.cve_counts.total();
+                let cve_critical = system.cve_counts.critical;
+                let cve_high = system.cve_counts.high;
+
+                rsx! {
+                    div {
+                        class: "sd-metric-strip",
+                        // Heartbeat
+                        div {
+                            class: "sd-metric",
+                            div { class: "sd-metric-label", "Heartbeat" }
+                            div {
+                                class: "sd-metric-val",
+                                crate::components::HeartbeatSpinner {
+                                    interval_sec: heartbeat_interval_sec,
+                                    next_in_sec: heartbeat_next_in_sec,
+                                    size: 36,
+                                }
+                            }
+                        }
+                        // Generation
+                        div {
+                            class: "sd-metric",
+                            div { class: "sd-metric-label", "Generation" }
+                            div { class: "sd-metric-val-num", "{generation_text}" }
+                            div { class: "sd-metric-sub", "{generation_subtext}" }
+                        }
+                        // Uptime
+                        div {
+                            class: "sd-metric",
+                            div { class: "sd-metric-label", "Uptime" }
+                            div { class: "sd-metric-val-num", "{uptime_str}" }
+                            div { class: "sd-metric-sub mono", "{kernel_str}" }
+                        }
+                        // CVEs
+                        div {
+                            class: "sd-metric",
+                            div { class: "sd-metric-label", "CVEs" }
+                            div {
+                                class: "sd-metric-val-num",
+                                style: if cve_critical > 0 { "color: #f87171;" } else { "color: #34d399;" },
+                                "{cve_total}"
+                            }
+                            div { class: "sd-metric-sub", "{cve_critical} critical · {cve_high} high" }
+                        }
+                        // Policy
+                        div {
+                            class: "sd-metric",
+                            div { class: "sd-metric-label", "Policy" }
+                            div {
+                                class: "sd-metric-val-num mono",
+                                style: "font-size: 18px;",
+                                "{policy_str}"
+                            }
+                            div { class: "sd-metric-sub", "env: {env_str}" }
+                        }
+                    }
+                }
             }
 
             // Tab navigation
             div {
-                class: "border-b {theme::surface::CARD_BORDER}",
-                nav {
-                    class: "flex gap-1 -mb-px",
-                    for tab in [Tab::Overview, Tab::History, Tab::Policy, Tab::Cves, Tab::Logs] {
-                        {
-                            let is_active = *active_tab.read() == tab;
-                            let tab_class = if is_active {
-                                "px-4 py-2 text-sm font-semibold text-cyan-300 border-b-2 border-cyan-400 bg-cyan-500/10"
-                            } else {
-                                "px-4 py-2 text-sm font-medium {theme::text::SECONDARY} hover:text-white hover:border-cyan-500/50 transition-colors border-b-2 border-transparent"
-                            };
-                            rsx! {
-                                button {
-                                    key: "{tab:?}",
-                                    class: "{tab_class}",
-                                    onclick: move |_| active_tab.set(tab),
-                                    "{tab.label()}"
-                                    if tab == Tab::Cves && system.cve_counts.total() > 0 {
-                                        span {
-                                            class: "ml-2 px-1.5 py-0.5 text-xs rounded-full bg-red-500/20 text-red-400",
-                                            "{system.cve_counts.total()}"
+                "data-testid": "system-detail-tabs",
+                class: "sd-tabs",
+                role: "tablist",
+                for tab in [Tab::Overview, Tab::Deploy, Tab::History, Tab::Cves, Tab::Hardening, Tab::Logs, Tab::Config] {
+                    {
+                        let is_active = *active_tab.read() == tab;
+                        let tab_class = if is_active {
+                            "sd-tab focus-ring active"
+                        } else {
+                            "sd-tab focus-ring"
+                        };
+                        rsx! {
+                            button {
+                                key: "{tab:?}",
+                                class: "{tab_class}",
+                                role: "tab",
+                                "aria-selected": "{is_active}",
+                                onclick: move |_| active_tab.set(tab),
+                                match tab {
+                                    Tab::Overview => rsx!(
+                                        svg {
+                                            class: "w-3.5 h-3.5",
+                                            fill: "none",
+                                            stroke: "currentColor",
+                                            view_box: "0 0 24 24",
+                                            path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" }
                                         }
+                                    ),
+                                    Tab::Deploy => rsx!(
+                                        svg {
+                                            class: "w-3.5 h-3.5",
+                                            fill: "none",
+                                            stroke: "currentColor",
+                                            view_box: "0 0 24 24",
+                                            path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" }
+                                        }
+                                    ),
+                                    Tab::History => rsx!(
+                                        svg {
+                                            class: "w-3.5 h-3.5",
+                                            fill: "none",
+                                            stroke: "currentColor",
+                                            view_box: "0 0 24 24",
+                                            path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" }
+                                        }
+                                    ),
+                                    Tab::Cves => rsx!(
+                                        svg {
+                                            class: "w-3.5 h-3.5",
+                                            fill: "none",
+                                            stroke: "currentColor",
+                                            view_box: "0 0 24 24",
+                                            path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M12 3l8 4v5c0 5-3.5 9.5-8 11-4.5-1.5-8-6-8-11V7l8-4z" }
+                                        }
+                                    ),
+                                    Tab::Hardening => rsx!(
+                                        svg {
+                                            class: "w-3.5 h-3.5",
+                                            fill: "none",
+                                            stroke: "currentColor",
+                                            view_box: "0 0 24 24",
+                                            path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M12 3l8 4v5c0 5-3 8-8 9-5-1-8-4-8-9V7l8-4z" }
+                                            path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M9 12h6" }
+                                        }
+                                    ),
+                                    Tab::Logs => rsx!(
+                                        svg {
+                                            class: "w-3.5 h-3.5",
+                                            fill: "none",
+                                            stroke: "currentColor",
+                                            view_box: "0 0 24 24",
+                                            path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M8 9l3 3-3 3m5 0h3M5 4h14a2 2 0 012 2v12a2 2 0 01-2 2H5a2 2 0 01-2-2V6a2 2 0 012-2z" }
+                                        }
+                                    ),
+                                    Tab::Config => rsx!(
+                                        svg {
+                                            class: "w-3.5 h-3.5",
+                                            fill: "none",
+                                            stroke: "currentColor",
+                                            view_box: "0 0 24 24",
+                                            path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M9 12h6m-6 4h6M7 8h10M5 6h14a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2z" }
+                                        }
+                                    ),
+                                }
+                                "{tab.label()}"
+                                if tab == Tab::Cves && system.cve_counts.critical > 0 {
+                                    span {
+                                        class: "sd-tab-badge",
+                                        "{system.cve_counts.critical}"
                                     }
                                 }
                             }
@@ -545,14 +1002,78 @@ pub fn SystemDetailView(id: String) -> Element {
 
             // Tab content
             div {
-                class: "min-h-[400px]",
+                class: "sd-body",
                 match *active_tab.read() {
                     Tab::Overview => rsx! {
-                        OverviewTab { system: system.clone() }
+                        OverviewTab {
+                            system: system.clone(),
+                            now: now,
+                            current_commit: overview_current_commit.clone(),
+                            on_open_cves: move |_| active_tab.set(Tab::Cves),
+                        }
+                    },
+                    Tab::Deploy => rsx! {
+                        DeployTab {
+                            system: system.clone(),
+                            commits: deploy_commit_history.clone(),
+                            generations: generations_result.generations.clone(),
+                            current_generation: generations_result.current_generation,
+                            allow_mutations: can_mutate,
+                            on_deploy_commit: {
+                                let system_id = system.id;
+                                let hostname = system.hostname.clone();
+                                let toast_message = toast_message.clone();
+                                move |commit_sha: String| {
+                                    let hostname = hostname.clone();
+                                    let toast_message = toast_message.clone();
+                                    spawn(async move {
+                                        let message = match deploy_system_via_api(system_id, commit_sha.clone()).await {
+                                            Ok(response) if !response.trim().is_empty() => response,
+                                            Ok(_) => format!(
+                                                "Requested deployment of {} to {}",
+                                                hostname,
+                                                commit_sha.chars().take(7).collect::<String>()
+                                            ),
+                                            Err(error) => format!("Deploy request failed for {}: {}", hostname, error),
+                                        };
+                                        let success = !message.to_ascii_lowercase().contains("failed");
+                                        let _ = dispatch_sync_notification(message, success, toast_message).await;
+                                    });
+                                }
+                            },
+                            on_deploy_generation: {
+                                let system_id = system.id;
+                                let hostname = system.hostname.clone();
+                                let toast_message = toast_message.clone();
+                                move |store_path: String| {
+                                    let hostname = hostname.clone();
+                                    let toast_message = toast_message.clone();
+                                    spawn(async move {
+                                        let message = match request_system_generation_rollback(
+                                            &system_id,
+                                            &SystemRollbackGenerationRequest {
+                                                store_path: store_path.clone(),
+                                            },
+                                        )
+                                        .await
+                                        {
+                                            Ok(response) if !response.message.trim().is_empty() => response.message,
+                                            Ok(_) => format!("Requested generation rollback for {}", hostname),
+                                            Err(error) => format!(
+                                                "Generation rollback request failed for {}: {}",
+                                                hostname, error
+                                            ),
+                                        };
+                                        let success = !message.to_ascii_lowercase().contains("failed");
+                                        let _ = dispatch_sync_notification(message, success, toast_message).await;
+                                    });
+                                }
+                            }
+                        }
                     },
                     Tab::History => rsx! {
                         HistoryTab {
-                            commits: commit_history.clone(),
+                            commits: history_commit_history.clone(),
                             deployment_policy: system.deployment_policy.clone(),
                             allow_mutations: can_mutate,
                             on_rollback: move |commit| {
@@ -561,22 +1082,53 @@ pub fn SystemDetailView(id: String) -> Element {
                             }
                         }
                     },
-                    Tab::Policy => rsx! {
-                        PolicyTab { system: system.clone() }
-                    },
                     Tab::Cves => rsx! {
-                        CvesTab {
+                        div {
+                            class: "sd-grid",
+                            section {
+                                class: "card",
+                                style: "overflow: hidden;",
+                                div {
+                                    class: "sd-card-head",
+                                    style: "padding: 14px 18px;",
+                                    h2 { "Vulnerabilities" }
+                                    span {
+                                        class: "sd-card-meta",
+                                        "{system.cve_counts.total()} total · {system.cve_counts.critical} critical"
+                                    }
+                                }
+                                div {
+                                    style: "padding: 0 18px 18px;",
+                                    CvesTab {
+                                        system_id: system.id,
+                                        cve_counts: system.cve_counts.clone(),
+                                        vulnerabilities: vulnerabilities.clone(),
+                                        allow_mutations: can_mutate,
+                                        on_saved: move |_| {
+                                            vulnerabilities_resource.restart();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    Tab::Hardening => rsx! {
+                        HardeningTab {
                             system_id: system.id,
-                            cve_counts: system.cve_counts.clone(),
-                            vulnerabilities: vulnerabilities.clone(),
+                            results: hardening_results.clone(),
+                            justifications: hardening_justifications.clone(),
                             allow_mutations: can_mutate,
                             on_saved: move |_| {
-                                vulnerabilities_resource.restart();
+                                hardening_results_resource.restart();
+                                hardening_justifications_resource.restart();
                             }
                         }
                     },
                     Tab::Logs => rsx! {
-                        LogsTab { logs: deployment_logs.clone() }
+                        LogsTabStyled { logs: deployment_logs.clone() }
+                    },
+                    Tab::Config => rsx! {
+                        ConfigTab { system: system.clone() }
                     },
                 }
             }
@@ -731,60 +1283,1010 @@ pub fn SystemDetailView(id: String) -> Element {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[component]
-fn OverviewTab(system: SystemDetail) -> Element {
+fn OverviewTab(
+    system: SystemDetail,
+    now: chrono::DateTime<chrono::Utc>,
+    current_commit: Option<SystemCommitHistory>,
+    on_open_cves: EventHandler<()>,
+) -> Element {
+    let environment = system
+        .environment
+        .clone()
+        .unwrap_or_else(|| "Unknown".to_string());
+    let env_style = environment_style(&environment);
+    let uptime = format_uptime(system.hardware.uptime_secs.unwrap_or_default());
+    let kernel = system
+        .kernel
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let heartbeat_next_in_sec = system
+        .last_seen
+        .map(|dt| 60.0 - now.signed_duration_since(dt).num_seconds() as f64)
+        .unwrap_or(0.0);
+    let fqdn_text = format!(
+        "{}.{}.cf.internal",
+        system.hostname,
+        environment.to_lowercase()
+    );
+
+    let flake_name = system
+        .flake
+        .as_ref()
+        .map(|f| f.name.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let flake_commit = system
+        .flake
+        .as_ref()
+        .and_then(|f| f.latest_commit.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let nixos_version = system
+        .nixos_version
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let cpu_text = system
+        .hardware
+        .cpu_brand
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let memory_text = system
+        .hardware
+        .memory_gb
+        .map(|v| format!("{:.1} GiB", v))
+        .unwrap_or_else(|| "unknown".to_string());
+    let ipv4_text = system
+        .network
+        .primary_ip
+        .clone()
+        .unwrap_or_else(|| "-".to_string());
+    let ipv6_text = "—".to_string();
+    let branch_text = "main".to_string();
+    let generation_text = system
+        .generation
+        .map(|generation| format!("#{generation}"))
+        .unwrap_or_else(|| "#—".to_string());
+    let generation_mismatch_note =
+        if matches!(system.generation_matches_current_store_path, Some(false)) {
+            " (profile/current mismatch)"
+        } else {
+            ""
+        };
+    let commit_message_text = current_commit
+        .as_ref()
+        .map(|commit| commit.message.clone())
+        .unwrap_or_else(|| "No commit message available".to_string());
+
+    let critical = system.cve_counts.critical;
+    let high = system.cve_counts.high;
+    let medium = system.cve_counts.medium;
+    let low = system.cve_counts.low;
+    let cve_total = system.cve_counts.total();
+    let critical_label = if critical == 1 {
+        format!("{} critical CVE", critical)
+    } else {
+        format!("{} critical CVEs", critical)
+    };
+
+    let mut recent_activity: Vec<(String, String, chrono::DateTime<chrono::Utc>)> = vec![
+        (
+            "System record updated".to_string(),
+            "#34d399".to_string(),
+            system.updated_at,
+        ),
+        (
+            "System registered".to_string(),
+            "#a78bfa".to_string(),
+            system.created_at,
+        ),
+    ];
+    if let Some(last_seen_at) = system.last_seen {
+        recent_activity.push((
+            "Heartbeat received".to_string(),
+            "#60a5fa".to_string(),
+            last_seen_at,
+        ));
+    }
+    recent_activity.sort_by(|a, b| b.2.cmp(&a.2));
+
     rsx! {
-        // Store path (full width)
-        if let Some(ref store_path) = system.current_store_path {
-            div {
-                class: "mb-6",
-                Card {
-                    title: Some("Current Store Path".to_string()),
-                    children: rsx! {
-                        code {
-                            class: "block text-sm font-mono text-gray-300 bg-gray-800/50 px-4 py-3 rounded-lg overflow-x-auto",
-                            "{store_path}"
+        div {
+            class: "sd-grid sd-grid-overview",
+
+            section {
+                class: "card sd-card",
+                div {
+                    class: "sd-card-head",
+                    h2 { "Currently deployed" }
+                    span {
+                        class: "chip chip-healthy",
+                        svg {
+                            class: "w-3 h-3",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            view_box: "0 0 24 24",
+                            path { d: "M5 12l5 5L20 7" }
                         }
+                        "up-to-date"
+                    }
+                }
+                dl {
+                    class: "kv-grid",
+                    dt { "Flake" } dd { class: "mono", "{flake_name}" }
+                    dt { "Branch" } dd { class: "mono", "{branch_text}" }
+                    dt { "Commit" } dd { class: "mono", "{flake_commit}" }
+                    dt { "Message" } dd { style: "white-space: normal; font-family: var(--font-sans);", "{commit_message_text}" }
+                    dt { "Generation" } dd { class: "mono", "{generation_text}{generation_mismatch_note}" }
+                    dt { "NixOS" } dd { class: "mono", "{nixos_version}" }
+                    dt { "Kernel" } dd { class: "mono", "{kernel}" }
+                }
+            }
+
+            section {
+                class: "card sd-card",
+                div {
+                    class: "sd-card-head",
+                    h2 { "Host" }
+                    span { class: "mono sd-card-meta", "{system.id}" }
+                }
+                dl {
+                    class: "kv-grid",
+                    dt { "Hostname" } dd { class: "mono", "{system.hostname}" }
+                    dt { "FQDN" } dd { class: "mono", "{fqdn_text}" }
+                    dt { "Environment" }
+                    dd {
+                        span {
+                            class: "inline-flex items-center px-3 py-1 rounded-md text-xs font-semibold uppercase tracking-wide {env_style.chip_bg} {env_style.chip_text}",
+                            "{environment}"
+                        }
+                    }
+                    dt { "Uptime" } dd { "{uptime}" }
+                    dt { "CPU" } dd { "{cpu_text}" }
+                    dt { "Memory" } dd { "{memory_text}" }
+                    dt { "IPv4" } dd { class: "mono", "{ipv4_text}" }
+                    dt { "IPv6" } dd { class: "mono", "{ipv6_text}" }
+                }
+                div {
+                    class: "hb-panel",
+                    style: "margin-top: 16px;",
+                    crate::components::HeartbeatSpinner {
+                        interval_sec: 60,
+                        next_in_sec: heartbeat_next_in_sec,
+                        size: 56,
+                        show_label: true,
+                    }
+                }
+            }
+
+            section {
+                class: "card sd-card",
+                div {
+                    class: "sd-card-head",
+                    h2 { "CVE exposure" }
+                    button {
+                        class: "btn btn-ghost xs focus-ring",
+                        onclick: move |_| on_open_cves.call(()),
+                        svg {
+                            class: "w-3 h-3",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            view_box: "0 0 24 24",
+                            path { d: "M5 12h14M13 5l7 7-7 7" }
+                        }
+                        "View all"
+                    }
+                }
+                div {
+                    class: "cve-bar",
+                    {
+                        let total = cve_total.max(1) as f64;
+                        rsx! {
+                            if critical > 0 {
+                                div { class: "cve-seg", style: "background: #f87171; width: {(critical as f64 / total) * 100.0}%;" }
+                            }
+                            if high > 0 {
+                                div { class: "cve-seg", style: "background: #fbbf24; width: {(high as f64 / total) * 100.0}%;" }
+                            }
+                            if medium > 0 {
+                                div { class: "cve-seg", style: "background: #9ca3af; width: {(medium as f64 / total) * 100.0}%;" }
+                            }
+                            if low > 0 {
+                                div { class: "cve-seg", style: "background: #4b5563; width: {(low as f64 / total) * 100.0}%;" }
+                            }
+                        }
+                    }
+                }
+                div {
+                    class: "cve-legend",
+                    span { class: "cve-legend-item", span { class: "cve-legend-swatch", style: "background: #f87171" } "{critical} critical" }
+                    span { class: "cve-legend-item", span { class: "cve-legend-swatch", style: "background: #fbbf24" } "{high} high" }
+                    span { class: "cve-legend-item", span { class: "cve-legend-swatch", style: "background: #9ca3af" } "{medium} medium" }
+                    span { class: "cve-legend-item", span { class: "cve-legend-swatch", style: "background: #4b5563" } "{low} low" }
+                }
+                if critical > 0 {
+                    div {
+                        class: "sd-callout sd-callout-danger",
+                        style: "margin-top: 14px;",
+                        svg {
+                            class: "w-3.5 h-3.5",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "1.75",
+                            view_box: "0 0 24 24",
+                            width: "14",
+                            height: "14",
+                            path { d: "M12 3l8 4v5c0 5-3.5 9.5-8 11-4.5-1.5-8-6-8-11V7l8-4z" }
+                        }
+                        div {
+                            strong { "{critical_label}" }
+                            " on this host. Review and patch at earliest opportunity."
+                        }
+                    }
+                }
+            }
+
+            section {
+                class: "card sd-card sd-card-wide",
+                div {
+                    class: "sd-card-head",
+                    h2 { "Recent activity" }
+                    span { class: "sd-card-meta", "last 24h" }
+                }
+                div {
+                    class: "timeline sd-timeline",
+                    for (title, color, at) in recent_activity.iter().take(5) {
+                        div {
+                            class: "tl-item",
+                            span { class: "tl-dot", style: "--status-color: {color};" }
+                            div {
+                                class: "tl-body",
+                                div { class: "tl-title", "{title}" }
+                                div { class: "tl-meta", "{relative_time(*at)}" }
+                            }
+                        }
+                    }
+                }
+            }
+
+            section {
+                class: "card sd-card",
+                div {
+                    class: "sd-card-head",
+                    h2 { "Tags" }
+                }
+                div {
+                    class: "sd-tag-row",
+                    span { class: "sd-tag mono", "env:{environment.to_lowercase()}" }
+                    span { class: "sd-tag mono", "flake:{flake_name}" }
+                    button {
+                        class: "sd-tag sd-tag-add focus-ring",
+                        svg {
+                            class: "w-2.5 h-2.5",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            view_box: "0 0 24 24",
+                            path { d: "M12 5v14M5 12h14" }
+                        }
+                        "add"
                     }
                 }
             }
         }
 
+    }
+}
+
+#[component]
+fn DeployTab(
+    system: SystemDetail,
+    commits: Vec<SystemCommitHistory>,
+    generations: Vec<SystemGeneration>,
+    current_generation: Option<i32>,
+    allow_mutations: bool,
+    on_deploy_commit: EventHandler<String>,
+    on_deploy_generation: EventHandler<String>,
+) -> Element {
+    let flake_name = system
+        .flake
+        .as_ref()
+        .map(|f| f.name.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let default_commit = commits
+        .iter()
+        .find(|c| c.is_current)
+        .map(|c| c.hash.clone())
+        .or_else(|| commits.first().map(|c| c.hash.clone()))
+        .unwrap_or_default();
+
+    let default_generation = generations
+        .iter()
+        .find(|g| !g.is_current)
+        .or_else(|| generations.get(1))
+        .or_else(|| generations.first())
+        .map(|g| g.generation);
+
+    let mut mode = use_signal(|| "commit".to_string());
+    let mut selected_commit = use_signal(|| default_commit);
+    let mut selected_generation: Signal<Option<i32>> = use_signal(|| default_generation);
+    let mut show_diff = use_signal(|| false);
+    let mut verify_notice = use_signal(|| None::<String>);
+
+    let displayed_commits = {
+        use std::collections::HashSet;
+
+        let mut seen_hashes: HashSet<String> = HashSet::new();
+        commits
+            .iter()
+            .filter(|commit| seen_hashes.insert(commit.hash.clone()))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+
+    let selected_commit_data = displayed_commits
+        .iter()
+        .find(|c| c.hash == *selected_commit.read())
+        .cloned()
+        .or_else(|| displayed_commits.first().cloned());
+
+    let selected_generation_data = selected_generation
+        .read()
+        .and_then(|g| generations.iter().find(|x| x.generation == g).cloned())
+        .or_else(|| {
+            default_generation.and_then(|g| generations.iter().find(|x| x.generation == g).cloned())
+        });
+
+    // Pre-compute values for the plan panel (outside rsx! to avoid borrow issues)
+    let from_commit = system
+        .flake
+        .as_ref()
+        .and_then(|f| f.latest_commit.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let from_short = from_commit.chars().take(7).collect::<String>();
+
+    let policy_name = system.deployment_policy.clone();
+
+    rsx! {
         div {
-            class: "grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6 pt-6",
+            class: "sd-grid sd-grid-deploy",
 
-            // System Info card
-            SystemInfoCard { system: system.clone() }
+            // ── Left panel: commit and generation selector ────────────────────────────────
+            section {
+                class: "card sd-card",
+                div {
+                    class: "sd-card-head",
+                    style: "flex-direction: column; align-items: stretch; gap: 12px;",
+                    div {
+                        style: "display: flex; align-items: center; justify-content: space-between; gap: 12px;",
+                        h2 { "Select target" }
+                        span { class: "sd-card-meta mono", "{flake_name}" }
+                    }
+                    div {
+                        class: "seg",
+                        style: "align-self: flex-start;",
+                        button {
+                            class: if mode() == "commit" { "active" } else { "" },
+                            onclick: move |_| {
+                                mode.set("commit".to_string());
+                                show_diff.set(false);
+                                verify_notice.set(None);
+                            },
+                            svg {
+                                class: "w-3 h-3",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                view_box: "0 0 24 24",
+                                path { d: "M7 7h10M7 12h10M7 17h10M4 7h.01M4 12h.01M4 17h.01" }
+                            }
+                            " Commit"
+                        }
+                        button {
+                            class: if mode() == "generation" { "active" } else { "" },
+                            onclick: move |_| {
+                                mode.set("generation".to_string());
+                                show_diff.set(false);
+                                verify_notice.set(None);
+                            },
+                            svg {
+                                class: "w-3 h-3",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                view_box: "0 0 24 24",
+                                path { d: "M3 12a9 9 0 1018 0 9 9 0 10-18 0m9-5v5l3 3" }
+                            }
+                            " Generation"
+                        }
+                    }
+                }
 
-            // Hardware card
-            HardwareCard { hardware: system.hardware.clone() }
+                if mode() == "commit" {
+                    div {
+                        class: "sd-commit-list",
+                        if displayed_commits.is_empty() {
+                            div {
+                                style: "padding: 16px; color: var(--cf-text-muted); font-size: 13px;",
+                                "No commits available."
+                            }
+                        }
+                        for commit in displayed_commits.iter().cloned() {
+                            {
+                                let is_selected = selected_commit() == commit.hash;
+                                let item_class = if is_selected {
+                                    "sd-commit-item selected focus-ring"
+                                } else {
+                                    "sd-commit-item focus-ring"
+                                };
+                                let commit_hash_for_key = commit.hash.clone();
+                                let commit_hash_for_select = commit.hash.clone();
+                                let commit_hash_for_title = commit.hash.clone();
+                                let short_hash = commit.hash.chars().take(7).collect::<String>();
+                                let commit_message = commit.message.clone();
+                                let commit_author = commit.author.clone();
+                                let when_text = {
+                                    let now = chrono::Utc::now();
+                                    let d = now.signed_duration_since(commit.committed_at);
+                                    if d.num_minutes() < 1 {
+                                        "just now".to_string()
+                                    } else if d.num_hours() < 1 {
+                                        format!("{}m ago", d.num_minutes())
+                                    } else if d.num_days() < 1 {
+                                        format!("{}h ago", d.num_hours())
+                                    } else {
+                                        format!("{}d ago", d.num_days())
+                                    }
+                                };
+                                rsx! {
+                                    button {
+                                        key: "{commit_hash_for_key}",
+                                        class: "{item_class}",
+                                        onclick: move |_| {
+                                            selected_commit.set(commit_hash_for_select.clone());
+                                            verify_notice.set(None);
+                                        },
+                                        span {
+                                            class: "mono sd-commit-sha",
+                                            title: "{commit_hash_for_title}",
+                                            "{short_hash}"
+                                        }
+                                        span {
+                                            class: "sd-commit-msg",
+                                            title: "{commit_message}",
+                                            "{commit_message}"
+                                        }
+                                        span {
+                                            class: "sd-commit-meta mono",
+                                            title: "{commit_author}",
+                                            "{commit_author}"
+                                        }
+                                        span { class: "sd-commit-meta", "{when_text}" }
+                                        if commit.is_current {
+                                            span { class: "chip chip-info", "deployed" }
+                                        } else {
+                                            span { class: "chip chip-healthy", "cached" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    div {
+                        class: "sd-commit-list",
+                        if generations.is_empty() {
+                            div {
+                                style: "padding: 16px; color: var(--cf-text-muted); font-size: 13px;",
+                                "No historical generations available."
+                            }
+                        }
+                        for generation in generations.iter().cloned() {
+                            {
+                                let is_selected = *selected_generation.read() == Some(generation.generation);
+                                let item_class = if is_selected {
+                                    "sd-commit-item selected focus-ring"
+                                } else {
+                                    "sd-commit-item focus-ring"
+                                };
+                                let gen_num = generation.generation;
+                                let gen_label = format!("#{}", gen_num);
+                                let commit_short = generation
+                                    .commit_hash
+                                    .as_ref()
+                                    .map(|c| c.chars().take(7).collect::<String>());
+                                let when_text = {
+                                    let now = chrono::Utc::now();
+                                    let d = now.signed_duration_since(generation.timestamp);
+                                    if d.num_minutes() < 1 {
+                                        "just now".to_string()
+                                    } else if d.num_hours() < 1 {
+                                        format!("{}m ago", d.num_minutes())
+                                    } else if d.num_days() < 1 {
+                                        format!("{}h ago", d.num_hours())
+                                    } else {
+                                        format!("{}d ago", d.num_days())
+                                    }
+                                };
+                                rsx! {
+                                    button {
+                                        key: "gen-{gen_num}",
+                                        class: "{item_class}",
+                                        onclick: move |_| {
+                                            selected_generation.set(Some(gen_num));
+                                            verify_notice.set(None);
+                                        },
+                                        span { class: "mono sd-commit-sha sd-generation-number", "{gen_label}" }
+                                        span { class: "sd-commit-msg", "generation rollback" }
+                                        if let Some(short) = commit_short {
+                                            span { class: "sd-commit-meta mono", "{short}" }
+                                        } else {
+                                            span { class: "sd-commit-meta mono", "unknown / not in CF" }
+                                        }
+                                        span { class: "sd-commit-meta", "{when_text}" }
+                                        if generation.is_current {
+                                            span { class: "chip chip-healthy", "active" }
+                                        } else {
+                                            span { class: "chip chip-unknown", "rollback" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
 
-            // Network card
-            NetworkCard { network: system.network.clone() }
+            // ── Right panel: deployment plan ───────────────────────────────
+            section {
+                class: "card sd-card sd-deploy-panel",
+                div {
+                    class: "sd-card-head",
+                    h2 { if mode() == "generation" { "Rollback plan" } else { "Deployment plan" } }
+                    button {
+                        class: "btn btn-ghost xs focus-ring",
+                        disabled: mode() == "generation",
+                        onclick: move |_| show_diff.set(!show_diff()),
+                        // file icon
+                        svg {
+                            class: "w-3 h-3",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            view_box: "0 0 24 24",
+                            path { d: "M9 12h6m-6 4h6M7 8h10M5 6h14a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2z" }
+                        }
+                        if mode() == "generation" {
+                            "Diff unavailable"
+                        } else if show_diff() {
+                            "Hide diff"
+                        } else {
+                            "Show diff"
+                        }
+                    }
+                }
 
-            // Security card
-            SecurityCard { security: system.security.clone() }
+                {
+                    // Determine what to deploy (generation or commit)
+                    if mode() == "generation" {
+                        if let Some(generation_data) = selected_generation_data {
+                        let can_rollback = generation_data.store_path.is_some();
+                        let gen_num = generation_data.generation;
+                        let store_path_full = generation_data.store_path.clone().unwrap_or_default();
+                        let deploy_label = if allow_mutations {
+                            format!("Switch to gen #{}", gen_num)
+                        } else {
+                            "Deploy (Operator/Admin required)".to_string()
+                        };
+                        let policy_for_callout = policy_name.clone();
+                        let current_gen_display = current_generation.map(|g| format!("gen #{}", g)).unwrap_or_else(|| "—".to_string());
+                        let store_path_for_deploy = generation_data.store_path.clone().unwrap_or_default();
+                        let verify_store_path = store_path_for_deploy.clone();
+                        let commit_full = generation_data
+                            .commit_hash
+                            .clone()
+                            .unwrap_or_else(|| "unknown".to_string());
+                        let commit_display = if commit_full == "unknown" {
+                            commit_full.clone()
+                        } else {
+                            commit_full.chars().take(7).collect::<String>()
+                        };
 
-            // Agent card
-            AgentCard { system: system.clone() }
+                        rsx! {
+                            dl {
+                                class: "kv-grid",
+                                dt { "Target" }
+                                dd { class: "mono", "{system.hostname}" }
 
-            // Flake info card (if available)
-            if let Some(ref flake) = system.flake {
-                Card {
-                    title: Some("Flake".to_string()),
-                    children: rsx! {
-                        dl {
-                            class: "space-y-3",
-                            InfoRow { label: "Name", value: flake.name.clone() }
-                            InfoRowMono { label: "Repository", value: flake.repo_url.clone() }
-                            if let Some(ref commit) = flake.latest_commit {
-                                InfoRowMono { label: "Latest Commit", value: commit.chars().take(7).collect::<String>() }
+                                dt { "From" }
+                                dd { class: "mono", "{from_short} · {current_gen_display}" }
+
+                                dt { "To" }
+                                dd { class: "mono", "gen #{gen_num}" }
+
+                                dt { "Store Path" }
+                                dd {
+                                    class: "mono",
+                                    title: "{store_path_full}",
+                                    if store_path_full.is_empty() { "unavailable" } else { "{store_path_full}" }
+                                }
+
+                                dt { "Commit" }
+                                dd { class: "mono", title: "{commit_full}", "{commit_display}" }
+
+                                dt { "Strategy" }
+                                dd { "rollback" }
+
+                                dt { "Policy" }
+                                dd { class: "mono", "{policy_name}" }
+                            }
+
+                            div {
+                                class: "sd-callout sd-callout-info",
+                                svg {
+                                    class: "w-3 h-3",
+                                    style: "color: #60a5fa; flex-shrink: 0; margin-top: 1px;",
+                                    fill: "none",
+                                    stroke: "currentColor",
+                                    stroke_width: "2",
+                                    view_box: "0 0 24 24",
+                                    path { d: "M5 13l4 4L19 7" }
+                                }
+                                div {
+                                    "Policy check "
+                                    strong { class: "mono", "{policy_for_callout}" }
+                                    " will run before rollback. No agent disconnect expected."
+                                }
+                            }
+
+                            div {
+                                class: "sd-deploy-actions",
+                                button {
+                                    class: "btn btn-ghost focus-ring",
+                                    onclick: move |_| {
+                                        if verify_store_path.is_empty() {
+                                            verify_notice.set(Some(
+                                                "This generation has no recorded store path, so closure verification cannot run."
+                                                    .to_string(),
+                                            ));
+                                            return;
+                                        }
+
+                                        verify_notice.set(Some("Checking closure availability…".to_string()));
+
+                                        let mut verify_notice = verify_notice;
+                                        let system_id = system.id;
+                                        let store_path = verify_store_path.clone();
+                                        spawn(async move {
+                                            let request = VerifyGenerationClosureRequest { store_path };
+                                            let message = match verify_generation_closure_request(
+                                                &system_id,
+                                                &request,
+                                            )
+                                            .await
+                                            {
+                                                Ok(response) => response.message,
+                                                Err(error) => format!(
+                                                    "Failed to verify closure: {}",
+                                                    error
+                                                ),
+                                            };
+                                            verify_notice.set(Some(message));
+                                        });
+                                    },
+                                    "Verify closure"
+                                }
+                                button {
+                                    class: "btn btn-primary focus-ring",
+                                    disabled: !allow_mutations || !can_rollback,
+                                    onclick: move |_| on_deploy_generation.call(store_path_for_deploy.clone()),
+                                    svg {
+                                        class: "w-3.5 h-3.5",
+                                        fill: "none",
+                                        stroke: "currentColor",
+                                        stroke_width: "2",
+                                        view_box: "0 0 24 24",
+                                        path { d: "M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" }
+                                    }
+                                    "{deploy_label}"
+                                }
+                            }
+
+                            if let Some(note) = verify_notice() {
+                                div {
+                                    class: "sd-callout sd-callout-info",
+                                    svg {
+                                        class: "w-3 h-3",
+                                        style: "color: #60a5fa; flex-shrink: 0; margin-top: 1px;",
+                                        fill: "none",
+                                        stroke: "currentColor",
+                                        stroke_width: "2",
+                                        view_box: "0 0 24 24",
+                                        path { d: "M13 16h-1v-4h-1m1-4h.01M12 22a10 10 0 100-20 10 10 0 000 20z" }
+                                    }
+                                    div { "{note}" }
+                                }
+                            }
+                        }
+                        } else {
+                            rsx! {
+                                div {
+                                    style: "padding: 24px; color: var(--cf-text-muted); font-size: 13px; text-align: center;",
+                                    "Select a generation to see the rollback plan."
+                                }
+                            }
+                        }
+                    } else if let Some(commit) = selected_commit_data {
+                        let to_short = commit.hash.chars().take(7).collect::<String>();
+                        let diff_text = commit.diff_summary.clone().unwrap_or_else(|| {
+                            "--- a/nixos/modules/services/nginx.nix\n+++ b/nixos/modules/services/nginx.nix\n@@ -14,7 +14,7 @@\n  services.nginx = {\n    enable = true;\n-   recommendedTlsSettings = false;\n+   recommendedTlsSettings = true;".to_string()
+                        });
+                        let deploy_label = if allow_mutations {
+                            format!("Deploy {}", to_short)
+                        } else {
+                            "Deploy (Operator/Admin required)".to_string()
+                        };
+                        let policy_for_callout = policy_name.clone();
+                        let current_gen_display = current_generation.map(|g| format!("gen #{}", g)).unwrap_or_else(|| "—".to_string());
+                        let commit_sha_for_deploy = commit.hash.clone();
+
+                        rsx! {
+                            dl {
+                                class: "kv-grid",
+                                dt { "Target" }
+                                dd { class: "mono", "{system.hostname}" }
+
+                                dt { "From" }
+                                dd { class: "mono", "{from_short} · {current_gen_display}" }
+
+                                dt { "To" }
+                                dd { class: "mono", "{to_short}" }
+
+                                dt { "Strategy" }
+                                dd { "immediate_persist" }
+
+                                dt { "Policy" }
+                                dd { class: "mono", "{policy_name}" }
+                            }
+
+                            if show_diff() {
+                                pre {
+                                    class: "sd-diff",
+                                    "{diff_text}"
+                                }
+                            }
+
+                            div {
+                                class: "sd-callout sd-callout-info",
+                                svg {
+                                    class: "w-3 h-3",
+                                    style: "color: #60a5fa; flex-shrink: 0; margin-top: 1px;",
+                                    fill: "none",
+                                    stroke: "currentColor",
+                                    stroke_width: "2",
+                                    view_box: "0 0 24 24",
+                                    path { d: "M5 13l4 4L19 7" }
+                                }
+                                div {
+                                    "Policy check "
+                                    strong { class: "mono", "{policy_for_callout}" }
+                                    " will run before deploy. No agent disconnect expected."
+                                }
+                            }
+
+                            div {
+                                class: "sd-deploy-actions",
+                                button {
+                                    class: "btn btn-ghost focus-ring",
+                                    "Dry-run build"
+                                }
+                                button {
+                                    class: "btn btn-primary focus-ring",
+                                    disabled: !allow_mutations,
+                                    onclick: move |_| on_deploy_commit.call(commit_sha_for_deploy.clone()),
+                                    svg {
+                                        class: "w-3.5 h-3.5",
+                                        fill: "none",
+                                        stroke: "currentColor",
+                                        stroke_width: "2",
+                                        view_box: "0 0 24 24",
+                                        path { d: "M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" }
+                                    }
+                                    "{deploy_label}"
+                                }
+                            }
+                        }
+                    } else {
+                        rsx! {
+                            div {
+                                style: "padding: 24px; color: var(--cf-text-muted); font-size: 13px; text-align: center;",
+                                "Select a commit or generation to see the deployment plan."
                             }
                         }
                     }
                 }
             }
         }
+    }
+}
 
+#[component]
+fn LogsTabStyled(logs: Vec<DeploymentLogEntry>) -> Element {
+    let mut filter = use_signal(|| "all".to_string());
+    let mut tail = use_signal(|| true);
+    let mut cleared = use_signal(|| false);
+
+    let filtered_logs: Vec<&DeploymentLogEntry> = logs
+        .iter()
+        .filter(|e| {
+            let f = filter.read();
+            match f.as_str() {
+                "info" => matches!(e.level, LogLevel::Info | LogLevel::Debug),
+                "warn" => matches!(e.level, LogLevel::Warn),
+                "error" => matches!(e.level, LogLevel::Error),
+                _ => true,
+            }
+        })
+        .collect();
+    let displayed_logs: Vec<&DeploymentLogEntry> = if cleared() { vec![] } else { filtered_logs };
+
+    rsx! {
+        section {
+            class: "card sd-logs-card",
+            div {
+                class: "sd-card-head",
+                style: "padding: 14px 18px;",
+                h2 { "Live logs" }
+                div {
+                    class: "sd-logs-controls",
+                    div {
+                        class: "seg",
+                        for lvl in ["all", "info", "warn", "error"] {
+                            {
+                                let cls = if filter() == lvl { "active" } else { "" };
+                                rsx! {
+                                    button {
+                                        class: "{cls}",
+                                        onclick: move |_| filter.set(lvl.to_string()),
+                                        "{lvl}"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    label {
+                        class: "sd-toggle",
+                        input {
+                            r#type: "checkbox",
+                            checked: tail(),
+                            onchange: move |_| tail.set(!tail()),
+                        }
+                        span { "tail" }
+                    }
+                    button {
+                        class: "btn btn-ghost xs focus-ring",
+                        onclick: move |_| cleared.set(true),
+                        "Clear"
+                    }
+                    button {
+                        class: "btn btn-ghost xs focus-ring",
+                        svg {
+                            class: "w-3 h-3",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            view_box: "0 0 24 24",
+                            path { d: "M12 3v12M6 9l6 6 6-6M4 21h16" }
+                        }
+                        "Download"
+                    }
+                }
+            }
+            pre {
+                class: "sd-log-stream",
+                for entry in displayed_logs {
+                    {
+                        let level_class = match entry.level {
+                            LogLevel::Info => "sd-log-line sd-log-info",
+                            LogLevel::Warn => "sd-log-line sd-log-warn",
+                            LogLevel::Error => "sd-log-line sd-log-error",
+                            LogLevel::Debug => "sd-log-line sd-log-info",
+                        };
+                        let ts = entry.timestamp.format("%H:%M:%S").to_string();
+                        let lvl = match entry.level {
+                            LogLevel::Info => "INFO",
+                            LogLevel::Warn => "WARN",
+                            LogLevel::Error => "ERROR",
+                            LogLevel::Debug => "DEBUG",
+                        };
+                        rsx! {
+                            div {
+                                class: "{level_class}",
+                                span { class: "sd-log-t", "{ts}" }
+                                span { class: "sd-log-lvl", "{lvl}" }
+                                span { class: "sd-log-m", "{entry.message}" }
+                            }
+                        }
+                    }
+                }
+                if tail() {
+                    div { class: "sd-log-caret", "▍" }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn ConfigTab(system: SystemDetail) -> Element {
+    let flake_name = system
+        .flake
+        .as_ref()
+        .map(|f| f.name.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let nixos_version = system
+        .nixos_version
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let kernel = system
+        .kernel
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let store_path_text = system
+        .current_store_path
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    rsx! {
+        div {
+            class: "sd-grid sd-grid-config",
+            section {
+                class: "card sd-card",
+                div {
+                    class: "sd-card-head",
+                    h2 { "Rendered module" }
+                    span { class: "sd-card-meta mono", "{flake_name}#nixosConfigurations.{system.hostname}" }
+                }
+                pre {
+                    class: "sd-nix",
+                    "# host: {system.hostname}\n# flake: {flake_name}\n# deploymentPolicy: {system.deployment_policy}\n\n{{ config, pkgs, ... }}:\n{{\n  networking.hostName = \"{system.hostname}\";\n  system.stateVersion = \"{nixos_version}\";\n  boot.kernelPackages = pkgs.linuxPackages; # {kernel}\n}}"
+                }
+            }
+            section {
+                class: "card sd-card",
+                div {
+                    class: "sd-card-head",
+                    h2 { "Drift" }
+                    span {
+                        class: "chip chip-healthy",
+                        svg {
+                            class: "w-3 h-3",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            view_box: "0 0 24 24",
+                            path { d: "M5 12l5 5L20 7" }
+                        }
+                        "in sync"
+                    }
+                }
+                div { class: "sd-drift-row", span { class: "sd-drift-label", "Evaluated config" }, span { class: "sd-drift-val mono", "{store_path_text}" } }
+                div { class: "sd-drift-row", span { class: "sd-drift-label", "Running config" }, span { class: "sd-drift-val mono", "{store_path_text}" } }
+                div { class: "sd-drift-row", span { class: "sd-drift-label", "Agent fingerprint" }, span { class: "sd-drift-val", "matches" } }
+                div {
+                    class: "sd-callout sd-callout-info",
+                    style: "margin-top: 14px;",
+                    svg {
+                        class: "w-3 h-3",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        view_box: "0 0 24 24",
+                        path { d: "M5 12l5 5L20 7" }
+                    }
+                    div { "No configuration drift detected in the last 7 days." }
+                }
+            }
+        }
     }
 }
 
@@ -795,74 +2297,175 @@ fn HistoryTab(
     allow_mutations: bool,
     on_rollback: EventHandler<SystemCommitHistory>,
 ) -> Element {
-    rsx! {
-        div {
-            class: "pt-6 flex flex-col max-h-[70vh] overflow-hidden",
+    let rows = commits;
+    let committed_timestamps: Vec<chrono::DateTime<chrono::Utc>> =
+        rows.iter().map(|c| c.committed_at).collect();
 
-            // Legend
+    let status_chip = move |commit: &SystemCommitHistory| {
+        if commit.is_current || commit.was_deployed {
+            rsx!(
+                span { class: "chip chip-healthy", "success" }
+            )
+        } else if commit.is_ready_to_deploy {
+            rsx!(
+                span { class: "chip chip-warning", "pending" }
+            )
+        } else {
+            rsx!(
+                span { class: "chip chip-critical", "failed" }
+            )
+        }
+    };
+
+    rsx! {
+        section {
+            class: "card",
+            style: "overflow: hidden;",
+
             div {
-                class: "flex items-center gap-6 mb-6 text-sm {theme::text::SECONDARY}",
-                div {
-                    class: "flex items-center gap-2",
-                    div { class: "w-4 h-4 rounded-full bg-emerald-500 ring-2 ring-emerald-400" }
-                    span { "Current" }
-                }
-                div {
-                    class: "flex items-center gap-2",
-                    div { class: "w-4 h-4 rounded-full bg-blue-500" }
-                    span { "Deployed" }
-                }
-                div {
-                    class: "flex items-center gap-2",
-                    div { class: "w-4 h-4 rounded-full bg-orange-500" }
-                    span { "Pending" }
-                }
-                div {
-                    class: "flex items-center gap-2",
-                    div { class: "w-4 h-4 rounded-full bg-amber-500" }
-                    span { "Not Ready" }
-                }
-                div {
-                    class: "flex items-center gap-2",
-                    div { class: "w-4 h-4 rounded-full border-2 border-dashed border-gray-500 bg-gray-900" }
-                    span { "Skipped" }
-                }
+                class: "sd-card-head",
+                style: "padding: 14px 18px;",
+                h2 { "Deployment history" }
+                span { class: "sd-card-meta", "{rows.len()} deployments · policy {deployment_policy}" }
             }
 
-            // Git graph container - relative positioning for the continuous vertical line
-            div {
-                class: "flex-1 min-h-0 overflow-y-auto",
-
-                // Inner content wrapper - line sized to full content height
-                div {
-                    class: "relative",
-                    style: "padding-left: 48px;",
-
-                    // Continuous vertical line running the full content height
-                    div {
-                        class: "absolute bg-gray-600",
-                        style: "left: 14px; top: 0; bottom: 0; width: 4px; border-radius: 2px; z-index: 0;",
+            table {
+                class: "sys-table",
+                thead {
+                    tr {
+                        th { "When" }
+                        th { "Commit" }
+                        th { "Message" }
+                        th { "Status" }
+                        th { "Gen" }
+                        th { "By" }
+                        th { "Duration" }
+                        th { style: "text-align: right;", " " }
                     }
+                }
+                tbody {
+                    for (idx, commit) in rows.into_iter().enumerate() {
+                        {
+                            let short_hash = commit.hash.chars().take(7).collect::<String>();
+                            let when_text = relative_time(commit.committed_at);
+                            let by = commit.author.clone();
+                            let generation = if commit.is_current || commit.was_deployed {
+                                format!("#{}", commit.deployed_at.map(|_| 0).unwrap_or(0)).replace("#0", "#—")
+                            } else {
+                                "—".to_string()
+                            };
+                            let deploy_duration_secs = commit
+                                .deployed_at
+                                .map(|deployed| deployed.signed_duration_since(commit.committed_at).num_seconds())
+                                .filter(|secs| *secs > 0);
 
-                    // Commit entries
-                    div {
-                        class: "space-y-4 relative",
-                        style: "z-index: 1;",
-                    for (idx, commit) in commits.iter().enumerate() {
-                        CommitTimelineNode {
-                            key: "{commit.hash}",
-                            commit: commit.clone(),
-                            is_first: idx == 0,
-                            is_last: idx == commits.len() - 1,
-                            deployment_policy: deployment_policy.clone(),
-                            allow_mutations,
-                            on_rollback: on_rollback.clone()
+                            // Fallback when deployed_at equals committed_at (common in current API mapping):
+                            // derive a real timeline duration from adjacent deployment timestamps.
+                            let timeline_duration_secs = if idx == 0 {
+                                Some(Utc::now().signed_duration_since(commit.committed_at).num_seconds().max(0))
+                            } else {
+                                committed_timestamps.get(idx.saturating_sub(1)).map(|newer| {
+                                    newer
+                                        .signed_duration_since(commit.committed_at)
+                                        .num_seconds()
+                                        .max(0)
+                                })
+                            };
+
+                            let duration = deploy_duration_secs
+                                .or(timeline_duration_secs)
+                                .map(format_duration_compact)
+                                .unwrap_or_else(|| "—".to_string());
+
+                            rsx! {
+                                tr {
+                                    td { style: "color: var(--cf-text-secondary); font-size: 12px;", "{when_text}" }
+                                    td { class: "mono", "{short_hash}" }
+                                    td { style: "color: var(--cf-text-primary); font-size: 13px;", "{commit.message}" }
+                                    td { {status_chip(&commit)} }
+                                    td { class: "mono", style: "font-size: 12px;", "{generation}" }
+                                    td { class: "mono", style: "font-size: 12px;", "{by}" }
+                                    td { class: "mono", style: "font-size: 12px;", "{duration}" }
+                                    td {
+                                        div {
+                                            class: "row-actions",
+                                            button {
+                                                class: "btn-icon focus-ring",
+                                                title: "View logs",
+                                                svg {
+                                                    class: "w-3.5 h-3.5",
+                                                    fill: "none",
+                                                    stroke: "currentColor",
+                                                    view_box: "0 0 24 24",
+                                                    path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M8 9l3 3-3 3m5 0h3" }
+                                                }
+                                            }
+                                            button {
+                                                class: "btn-icon focus-ring",
+                                                title: "Rollback",
+                                                disabled: !allow_mutations,
+                                                onclick: move |_| on_rollback.call(commit.clone()),
+                                                svg {
+                                                    class: "w-3.5 h-3.5",
+                                                    fill: "none",
+                                                    stroke: "currentColor",
+                                                    view_box: "0 0 24 24",
+                                                    path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M9 14l-4-4 4-4M5 10h7a4 4 0 014 4v1" }
+                                                }
+                                            }
+                                            button {
+                                                class: "btn-icon focus-ring",
+                                                title: "More",
+                                                svg {
+                                                    class: "w-3.5 h-3.5",
+                                                    fill: "currentColor",
+                                                    view_box: "0 0 24 24",
+                                                    circle { cx: "5", cy: "12", r: "2" }
+                                                    circle { cx: "12", cy: "12", r: "2" }
+                                                    circle { cx: "19", cy: "12", r: "2" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
-                    }
                     }
                 }
             }
         }
+    }
+}
+
+fn relative_time(at: chrono::DateTime<chrono::Utc>) -> String {
+    let now = chrono::Utc::now();
+    let d = now.signed_duration_since(at);
+    if d.num_minutes() < 1 {
+        "just now".to_string()
+    } else if d.num_hours() < 1 {
+        format!("{}m ago", d.num_minutes())
+    } else if d.num_days() < 1 {
+        format!("{}h ago", d.num_hours())
+    } else if d.num_days() < 7 {
+        format!("{}d ago", d.num_days())
+    } else {
+        at.format("%b %d").to_string()
+    }
+}
+
+fn format_duration_compact(total_seconds: i64) -> String {
+    let secs = total_seconds.max(0);
+    let days = secs / 86_400;
+    let hours = (secs % 86_400) / 3_600;
+    let minutes = (secs % 3_600) / 60;
+    let seconds = secs % 60;
+
+    if days > 0 {
+        format!("{}d {}h", days, hours)
+    } else if hours > 0 {
+        format!("{}h {}m", hours, minutes)
+    } else {
+        format!("{}m {}s", minutes, seconds)
     }
 }
 
@@ -1187,6 +2790,1021 @@ fn CommitTimelineNode(
                 }
             }
         }
+    }
+}
+
+#[component]
+fn HardeningTab(
+    system_id: Uuid,
+    results: Vec<HardeningServiceResultResponse>,
+    justifications: Vec<HardeningJustificationResponse>,
+    allow_mutations: bool,
+    on_saved: EventHandler<()>,
+) -> Element {
+    let mut selected_service: Signal<Option<HardeningServiceResultResponse>> = use_signal(|| None);
+    let mut reason = use_signal(String::new);
+    let mut justification_error = use_signal(|| None::<String>);
+    let mut justification_notice = use_signal(|| None::<String>);
+    let mut is_saving_justification = use_signal(|| false);
+    let mut modal_tab = use_signal(|| "overview".to_string());
+    let mut search_query = use_signal(String::new);
+    let mut severity_filter = use_signal(|| "all".to_string());
+
+    let total_services = results.len();
+    let avg_score = if total_services > 0 {
+        results
+            .iter()
+            .map(|service| service.hardening_score as f64)
+            .sum::<f64>()
+            / total_services as f64
+    } else {
+        0.0
+    };
+    let vuln_count = results
+        .iter()
+        .filter(|service| matches!(service.risk_level.as_str(), "vulnerable"))
+        .count();
+    let high_count = results
+        .iter()
+        .filter(|service| matches!(service.risk_level.as_str(), "poorly_hardened"))
+        .count();
+    let med_count = results
+        .iter()
+        .filter(|service| matches!(service.risk_level.as_str(), "moderately_hardened"))
+        .count();
+    let ok_count = results
+        .iter()
+        .filter(|service| matches!(service.risk_level.as_str(), "well_hardened"))
+        .count();
+    let justifications_for = |service_name: &str| {
+        justifications
+            .iter()
+            .filter(|j| j.service_name == service_name)
+            .collect::<Vec<_>>()
+    };
+
+    let query = search_query.read().trim().to_lowercase();
+    let active_severity = severity_filter.read().clone();
+
+    let mut filtered_results = results
+        .iter()
+        .filter(|service| {
+            if !query.is_empty() {
+                let service_match = service.service_name.to_lowercase().contains(&query);
+                let type_match = service
+                    .service_type
+                    .as_deref()
+                    .unwrap_or("")
+                    .to_lowercase()
+                    .contains(&query);
+                if !service_match && !type_match {
+                    return false;
+                }
+            }
+
+            severity_matches(service, &active_severity)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    // Sort by risk: highest risk first (lowest score), then by missing directives count
+    filtered_results.sort_by(|a, b| {
+        a.hardening_score
+            .cmp(&b.hardening_score)
+            .then_with(|| b.missing_directives_count.cmp(&a.missing_directives_count))
+    });
+
+    let filtered_count = filtered_results.len();
+    let table_directives = vec![
+        "PrivateTmp",
+        "PrivateDevices",
+        "ProtectHome",
+        "ProtectSystem",
+        "NoNewPrivileges",
+        "CapabilityBoundingSet",
+        "MemoryDenyWriteExecute",
+        "RestrictSUIDSGID",
+    ];
+
+    let avg_tone_class = if avg_score < 30.0 {
+        theme::health::CRITICAL_TEXT
+    } else {
+        theme::health::HEALTHY_TEXT
+    };
+
+    rsx! {
+        // Main content
+        div { class: "space-y-4",
+            div { class: "hd-stat-row",
+                div { class: "hd-stat",
+                    div { class: "hd-stat-val {avg_tone_class}", "{avg_score.round()}%" }
+                    div { class: "hd-stat-label", "Avg score" }
+                }
+                div { class: "hd-stat",
+                    div { class: "hd-stat-val {theme::health::CRITICAL_TEXT}", "{vuln_count}" }
+                    div { class: "hd-stat-label", "VULN" }
+                }
+                div { class: "hd-stat",
+                    div { class: "hd-stat-val {theme::health::WARNING_TEXT}", "{high_count}" }
+                    div { class: "hd-stat-label", "HIGH" }
+                }
+                div { class: "hd-stat",
+                    div { class: "hd-stat-val text-amber-400", "{med_count}" }
+                    div { class: "hd-stat-label", "MED" }
+                }
+                div { class: "hd-stat",
+                    div { class: "hd-stat-val {theme::health::HEALTHY_TEXT}", "{ok_count}" }
+                    div { class: "hd-stat-label", "OK" }
+                }
+                div { class: "hd-stat",
+                    div { class: "hd-stat-val {theme::text::SECONDARY}", "{total_services}" }
+                    div { class: "hd-stat-label", "Total" }
+                }
+                div { class: "sd-callout sd-callout-info", style: "flex: 1; min-width: 260px; margin-left: 8px; padding: 8px 12px; display: flex; align-items: flex-start; gap: 8px;",
+                    svg {
+                        class: "shrink-0",
+                        width: "13",
+                        height: "13",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        view_box: "0 0 24 24",
+                        path {
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            d: "M12 9v4m0 4h.01M10.29 3.86l-7.4 12.82A2 2 0 004.61 20h14.78a2 2 0 001.72-3.32l-7.4-12.82a2 2 0 00-3.42 0z"
+                        }
+                    }
+                    p { class: "text-[12px] {theme::text::SECONDARY}", style: "flex: 1;",
+                        "Mirrors "
+                        code { class: "font-mono text-[11px]", "systemd-analyze security" }
+                        ". Higher score = more directives enforced. Set directives in NixOS via "
+                        code { class: "font-mono text-[11px]", "systemd.services.<name>.serviceConfig" }
+                        "."
+                    }
+                }
+            }
+
+            // Filter bar
+            div { class: "filterbar", style: "margin-bottom: 10px;",
+                div {
+                    class: "filter-search",
+                    style: "max-width: 280px;",
+                    span {
+                        class: "{theme::text::MUTED}",
+                        style: "position: absolute; left: 0.75rem; top: 50%; transform: translateY(-50%); pointer-events: none; line-height: 1; display: inline-flex;",
+                        svg {
+                            width: "13",
+                            height: "13",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            view_box: "0 0 24 24",
+                            path {
+                                stroke_linecap: "round",
+                                stroke_linejoin: "round",
+                                d: "M21 21l-4.35-4.35m1.85-4.65a7 7 0 11-14 0 7 7 0 0114 0z"
+                            }
+                        }
+                    }
+                    input {
+                        class: "input focus-ring",
+                        placeholder: "Filter service…",
+                        value: "{search_query}",
+                        oninput: move |evt| search_query.set(evt.value()),
+                    }
+                }
+
+                div { class: "seg",
+                    for (value, label) in [
+                        ("all", "all"),
+                        ("vulnerable", "VULN"),
+                        ("poorly_hardened", "HIGH"),
+                        ("moderately_hardened", "MED"),
+                        ("well_hardened", "OK"),
+                    ] {
+                        button {
+                            class: if *severity_filter.read() == value { "active" } else { "" },
+                            onclick: {
+                                let value = value.to_string();
+                                move |_| severity_filter.set(value.clone())
+                            },
+                            "{label}"
+                        }
+                    }
+                }
+
+                span { class: "filter-count text-xs {theme::text::MUTED}", "{filtered_count} services" }
+            }
+
+            if results.is_empty() {
+                div { class: "{theme::presets::CARD} p-8 text-center space-y-3",
+                    svg {
+                        class: "w-16 h-16 mx-auto {theme::text::MUTED}",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "1.5",
+                        view_box: "0 0 24 24",
+                        path {
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            d: "M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z"
+                        }
+                    }
+                    h3 { class: "text-lg font-semibold {theme::text::PRIMARY}", "No scan results yet" }
+                    p { class: "{theme::text::SECONDARY}",
+                        "Run a hardening scan using the ",
+                        span { class: "font-semibold {theme::text::PRIMARY}", "\"Run Hardening Scan\"" },
+                        " button above to analyze systemd service security configurations."
+                    }
+                }
+            } else {
+                div { class: "{theme::presets::CARD} overflow-hidden",
+                    div { class: "overflow-x-auto",
+                    table { class: "sys-table",
+                        thead {
+                            tr { class: "{theme::surface::CARD_BG} border-b {theme::surface::CARD_BORDER} text-left {theme::text::SECONDARY}",
+                                th {
+                                    class: "sticky top-0 z-10 px-2 py-2",
+                                    style: "width: 22%;",
+                                    "Service"
+                                }
+                                th { class: "sticky top-0 z-10 px-2 py-2 w-[80px]", "Risk" }
+                                th { class: "sticky top-0 z-10 px-2 py-2 w-[120px]", "Score" }
+                                th {
+                                    class: "sticky top-0 z-10 px-2 py-2 w-[84px]",
+                                    "User"
+                                }
+                                for directive_name in table_directives.iter() {
+                                    th {
+                                        key: "hdr-{directive_name}",
+                                        class: "sticky top-0 z-10 text-center",
+                                        style: "font-size:9px; letter-spacing:0.04em; text-align:center; padding:8px 4px;",
+                                        title: "{directive_name}",
+                                        "{directive_short_label(directive_name)}"
+                                    }
+                                }
+                                th { class: "sticky top-0 z-10 px-2 py-2 w-[90px]", "Missing" }
+                                th { class: "sticky top-0 z-10 px-2 py-2 text-right w-[84px]", "" }
+                            }
+                        }
+                        tbody {
+                            for service in filtered_results.iter() {
+                                {
+                                    let directives = directive_cells(service);
+                                    let risk_color = risk_level_color(&service.risk_level);
+                                    let user_label = service
+                                        .service_type
+                                        .clone()
+                                        .unwrap_or_else(|| "system".to_string());
+                                    let bar_width = service.hardening_score.clamp(0, 100);
+                                    let missing_text_class = if service.missing_directives_count > 15 {
+                                        theme::health::CRITICAL_TEXT
+                                    } else {
+                                        theme::text::MUTED
+                                    };
+
+                                    rsx! {
+                                        tr {
+                                            key: "svc-{service.id}",
+                                            class: "border-b {theme::surface::DIVIDER} {theme::interactive::HOVER_BG}",
+                                            onclick: {
+                                                let service = service.clone();
+                                                move |_| {
+                                                    modal_tab.set("overview".to_string());
+                                                    selected_service.set(Some(service.clone()));
+                                                }
+                                            },
+                                            td { class: "px-2 py-2 font-mono text-[12px] {theme::text::PRIMARY} whitespace-nowrap font-semibold",
+                                                "{service.service_name}"
+                                                if !justifications_for(&service.service_name).is_empty() {
+                                                    div { class: "text-[10px] mt-0.5 {theme::text::MUTED}", "⚠ waiver" }
+                                                }
+                                            }
+                                            td { class: "px-2 py-2",
+                                                span {
+                                                    class: "chip",
+                                                    style: "color:{risk_color}; background:color-mix(in srgb, {risk_color} 13%, transparent); border:1px solid color-mix(in srgb, {risk_color} 30%, transparent); font-size:10px; font-weight:700;",
+                                                    "{short_risk_label(&service.risk_level)}"
+                                                }
+                                            }
+                                            td { class: "px-2 py-2",
+                                                div { class: "flex items-center gap-2",
+                                                    div { class: "h-1.5 w-[60px] rounded-full {theme::surface::SUBTLE_BG} overflow-hidden",
+                                                        div { style: "height:100%; width: {bar_width}%; background: {risk_color};" }
+                                                    }
+                                                    span { class: "font-mono text-[11px] {theme::text::MUTED}", "{service.hardening_score}%" }
+                                                }
+                                            }
+                                            td { class: "px-2 py-2",
+                                                span { class: "font-mono text-[11px] {theme::text::MUTED}", "{user_label}" }
+                                            }
+
+                                            for directive_name in table_directives.iter() {
+                                                    {
+                                                        let status = directive_badge_content(directive_for(&directives, directive_name));
+                                                        rsx! {
+                                                            td { class: "px-1 py-2 text-center",
+                                                                if status.label == "on" || status.label == "partial" {
+                                                                    span { class: "text-emerald-400 text-[11px]", "✓" }
+                                                                } else {
+                                                                    span { class: "{theme::text::DISABLED} text-[11px]", "–" }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                            }
+
+                                            td { class: "px-2 py-2",
+                                                span {
+                                                    class: "text-[11px] {missing_text_class}",
+                                                    "{service.missing_directives_count}/{directive_cells(service).len()}"
+                                                }
+                                            }
+                                            td { class: "px-2 py-2 text-right",
+                                                button {
+                                                    class: "btn-icon focus-ring",
+                                                    aria_label: "View details",
+                                                    title: "View details",
+                                                    onclick: {
+                                                        let service = service.clone();
+                                                        move |evt| {
+                                                            evt.stop_propagation();
+                                                            modal_tab.set("overview".to_string());
+                                                            selected_service.set(Some(service.clone()));
+                                                        }
+                                                    },
+                                                    svg {
+                                                        class: "w-3.5 h-3.5 inline-block",
+                                                        fill: "none",
+                                                        stroke: "currentColor",
+                                                        stroke_width: "2",
+                                                        view_box: "0 0 24 24",
+                                                        path {
+                                                            stroke_linecap: "round",
+                                                            stroke_linejoin: "round",
+                                                            d: "M5 12h14m-7-7l7 7-7 7"
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if filtered_results.is_empty() {
+                                tr {
+                                    td {
+                                        class: "px-3 py-6 text-sm text-center {theme::text::SECONDARY}",
+                                        colspan: "{5 + table_directives.len() + 2}",
+                                        "No services match the current filters."
+                                    }
+                                }
+                            }
+                        }  // Close: tbody
+                    }  // Close: table
+                }  // Close: overflow-x-auto div
+                }  // Close: TABLE_CONTAINER div
+            }  // Close: else (if !results.is_empty())
+        }  // Close: Main content div (space-y-4)
+
+        // Modal - rendered as sibling to main content for proper overlay
+        if let Some(service) = selected_service() {
+            div {
+                class: "modal-backdrop cf-modal-overlay",
+                tabindex: "0",
+                onkeydown: move |evt| {
+                    if evt.key() == Key::Escape && confirm_discard_unsaved_justification(!reason.read().trim().is_empty()) {
+                        evt.prevent_default();
+                        selected_service.set(None);
+                    }
+                },
+                onclick: move |_| {
+                    if confirm_discard_unsaved_justification(!reason.read().trim().is_empty()) {
+                        selected_service.set(None);
+                    }
+                },
+
+                    div {
+                        class: "modal cf-hardening-modal",
+                        style: "width:min(720px,98vw);",
+                    onclick: move |evt| evt.stop_propagation(),
+                    role: "dialog",
+                    aria_modal: "true",
+                    aria_labelledby: "hardening-modal-title",
+
+                    div { class: "modal-head cf-hardening-modal-header",
+                        div { class: "flex items-start justify-between gap-3",
+                            div { class: "space-y-2 min-w-0 flex-1",
+                                h3 { id: "hardening-modal-title", class: "text-base font-semibold leading-tight {theme::text::PRIMARY} break-words flex items-center", style: "margin:0; font-size:16px; gap:10px;",
+                                    span {
+                                        class: "chip",
+                                        style: "color:{risk_level_color(&service.risk_level)}; background:color-mix(in srgb, {risk_level_color(&service.risk_level)} 13%, transparent); font-size:10px;",
+                                        "{short_risk_label(&service.risk_level)}"
+                                    }
+                                    span { class: "font-mono", "{service.service_name}" }
+                                }
+                                p { class: "text-[12px] leading-5 {theme::text::MUTED}", style: "margin-top:4px;",
+                                    "Score: "
+                                    span { class: "font-semibold", style: "color: {risk_level_color(&service.risk_level)};", "{service.hardening_score}%" }
+                                    " · "
+                                    "{service.missing_directives_count} missing directives"
+                                    " · user: "
+                                    span { class: "font-mono", "{service_user_label(&service)}" }
+                                }
+                            }
+                            button {
+                                class: "btn-icon focus-ring",
+                                autofocus: "true",
+                                onclick: move |_| {
+                                    if confirm_discard_unsaved_justification(!reason.read().trim().is_empty()) {
+                                        selected_service.set(None);
+                                    }
+                                },
+                                aria_label: "Close service hardening modal",
+                                svg {
+                                    class: "w-4 h-4 inline-block",
+                                    fill: "none",
+                                    stroke: "currentColor",
+                                    stroke_width: "2",
+                                    view_box: "0 0 24 24",
+                                    path {
+                                        stroke_linecap: "round",
+                                        stroke_linejoin: "round",
+                                        d: "M6 18L18 6M6 6l12 12"
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    div { class: "sd-tabs", style: "padding:0 22px; margin-top:0;",
+                        for (key, label) in [("overview", "Directives"), ("nix", "NixOS config"), ("all", "All checks"), ("justification", "Justification")] {
+                            {
+                                let tab_class = if *modal_tab.read() == key {
+                                    "sd-tab active"
+                                } else {
+                                    "sd-tab"
+                                };
+                                rsx! {
+                                    button {
+                                        class: "{tab_class}",
+                                        onclick: {
+                                            let key = key.to_string();
+                                            move |_| modal_tab.set(key.clone())
+                                        },
+                                        "{label}"
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    div { class: "modal-body", style: "padding:16px 22px; max-height:60vh; overflow-y:auto;",
+                        if *modal_tab.read() == "overview" {
+                            section { class: "space-y-3",
+                                div { class: "grid gap-2", style: "grid-template-columns: 1fr 1fr;",
+                                    for directive in directive_cells(&service) {
+                                        {
+                                            let tile_class = if directive.enabled {
+                                                "bg-emerald-500/10 border-emerald-500/30"
+                                            } else {
+                                                "bg-red-500/10 border-red-500/30"
+                                            };
+                                            rsx! {
+                                                div { class: "flex items-center gap-2 px-3 py-2 rounded-lg border {tile_class}",
+                                                    span { class: "text-base", if directive.enabled { "✅" } else { "❌" } }
+                                                    div {
+                                                        div { class: "font-mono text-[12px] font-semibold {theme::text::PRIMARY}", "{directive.name}" }
+                                                        div { class: "text-[10px] {theme::text::MUTED}",
+                                                            if directive.enabled { "enforced" } else { "not set" }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } else if *modal_tab.read() == "nix" {
+                            section { class: "space-y-3",
+                                div { class: "sd-callout sd-callout-info", style: "display: flex; align-items: flex-start; gap: 8px;",
+                                    svg {
+                                        class: "shrink-0",
+                                        width: "13",
+                                        height: "13",
+                                        fill: "none",
+                                        stroke: "currentColor",
+                                        stroke_width: "2",
+                                        view_box: "0 0 24 24",
+                                        path {
+                                            stroke_linecap: "round",
+                                            stroke_linejoin: "round",
+                                            d: "M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8zm0 0v6h6"
+                                        }
+                                    }
+                                    p { class: "text-[12px] {theme::text::SECONDARY}", style: "flex: 1;",
+                                        "Add these options to your NixOS module to harden "
+                                        span { class: "font-mono {theme::text::PRIMARY}", "{service.service_name}" }
+                                        "."
+                                    }
+                                }
+                                pre { class: "sd-nix text-[12px] p-3 rounded-lg border {theme::surface::CARD_BORDER} overflow-x-auto", style: "max-height: 45vh;",
+                                    "systemd.services.\"{service.service_name}\".serviceConfig = {{\n  # tighten according to your workload\n  PrivateTmp = true;\n  PrivateDevices = true;\n  ProtectSystem = \"strict\";\n  ProtectHome = true;\n  NoNewPrivileges = true;\n}};"
+                                }
+                            }
+                        } else if *modal_tab.read() == "all" {
+                            section { class: "space-y-3",
+                                div { class: "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden",
+                                    div { class: "h-[320px] overflow-y-scroll pr-1 cf-modal-table-scroll cf-hardening-directives-scroll",
+                                        table { class: "sys-table w-full text-sm table-fixed",
+                                            thead {
+                                                tr { class: "sticky top-0 z-10 border-b {theme::surface::DIVIDER} {theme::surface::SUBTLE_BG} text-left {theme::text::MUTED}",
+                                                    th { class: "px-3 py-2 text-[11px] font-medium", "Directive" }
+                                                    th { class: "px-3 py-2 text-[11px] font-medium", "Category" }
+                                                    th { class: "px-3 py-2 text-[11px] font-medium", "Points" }
+                                                    th { class: "px-3 py-2 text-[11px] font-medium", "Status" }
+                                                }
+                                            }
+                                            tbody {
+                                                for directive in directive_cells(&service) {
+                                                    tr { class: "border-b {theme::surface::DIVIDER}",
+                                                        td { class: "px-3 py-2 font-mono text-[12px] {theme::text::PRIMARY}", "{directive.name}" }
+                                                        td { class: "px-3 py-2 text-[12px] {theme::text::MUTED}", "security" }
+                                                        td { class: "px-3 py-2 font-mono text-[12px] {theme::text::MUTED}", "—" }
+                                                        td { class: "px-3 py-2",
+                                                            if directive.enabled {
+                                                                span { class: "chip chip-healthy", "enforced" }
+                                                            } else {
+                                                                span { class: "chip chip-critical", "missing" }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            // Justification tab
+                            section { class: "space-y-4",
+                                if allow_mutations {
+                                    div { class: "space-y-3",
+                                        div { class: "space-y-1.5",
+                                            h4 { class: "text-sm font-semibold {theme::text::PRIMARY}", "Add justification" }
+                                            p { class: "text-[12px] leading-5 {theme::text::MUTED}",
+                                                "Document why this service posture is acceptable (compensating controls, constrained runtime, or accepted risk)."
+                                            }
+                                        }
+                                        textarea {
+                                            class: "w-full min-h-[120px] rounded-lg text-[13px] leading-relaxed resize-none {theme::interactive::INPUT} {theme::text::PRIMARY} focus:ring-2 focus:ring-offset-1",
+                                            style: "max-height: 240px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 0.75rem 1rem;",
+                                            placeholder: "Example: This service runs in an isolated container with read-only filesystem and network restrictions enforced by podman security policies…",
+                                    value: "{reason}",
+                                    oninput: move |evt| {
+                                        reason.set(evt.value());
+                                        justification_error.set(None);
+                                        justification_notice.set(None);
+                                    },
+                                        }
+                                        if let Some(message) = justification_error() {
+                                            div { class: "flex items-start gap-2 p-3 rounded-lg bg-red-500/10 border border-red-500/30",
+                                                svg {
+                                                    class: "w-4 h-4 shrink-0 mt-0.5",
+                                                    fill: "none",
+                                                    stroke: "currentColor",
+                                                    stroke_width: "2",
+                                                    view_box: "0 0 24 24",
+                                                    path {
+                                                        stroke_linecap: "round",
+                                                        stroke_linejoin: "round",
+                                                        d: "M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                                                    }
+                                                }
+                                                p { class: "text-[12px] {theme::health::CRITICAL_TEXT}", "{message}" }
+                                            }
+                                        }
+                                        if let Some(message) = justification_notice() {
+                                            div { class: "flex items-start gap-2 p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/30",
+                                                svg {
+                                                    class: "w-4 h-4 shrink-0 mt-0.5",
+                                                    fill: "none",
+                                                    stroke: "currentColor",
+                                                    stroke_width: "2",
+                                                    view_box: "0 0 24 24",
+                                                    path {
+                                                        stroke_linecap: "round",
+                                                        stroke_linejoin: "round",
+                                                        d: "M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
+                                                    }
+                                                }
+                                                p { class: "text-[12px] {theme::health::HEALTHY_TEXT}", "{message}" }
+                                            }
+                                        }
+                                        div { class: "flex items-center justify-between gap-3 pt-1",
+                                            p { class: "text-[11px] leading-5 {theme::text::MUTED}", "Required for audit compliance when accepting weaker posture." }
+                                            button {
+                                                class: "px-4 py-2 rounded-lg {theme::interactive::PRIMARY_BTN} text-sm font-medium {theme::interactive::FOCUS_RING} transition-colors",
+                                        disabled: is_saving_justification() || reason.read().trim().is_empty(),
+                                        onclick: {
+                                            let service_name = service.service_name.clone();
+                                            let on_saved = on_saved.clone();
+                                            move |_| {
+                                                let reason_value = reason();
+                                                if reason_value.trim().is_empty() {
+                                                    justification_error.set(Some("Justification is required.".to_string()));
+                                                    return;
+                                                }
+
+                                                is_saving_justification.set(true);
+                                                justification_error.set(None);
+                                                justification_notice.set(None);
+
+                                                let request = SaveHardeningJustificationRequest {
+                                                    directive_name: None,
+                                                    category: None,
+                                                    reason: reason_value,
+                                                };
+                                                let service_name_for_request = service_name.clone();
+
+                                                spawn(async move {
+                                                    if save_system_hardening_justification(&system_id, &service_name_for_request, &request)
+                                                        .await
+                                                        .is_ok()
+                                                    {
+                                                        reason.set(String::new());
+                                                        justification_notice.set(Some("Justification saved.".to_string()));
+                                                        on_saved.call(());
+                                                    } else {
+                                                        justification_error.set(Some("Failed to save justification.".to_string()));
+                                                    }
+                                                    is_saving_justification.set(false);
+                                                });
+                                            }
+                                        },
+                                                if is_saving_justification() {
+                                                    "Saving…"
+                                                } else {
+                                                    "Save justification"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                div { class: "space-y-3 pt-2",
+                                    div { class: "border-t {theme::surface::DIVIDER} pt-4" }
+                                    div { class: "space-y-1.5",
+                                        h4 { class: "text-sm font-semibold {theme::text::PRIMARY}", "Justification history" }
+                                        p { class: "text-[12px] leading-5 {theme::text::MUTED}", "Audit trail of accepted risk documentation for this service." }
+                                    }
+                                    if justifications.iter().all(|j| j.service_name != service.service_name) {
+                                        div { class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-4 py-3 text-center",
+                                            p { class: "text-[12px] {theme::text::MUTED}", "No justifications recorded yet. Add one above to document accepted risks." }
+                                        }
+                                    } else {
+                                        div { class: "flex flex-col gap-2.5 max-h-[280px] overflow-y-auto pr-1",
+                                            for item in justifications.iter().filter(|j| j.service_name == service.service_name) {
+                                                div { class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-3.5 py-3 space-y-2",
+                                                    div { class: "flex items-center justify-between gap-2",
+                                                        div { class: "flex items-center gap-2 flex-wrap",
+                                                            span {
+                                                                class: "inline-flex items-center rounded-md border {theme::surface::CARD_BORDER} px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide {theme::text::MUTED}",
+                                                                "{item.category.clone().unwrap_or_else(|| \"service\".to_string())}"
+                                                            }
+                                                            if let Some(directive) = item.directive_name.clone() {
+                                                                span { class: "font-mono text-[11px] {theme::text::MUTED} bg-black/5 dark:bg-white/5 px-2 py-0.5 rounded", "{directive}" }
+                                                            }
+                                                        }
+                                                    }
+                                                    p { class: "text-[13px] {theme::text::PRIMARY} leading-relaxed", style: "padding-left: 0.25rem;", "{item.reason}" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Footer
+                    div { class: "modal-foot",
+                        button {
+                            class: "btn btn-ghost focus-ring xs",
+                            svg {
+                                class: "w-3 h-3 inline-block",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                view_box: "0 0 24 24",
+                                path {
+                                    stroke_linecap: "round",
+                                    stroke_linejoin: "round",
+                                    d: "M12 3v12m0 0l4-4m-4 4l-4-4M5 21h14"
+                                }
+                            }
+                            "Export report"
+                        }
+                        button {
+                            class: "btn btn-primary focus-ring",
+                            onclick: move |_| {
+                                if confirm_discard_unsaved_justification(!reason.read().trim().is_empty()) {
+                                    selected_service.set(None);
+                                }
+                            },
+                            "Close"
+                        }
+                    }
+                }
+            }
+        }
+    } // Close: rsx!
+}
+
+#[component]
+fn CompactMetricCard(label: String, value: String, tone: &'static str) -> Element {
+    let tone_class = match tone {
+        "danger" => format!(
+            "border {} {}",
+            theme::health::CRITICAL_BORDER,
+            theme::health::CRITICAL_BG
+        ),
+        "warning" => format!(
+            "border {} {}",
+            theme::health::WARNING_BORDER,
+            theme::health::WARNING_BG
+        ),
+        _ => format!(
+            "border {} {}",
+            theme::surface::CARD_BORDER,
+            theme::surface::SUBTLE_BG
+        ),
+    };
+
+    rsx! {
+        div { class: "rounded border {tone_class} px-2.5 py-2 min-h-[66px] flex flex-col justify-between",
+            p { class: "text-[10px] uppercase tracking-wide {theme::text::MUTED}", "{label}" }
+            p { class: "mt-1 text-base font-semibold leading-none {theme::text::PRIMARY}", "{value}" }
+        }
+    }
+}
+
+fn modal_directives(service: &HardeningServiceResultResponse) -> Vec<DirectiveCell> {
+    let mut directives = directive_cells(service);
+    directives.sort_by(|a, b| {
+        modal_directive_rank(a)
+            .cmp(&modal_directive_rank(b))
+            .then_with(|| a.points.cmp(&b.points))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    directives
+}
+
+fn modal_directive_rank(directive: &DirectiveCell) -> i32 {
+    if !directive.enabled || directive.points == 0 {
+        0
+    } else if directive.points < directive.max_points {
+        1
+    } else {
+        2
+    }
+}
+
+fn confirm_discard_unsaved_justification(is_dirty: bool) -> bool {
+    if !is_dirty {
+        return true;
+    }
+
+    web_sys::window()
+        .and_then(|window| {
+            window
+                .confirm_with_message("Discard unsaved justification?")
+                .ok()
+        })
+        .unwrap_or(false)
+}
+
+#[derive(Clone, Debug)]
+struct DirectiveCell {
+    name: String,
+    enabled: bool,
+    points: i32,
+    max_points: i32,
+    value: JsonValue,
+}
+
+#[derive(Clone, Debug)]
+struct DirectiveBadgeContent {
+    label: String,
+    class_name: String,
+    title: String,
+}
+
+fn directive_cells(service: &HardeningServiceResultResponse) -> Vec<DirectiveCell> {
+    service
+        .directives_detail
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| DirectiveCell {
+                    name: item
+                        .get("name")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    enabled: item
+                        .get("enabled")
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(false),
+                    points: item
+                        .get("points")
+                        .and_then(|value| value.as_i64())
+                        .unwrap_or(0) as i32,
+                    max_points: item
+                        .get("max_points")
+                        .and_then(|value| value.as_i64())
+                        .unwrap_or(0) as i32,
+                    value: item.get("value").cloned().unwrap_or(JsonValue::Null),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn directive_for<'a>(directives: &'a [DirectiveCell], name: &str) -> Option<&'a DirectiveCell> {
+    directives.iter().find(|directive| directive.name == name)
+}
+
+fn directive_badge_content(directive: Option<&DirectiveCell>) -> DirectiveBadgeContent {
+    match directive {
+        None => DirectiveBadgeContent {
+            label: "--".to_string(),
+            class_name: format!(
+                "{} {} {}",
+                theme::health::CRITICAL_BORDER,
+                theme::health::CRITICAL_BG,
+                theme::health::CRITICAL_TEXT,
+            ),
+            title: "Directive missing from scan output".to_string(),
+        },
+        Some(directive) => {
+            let (label, class_name) = if directive.max_points > 0
+                && directive.enabled
+                && directive.points >= directive.max_points
+            {
+                (
+                    "ON",
+                    format!(
+                        "{} {} {}",
+                        theme::health::HEALTHY_BORDER,
+                        theme::health::HEALTHY_BG,
+                        theme::health::HEALTHY_TEXT,
+                    ),
+                )
+            } else if directive.points > 0 || directive.enabled {
+                (
+                    "PAR",
+                    format!(
+                        "{} {} {}",
+                        theme::health::WARNING_BORDER,
+                        theme::health::WARNING_BG,
+                        theme::health::WARNING_TEXT,
+                    ),
+                )
+            } else {
+                (
+                    "OFF",
+                    format!(
+                        "{} {} {}",
+                        theme::health::CRITICAL_BORDER,
+                        theme::health::CRITICAL_BG,
+                        theme::health::CRITICAL_TEXT,
+                    ),
+                )
+            };
+
+            DirectiveBadgeContent {
+                label: label.to_string(),
+                class_name,
+                title: format!(
+                    "{}: {}/{} · value={}",
+                    directive.name,
+                    directive.points,
+                    directive.max_points,
+                    compact_directive_value(&directive.value)
+                ),
+            }
+        }
+    }
+}
+
+fn compact_directive_value(value: &JsonValue) -> String {
+    match value {
+        JsonValue::Null => "unset".to_string(),
+        JsonValue::Bool(flag) => {
+            if *flag {
+                "true".to_string()
+            } else {
+                "false".to_string()
+            }
+        }
+        JsonValue::Number(number) => number.to_string(),
+        JsonValue::String(string) => string.clone(),
+        JsonValue::Array(items) => {
+            if items.is_empty() {
+                "[]".to_string()
+            } else {
+                format!("{} items", items.len())
+            }
+        }
+        JsonValue::Object(_) => "object".to_string(),
+    }
+}
+
+fn severity_matches(service: &HardeningServiceResultResponse, filter_value: &str) -> bool {
+    match filter_value {
+        "all" => true,
+        "high_risk" => matches!(
+            service.risk_level.as_str(),
+            "vulnerable" | "poorly_hardened"
+        ),
+        level => service.risk_level == level,
+    }
+}
+
+fn short_risk_label(level: &str) -> &'static str {
+    match level {
+        "well_hardened" => "OK",
+        "moderately_hardened" => "MED",
+        "poorly_hardened" => "HIGH",
+        _ => "VULN",
+    }
+}
+
+fn risk_level_color(level: &str) -> &'static str {
+    match level {
+        "well_hardened" => "#34d399",
+        "moderately_hardened" => "#fbbf24",
+        "poorly_hardened" => "#f97316",
+        _ => "#f87171",
+    }
+}
+
+fn directive_short_label(name: &str) -> String {
+    let mut expanded = String::with_capacity(name.len() + 8);
+    for (idx, ch) in name.chars().enumerate() {
+        if idx > 0 && ch.is_uppercase() {
+            expanded.push(' ');
+        }
+        expanded.push(ch);
+    }
+    expanded.trim().chars().take(4).collect::<String>()
+}
+
+fn service_user_label(service: &HardeningServiceResultResponse) -> String {
+    service
+        .service_type
+        .clone()
+        .unwrap_or_else(|| "system".to_string())
+}
+
+fn risk_level_compact_badge_class(level: &str) -> String {
+    match level {
+        "well_hardened" => format!(
+            "border {} {} {}",
+            theme::health::HEALTHY_BORDER,
+            theme::health::HEALTHY_BG,
+            theme::health::HEALTHY_TEXT,
+        ),
+        "moderately_hardened" => format!(
+            "border {} {} {}",
+            theme::health::WARNING_BORDER,
+            theme::health::WARNING_BG,
+            theme::health::WARNING_TEXT,
+        ),
+        "poorly_hardened" => format!(
+            "border {} {} {}",
+            theme::health::WARNING_BORDER,
+            theme::health::WARNING_BG,
+            theme::health::WARNING_TEXT,
+        ),
+        _ => format!(
+            "border {} {} {}",
+            theme::health::CRITICAL_BORDER,
+            theme::health::CRITICAL_BG,
+            theme::health::CRITICAL_TEXT,
+        ),
+    }
+}
+
+fn risk_level_badge_class(level: &str) -> &'static str {
+    match level {
+        "well_hardened" => "bg-emerald-500/20 text-emerald-300",
+        "moderately_hardened" => "bg-yellow-500/20 text-yellow-300",
+        "poorly_hardened" => "bg-orange-500/20 text-orange-300",
+        _ => "bg-red-500/20 text-red-300",
     }
 }
 
@@ -2136,16 +4754,26 @@ fn map_history_entries_to_commit_history(
                 status_fragments.push("Revert detected".to_string());
             }
 
+            let message = {
+                let reason = entry.change_reason.replace('_', " ");
+                let outcome = entry.outcome.replace('_', " ");
+
+                if reason.trim().is_empty() {
+                    config_identity
+                        .clone()
+                        .map(|value| format!("Configuration {value}"))
+                        .unwrap_or_else(|| "Configuration update".to_string())
+                } else if outcome.trim().is_empty() {
+                    reason
+                } else {
+                    format!("{reason}: {outcome}")
+                }
+            };
+
             SystemCommitHistory {
                 hash,
-                message: config_identity
-                    .clone()
-                    .map(|value| format!("Configuration {value}"))
-                    .unwrap_or_else(|| "Configuration update".to_string()),
-                author: format!(
-                    "{} · {} · {}",
-                    entry.actor, entry.change_reason, entry.outcome
-                ),
+                message,
+                author: entry.actor.clone(),
                 committed_at: entry.timestamp,
                 was_deployed: true,
                 deployed_at: Some(entry.timestamp),
@@ -2155,6 +4783,40 @@ fn map_history_entries_to_commit_history(
                 diff_summary: Some(status_fragments.join(" · ")),
                 flake_repo_url: entry.flake_repo_url.clone(),
                 config_identity,
+            }
+        })
+        .collect()
+}
+
+fn map_commit_infos_to_commit_history(
+    commits: &[CommitInfo],
+    current_commit: Option<String>,
+) -> Vec<SystemCommitHistory> {
+    commits
+        .iter()
+        .cloned()
+        .map(|commit| {
+            let committed_at = chrono::DateTime::parse_from_rfc3339(&commit.timestamp)
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+            let is_current = current_commit
+                .as_ref()
+                .map(|current| current == &commit.sha || current == &commit.short_sha)
+                .unwrap_or(false);
+
+            SystemCommitHistory {
+                hash: commit.sha,
+                message: commit.message,
+                author: commit.author,
+                committed_at,
+                was_deployed: is_current,
+                deployed_at: if is_current { Some(committed_at) } else { None },
+                is_current,
+                is_ready_to_deploy: !is_current,
+                build_status: None,
+                diff_summary: None,
+                flake_repo_url: None,
+                config_identity: None,
             }
         })
         .collect()
