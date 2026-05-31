@@ -1,0 +1,103 @@
+---
+id: TASK-327
+title: Refactor Dashboard view UI/UX for exact parity with latest design examples
+status: Backlog
+assignee: []
+created_date: '2026-05-31 15:14'
+labels:
+  - ui
+  - dashboard
+  - design-parity
+  - strict-parity
+  - loading-state
+milestone: UI/UX Parity
+dependencies: []
+references:
+  - /home/mcamp/code/crystal-forge/CrystalForgelatest
+modified_files:
+  - packages/web-ui/src/views/
+  - packages/web-ui/src/components/
+  - checks/web-ui/
+priority: high
+ordinal: 0
+---
+
+## Description
+
+<!-- SECTION:DESCRIPTION:BEGIN -->
+## Problem
+The current Dashboard view in the web UI diverges from the latest design examples in layout precision, spacing rhythm, typography hierarchy, visual states, and interaction details. This creates inconsistency and lowers confidence in the design system rollout.
+
+## Goal
+Implement a dashboard refactor that matches the latest design examples with strict visual and behavioral parity, including all loading-state behavior and spinner treatment shown in the source examples.
+
+## Design Source (Authoritative)
+- `/home/mcamp/code/crystal-forge/CrystalForgelatest`
+- Includes Dashboard examples and related component references that define expected visuals, interactions, and loading states.
+
+## Non-Goals
+- No backend/API contract redesign unless absolutely required to render already-available data and tracked separately.
+- No unrelated redesign in non-dashboard views.
+- No broad component-library rewrite unless directly required for dashboard parity.
+- No speculative feature additions absent from the design source.
+
+## Execution Expectations (High-Discipline)
+This task requires exacting attention to detail:
+- Pixel-accurate layout, spacing, sizing, and alignment across breakpoints.
+- Exact text hierarchy, copy, labels, and semantic emphasis from the design source.
+- Exact visual states (default/hover/focus/active/disabled/loading/error) where shown.
+- No “close enough” substitutions for core visual structure.
+
+## Architectural Constraints
+- Keep business logic out of view rendering.
+- Keep state/data mapping separate from presentational components.
+- Reuse existing design-system primitives where they already satisfy design parity.
+- Maintain clear separation of API models, domain logic, infrastructure, and UI layers.
+
+## Impact Areas
+- `packages/web-ui/src/views/**` (dashboard-specific view modules)
+- `packages/web-ui/src/components/**` (dashboard-specific or reused presentation components as needed)
+- `checks/web-ui/**` (integration checks, assertions, screenshot evidence)
+- Any route wiring that composes dashboard view surfaces
+
+## Verification Plan
+Tier 1 feature-level + targeted Tier 0 checks:
+- `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown`
+- `nix build .#checks.x86_64-linux.web-ui`
+- Ensure web-ui check captures updated Dashboard screenshots covering:
+  - Initial loading state with spinner
+  - Post-load default dashboard state
+  - At least one responsive/mobile layout state
+- Add/adjust assertions to verify key dashboard interactions and visible state transitions from loading → loaded.
+
+## Risk Level
+High (high-visibility screen with strict visual parity and responsive expectations).
+
+## Dependencies
+- Design examples remain accessible at `/home/mcamp/code/crystal-forge/CrystalForgelatest`.
+- No conflicting active task heavily modifying same dashboard files during implementation.
+- Existing web-ui test harness capable of capturing screenshots for the targeted states.
+
+## Definition of Ready Notes
+This task is intentionally strict and objective. Parity decisions must defer to the local design source when ambiguity appears.
+<!-- SECTION:DESCRIPTION:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 Dashboard layout matches the authoritative design examples from `/home/mcamp/code/crystal-forge/CrystalForgelatest` at desktop and mobile breakpoints with pixel-accurate alignment, spacing, and sizing.
+- [ ] #2 Dashboard typography hierarchy, labels, copy, and emphasis match the design examples exactly (no placeholder substitutions in primary UI text).
+- [ ] #3 Visual styling matches design source for colors, radii, borders, shadows, icon sizing, and component density in all visible dashboard sections.
+- [ ] #4 Interaction states shown in the design examples are implemented and validated (hover/focus/active/disabled/error where applicable).
+- [ ] #5 Loading experience matches design source and includes the dashboard loading spinner behavior and presentation exactly as shown.
+- [ ] #6 State transition from loading spinner state to loaded dashboard state is deterministic and covered by web-ui assertions.
+- [ ] #7 No business logic is introduced into presentational components; state/data mapping remains separated from rendering.
+- [ ] #8 No backend/API contract changes are introduced unless explicitly required and tracked via separate scoped task(s).
+- [ ] #9 `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` passes.
+- [ ] #10 `nix build .#checks.x86_64-linux.web-ui` passes and includes dashboard screenshot evidence for loading spinner state and loaded state.
+<!-- AC:END -->
+
+## Definition of Done
+<!-- DOD:BEGIN -->
+- [ ] #1 Attach dashboard loading-state and loaded-state screenshot evidence from web-ui checks to MR.
+- [ ] #2 Document any unavoidable visual deltas with rationale and explicit sign-off request (if exact parity cannot be achieved due to technical constraints).
+<!-- DOD:END -->
