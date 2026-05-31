@@ -19,6 +19,7 @@ use crate::views::login::LoginView;
 use crate::views::not_found::NotFoundView;
 use crate::views::policies::PoliciesView;
 use crate::views::register::RegisterView;
+use crate::views::scanning::ScanningView;
 use crate::views::setup::SetupView;
 use crate::views::style_guide::StyleGuideView;
 use crate::views::system_detail::SystemDetailView;
@@ -64,6 +65,9 @@ pub enum Route {
     #[route("/cves")]
     CvesView {},
 
+    #[route("/scanning")]
+    ScanningView {},
+
     #[route("/deployment-policies")]
     PoliciesView {},
 
@@ -108,6 +112,7 @@ impl Route {
             Route::BuildersView { .. } => "Builders".to_string(),
             Route::CachesView { .. } => "Cache Management".to_string(),
             Route::CvesView { .. } => "CVEs".to_string(),
+            Route::ScanningView { .. } => "Scanning".to_string(),
             Route::PoliciesView { .. } => "Deployment Policies".to_string(),
             Route::AdminView { .. } => "Server Management".to_string(),
             Route::StyleGuideView { .. } => "Component Showcase".to_string(),
