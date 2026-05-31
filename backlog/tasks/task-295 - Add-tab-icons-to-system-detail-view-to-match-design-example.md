@@ -4,13 +4,15 @@ title: Add tab icons to system detail view to match design example
 status: Backlog
 assignee: []
 created_date: '2026-05-10 13:28'
+updated_date: '2026-05-31 15:59'
 labels:
   - ui
   - design-system
   - icons
+milestone: m-16
 dependencies: []
 priority: medium
-ordinal: 250000
+ordinal: 0
 ---
 
 ## Description
@@ -128,4 +130,6 @@ The Icon component already has the correct structure (SVG with view_box, stroke,
 - [ ] #15 Config tab uses File icon
 - [ ] #16 Visual appearance matches design example
 - [ ] #17 Icons render correctly in all tabs
+- [ ] #18 web-ui check updates are required with assertions for tab-icon rendering and state behavior
+- [ ] #19 web-ui check must capture screenshots for all affected system-detail tab states
 <!-- AC:END -->
