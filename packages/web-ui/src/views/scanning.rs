@@ -12,6 +12,7 @@ pub fn ScanningView() -> Element {
     rsx! {
         div {
             style: "display:flex; flex-direction:column; gap:16px;",
+
             div {
                 class: "page-head",
                 div {
@@ -23,13 +24,11 @@ pub fn ScanningView() -> Element {
                     button {
                         class: "btn btn-ghost focus-ring",
                         onclick: move |_| schedule_open.set(true),
-                        IconGear {}
-                        " Schedule"
+                        "Schedule"
                     }
                     button {
                         class: "btn btn-primary focus-ring",
-                        IconSync {}
-                        " Rescan all"
+                        "Rescan all"
                     }
                 }
             }
@@ -49,9 +48,11 @@ pub fn ScanningView() -> Element {
                 } else {
                     "display:grid; grid-template-columns: 1fr; gap:14px; align-items:start;"
                 },
+
                 div {
                     class: "card",
                     style: "overflow:hidden;",
+
                     div {
                         class: "sd-tabs",
                         style: "padding:0 16px; border-bottom:1px solid var(--cf-card-border); display:flex; align-items:center;",
@@ -114,12 +115,12 @@ pub fn ScanningView() -> Element {
                                     td {
                                         div {
                                             class: "row-actions",
-                                            button { class: "btn-icon focus-ring", title: "Rescan now", IconSyncSmall {} }
+                                            button { class: "btn-icon focus-ring", title: "Rescan now", "↻" }
                                             button {
                                                 class: "btn-icon focus-ring",
                                                 title: "View CVEs",
                                                 onclick: move |_| { nav.push(Route::CvesView {}); },
-                                                IconArrowRight {}
+                                                "→"
                                             }
                                         }
                                     }
@@ -128,8 +129,64 @@ pub fn ScanningView() -> Element {
                         }
                     } else {
                         div {
-                            style: "padding:16px;",
-                            p { class: "page-subtitle", "All configs view is coming next; active/recent queue remains fully usable." }
+                            style: "padding:10px 16px; border-top: 1px solid var(--cf-divider);",
+                            div {
+                                style: "display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:10px;",
+                                input {
+                                    class: "input focus-ring",
+                                    style: "max-width:220px;",
+                                    placeholder: "Search systems…",
+                                }
+                                select {
+                                    class: "input focus-ring",
+                                    style: "width:auto;",
+                                    option { value: "all", "All environments" }
+                                    option { value: "lan", "LAN" }
+                                    option { value: "wifi", "WiFi" }
+                                }
+                                span { class: "page-subtitle", "3 systems · 14 configs" }
+                            }
+
+                            table {
+                                class: "sys-table",
+                                thead {
+                                    tr {
+                                        th { "System" }
+                                        th { "Env" }
+                                        th { "Configs" }
+                                        th { "Scan freshness" }
+                                        th { "Current findings" }
+                                        th { style: "text-align:right;", " " }
+                                    }
+                                }
+                                tbody {
+                                    tr {
+                                        td {
+                                            div { style: "font-weight:600; font-size:13px;", "butler" }
+                                            div { class: "mono", style: "font-size:11px; color:var(--cf-text-muted);", "github:acme/fleet" }
+                                        }
+                                        td { span { class: "chip chip-info", style: "font-size:10px;", "LAN" } }
+                                        td { class: "mono", style: "font-size:12px;", "5" }
+                                        td {
+                                            div { style: "display:flex; align-items:center; gap:8px; min-width:120px;",
+                                                div { style: "flex:1; height:5px; background:var(--cf-subtle-bg); border-radius:99px; overflow:hidden; display:flex;",
+                                                    div { style: "width:60%; background:#34d399;" }
+                                                    div { style: "width:20%; background:#fbbf24;" }
+                                                    div { style: "width:20%; background:#4b5563;" }
+                                                }
+                                                span { class: "mono", style: "font-size:11px; color:var(--cf-text-muted);", "3/5" }
+                                            }
+                                        }
+                                        td {
+                                            div { style: "display:flex; gap:4px;",
+                                                span { class: "chip chip-critical", style: "font-size:10px;", "1C" }
+                                                span { class: "chip chip-warning", style: "font-size:10px;", "2H" }
+                                            }
+                                        }
+                                        td { div { class: "row-actions", button { class: "btn-icon focus-ring", "↻" } } }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -145,7 +202,7 @@ pub fn ScanningView() -> Element {
                                 class: "btn-icon focus-ring",
                                 onclick: move |_| show_activity.set(false),
                                 title: "Hide panel",
-                                IconClose {}
+                                "×"
                             }
                         }
                         div { class: "dash-w-body", style: "gap:8px;",
@@ -192,18 +249,3 @@ fn stat_card(label: &'static str, value: &'static str, meta: Option<&'static str
         }
     }
 }
-
-#[component]
-fn IconGear() -> Element { rsx!(svg { width: "14", height: "14", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round", circle { cx: "12", cy: "12", r: "3" } path { d: "M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0A1.65 1.65 0 0 0 9.91 3.1V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" } }) }
-
-#[component]
-fn IconSync() -> Element { rsx!(svg { width: "14", height: "14", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round", path { d: "M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" } }) }
-
-#[component]
-fn IconSyncSmall() -> Element { rsx!(svg { width: "14", height: "14", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round", path { d: "M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" } }) }
-
-#[component]
-fn IconArrowRight() -> Element { rsx!(svg { width: "14", height: "14", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round", line { x1: "5", y1: "12", x2: "19", y2: "12" } polyline { points: "12 5 19 12 12 19" } }) }
-
-#[component]
-fn IconClose() -> Element { rsx!(svg { width: "14", height: "14", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round", path { d: "M18 6 6 18" } path { d: "M6 6l12 12" } }) }
