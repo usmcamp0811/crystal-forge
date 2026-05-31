@@ -534,13 +534,15 @@ pub async fn insert_cve_justification(
         .execute(pool)
         .await?;
     } else {
-        // Per-system: conflict on composite primary key (system_id, cve_id)
+        // Per-system: conflict on partial unique index (system_id, cve_id)
+        // WHERE system_id IS NOT NULL.
         sqlx::query(
             r#"
             INSERT INTO system_cve_justifications
                 (system_id, cve_id, category, reason, updated_by, updated_at)
             VALUES ($1, $2, $3, $4, $5, NOW())
             ON CONFLICT (system_id, cve_id)
+            WHERE system_id IS NOT NULL
             DO UPDATE SET
                 category   = EXCLUDED.category,
                 reason     = EXCLUDED.reason,
