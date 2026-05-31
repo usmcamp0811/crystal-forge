@@ -34,3 +34,6 @@ mod hardening_scans_tests;
 
 #[cfg(test)]
 mod eval_logs_tests;
+
+#[cfg(test)]
+mod scanning_tests;

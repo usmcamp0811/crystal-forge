@@ -235,3 +235,88 @@ fn internal_error(message: &str) -> axum::response::Response {
     )
         .into_response()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::postgres::PgPoolOptions;
+
+    fn lazy_pool() -> PgPool {
+        PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct")
+    }
+
+    #[tokio::test]
+    async fn get_scanning_stats_requires_admin() {
+        let response = get_scanning_stats(State(lazy_pool()), HeaderMap::new())
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn get_scanning_queue_requires_admin() {
+        let response = get_scanning_queue(
+            State(lazy_pool()),
+            HeaderMap::new(),
+            Query(ScanningListParams { limit: 50 }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn get_scanning_systems_requires_admin() {
+        let response = get_scanning_systems(
+            State(lazy_pool()),
+            HeaderMap::new(),
+            Query(ScanningListParams { limit: 50 }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn get_scanning_activity_requires_admin() {
+        let response = get_scanning_activity(
+            State(lazy_pool()),
+            HeaderMap::new(),
+            Query(ScanningListParams { limit: 50 }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn get_scanning_schedule_requires_admin() {
+        let response = get_scanning_schedule(State(lazy_pool()), HeaderMap::new())
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn put_scanning_schedule_requires_admin() {
+        let payload = UpdateScanSchedulePolicyRequest {
+            on_build: true,
+            deployed_interval: "24h".to_string(),
+            recent_interval: "24h".to_string(),
+            archived_interval: "168h".to_string(),
+            archived_enabled: true,
+            rebuild_to_scan: false,
+        };
+        let response = put_scanning_schedule(State(lazy_pool()), HeaderMap::new(), Json(payload))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn default_limit_is_fifty() {
+        assert_eq!(default_limit(), 50);
+    }
+}

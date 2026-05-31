@@ -117,15 +117,15 @@ pub async fn get_scan_stats(pool: &PgPool) -> Result<ScanStatsRow> {
     let row = sqlx::query(
         r#"
         WITH latest AS (
-            SELECT DISTINCT ON (et.target_name)
-                et.target_name,
+            SELECT DISTINCT ON (d.id)
+                d.id AS derivation_id,
                 cs.status,
                 cs.completed_at,
                 cs.scheduled_at
-            FROM evaluation_targets et
-            LEFT JOIN cve_scans cs ON cs.evaluation_target_id = et.id
-            WHERE et.target_type = 'nixos'
-            ORDER BY et.target_name, cs.completed_at DESC NULLS LAST, cs.created_at DESC NULLS LAST
+            FROM derivations d
+            LEFT JOIN cve_scans cs ON cs.derivation_id = d.id
+            WHERE d.derivation_type = 'nixos'
+            ORDER BY d.id, cs.completed_at DESC NULLS LAST, cs.created_at DESC NULLS LAST
         )
         SELECT
             COUNT(*) FILTER (WHERE status = 'in_progress')::BIGINT AS scanning,
@@ -158,7 +158,7 @@ pub async fn get_scan_queue(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueueRo
         r#"
         SELECT
             cs.id AS scan_id,
-            et.target_name AS hostname,
+            d.derivation_name AS hostname,
             f.name AS flake_name,
             c.git_commit_hash AS commit_hash,
             cs.status,
@@ -168,10 +168,10 @@ pub async fn get_scan_queue(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueueRo
             cs.high_count,
             cs.medium_count
         FROM cve_scans cs
-        JOIN evaluation_targets et ON et.id = cs.evaluation_target_id
-        LEFT JOIN commits c ON c.id = et.commit_id
+        JOIN derivations d ON d.id = cs.derivation_id
+        LEFT JOIN commits c ON c.id = d.commit_id
         LEFT JOIN flakes f ON f.id = c.flake_id
-        WHERE et.target_type = 'nixos'
+        WHERE d.derivation_type = 'nixos'
         ORDER BY
             CASE WHEN cs.status = 'in_progress' THEN 0 WHEN cs.status = 'pending' THEN 1 ELSE 2 END,
             COALESCE(cs.completed_at, cs.scheduled_at, cs.created_at) DESC
@@ -202,35 +202,33 @@ pub async fn get_scan_queue(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueueRo
 pub async fn get_scan_systems(pool: &PgPool, limit: i64) -> Result<Vec<ScanSystemRow>> {
     let rows = sqlx::query(
         r#"
-        WITH latest_per_target AS (
-            SELECT DISTINCT ON (et.id)
-                et.id AS evaluation_target_id,
-                et.target_name AS hostname,
-                et.derivation_path,
-                e.name AS environment,
+        WITH latest_per_derivation AS (
+            SELECT DISTINCT ON (d.id)
+                d.id AS derivation_id,
+                d.derivation_name AS hostname,
+                d.store_path,
                 cs.completed_at,
                 cs.critical_count,
                 cs.high_count
-            FROM evaluation_targets et
-            LEFT JOIN systems s ON s.hostname = et.target_name
-            LEFT JOIN environments e ON e.id = s.environment_id
-            LEFT JOIN cve_scans cs ON cs.evaluation_target_id = et.id
-            WHERE et.target_type = 'nixos'
-            ORDER BY et.id, cs.completed_at DESC NULLS LAST, cs.created_at DESC NULLS LAST
+            FROM derivations d
+            LEFT JOIN cve_scans cs ON cs.derivation_id = d.id
+            WHERE d.derivation_type = 'nixos'
+            ORDER BY d.id, cs.completed_at DESC NULLS LAST, cs.created_at DESC NULLS LAST
         )
         SELECT
             s.id AS system_id,
             l.hostname,
-            MAX(l.environment) AS environment,
+            MAX(e.name) AS environment,
             COUNT(*)::BIGINT AS total_configs,
             COUNT(*) FILTER (WHERE l.completed_at >= NOW() - INTERVAL '30 days')::BIGINT AS scanned,
             COUNT(*) FILTER (WHERE l.completed_at IS NOT NULL AND l.completed_at < NOW() - INTERVAL '30 days')::BIGINT AS stale,
-            COUNT(*) FILTER (WHERE l.derivation_path IS NULL)::BIGINT AS needs_build,
+            COUNT(*) FILTER (WHERE l.store_path IS NULL)::BIGINT AS needs_build,
             COUNT(*) FILTER (WHERE l.completed_at IS NULL)::BIGINT AS unscanned,
             COALESCE(MAX(l.critical_count), 0)::BIGINT AS current_crit,
             COALESCE(MAX(l.high_count), 0)::BIGINT AS current_high
-        FROM latest_per_target l
+        FROM latest_per_derivation l
         JOIN systems s ON s.hostname = l.hostname
+        LEFT JOIN environments e ON e.id = s.environment_id
         WHERE s.is_active = TRUE
         GROUP BY s.id, l.hostname
         ORDER BY total_configs DESC, l.hostname ASC
@@ -263,7 +261,7 @@ pub async fn get_scan_activity(pool: &PgPool, limit: i64) -> Result<Vec<ScanActi
         r#"
         SELECT
             COALESCE(cs.completed_at, cs.scheduled_at, cs.created_at) AS at,
-            et.target_name AS name,
+            d.derivation_name AS name,
             CASE
                 WHEN cs.status = 'in_progress' THEN 'Scan started'
                 WHEN cs.status = 'completed' THEN 'Scan completed'
@@ -278,8 +276,8 @@ pub async fn get_scan_activity(pool: &PgPool, limit: i64) -> Result<Vec<ScanActi
             END AS detail,
             cs.status
         FROM cve_scans cs
-        JOIN evaluation_targets et ON et.id = cs.evaluation_target_id
-        WHERE et.target_type = 'nixos'
+        JOIN derivations d ON d.id = cs.derivation_id
+        WHERE d.derivation_type = 'nixos'
         ORDER BY COALESCE(cs.completed_at, cs.scheduled_at, cs.created_at) DESC
         LIMIT $1
         "#,
