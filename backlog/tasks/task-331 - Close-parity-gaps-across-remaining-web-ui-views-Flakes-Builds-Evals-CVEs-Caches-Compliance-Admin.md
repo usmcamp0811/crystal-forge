@@ -6,6 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-05-31 15:56'
+updated_date: '2026-05-31 15:59'
 labels:
   - design-parity
   - multi-view
@@ -55,4 +56,6 @@ Risk: High due to breadth.
 - [ ] #2 Shared interaction patterns (filters/tabs/modals/table density) behave consistently across views
 - [ ] #3 No listed view relies on mock/fallback data in production path for primary content
 - [ ] #4 All identified parity defects are tracked and closed or split into explicit follow-up tasks
+- [ ] #5 web-ui check includes assertion-based verification for each listed view's critical interactions
+- [ ] #6 web-ui check captures screenshots for all listed views across loading, empty, error, and populated states
 <!-- AC:END -->
