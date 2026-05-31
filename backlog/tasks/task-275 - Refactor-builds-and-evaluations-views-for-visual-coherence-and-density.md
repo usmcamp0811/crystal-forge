@@ -4,7 +4,7 @@ title: Refactor builds and evaluations views for visual coherence and density
 status: Backlog
 assignee: []
 created_date: '2026-04-18 01:56'
-updated_date: '2026-05-31 15:59'
+updated_date: '2026-05-31 16:04'
 labels:
   - ui
   - ux
@@ -13,7 +13,12 @@ labels:
   - evaluations
   - dioxus
 milestone: m-16
-dependencies: []
+dependencies:
+  - TASK-328
+  - TASK-329
+  - TASK-333
+references:
+  - /home/mcamp/code/crystal-forge/CrystalForgelatest
 priority: medium
 ordinal: 0
 ---
@@ -21,95 +26,48 @@ ordinal: 0
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-The builds and evaluations views currently have divergent layouts and interaction patterns despite representing similar workflow processes (queue → active → completed). This task unifies their visual design and information architecture to create a coherent, dense, and refined UI.
+## Problem
+Builds and Evaluations views present similar operational workflows but currently diverge in layout, interaction rhythm, and density, reducing usability and design consistency.
 
-## Current State
+## Goal
+Unify both views under a coherent, high-density interaction model aligned to CrystalForgelatest design standards while preserving existing operational functionality.
 
-**Builds View** (`packages/web-ui/src/views/builds.rs`):
-- Tabs: Active Queue / Completed Builds
-- Active queue: Card-based display with extensive filters
-- Split view: queue list (left) / detail pane (right)
-- Completed: Full-width table with status filters and sorting
-- Worker strip metrics at top
-
-**Evaluations View** (`packages/web-ui/src/views/evaluations.rs`):
-- No tabs - everything on one page
-- Full-width logs section at top (collapsible)
-- Split view: active queue cards with drag-drop (left) / metrics + selected commit + completed list (right)
-- Active queue: card-based with Up/Down buttons
-
-## Design Direction
-
-Both views should adopt a consistent pattern:
-
-### Layout Structure
-1. **Page header** with metrics strip
-2. **Tabs**: "Active Queue" | "History" (or "Completed")
-3. **Active Queue tab**:
-   - Left half: Table view of queue items (sortable, filterable, searchable)
-   - Right half: Detail pane for selected item
-   - Auto-select first row on load
-4. **History/Completed tab**:
-   - Full-width table with filters, sorting, search
-   - Click row to view details (could open detail pane or modal)
-
-### Builds-Specific Considerations
-- Keep worker status/control strip
-- Preserve existing queue actions (prioritize, stop, restart, etc.)
-- Maintain builder status controls
-
-### Evaluations-Specific Considerations  
-- Preserve drag-and-drop reordering in active queue table (or provide Up/Down in row actions)
-- Keep live log streaming panel (position TBD - possibly as detail pane tab or dedicated section)
-- Maintain websocket connection for real-time updates
-- System-level status chips in detail pane
-
-### Table Features (Both Views)
-- Minimal columns: status, system/config, commit (short), time/duration
-- Sortable by column click
-- Search/filter controls above table
-- Row selection highlights and updates detail pane
-- Pagination controls (builds already has this)
-
-## Development Workflow
-
-This task will be worked **interactively** using Dioxus hot-reload:
-
-```bash
-AUTH_MODE=dev nix run .#web-ui.dx-serve
-```
-
-The implementing agent will:
-1. Make incremental UI changes
-2. Commit at logical checkpoints (e.g., "builds: convert active queue to table", "evals: add tab navigation")
-3. Iterate based on user feedback during the session
-4. Use existing mock data infrastructure
+## Non-Goals
+- No new backend workflow semantics outside existing feature scope.
+- No non-view-layer refactors unrelated to builds/evaluations surfaces.
+- No speculative feature additions not represented in design direction.
 
 ## Scope
+- Align page structure, tab patterns, active/history segmentation, and detail-pane behavior.
+- Standardize table-centric queue presentation and row-selection behavior.
+- Preserve current queue actions, controls, and websocket/live updates.
+- Harmonize visual tokens, spacing, and typography with milestone parity standards.
 
-**In scope:**
-- Restructure both views for visual consistency
-- Convert card-based queues to table views
-- Implement/refine table features (sort, filter, search)
-- Unify split-pane detail view pattern
-- Maintain all existing functionality (actions, websockets, metrics)
-- Improve information density and visual hierarchy
+## Architectural Constraints
+- Keep state/data adapters separate from presentational view components.
+- Avoid business logic in rendering modules.
+- Reuse shared table/filter primitives where possible.
 
-**Out of scope:**
-- New API endpoints (unless minor additions needed)
-- Changes to backend logic or data models
-- Performance optimization beyond UI rendering
-- New features not related to layout/density
+## Verification Plan
+- `AUTH_MODE=dev nix run .#web-ui.dx-serve` for iterative visual validation.
+- `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown`
+- `nix build .#checks.x86_64-linux.web-ui`
+- Update `checks/web-ui` with assertion-based interaction coverage for builds and evaluations.
+- Capture screenshot coverage for loading/empty/error/populated and key tab/detail states.
 
-## Success Criteria
+## Impact Areas
+- `packages/web-ui/src/views/builds.rs`
+- `packages/web-ui/src/views/evaluations.rs`
+- Related components under `packages/web-ui/src/components/**`
+- `checks/web-ui/**`
 
-- Both views use consistent tab-based navigation (Active / History)
-- Both active queues display as tables with similar column structures
-- Both detail panes show relevant information in similar layout patterns
-- All existing actions and functionality remain working
-- Visual density is noticeably improved (less whitespace, more scannable)
-- User can quickly identify status, system, and key metadata at a glance
-- Hot-reload workflow allows rapid iteration and feedback
+## Risk Level
+High (high-traffic operational screens with many interaction paths).
+
+## Dependencies
+- Design parity matrix TASK-328.
+- Shared token/shell alignment TASK-329.
+- Verification harness TASK-333.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
