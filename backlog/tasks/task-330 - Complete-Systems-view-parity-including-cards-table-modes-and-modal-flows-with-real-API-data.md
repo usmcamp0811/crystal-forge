@@ -6,6 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-05-31 15:56'
+updated_date: '2026-05-31 15:58'
 labels:
   - design-parity
   - systems
@@ -55,4 +56,5 @@ Risk: High.
 - [ ] #3 All stat-strip and row/card values are sourced from backend APIs in production path
 - [ ] #4 All systems modals/panels match reference spacing/typography/interactions
 - [ ] #5 web-ui checks include screenshot + behavior assertions for systems parity scenarios
+- [ ] #6 web-ui screenshot set covers loading, empty, error, and populated states for Systems surfaces
 <!-- AC:END -->
