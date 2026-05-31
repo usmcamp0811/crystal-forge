@@ -1,9 +1,10 @@
 ---
 id: TASK-326
 title: Relocate CVEs nav entry and add Scanning view from design reference
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-05-31 02:20'
+updated_date: '2026-05-31 02:20'
 labels:
   - ui
   - navigation
