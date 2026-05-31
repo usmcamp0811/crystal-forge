@@ -362,55 +362,84 @@ pub fn ScanningView() -> Element {
                         class: "modal",
                         style: "width:min(620px,96vw);",
                         onclick: move |evt| evt.stop_propagation(),
-                        div { class: "modal-head", h2 { "Scan schedule" }, p { "Control how often vulnix rescans configurations." } }
+                        div { class: "modal-head", h2 { "Scan schedule" }, p { "Control how often vulnix rescans configurations. New & deployed configs scan most often; old ones least." } }
                         div {
                             class: "modal-body",
                             div {
                                 style: "display:flex; align-items:flex-start; justify-content:space-between; gap:16px; padding:12px 0; border-bottom:1px solid var(--cf-divider);",
                                 div {
                                     div { style: "font-size:13px; font-weight:600;", "Scan on build" }
-                                    div { style: "font-size:11px; color:var(--cf-text-muted); margin-top:2px; line-height:1.5;", "Scan freshly-built configs before deploy." }
+                                    div { style: "font-size:11px; color:var(--cf-text-muted); margin-top:2px; line-height:1.5;", "Scan a freshly-built config before it can be deployed. Strongly recommended — the derivation is already in the store, so no extra build is needed." }
                                 }
                                 label { style: "display:flex; gap:8px; align-items:center; font-size:13px; cursor:pointer;",
                                     input { r#type: "checkbox", checked: true }
                                     span { "On" }
                                 }
                             }
+                            { schedule_interval_row(
+                                "Deployed configs",
+                                "Currently running on at least one system. Rescanned to catch newly-published advisories.",
+                            ) }
+                            { schedule_interval_row(
+                                "Recent configs",
+                                "Built in the last 30 days but not currently deployed.",
+                            ) }
                             div {
                                 style: "display:flex; align-items:flex-start; justify-content:space-between; gap:16px; padding:12px 0; border-bottom:1px solid var(--cf-divider);",
                                 div {
-                                    div { style: "font-size:13px; font-weight:600;", "Deployed configs" }
-                                    div { style: "font-size:11px; color:var(--cf-text-muted); margin-top:2px; line-height:1.5;", "Currently running on at least one system." }
+                                    div { style: "font-size:13px; font-weight:600;", "Archived configs" }
+                                    div { style: "font-size:11px; color:var(--cf-text-muted); margin-top:2px; line-height:1.5;", "Old / superseded configs no longer in rotation. Scan rarely (or never) to save builder time." }
                                 }
-                                select { class: "input focus-ring", style: "width:120px;", option { value: "24h", "Every 24h" } }
+                                div {
+                                    style: "display:flex; align-items:center; gap:8px;",
+                                    input { r#type: "checkbox", checked: true }
+                                    select { class: "input focus-ring", style: "width:120px;", option { value: "168h", "Every 168h" } }
+                                }
+                            }
+                            div {
+                                style: "display:flex; align-items:flex-start; justify-content:space-between; gap:16px; padding:12px 0; border-bottom:1px solid var(--cf-divider);",
+                                div {
+                                    div { style: "font-size:13px; font-weight:600;", "Rebuild to scan old configs" }
+                                    div { style: "font-size:11px; color:var(--cf-text-muted); margin-top:2px; line-height:1.5;", "vulnix needs a realised derivation. Archived configs evicted from cache must be rebuilt before they can be scanned — this can be expensive. Off = skip uncached configs instead of building them." }
+                                }
+                                label { style: "display:flex; gap:8px; align-items:center; font-size:13px; cursor:pointer;",
+                                    input { r#type: "checkbox" }
+                                    span { "Off" }
+                                }
                             }
                             div {
                                 class: "sd-callout sd-callout-info",
                                 style: "font-size:11px; margin-top:12px;",
-                                div { "Estimated load: deployed configs at every 24h dominate builder cost." }
-                            }
-                            div {
-                                style: "display:flex; align-items:flex-start; justify-content:space-between; gap:16px; padding:12px 0 0;",
-                                div {
-                                    div { style: "font-size:13px; font-weight:600;", "Retry policy" }
-                                    div { style: "font-size:11px; color:var(--cf-text-muted); margin-top:2px; line-height:1.5;", "Automatic retry attempts after transient scanner failures." }
-                                }
-                                select {
-                                    class: "input focus-ring",
-                                    style: "width:120px;",
-                                    option { value: "none", "Disabled" }
-                                    option { value: "1", selected: true, "1 retry" }
-                                    option { value: "2", "2 retries" }
-                                }
+                                div { "Estimated load: ~every build scans + periodic rescans. Deployed configs at every 24h dominate builder cost." }
                             }
                         }
                         div {
                             class: "modal-foot",
                             button { class: "btn btn-ghost focus-ring", onclick: move |_| schedule_open.set(false), "Cancel" }
-                            button { class: "btn btn-primary focus-ring", onclick: move |_| schedule_open.set(false), "Save" }
+                            button { class: "btn btn-primary focus-ring", onclick: move |_| schedule_open.set(false), "Save schedule" }
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+fn schedule_interval_row(title: &'static str, desc: &'static str) -> Element {
+    rsx! {
+        div {
+            style: "display:flex; align-items:flex-start; justify-content:space-between; gap:16px; padding:12px 0; border-bottom:1px solid var(--cf-divider);",
+            div {
+                style: "min-width:0;",
+                div { style: "font-size:13px; font-weight:600;", "{title}" }
+                div { style: "font-size:11px; color:var(--cf-text-muted); margin-top:2px; line-height:1.5;", "{desc}" }
+            }
+            select {
+                class: "input focus-ring",
+                style: "width:120px;",
+                option { value: "24h", "Every 24h" }
+                option { value: "168h", "Every 168h" }
+                option { value: "never", "Never" }
             }
         }
     }
