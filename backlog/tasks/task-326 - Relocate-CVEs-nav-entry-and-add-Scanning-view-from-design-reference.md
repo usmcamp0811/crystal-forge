@@ -1,7 +1,7 @@
 ---
 id: TASK-326
 title: Relocate CVEs nav entry and add Scanning view from design reference
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-05-31 02:20'
 updated_date: '2026-05-31 02:20'
@@ -60,3 +60,9 @@ The sidebar information architecture has changed: CVEs is moving to a different 
 - [ ] #7 No unrelated view/sidebar regressions introduced
 - [ ] #8 Web UI builds successfully with the changes
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-326-scanning-view-nav-relocation
+<!-- SECTION:NOTES:END -->
