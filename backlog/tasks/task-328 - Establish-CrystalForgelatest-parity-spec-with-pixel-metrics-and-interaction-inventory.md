@@ -3,7 +3,7 @@ id: TASK-328
 title: >-
   Establish CrystalForgelatest parity spec with pixel metrics and interaction
   inventory
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-05-31 15:56'
 updated_date: '2026-05-31 16:07'
@@ -54,3 +54,9 @@ Risk: Medium (spec quality drives all downstream work).
 - [ ] #6 The parity matrix defines mandatory web-ui assertions per view/state (not screenshot-only checks)
 - [ ] #7 The parity matrix requires screenshot coverage for all in-scope states including loading, empty, error, and populated states
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: gpt-5.3-codex on webb in /home/mcamp/code/crystal-forge/dev
+<!-- SECTION:NOTES:END -->
