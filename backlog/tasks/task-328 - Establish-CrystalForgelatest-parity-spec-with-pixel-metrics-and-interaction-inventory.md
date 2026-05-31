@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-05-31 15:56'
-updated_date: '2026-05-31 16:07'
+updated_date: '2026-05-31 16:13'
 labels:
   - design-parity
   - ui-ux
@@ -17,6 +17,8 @@ references:
   - /home/mcamp/code/crystal-forge/CrystalForgelatest
   - /home/mcamp/code/crystal-forge/CrystalForgelatest/styles.css
   - /home/mcamp/code/crystal-forge/CrystalForgelatest/app.jsx
+  - design/doc-8 - CrystalForgelatest-UI-Parity-Matrix-TASK-328.md
+  - design/doc-9 - M16-Baseline-UI-Parity-Scorecard-Initial.md
 priority: high
 ordinal: 1600
 ---
@@ -58,5 +60,5 @@ Risk: Medium (spec quality drives all downstream work).
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-LOCK: gpt-5.3-codex on webb in /home/mcamp/code/crystal-forge/dev
+Baseline scorecard created: doc-9 with initial per-view A/B/C/D grades and prioritized execution order.
 <!-- SECTION:NOTES:END -->
