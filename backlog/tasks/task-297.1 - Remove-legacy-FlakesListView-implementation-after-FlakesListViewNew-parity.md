@@ -4,12 +4,13 @@ title: Remove legacy FlakesListView implementation after FlakesListViewNew parit
 status: Backlog
 assignee: []
 created_date: '2026-05-15 15:44'
+updated_date: '2026-05-31 15:59'
 labels:
   - web-ui
   - flakes
   - cleanup
   - refactor
-milestone: UI parity
+milestone: m-16
 dependencies: []
 references:
   - packages/web-ui/src/views/flakes_list.rs
@@ -33,4 +34,6 @@ Desired outcome: remove dead legacy Flakes view code and associated unused helpe
 - [ ] #2 Application still routes to FlakesListViewNew without regression
 - [ ] #3 `nix develop -c cargo check --target wasm32-unknown-unknown` passes
 - [ ] #4 Any follow-up cleanup out of scope is captured in separate backlog tasks
+- [ ] #5 web-ui check must assert flakes-view behavior parity before legacy view removal
+- [ ] #6 web-ui check must include full screenshots for affected flakes-view states before and after switch
 <!-- AC:END -->
