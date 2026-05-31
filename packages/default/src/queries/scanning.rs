@@ -130,11 +130,12 @@ pub async fn get_scan_stats(pool: &PgPool) -> Result<ScanStatsRow> {
                 d.id AS derivation_id,
                 cs.status,
                 cs.completed_at,
-                cs.scheduled_at
+                cs.scheduled_at,
+                cs.created_at
             FROM derivations d
             LEFT JOIN cve_scans cs ON cs.derivation_id = d.id
             WHERE d.derivation_type = 'nixos'
-            ORDER BY d.id, cs.completed_at DESC NULLS LAST, cs.created_at DESC NULLS LAST
+            ORDER BY d.id, COALESCE(cs.completed_at, cs.scheduled_at, cs.created_at) DESC NULLS LAST
         )
         SELECT
             COUNT(*) FILTER (WHERE status = 'in_progress')::BIGINT AS scanning,
@@ -283,19 +284,24 @@ pub async fn get_scan_systems(pool: &PgPool, limit: i64) -> Result<Vec<ScanSyste
                 d.derivation_name AS hostname,
                 d.store_path,
                 cs.completed_at,
+                cs.scheduled_at,
+                cs.created_at,
                 cs.critical_count,
                 cs.high_count
             FROM derivations d
             LEFT JOIN cve_scans cs ON cs.derivation_id = d.id
             WHERE d.derivation_type = 'nixos'
-            ORDER BY d.id, cs.completed_at DESC NULLS LAST, cs.created_at DESC NULLS LAST
+            ORDER BY d.id, COALESCE(cs.completed_at, cs.scheduled_at, cs.created_at) DESC NULLS LAST
         )
         SELECT
             s.id AS system_id,
             l.hostname,
             MAX(e.name) AS environment,
             COUNT(*)::BIGINT AS total_configs,
-            COUNT(*) FILTER (WHERE l.completed_at >= NOW() - INTERVAL '30 days')::BIGINT AS scanned,
+            COUNT(*) FILTER (
+                WHERE l.completed_at IS NOT NULL
+                AND l.completed_at >= NOW() - (SELECT deployed_hours * INTERVAL '1 hour' FROM policy)
+            )::BIGINT AS scanned,
             COUNT(*) FILTER (
                 WHERE l.completed_at IS NOT NULL
                 AND l.completed_at < NOW() - (SELECT deployed_hours * INTERVAL '1 hour' FROM policy)

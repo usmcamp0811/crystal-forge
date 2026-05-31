@@ -60,7 +60,12 @@ pub fn ScanningView() -> Element {
                         },
                         "Schedule"
                     }
-                    button { class: "btn btn-primary focus-ring", "Rescan all" }
+                    button {
+                        class: "btn btn-primary focus-ring",
+                        disabled: true,
+                        title: "Fleet rescan endpoint is not available yet",
+                        "Rescan all"
+                    }
                 }
             }
 
@@ -86,6 +91,14 @@ pub fn ScanningView() -> Element {
                     div { class: "sd-tabs", style: "padding:0 16px; border-bottom:1px solid var(--cf-card-border); display:flex; align-items:center;",
                         button { class: if tab() == "queue" { "sd-tab focus-ring active" } else { "sd-tab focus-ring" }, onclick: move |_| tab.set("queue".to_string()), "Active & Recent" }
                         button { class: if tab() == "all" { "sd-tab focus-ring active" } else { "sd-tab focus-ring" }, onclick: move |_| tab.set("all".to_string()), "All configs" }
+                        if !show_activity() {
+                            button {
+                                class: "sd-tab focus-ring",
+                                style: "margin-left:auto;",
+                                onclick: move |_| show_activity.set(true),
+                                "Activity"
+                            }
+                        }
                     }
 
                     if tab() == "queue" {
