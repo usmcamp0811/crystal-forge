@@ -6,6 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-05-31 15:56'
+updated_date: '2026-05-31 15:59'
 labels:
   - design-parity
   - backend-api
@@ -50,4 +51,6 @@ Risk: High (cross-layer contract changes).
 - [ ] #2 All design-required fields/states are available from authoritative backend APIs
 - [ ] #3 API tests validate new/changed fields and failure/empty-state semantics
 - [ ] #4 Affected web-ui surfaces consume backend data without fallback placeholders in production path
+- [ ] #5 web-ui check is updated with assertions proving backend-driven values render correctly in target views
+- [ ] #6 web-ui check captures screenshots of all affected states that depend on updated API contracts
 <!-- AC:END -->
