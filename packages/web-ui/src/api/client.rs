@@ -107,6 +107,17 @@ pub async fn fetch_scanning_systems(
     fetch_json(&url).await
 }
 
+pub async fn fetch_scanning_system_scans(
+    system_id: &Uuid,
+    limit: Option<i64>,
+) -> Result<Vec<ScanningQueueItemResponse>, ApiClientError> {
+    let mut url = format!("{}/scanning/systems/{}/scans", base_url(), system_id);
+    if let Some(limit) = limit {
+        url.push_str(&format!("?limit={}", limit.clamp(1, 500)));
+    }
+    fetch_json(&url).await
+}
+
 pub async fn fetch_scanning_activity(
     limit: Option<i64>,
 ) -> Result<Vec<ScanningActivityItemResponse>, ApiClientError> {

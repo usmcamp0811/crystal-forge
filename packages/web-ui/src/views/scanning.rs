@@ -1,10 +1,12 @@
 use dioxus::prelude::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::api::client::{
-    fetch_scanning_activity, fetch_scanning_queue, fetch_scanning_schedule, fetch_scanning_stats,
-    fetch_scanning_systems, update_scanning_schedule,
+    fetch_scanning_activity, fetch_scanning_queue, fetch_scanning_schedule,
+    fetch_scanning_stats, fetch_scanning_system_scans, fetch_scanning_systems,
+    update_scanning_schedule,
 };
+use crate::api::models::ScanningQueueItemResponse;
 use crate::api::models::{ScanSchedulePolicyResponse, UpdateScanSchedulePolicyRequest};
 use crate::routes::Route;
 
@@ -15,6 +17,8 @@ pub fn ScanningView() -> Element {
     let mut show_activity = use_signal(|| true);
     let mut schedule_open = use_signal(|| false);
     let mut expanded_systems = use_signal(HashSet::<String>::new);
+    let mut system_scan_rows = use_signal(HashMap::<String, Vec<ScanningQueueItemResponse>>::new);
+    let mut loading_system_scans = use_signal(HashSet::<String>::new);
 
     let mut policy_on_build = use_signal(|| true);
     let mut policy_deployed_interval = use_signal(|| "24h".to_string());
@@ -121,18 +125,14 @@ pub fn ScanningView() -> Element {
                                     for s in rows.iter() {
                                         {
                                             let hostname = s.hostname.clone();
+                                            let system_key = s.system_id.to_string();
                                             let is_expanded = expanded_systems.read().contains(&hostname);
-                                            let queue_rows_for_host = queue
+                                            let queue_rows_for_system = system_scan_rows
                                                 .read()
-                                                .as_ref()
-                                                .and_then(|res| res.as_ref().ok())
-                                                .map(|all| {
-                                                    all.iter()
-                                                        .filter(|q| q.hostname == hostname)
-                                                        .cloned()
-                                                        .collect::<Vec<_>>()
-                                                })
+                                                .get(&system_key)
+                                                .cloned()
                                                 .unwrap_or_default();
+                                            let system_scans_loading = loading_system_scans.read().contains(&system_key);
 
                                             rsx! {
                                                 tr {
@@ -153,12 +153,42 @@ pub fn ScanningView() -> Element {
                                                             class: "btn-icon focus-ring",
                                                             onclick: {
                                                                 let host = s.hostname.clone();
+                                                                let system_id = s.system_id;
+                                                                let key = s.system_id.to_string();
                                                                 move |_| {
                                                                     let mut next = expanded_systems.read().clone();
                                                                     if next.contains(&host) {
                                                                         next.remove(&host);
                                                                     } else {
                                                                         next.insert(host.clone());
+
+                                                                        if !system_scan_rows.read().contains_key(&key)
+                                                                            && !loading_system_scans.read().contains(&key)
+                                                                        {
+                                                                            let fetch_key = key.clone();
+                                                                            let mut loading = loading_system_scans.read().clone();
+                                                                            loading.insert(key.clone());
+                                                                            loading_system_scans.set(loading);
+
+                                                                            spawn(async move {
+                                                                                match fetch_scanning_system_scans(&system_id, Some(100)).await {
+                                                                                    Ok(rows) => {
+                                                                                        let mut next_rows = system_scan_rows.read().clone();
+                                                                                        next_rows.insert(fetch_key.clone(), rows);
+                                                                                        system_scan_rows.set(next_rows);
+                                                                                    }
+                                                                                    Err(_) => {
+                                                                                        let mut next_rows = system_scan_rows.read().clone();
+                                                                                        next_rows.insert(fetch_key.clone(), Vec::new());
+                                                                                        system_scan_rows.set(next_rows);
+                                                                                    }
+                                                                                }
+
+                                                                                let mut loading_next = loading_system_scans.read().clone();
+                                                                                loading_next.remove(&fetch_key);
+                                                                                loading_system_scans.set(loading_next);
+                                                                            });
+                                                                        }
                                                                     }
                                                                     expanded_systems.set(next);
                                                                 }
@@ -183,12 +213,16 @@ pub fn ScanningView() -> Element {
                                                                         }
                                                                     }
                                                                     tbody {
-                                                                        if queue_rows_for_host.is_empty() {
+                                                                        if system_scans_loading {
+                                                                            tr {
+                                                                                td { colspan: 5, style: "padding:10px; color:var(--cf-text-muted);", "Loading per-config scan rows…" }
+                                                                            }
+                                                                        } else if queue_rows_for_system.is_empty() {
                                                                             tr {
                                                                                 td { colspan: 5, style: "padding:10px; color:var(--cf-text-muted);", "No per-config scan rows yet." }
                                                                             }
                                                                         } else {
-                                                                            for row in queue_rows_for_host.iter() {
+                                                                            for row in queue_rows_for_system.iter() {
                                                                                 tr {
                                                                                     td {
                                                                                         div { class: "mono", style: "font-size:12px;", "{commit_label(&row.commit_hash)}" }

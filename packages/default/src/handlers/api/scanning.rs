@@ -1,4 +1,4 @@
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use axum::{Json, http::StatusCode};
@@ -13,7 +13,7 @@ use crate::api::models::{
 use crate::handlers::api::rbac::require_admin;
 use crate::queries::scanning::{
     ScanSchedulePolicyRow, get_scan_activity, get_scan_queue, get_scan_schedule_policy,
-    get_scan_stats, get_scan_systems, update_scan_schedule_policy,
+    get_scan_queue_for_system, get_scan_stats, get_scan_systems, update_scan_schedule_policy,
 };
 
 #[derive(Debug, Deserialize)]
@@ -124,6 +124,44 @@ pub async fn get_scanning_systems(
         Err(e) => {
             error!("scanning systems query failed: {e:#}");
             internal_error("Failed to load scanning systems")
+        }
+    }
+}
+
+pub async fn get_scanning_system_scans(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(system_id): Path<uuid::Uuid>,
+    Query(params): Query<ScanningListParams>,
+) -> impl IntoResponse {
+    if require_admin(&pool, &headers).await.is_none() {
+        return forbidden_admin();
+    }
+
+    match get_scan_queue_for_system(&pool, system_id, params.limit.clamp(1, 500)).await {
+        Ok(rows) => (
+            StatusCode::OK,
+            Json(
+                rows.into_iter()
+                    .map(|r| ScanningQueueItemResponse {
+                        scan_id: r.scan_id,
+                        hostname: r.hostname,
+                        flake_name: r.flake_name,
+                        commit_hash: r.commit_hash,
+                        status: r.status,
+                        completed_at: r.completed_at,
+                        scheduled_at: r.scheduled_at,
+                        critical_count: r.critical_count,
+                        high_count: r.high_count,
+                        medium_count: r.medium_count,
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+        )
+            .into_response(),
+        Err(e) => {
+            error!("scanning system scans query failed: {e:#}");
+            internal_error("Failed to load system scan rows")
         }
     }
 }
@@ -302,6 +340,19 @@ mod tests {
         let response = get_scanning_activity(
             State(lazy_pool()),
             HeaderMap::new(),
+            Query(ScanningListParams { limit: 50 }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn get_scanning_system_scans_requires_admin() {
+        let response = get_scanning_system_scans(
+            State(lazy_pool()),
+            HeaderMap::new(),
+            Path(uuid::Uuid::nil()),
             Query(ScanningListParams { limit: 50 }),
         )
         .await
