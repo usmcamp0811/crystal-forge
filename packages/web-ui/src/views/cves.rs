@@ -224,23 +224,9 @@ pub fn CvesView() -> Element {
                     style: "display: flex; gap: 8px;",
                     button {
                         class: "btn btn-ghost focus-ring",
-                        onclick: move |_| {
-                            let mut toast_message = toast_message;
-                            spawn(async move {
-                                match client::trigger_cve_fleet_rescan().await {
-                                    Ok(_) => {
-                                        toast_message.set(Some(("Fleet rescan initiated".to_string(), true)));
-                                        gloo_timers::future::TimeoutFuture::new(4000).await;
-                                        toast_message.set(None);
-                                    }
-                                    Err(e) => {
-                                        toast_message.set(Some((format!("Rescan failed: {e}"), false)));
-                                        gloo_timers::future::TimeoutFuture::new(5000).await;
-                                        toast_message.set(None);
-                                    }
-                                }
-                            });
-                        },
+                        disabled: true,
+                        title: "Fleet rescan enqueue path is not wired yet",
+                        style: "opacity: 0.6; cursor: not-allowed;",
                         // Sync icon
                         svg {
                             width: "14",

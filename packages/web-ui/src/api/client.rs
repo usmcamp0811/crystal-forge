@@ -310,39 +310,18 @@ pub async fn revoke_cve_justification(cve_id: &str) -> Result<(), ApiClientError
         base_url(),
         encode_uri_component(cve_id)
     );
-    send_empty("DELETE", &url).await
+    send_empty_with_csrf("DELETE", &url, None::<&()>).await
 }
 
 /// Trigger CVE scan for all active systems (fleet rescan).
 pub async fn trigger_cve_fleet_rescan() -> Result<FleetRescanResponse, ApiClientError> {
     let url = format!("{}/cves/rescan-fleet", base_url());
-    post_json_no_body(&url).await
+    send_json_with_csrf("POST", &url, None::<&()>).await
 }
 
 /// Export CVEs as CSV (triggers browser download).
 pub async fn export_cves_csv(filters: &CveFilters) -> Result<(), ApiClientError> {
-    let mut parts: Vec<String> = Vec::new();
-
-    if let Some(severity) = &filters.severity {
-        if !severity.is_empty() {
-            parts.push(format!("severity={}", encode_query_value(severity)));
-        }
-    }
-
-    if let Some(fix_status) = &filters.fix_status {
-        if !fix_status.is_empty() {
-            parts.push(format!("fix_status={}", encode_query_value(fix_status)));
-        }
-    }
-
-    if let Some(triage_status) = &filters.triage_status {
-        if !triage_status.is_empty() {
-            parts.push(format!(
-                "triage_status={}",
-                encode_query_value(triage_status)
-            ));
-        }
-    }
+    let parts = cve_filter_query_parts(filters);
 
     let mut url = format!("{}/cves/export", base_url());
     if !parts.is_empty() {
