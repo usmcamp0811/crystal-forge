@@ -1,10 +1,10 @@
 ---
 id: TASK-327
 title: Refactor Dashboard view UI/UX for exact parity with latest design examples
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-05-31 15:14'
-updated_date: '2026-05-31 15:16'
+updated_date: '2026-05-31 15:17'
 labels:
   - ui
   - dashboard
@@ -96,6 +96,12 @@ This task is intentionally strict and objective. Parity decisions must defer to 
 - [ ] #9 `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` passes.
 - [ ] #10 `nix build .#checks.x86_64-linux.web-ui` passes and includes dashboard screenshot evidence for loading spinner state and loaded state.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: gpt-5.3-codex on webb in /home/mcamp/code/crystal-forge/TASK-327-refactor-dashboard-view
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
