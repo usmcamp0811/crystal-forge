@@ -62,17 +62,8 @@ pub fn Chip(
 
 /// Get environment color matching JSX data.js ENVIRONMENTS
 fn env_color(env: &str) -> &'static str {
-    let normalized = env.trim().to_ascii_lowercase();
-    match normalized.as_str() {
-        "production" => "#dc2626",
-        "prod" => "#dc2626",
-        "staging" => "#d97706",
-        "dev" => "#2563eb",
-        "development" => "#2563eb",
-        "edge" => "#0f766e",
-        "lab" => "#7c3aed",
-        _ => "#6b7280", // unknown/default gray
-    }
+    let _ = env;
+    "#6b7280" // fallback when no environment color is provided from backend
 }
 
 /// Environment badge with auto-color or custom styling.

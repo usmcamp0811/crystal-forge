@@ -2,8 +2,9 @@ use dioxus::prelude::*;
 use std::collections::{HashMap, HashSet};
 
 use crate::api::client::{
-    fetch_scanning_activity, fetch_scanning_queue, fetch_scanning_schedule, fetch_scanning_stats,
-    fetch_scanning_system_scans, fetch_scanning_systems, update_scanning_schedule,
+    fetch_environments, fetch_scanning_activity, fetch_scanning_queue, fetch_scanning_schedule,
+    fetch_scanning_stats, fetch_scanning_system_scans, fetch_scanning_systems,
+    update_scanning_schedule,
 };
 use crate::api::models::ScanningQueueItemResponse;
 use crate::api::models::{ScanSchedulePolicyResponse, UpdateScanSchedulePolicyRequest};
@@ -106,11 +107,23 @@ pub fn ScanningView() -> Element {
     let stats = use_resource(|| async { fetch_scanning_stats().await });
     let queue = use_resource(|| async { fetch_scanning_queue(Some(50)).await });
     let systems = use_resource(|| async { fetch_scanning_systems(Some(100)).await });
+    let environments = use_resource(|| async { fetch_environments().await });
     let activity = use_resource(|| async { fetch_scanning_activity(Some(20)).await });
     let mut schedule = use_resource(|| async { fetch_scanning_schedule().await });
 
     let schedule_value: Option<ScanSchedulePolicyResponse> =
         schedule.read().as_ref().and_then(|r| r.clone().ok());
+    let env_colors = environments
+        .read()
+        .as_ref()
+        .and_then(|r| r.as_ref().ok())
+        .map(|items| {
+            items
+                .iter()
+                .map(|e| (e.name.to_ascii_lowercase(), e.color_hex.clone()))
+                .collect::<HashMap<String, String>>()
+        })
+        .unwrap_or_default();
 
     rsx! {
         div { style: "display:flex; flex-direction:column; gap:16px;",
@@ -348,7 +361,21 @@ pub fn ScanningView() -> Element {
                                                         }
                                                         td {
                                                             if let Some(env) = s.environment.clone() {
-                                                                EnvBadge { name: env }
+                                                                {
+                                                                    let key = env.to_ascii_lowercase();
+                                                                    if let Some(color) = env_colors.get(&key) {
+                                                                        rsx! {
+                                                                            EnvBadge {
+                                                                                name: env,
+                                                                                fg: color.clone(),
+                                                                                bg: format!("color-mix(in oklab, {} 14%, var(--cf-card-bg))", color),
+                                                                                border: color.clone(),
+                                                                            }
+                                                                        }
+                                                                    } else {
+                                                                        rsx! { EnvBadge { name: env } }
+                                                                    }
+                                                                }
                                                             }
                                                         }
                                                         td { class: "mono", style: "font-size:12px;", "{s.total_configs}" }
