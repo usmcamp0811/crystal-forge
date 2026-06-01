@@ -3,9 +3,10 @@ id: TASK-337
 title: >-
   TASK-326 - Relocate CVEs nav entry and add Scanning view parity merge-blocker
   fix
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-06-01 03:40'
+updated_date: '2026-06-01 03:40'
 labels:
   - backend
   - scanning
@@ -71,3 +72,9 @@ Low-Medium (query join behavior change on queue endpoints)
 - [ ] #3 Queue endpoint behavior remains consistent for derivations with scan rows
 - [ ] #4 Targeted verification commands pass for touched backend/web-ui tests
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Moved to To Do per maintainer instruction to proceed with MR !267 blocker fix.
+<!-- SECTION:NOTES:END -->
