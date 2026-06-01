@@ -1,10 +1,10 @@
 ---
 id: TASK-326
 title: Relocate CVEs nav entry and add Scanning view from design reference
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-05-31 02:20'
-updated_date: '2026-06-01 01:50'
+updated_date: '2026-06-01 01:57'
 labels:
   - ui
   - navigation
@@ -67,33 +67,33 @@ The sidebar information architecture has changed: CVEs is moving to a different 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Sidebar places CVEs in the new requested section/order
-- [ ] #2 Old CVEs sidebar location now routes to a new Scanning view
-- [ ] #3 Scanning view structure and interaction closely match ScanningView.jsx design reference
-- [ ] #4 Route wiring is complete and direct navigation to Scanning view works
-- [ ] #5 Existing CVEs page remains accessible at its new navigation location
-- [ ] #6 Empty/loading/error states in Scanning view follow existing app style patterns
-- [ ] #7 No unrelated view/sidebar regressions introduced
-- [ ] #8 Web UI builds successfully with the changes
-- [ ] #9 Backend: scan_schedule_policy persisted via new migration (singleton row): on_build, deployed_interval, recent_interval, archived_interval, archived_enabled, rebuild_to_scan
-- [ ] #10 Backend: admin-gated GET/PUT /api/v1/scanning/schedule returns and updates the policy
-- [ ] #11 Backend: admin-gated GET /api/v1/scanning/stats returns live scanning-now/queued/stale/never-scanned/failed/coverage derived from cve_scans
-- [ ] #12 Backend: admin-gated GET /api/v1/scanning/queue returns active & recent scans (joins cve_scans + evaluation_targets + commits/flakes + systems)
-- [ ] #13 Backend: admin-gated GET /api/v1/scanning/systems returns per-system grouped configs with per-commit scan rows (freshness, status, findings, last scan)
-- [ ] #14 Backend: admin-gated GET /api/v1/scanning/activity returns recent scan activity derived from cve_scans (started/completed/failed) using completed_at/scheduled_at timestamps
-- [ ] #15 Backend: new handlers registered in bin/server.rs and cargo sqlx prepare metadata regenerated and committed
-- [ ] #16 Backend: query/handler unit tests cover aggregation and auth gating
-- [ ] #17 Frontend: Scanning view consumes the new endpoints via use_resource with loading/empty/error states (no fabricated data)
-- [ ] #18 Frontend: All-configs view supports expandable per-system rows showing the nested per-commit scan table (structural parity with ScanningView.jsx)
-- [ ] #19 Frontend: Schedule modal is bound to live policy (GET) and saves via PUT
-- [ ] #20 Freshness semantics: freshness = recency of vulnix scan; recent cutoff = 30 days; stale = last successful scan older than configured interval for the class; needs-build = derivation not in any cache
-- [ ] #21 Worker enforcement of policy intervals/flags is explicitly out of scope and tracked by TASK-327
+- [x] #1 Sidebar places CVEs in the new requested section/order
+- [x] #2 Old CVEs sidebar location now routes to a new Scanning view
+- [x] #3 Scanning view structure and interaction closely match ScanningView.jsx design reference
+- [x] #4 Route wiring is complete and direct navigation to Scanning view works
+- [x] #5 Existing CVEs page remains accessible at its new navigation location
+- [x] #6 Empty/loading/error states in Scanning view follow existing app style patterns
+- [x] #7 No unrelated view/sidebar regressions introduced
+- [x] #8 Web UI builds successfully with the changes
+- [x] #9 Backend: scan_schedule_policy persisted via new migration (singleton row): on_build, deployed_interval, recent_interval, archived_interval, archived_enabled, rebuild_to_scan
+- [x] #10 Backend: admin-gated GET/PUT /api/v1/scanning/schedule returns and updates the policy
+- [x] #11 Backend: admin-gated GET /api/v1/scanning/stats returns live scanning-now/queued/stale/never-scanned/failed/coverage derived from cve_scans
+- [x] #12 Backend: admin-gated GET /api/v1/scanning/queue returns active & recent scans (joins cve_scans + evaluation_targets + commits/flakes + systems)
+- [x] #13 Backend: admin-gated GET /api/v1/scanning/systems returns per-system grouped configs with per-commit scan rows (freshness, status, findings, last scan)
+- [x] #14 Backend: admin-gated GET /api/v1/scanning/activity returns recent scan activity derived from cve_scans (started/completed/failed) using completed_at/scheduled_at timestamps
+- [x] #15 Backend: new handlers registered in bin/server.rs and cargo sqlx prepare metadata regenerated and committed
+- [x] #16 Backend: query/handler unit tests cover aggregation and auth gating
+- [x] #17 Frontend: Scanning view consumes the new endpoints via use_resource with loading/empty/error states (no fabricated data)
+- [x] #18 Frontend: All-configs view supports expandable per-system rows showing the nested per-commit scan table (structural parity with ScanningView.jsx)
+- [x] #19 Frontend: Schedule modal is bound to live policy (GET) and saves via PUT
+- [x] #20 Freshness semantics: freshness = recency of vulnix scan; recent cutoff = 30 days; stale = last successful scan older than configured interval for the class; needs-build = derivation not in any cache
+- [x] #21 Worker enforcement of policy intervals/flags is explicitly out of scope and tracked by TASK-327
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-LOCK: gpt-5.3-codex on linux in /home/mcamp/code/crystal-forge/TASK-326-scanning-view-nav-relocation
+Updated queue/UI parity per user request: added backend queue fields freshness/is_current/trigger contract + icon-level parity conversion in Scanning view.
 
-Continuing TASK-326 per user instruction for icon-level parity and backend queue field parity (freshness/is_current/trigger) before returning MR to Review.
+Commit: 2a3c27ea pushed to MR !267.
 <!-- SECTION:NOTES:END -->
