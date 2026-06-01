@@ -3,7 +3,7 @@ id: TASK-337
 title: >-
   TASK-326 - Relocate CVEs nav entry and add Scanning view parity merge-blocker
   fix
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-06-01 03:40'
 updated_date: '2026-06-01 03:40'
@@ -76,5 +76,5 @@ Low-Medium (query join behavior change on queue endpoints)
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Moved to To Do per maintainer instruction to proceed with MR !267 blocker fix.
+LOCK: gpt-5.3-codex on webb in /home/mcamp/code/crystal-forge/TASK-326-scanning-view-nav-relocation
 <!-- SECTION:NOTES:END -->
