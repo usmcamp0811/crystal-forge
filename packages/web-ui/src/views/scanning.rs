@@ -495,9 +495,13 @@ pub fn ScanningView() -> Element {
                                             }
                                         }
                                         div { style: if idx + 1 == items.len() { "padding-top:3px; padding-bottom:0; min-width:0;" } else { "padding-top:3px; padding-bottom:14px; min-width:0;" },
-                                            div { style: "font-size:12px; display:flex; justify-content:space-between; gap:6px;",
+                                            div { style: "font-size:12px; display:flex; justify-content:space-between; gap:6px; min-width:0;",
                                                 span { style: "font-weight:600;", "{item.event}" }
-                                                span { style: "font-size:11px; color:var(--cf-text-muted); white-space:nowrap;", "{item.at.map(|d| d.to_rfc3339()).unwrap_or_default()}" }
+                                                span {
+                                                    style: "font-size:11px; color:var(--cf-text-muted); white-space:nowrap; min-width:0; max-width:150px; overflow:hidden; text-overflow:ellipsis; flex-shrink:1;",
+                                                    title: "{item.at.map(|d| d.to_rfc3339()).unwrap_or_default()}",
+                                                    "{item.at.map(|d| d.to_rfc3339()).unwrap_or_default()}"
+                                                }
                                             }
                                             div { class: "mono", style: "font-size:11px; color:var(--cf-brand-purple);", "{item.name}" }
                                             div { style: "font-size:11px; color:var(--cf-text-muted); margin-top:2px;", "{item.detail}" }
