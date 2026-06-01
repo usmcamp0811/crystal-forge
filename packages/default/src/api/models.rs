@@ -252,6 +252,13 @@ pub struct ScanningQueueItemResponse {
     pub critical_count: i32,
     pub high_count: i32,
     pub medium_count: i32,
+    /// Freshness class: `deployed`, `recent`, or `archived`.
+    pub freshness: String,
+    /// True when this is the latest scan row for its derivation.
+    pub is_current: bool,
+    /// What triggered the scan. Not yet tracked in the schema; always `None`
+    /// until a trigger source column is added (tracked as follow-up).
+    pub trigger: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

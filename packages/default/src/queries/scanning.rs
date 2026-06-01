@@ -37,6 +37,11 @@ pub struct ScanQueueRow {
     pub critical_count: i32,
     pub high_count: i32,
     pub medium_count: i32,
+    /// Freshness class derived from the most recent completed scan:
+    /// `deployed` (<=24h), `recent` (<=30d), or `archived` (older/never).
+    pub freshness: String,
+    /// True when this is the latest scan row for its derivation.
+    pub is_current: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -190,7 +195,17 @@ pub async fn get_scan_queue(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueueRo
             cs.scheduled_at,
             cs.critical_count,
             cs.high_count,
-            cs.medium_count
+            cs.medium_count,
+            CASE
+                WHEN cs.completed_at IS NULL THEN 'archived'
+                WHEN cs.completed_at >= NOW() - INTERVAL '24 hours' THEN 'deployed'
+                WHEN cs.completed_at >= NOW() - INTERVAL '30 days' THEN 'recent'
+                ELSE 'archived'
+            END AS freshness,
+            (ROW_NUMBER() OVER (
+                PARTITION BY d.id
+                ORDER BY COALESCE(cs.completed_at, cs.scheduled_at, cs.created_at) DESC NULLS LAST
+            ) = 1) AS is_current
         FROM cve_scans cs
         JOIN derivations d ON d.id = cs.derivation_id
         LEFT JOIN commits c ON c.id = d.commit_id
@@ -219,6 +234,8 @@ pub async fn get_scan_queue(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueueRo
             critical_count: row.get("critical_count"),
             high_count: row.get("high_count"),
             medium_count: row.get("medium_count"),
+            freshness: row.get("freshness"),
+            is_current: row.get("is_current"),
         })
         .collect())
 }
@@ -263,7 +280,16 @@ pub async fn get_scan_queue_for_system(
             scheduled_at,
             critical_count,
             high_count,
-            medium_count
+            medium_count,
+            CASE
+                WHEN completed_at IS NULL THEN 'archived'
+                WHEN completed_at >= NOW() - INTERVAL '24 hours' THEN 'deployed'
+                WHEN completed_at >= NOW() - INTERVAL '30 days' THEN 'recent'
+                ELSE 'archived'
+            END AS freshness,
+            (ROW_NUMBER() OVER (
+                ORDER BY lifecycle_at DESC NULLS LAST
+            ) = 1) AS is_current
         FROM latest_per_derivation
         ORDER BY
             CASE WHEN status = 'in_progress' THEN 0 WHEN status = 'pending' THEN 1 ELSE 2 END,
@@ -289,6 +315,8 @@ pub async fn get_scan_queue_for_system(
             critical_count: row.get("critical_count"),
             high_count: row.get("high_count"),
             medium_count: row.get("medium_count"),
+            freshness: row.get("freshness"),
+            is_current: row.get("is_current"),
         })
         .collect())
 }

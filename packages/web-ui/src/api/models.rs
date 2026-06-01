@@ -497,6 +497,15 @@ pub struct ScanningQueueItemResponse {
     pub critical_count: i32,
     pub high_count: i32,
     pub medium_count: i32,
+    /// Freshness class: `deployed`, `recent`, or `archived`.
+    #[serde(default)]
+    pub freshness: String,
+    /// True when this is the latest scan row for its derivation.
+    #[serde(default)]
+    pub is_current: bool,
+    /// Scan trigger source (not yet tracked server-side).
+    #[serde(default)]
+    pub trigger: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

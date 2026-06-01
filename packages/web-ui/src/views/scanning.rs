@@ -8,6 +8,7 @@ use crate::api::client::{
 use crate::api::models::ScanningQueueItemResponse;
 use crate::api::models::{ScanSchedulePolicyResponse, UpdateScanSchedulePolicyRequest};
 use crate::components::chips::EnvBadge;
+use crate::components::icon::{Icon, IconName};
 use crate::routes::Route;
 
 /// Status presentation metadata mirroring the design's SCAN_STATUS_META map.
@@ -133,13 +134,15 @@ pub fn ScanningView() -> Element {
                             schedule_save_error.set(None);
                             schedule_open.set(true);
                         },
-                        "⚙ Schedule"
+                        Icon { name: IconName::Gear, size: 14 }
+                        " Schedule"
                     }
                     button {
                         class: "btn btn-primary focus-ring",
                         disabled: true,
                         title: "Fleet rescan endpoint is not available yet",
-                        "↻ Rescan all"
+                        Icon { name: IconName::Sync, size: 14 }
+                        " Rescan all"
                     }
                 }
             }
@@ -172,7 +175,8 @@ pub fn ScanningView() -> Element {
                                 style: "margin-left:auto; font-size:11px; padding:2px 8px;",
                                 title: "Show scan activity",
                                 onclick: move |_| show_activity.set(true),
-                                "↻ Activity"
+                                Icon { name: IconName::Rows, size: 11 }
+                                " Activity"
                             }
                         }
                     }
@@ -195,6 +199,7 @@ pub fn ScanningView() -> Element {
                                             let eff = effective_status(row);
                                             let meta = meta_for(&eff);
                                             let fresh = freshness_label(row);
+                                            let trigger = row.trigger.clone();
                                             let has_findings = row.critical_count > 0 || row.high_count > 0;
                                             rsx! {
                                                 tr {
@@ -211,12 +216,17 @@ pub fn ScanningView() -> Element {
                                                     }
                                                     td { { findings_cell(row.critical_count, row.high_count, row.medium_count, row.completed_at.is_some()) } }
                                                     td { style: "font-size:12px; color:var(--cf-text-muted);", "{last_scan(row)}" }
-                                                    td { span { style: "font-size:11px; color:var(--cf-text-muted);", "—" } }
+                                                    td {
+                                                        match trigger {
+                                                            Some(t) if !t.is_empty() => rsx! { span { class: "chip chip-unknown", style: "font-size:10px;", "{t}" } },
+                                                            _ => rsx! { span { style: "font-size:11px; color:var(--cf-text-muted);", "—" } },
+                                                        }
+                                                    }
                                                     td {
                                                         div { class: "row-actions",
-                                                            button { class: "btn-icon focus-ring", disabled: true, title: "Rescan endpoint not available yet", "↻" }
+                                                            button { class: "btn-icon focus-ring", disabled: true, title: "Rescan endpoint not available yet", Icon { name: IconName::Sync, size: 14 } }
                                                             if has_findings {
-                                                                button { class: "btn-icon focus-ring", title: "View CVEs", onclick: move |_| { let _ = nav.push(Route::CvesView {}); }, "→" }
+                                                                button { class: "btn-icon focus-ring", title: "View CVEs", onclick: move |_| { let _ = nav.push(Route::CvesView {}); }, Icon { name: IconName::ArrowRight, size: 14 } }
                                                             }
                                                         }
                                                     }
@@ -254,7 +264,7 @@ pub fn ScanningView() -> Element {
                                 rsx! {
                                     div { style: "padding:10px 16px; border-bottom:1px solid var(--cf-divider); display:flex; gap:10px; align-items:center; flex-wrap:wrap;",
                                         div { class: "filter-search", style: "max-width:240px;",
-                                            span { style: "position:absolute; left:9px; color:var(--cf-text-muted); font-size:12px;", "🔍" }
+                                            Icon { name: IconName::Search, size: 14 }
                                             input {
                                                 class: "input focus-ring",
                                                 placeholder: "Search systems…",
@@ -328,7 +338,9 @@ pub fn ScanningView() -> Element {
                                                         },
                                                         td {
                                                             div { style: "display:flex; align-items:center; gap:8px;",
-                                                                span { style: "color:var(--cf-text-muted); flex-shrink:0; font-size:12px;", if is_expanded { "▾" } else { "▸" } }
+                                                                span { style: "color:var(--cf-text-muted); flex-shrink:0; display:inline-flex;",
+                                                                    Icon { name: if is_expanded { IconName::ChevronDown } else { IconName::ChevronRight }, size: 12 }
+                                                                }
                                                                 div {
                                                                     div { style: "font-weight:600; font-size:13px;", "{s.hostname}" }
                                                                 }
@@ -365,7 +377,7 @@ pub fn ScanningView() -> Element {
                                                                     if s.current_high > 0 { span { class: "chip chip-warning", style: "font-size:10px;", "{s.current_high}H" } }
                                                                 }
                                                             } else {
-                                                                span { class: "chip chip-healthy", style: "font-size:10px;", "✓ clean" }
+                                                                 span { class: "chip chip-healthy", style: "font-size:10px; display:inline-flex; align-items:center; gap:4px;", Icon { name: IconName::Check, size: 9 } " clean" }
                                                             }
                                                         }
                                                         td {
@@ -376,7 +388,7 @@ pub fn ScanningView() -> Element {
                                                                     disabled: true,
                                                                     title: "Rescan endpoint not available yet",
                                                                     onclick: move |evt| evt.stop_propagation(),
-                                                                    "↻"
+                                                                    Icon { name: IconName::Sync, size: 14 }
                                                                 }
                                                             }
                                                         }
@@ -390,7 +402,7 @@ pub fn ScanningView() -> Element {
                                                                         span { style: "font-size:11px; color:var(--cf-text-muted);",
                                                                             "{queue_rows_for_system.len()} config(s) for this system · newest first"
                                                                         }
-                                                                        button { class: "btn btn-ghost focus-ring", style: "font-size:11px; padding:2px 8px;", disabled: true, title: "Rescan endpoint not available yet", "↻ Rescan all" }
+                                                                        button { class: "btn btn-ghost focus-ring", style: "font-size:11px; padding:2px 8px;", disabled: true, title: "Rescan endpoint not available yet", Icon { name: IconName::Sync, size: 10 } " Rescan all" }
                                                                     }
                                                                     div { style: "border:1px solid var(--cf-divider); border-radius:8px; overflow:hidden;",
                                                                         table { style: "width:100%; border-collapse:collapse; font-size:12px;",
@@ -410,13 +422,13 @@ pub fn ScanningView() -> Element {
                                                                                 } else if queue_rows_for_system.is_empty() {
                                                                                     tr { td { colspan: 6, style: "padding:10px; color:var(--cf-text-muted);", "No per-config scan rows yet." } }
                                                                                 } else {
-                                                                                    for (i, row) in queue_rows_for_system.iter().enumerate() {
-                                                                                        {
-                                                                                            let eff = effective_status(row);
-                                                                                            let meta = meta_for(&eff);
-                                                                                            let fresh = freshness_label(row);
-                                                                                            let is_current = i == 0;
-                                                                                            let needs_build = row.status == "needs-build" || row.status == "needs_build";
+                                                                    for row in queue_rows_for_system.iter() {
+                                                                        {
+                                                                            let eff = effective_status(row);
+                                                                            let meta = meta_for(&eff);
+                                                                            let fresh = freshness_label(row);
+                                                                            let is_current = row.is_current;
+                                                                            let needs_build = row.status == "needs-build" || row.status == "needs_build";
                                                                                             rsx! {
                                                                                                 tr { style: "border-top:1px solid var(--cf-divider);",
                                                                                                     td { style: "padding:7px 8px;",
@@ -433,13 +445,13 @@ pub fn ScanningView() -> Element {
                                                                                                     }
                                                                                                     td { style: "padding:7px 8px;", { findings_cell(row.critical_count, row.high_count, row.medium_count, row.completed_at.is_some()) } }
                                                                                                     td { style: "padding:7px 8px; color:var(--cf-text-muted);", "{last_scan(row)}" }
-                                                                                                    td { style: "padding:7px 8px; text-align:right;",
-                                                                                                        if needs_build {
-                                                                                                            button { class: "btn btn-ghost focus-ring", style: "font-size:11px; padding:2px 8px;", disabled: true, title: "Not in cache — build first, then scan", "⚒ Build & scan" }
-                                                                                                        } else {
-                                                                                                            button { class: "btn-icon focus-ring", disabled: true, title: "Rescan endpoint not available yet", "↻" }
-                                                                                                        }
-                                                                                                    }
+                                                                                    td { style: "padding:7px 8px; text-align:right;",
+                                                                                        if needs_build {
+                                                                                             button { class: "btn btn-ghost focus-ring", style: "font-size:11px; padding:2px 8px;", disabled: true, title: "Not in cache — build first, then scan", Icon { name: IconName::Cpu, size: 11 } " Build & scan" }
+                                                                                        } else {
+                                                                                             button { class: "btn-icon focus-ring", disabled: true, title: "Rescan endpoint not available yet", Icon { name: IconName::Sync, size: 13 } }
+                                                                                        }
+                                                                                    }
                                                                                                 }
                                                                                             }
                                                                                         }
@@ -470,14 +482,14 @@ pub fn ScanningView() -> Element {
                     div { class: "card", style: "padding:16px;",
                         div { style: "display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;",
                             h3 { style: "margin:0; font-size:13px; font-weight:600;", "Scan activity" }
-                            button { class: "btn-icon focus-ring", title: "Hide panel", onclick: move |_| show_activity.set(false), "×" }
+                            button { class: "btn-icon focus-ring", title: "Hide panel", onclick: move |_| show_activity.set(false), Icon { name: IconName::X, size: 14 } }
                         }
                         div { class: "dash-w-body", style: "gap:0;",
                             if let Some(Ok(items)) = activity.read().as_ref() {
                                 for (idx, item) in items.iter().enumerate() {
                                     div { style: "display:flex; gap:10px; padding-left:2px;",
                                         div { style: "display:flex; flex-direction:column; align-items:center; padding-top:4px; flex-shrink:0;",
-                                            div { style: "width:22px; height:22px; border-radius:6px; background:color-mix(in oklab, #60a5fa 18%, transparent); color:#60a5fa; display:grid; place-items:center; font-size:11px;", "↻" }
+                                            div { style: "width:22px; height:22px; border-radius:6px; background:color-mix(in oklab, #60a5fa 18%, transparent); color:#60a5fa; display:grid; place-items:center;", Icon { name: IconName::Sync, size: 11 } }
                                             if idx + 1 < items.len() {
                                                 div { style: "width:2px; flex:1; background:var(--cf-divider); min-height:16px;" }
                                             }
@@ -504,7 +516,7 @@ pub fn ScanningView() -> Element {
                 div { class: "modal-backdrop", onclick: move |_| schedule_open.set(false),
                     div { class: "modal", style: "width:min(620px,96vw);", onclick: move |evt| evt.stop_propagation(),
                         div { class: "modal-head",
-                            h2 { "⚙ Scan schedule" }
+                            h2 { Icon { name: IconName::Gear, size: 14 } " Scan schedule" }
                             p { "Control how often vulnix rescans configurations. New & deployed configs scan most often; old ones least." }
                         }
                         div { class: "modal-body",
@@ -574,8 +586,8 @@ pub fn ScanningView() -> Element {
                                         },
                                     ) }
 
-                                    div { style: "display:flex; gap:8px; align-items:flex-start; font-size:11px; margin-top:12px; padding:10px 12px; border-radius:8px; background:color-mix(in oklab, #60a5fa 10%, var(--cf-card-bg)); border:1px solid var(--cf-card-border);",
-                                        span { "🛡" }
+                                    div { class: "sd-callout sd-callout-info", style: "font-size:11px; margin-top:12px;",
+                                        Icon { name: IconName::Shield, size: 12 }
                                         div {
                                             "Estimated load: ~"
                                             if policy_on_build() { "every build" } else { "no" }
@@ -615,7 +627,8 @@ pub fn ScanningView() -> Element {
                                         }
                                     });
                                 },
-                                "✓ Save schedule"
+                                Icon { name: IconName::Check, size: 13 }
+                                " Save schedule"
                             }
                         }
                     }
@@ -671,8 +684,12 @@ fn toggle_system(
     expanded_systems.set(next);
 }
 
-/// Derive a freshness class label (deployed/recent/archived) from scan recency.
+/// Resolve a freshness class label, preferring the server-provided value and
+/// falling back to client-side inference from scan recency.
 fn freshness_label(row: &ScanningQueueItemResponse) -> String {
+    if !row.freshness.is_empty() {
+        return row.freshness.clone();
+    }
     match row.completed_at {
         Some(ts) => {
             let age = chrono::Utc::now().signed_duration_since(ts);
@@ -709,7 +726,7 @@ fn findings_cell(crit: i32, high: i32, med: i32, scanned: bool) -> Element {
             if crit > 0 { span { class: "chip chip-critical", style: "font-size:10px;", "{crit}C" } }
             if high > 0 { span { class: "chip chip-warning", style: "font-size:10px;", "{high}H" } }
             if med > 0 { span { class: "chip chip-info", style: "font-size:10px;", "{med}M" } }
-            if crit == 0 && high == 0 && med == 0 { span { class: "chip chip-healthy", style: "font-size:10px;", "✓ clean" } }
+            if crit == 0 && high == 0 && med == 0 { span { class: "chip chip-healthy", style: "font-size:10px; display:inline-flex; align-items:center; gap:4px;", Icon { name: IconName::Check, size: 9 } " clean" } }
         }
     }
 }

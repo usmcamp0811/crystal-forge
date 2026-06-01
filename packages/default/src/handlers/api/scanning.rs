@@ -68,18 +68,7 @@ pub async fn get_scanning_queue(
             StatusCode::OK,
             Json(
                 rows.into_iter()
-                    .map(|r| ScanningQueueItemResponse {
-                        scan_id: r.scan_id,
-                        hostname: r.hostname,
-                        flake_name: r.flake_name,
-                        commit_hash: r.commit_hash,
-                        status: r.status,
-                        completed_at: r.completed_at,
-                        scheduled_at: r.scheduled_at,
-                        critical_count: r.critical_count,
-                        high_count: r.high_count,
-                        medium_count: r.medium_count,
-                    })
+                    .map(scan_queue_row_to_response)
                     .collect::<Vec<_>>(),
             ),
         )
@@ -88,6 +77,26 @@ pub async fn get_scanning_queue(
             error!("scanning queue query failed: {e:#}");
             internal_error("Failed to load scanning queue")
         }
+    }
+}
+
+fn scan_queue_row_to_response(
+    r: crate::queries::scanning::ScanQueueRow,
+) -> ScanningQueueItemResponse {
+    ScanningQueueItemResponse {
+        scan_id: r.scan_id,
+        hostname: r.hostname,
+        flake_name: r.flake_name,
+        commit_hash: r.commit_hash,
+        status: r.status,
+        completed_at: r.completed_at,
+        scheduled_at: r.scheduled_at,
+        critical_count: r.critical_count,
+        high_count: r.high_count,
+        medium_count: r.medium_count,
+        freshness: r.freshness,
+        is_current: r.is_current,
+        trigger: None,
     }
 }
 
@@ -143,18 +152,7 @@ pub async fn get_scanning_system_scans(
             StatusCode::OK,
             Json(
                 rows.into_iter()
-                    .map(|r| ScanningQueueItemResponse {
-                        scan_id: r.scan_id,
-                        hostname: r.hostname,
-                        flake_name: r.flake_name,
-                        commit_hash: r.commit_hash,
-                        status: r.status,
-                        completed_at: r.completed_at,
-                        scheduled_at: r.scheduled_at,
-                        critical_count: r.critical_count,
-                        high_count: r.high_count,
-                        medium_count: r.medium_count,
-                    })
+                    .map(scan_queue_row_to_response)
                     .collect::<Vec<_>>(),
             ),
         )
