@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-06-01 03:40'
-updated_date: '2026-06-01 03:40'
+updated_date: '2026-06-01 03:55'
 labels:
   - backend
   - scanning
@@ -76,5 +76,9 @@ Low-Medium (query join behavior change on queue endpoints)
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-LOCK: gpt-5.3-codex on webb in /home/mcamp/code/crystal-forge/TASK-326-scanning-view-nav-relocation
+Implemented minimal blocker fix in scanning queries: changed queue CTE joins from LEFT JOIN cve_scans to JOIN cve_scans in both get_scan_queue and get_scan_queue_for_system; set get_scan_queue_for_system is_current projection to TRUE.
+
+Tightened web-ui integration mock routing for scanning systems endpoints: split `**/api/v1/scanning/systems?*` and `**/api/v1/scanning/systems/*/scans*` patterns and matching unroute calls.
+
+Verification attempt failed due local DB connectivity in sqlx compile-time checks: `nix develop -c cargo test -p crystal-forge handlers::api::scanning::tests -- --nocapture` and `nix develop -c cargo test -p crystal-forge query_scanning -- --ignored --nocapture` both errored with `error communicating with database: Connection refused (os error 111)`. Requires starting repo dev DB stack before rerun.
 <!-- SECTION:NOTES:END -->
