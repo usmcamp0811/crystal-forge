@@ -8,12 +8,15 @@ use crate::api::client::{
 };
 use crate::api::models::ScanningQueueItemResponse;
 use crate::api::models::{ScanSchedulePolicyResponse, UpdateScanSchedulePolicyRequest};
+use crate::components::chips::EnvBadge;
 use crate::routes::Route;
 
 #[component]
 pub fn ScanningView() -> Element {
     let nav = navigator();
     let mut tab = use_signal(|| "queue".to_string());
+    let mut all_configs_search = use_signal(String::new);
+    let mut all_configs_env_filter = use_signal(|| "all".to_string());
     let mut show_activity = use_signal(|| true);
     let mut schedule_open = use_signal(|| false);
     let mut expanded_systems = use_signal(HashSet::<String>::new);
@@ -131,26 +134,116 @@ pub fn ScanningView() -> Element {
                             }
                         }
                     } else {
+                        if let Some(Ok(rows)) = systems.read().as_ref() {
+                            div { style: "display:flex; align-items:center; justify-content:space-between; gap:10px; padding:12px 16px; border-bottom:1px solid var(--cf-card-border);",
+                                div { style: "display:flex; gap:8px; align-items:center;",
+                                    input {
+                                        class: "input",
+                                        r#type: "text",
+                                        placeholder: "Search systems, flakes, commits…",
+                                        value: all_configs_search(),
+                                        oninput: move |e| all_configs_search.set(e.value()),
+                                        style: "min-width:280px;"
+                                    }
+                                    select {
+                                        class: "input",
+                                        value: all_configs_env_filter(),
+                                        oninput: move |e| all_configs_env_filter.set(e.value()),
+                                        option { value: "all", "All environments" }
+                                        {
+                                            let mut envs = rows
+                                                .iter()
+                                                .filter_map(|r| r.environment.clone())
+                                                .filter(|e| !e.is_empty())
+                                                .collect::<Vec<_>>();
+                                            envs.sort();
+                                            envs.dedup();
+                                            rsx! {
+                                                for env in envs {
+                                                    option { value: "{env}", "{env}" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                div { class: "page-subtitle", "{rows.len()} systems" }
+                            }
+                        }
+
                         table { class: "sys-table",
                             thead { tr { th { "System" } th { "Env" } th { "Configs" } th { "Fresh" } th { "Current findings" } th { " " } } }
                             tbody {
                                 if let Some(Ok(rows)) = systems.read().as_ref() {
                                     for s in rows.iter() {
                                         {
-                                            let hostname = s.hostname.clone();
-                                            let system_key = s.system_id.to_string();
-                                            let is_expanded = expanded_systems.read().contains(&hostname);
-                                            let queue_rows_for_system = system_scan_rows
-                                                .read()
-                                                .get(&system_key)
-                                                .cloned()
-                                                .unwrap_or_default();
-                                            let system_scans_loading = loading_system_scans.read().contains(&system_key);
+                                            let search = all_configs_search().to_lowercase();
+                                            let env_filter = all_configs_env_filter();
+                                            let env_name = s.environment.clone().unwrap_or_default();
+                                            let matches_search = search.is_empty() || s.hostname.to_lowercase().contains(&search);
+                                            let matches_env = env_filter == "all" || env_name == env_filter;
 
-                                            rsx! {
+                                            if matches_search && matches_env {
+                                                let hostname = s.hostname.clone();
+                                                let system_key = s.system_id.to_string();
+                                                let is_expanded = expanded_systems.read().contains(&hostname);
+                                                let queue_rows_for_system = system_scan_rows
+                                                    .read()
+                                                    .get(&system_key)
+                                                    .cloned()
+                                                    .unwrap_or_default();
+                                                let system_scans_loading = loading_system_scans.read().contains(&system_key);
+
+                                                rsx! {
                                                 tr {
+                                                    style: "cursor:pointer;",
+                                                    onclick: {
+                                                        let host = s.hostname.clone();
+                                                        let system_id = s.system_id;
+                                                        let key = s.system_id.to_string();
+                                                        move |_| {
+                                                            let mut next = expanded_systems.read().clone();
+                                                            if next.contains(&host) {
+                                                                next.remove(&host);
+                                                            } else {
+                                                                next.insert(host.clone());
+
+                                                                if !system_scan_rows.read().contains_key(&key)
+                                                                    && !loading_system_scans.read().contains(&key)
+                                                                {
+                                                                    let fetch_key = key.clone();
+                                                                    let mut loading = loading_system_scans.read().clone();
+                                                                    loading.insert(key.clone());
+                                                                    loading_system_scans.set(loading);
+
+                                                                    spawn(async move {
+                                                                        match fetch_scanning_system_scans(&system_id, Some(100)).await {
+                                                                            Ok(rows) => {
+                                                                                let mut next_rows = system_scan_rows.read().clone();
+                                                                                next_rows.insert(fetch_key.clone(), rows);
+                                                                                system_scan_rows.set(next_rows);
+                                                                            }
+                                                                            Err(_) => {
+                                                                                let mut next_rows = system_scan_rows.read().clone();
+                                                                                next_rows.insert(fetch_key.clone(), Vec::new());
+                                                                                system_scan_rows.set(next_rows);
+                                                                            }
+                                                                        }
+
+                                                                        let mut loading_next = loading_system_scans.read().clone();
+                                                                        loading_next.remove(&fetch_key);
+                                                                        loading_system_scans.set(loading_next);
+                                                                    });
+                                                                }
+                                                            }
+                                                            expanded_systems.set(next);
+                                                        }
+                                                    },
                                                     td { div { style: "font-weight:600; font-size:13px;", "{s.hostname}" } }
-                                                    td { span { class: "chip chip-info", style: "font-size:10px;", "{s.environment.clone().unwrap_or_default()}" } }
+                                                    td {
+                                                        if let Some(env) = s.environment.clone() {
+                                                            EnvBadge { name: env }
+                                                        }
+                                                    }
                                                     td { class: "mono", style: "font-size:12px;", "{s.total_configs}" }
                                                     td { class: "mono", style: "font-size:12px;", "{s.scanned}/{s.total_configs}" }
                                                     td {
@@ -168,7 +261,8 @@ pub fn ScanningView() -> Element {
                                                                 let host = s.hostname.clone();
                                                                 let system_id = s.system_id;
                                                                 let key = s.system_id.to_string();
-                                                                move |_| {
+                                                                move |evt| {
+                                                                    evt.stop_propagation();
                                                                     let mut next = expanded_systems.read().clone();
                                                                     if next.contains(&host) {
                                                                         next.remove(&host);
@@ -251,7 +345,7 @@ pub fn ScanningView() -> Element {
                                                                                         }
                                                                                     }
                                                                                     td { style: "font-size:12px; color:var(--cf-text-muted);", "{row.completed_at.map(|d| d.to_rfc3339()).unwrap_or_default()}" }
-                                                                                    td { div { class: "row-actions", button { class: "btn-icon focus-ring", onclick: move |_| { let _ = nav.push(Route::CvesView {}); }, "→" } } }
+                                                                                    td { div { class: "row-actions", button { class: "btn-icon focus-ring", title: "Per-config rescan endpoint is not available yet", disabled: true, "→" } } }
                                                                                 }
                                                                             }
                                                                         }
@@ -261,6 +355,9 @@ pub fn ScanningView() -> Element {
                                                         }
                                                     }
                                                 }
+                                                }
+                                            } else {
+                                                rsx! {}
                                             }
                                         }
                                     }
