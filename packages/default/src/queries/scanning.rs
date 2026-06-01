@@ -185,35 +185,48 @@ pub async fn get_scan_stats(pool: &PgPool) -> Result<ScanStatsRow> {
 pub async fn get_scan_queue(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueueRow>> {
     let rows = sqlx::query(
         r#"
+        WITH latest_per_derivation AS (
+            SELECT DISTINCT ON (d.id)
+                cs.id AS scan_id,
+                d.derivation_name AS hostname,
+                f.name AS flake_name,
+                c.git_commit_hash AS commit_hash,
+                cs.status,
+                cs.completed_at,
+                cs.scheduled_at,
+                cs.critical_count,
+                cs.high_count,
+                cs.medium_count,
+                COALESCE(cs.completed_at, cs.scheduled_at, cs.created_at) AS lifecycle_at
+            FROM derivations d
+            LEFT JOIN cve_scans cs ON cs.derivation_id = d.id
+            LEFT JOIN commits c ON c.id = d.commit_id
+            LEFT JOIN flakes f ON f.id = c.flake_id
+            WHERE d.derivation_type = 'nixos'
+            ORDER BY d.id, COALESCE(cs.completed_at, cs.scheduled_at, cs.created_at) DESC NULLS LAST
+        )
         SELECT
-            cs.id AS scan_id,
-            d.derivation_name AS hostname,
-            f.name AS flake_name,
-            c.git_commit_hash AS commit_hash,
-            cs.status,
-            cs.completed_at,
-            cs.scheduled_at,
-            cs.critical_count,
-            cs.high_count,
-            cs.medium_count,
+            scan_id,
+            hostname,
+            flake_name,
+            commit_hash,
+            status,
+            completed_at,
+            scheduled_at,
+            critical_count,
+            high_count,
+            medium_count,
             CASE
-                WHEN cs.completed_at IS NULL THEN 'archived'
-                WHEN cs.completed_at >= NOW() - INTERVAL '24 hours' THEN 'deployed'
-                WHEN cs.completed_at >= NOW() - INTERVAL '30 days' THEN 'recent'
+                WHEN completed_at IS NULL THEN 'archived'
+                WHEN completed_at >= NOW() - INTERVAL '24 hours' THEN 'deployed'
+                WHEN completed_at >= NOW() - INTERVAL '30 days' THEN 'recent'
                 ELSE 'archived'
             END AS freshness,
-            (ROW_NUMBER() OVER (
-                PARTITION BY d.id
-                ORDER BY COALESCE(cs.completed_at, cs.scheduled_at, cs.created_at) DESC NULLS LAST
-            ) = 1) AS is_current
-        FROM cve_scans cs
-        JOIN derivations d ON d.id = cs.derivation_id
-        LEFT JOIN commits c ON c.id = d.commit_id
-        LEFT JOIN flakes f ON f.id = c.flake_id
-        WHERE d.derivation_type = 'nixos'
+            TRUE AS is_current
+        FROM latest_per_derivation
         ORDER BY
-            CASE WHEN cs.status = 'in_progress' THEN 0 WHEN cs.status = 'pending' THEN 1 ELSE 2 END,
-            COALESCE(cs.completed_at, cs.scheduled_at, cs.created_at) DESC
+            CASE WHEN status = 'in_progress' THEN 0 WHEN status = 'pending' THEN 1 ELSE 2 END,
+            lifecycle_at DESC NULLS LAST
         LIMIT $1
         "#,
     )
