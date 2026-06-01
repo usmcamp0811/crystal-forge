@@ -125,32 +125,43 @@ pub async fn get_scan_stats(pool: &PgPool) -> Result<ScanStatsRow> {
             FROM scan_schedule_policy
             WHERE id = 1
         ),
-        latest AS (
+        latest_lifecycle AS (
             SELECT DISTINCT ON (d.id)
                 d.id AS derivation_id,
                 cs.status,
-                cs.completed_at,
                 cs.scheduled_at,
-                cs.created_at
+                cs.created_at,
+                cs.completed_at
             FROM derivations d
             LEFT JOIN cve_scans cs ON cs.derivation_id = d.id
             WHERE d.derivation_type = 'nixos'
             ORDER BY d.id, COALESCE(cs.completed_at, cs.scheduled_at, cs.created_at) DESC NULLS LAST
+        ),
+        latest_completed AS (
+            SELECT DISTINCT ON (d.id)
+                d.id AS derivation_id,
+                cs.completed_at
+            FROM derivations d
+            LEFT JOIN cve_scans cs ON cs.derivation_id = d.id
+            WHERE d.derivation_type = 'nixos'
+              AND cs.completed_at IS NOT NULL
+            ORDER BY d.id, cs.completed_at DESC
         )
         SELECT
-            COUNT(*) FILTER (WHERE status = 'in_progress')::BIGINT AS scanning,
-            COUNT(*) FILTER (WHERE status = 'pending')::BIGINT AS queued,
-            COUNT(*) FILTER (WHERE status = 'failed')::BIGINT AS failed,
-            COUNT(*) FILTER (WHERE completed_at IS NULL)::BIGINT AS never_scanned,
+            COUNT(*) FILTER (WHERE ll.status = 'in_progress')::BIGINT AS scanning,
+            COUNT(*) FILTER (WHERE ll.status = 'pending')::BIGINT AS queued,
+            COUNT(*) FILTER (WHERE ll.status = 'failed')::BIGINT AS failed,
+            COUNT(*) FILTER (WHERE lc.completed_at IS NULL)::BIGINT AS never_scanned,
             COUNT(*) FILTER (
-                WHERE completed_at IS NOT NULL
-                AND completed_at < NOW() - (SELECT deployed_hours * INTERVAL '1 hour' FROM policy)
+                WHERE lc.completed_at IS NOT NULL
+                AND lc.completed_at < NOW() - (SELECT deployed_hours * INTERVAL '1 hour' FROM policy)
             )::BIGINT AS stale,
             CASE
                 WHEN COUNT(*) = 0 THEN 0
-                ELSE ROUND((COUNT(*) FILTER (WHERE completed_at IS NOT NULL)::numeric / COUNT(*)::numeric) * 100)
+                ELSE ROUND((COUNT(*) FILTER (WHERE lc.completed_at IS NOT NULL)::numeric / COUNT(*)::numeric) * 100)
             END::BIGINT AS coverage_percent
-        FROM latest
+        FROM latest_lifecycle ll
+        LEFT JOIN latest_completed lc ON lc.derivation_id = ll.derivation_id
         "#,
     )
     .fetch_one(pool)
@@ -278,44 +289,56 @@ pub async fn get_scan_systems(pool: &PgPool, limit: i64) -> Result<Vec<ScanSyste
             FROM scan_schedule_policy
             WHERE id = 1
         ),
-        latest_per_derivation AS (
+        latest_lifecycle_per_derivation AS (
             SELECT DISTINCT ON (d.id)
                 d.id AS derivation_id,
                 d.derivation_name AS hostname,
                 d.store_path,
-                cs.completed_at,
+                cs.status,
                 cs.scheduled_at,
                 cs.created_at,
+                cs.completed_at
+            FROM derivations d
+            LEFT JOIN cve_scans cs ON cs.derivation_id = d.id
+            WHERE d.derivation_type = 'nixos'
+            ORDER BY d.id, COALESCE(cs.completed_at, cs.scheduled_at, cs.created_at) DESC NULLS LAST
+        ),
+        latest_completed_per_derivation AS (
+            SELECT DISTINCT ON (d.id)
+                d.id AS derivation_id,
+                cs.completed_at,
                 cs.critical_count,
                 cs.high_count
             FROM derivations d
             LEFT JOIN cve_scans cs ON cs.derivation_id = d.id
             WHERE d.derivation_type = 'nixos'
-            ORDER BY d.id, COALESCE(cs.completed_at, cs.scheduled_at, cs.created_at) DESC NULLS LAST
+              AND cs.completed_at IS NOT NULL
+            ORDER BY d.id, cs.completed_at DESC
         )
         SELECT
             s.id AS system_id,
-            l.hostname,
+            ll.hostname,
             MAX(e.name) AS environment,
             COUNT(*)::BIGINT AS total_configs,
             COUNT(*) FILTER (
-                WHERE l.completed_at IS NOT NULL
-                AND l.completed_at >= NOW() - (SELECT deployed_hours * INTERVAL '1 hour' FROM policy)
+                WHERE lc.completed_at IS NOT NULL
+                AND lc.completed_at >= NOW() - (SELECT deployed_hours * INTERVAL '1 hour' FROM policy)
             )::BIGINT AS scanned,
             COUNT(*) FILTER (
-                WHERE l.completed_at IS NOT NULL
-                AND l.completed_at < NOW() - (SELECT deployed_hours * INTERVAL '1 hour' FROM policy)
+                WHERE lc.completed_at IS NOT NULL
+                AND lc.completed_at < NOW() - (SELECT deployed_hours * INTERVAL '1 hour' FROM policy)
             )::BIGINT AS stale,
-            COUNT(*) FILTER (WHERE l.store_path IS NULL)::BIGINT AS needs_build,
-            COUNT(*) FILTER (WHERE l.completed_at IS NULL)::BIGINT AS unscanned,
-            COALESCE(MAX(l.critical_count), 0)::BIGINT AS current_crit,
-            COALESCE(MAX(l.high_count), 0)::BIGINT AS current_high
-        FROM latest_per_derivation l
-        JOIN systems s ON s.hostname = l.hostname
+            COUNT(*) FILTER (WHERE ll.store_path IS NULL)::BIGINT AS needs_build,
+            COUNT(*) FILTER (WHERE lc.completed_at IS NULL)::BIGINT AS unscanned,
+            COALESCE(MAX(lc.critical_count), 0)::BIGINT AS current_crit,
+            COALESCE(MAX(lc.high_count), 0)::BIGINT AS current_high
+        FROM latest_lifecycle_per_derivation ll
+        LEFT JOIN latest_completed_per_derivation lc ON lc.derivation_id = ll.derivation_id
+        JOIN systems s ON s.hostname = ll.hostname
         LEFT JOIN environments e ON e.id = s.environment_id
         WHERE s.is_active = TRUE
-        GROUP BY s.id, l.hostname
-        ORDER BY total_configs DESC, l.hostname ASC
+        GROUP BY s.id, ll.hostname
+        ORDER BY total_configs DESC, ll.hostname ASC
         LIMIT $1
         "#,
     )
