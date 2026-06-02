@@ -1,10 +1,10 @@
 ---
 id: TASK-273
 title: Add evaluation cancellation and history view mirroring builds UI
-status: Review
+status: Done
 assignee: []
 created_date: '2026-04-16 01:24'
-updated_date: '2026-04-16 02:34'
+updated_date: '2026-06-02 03:45'
 labels:
   - evaluation
   - ui
@@ -13,6 +13,7 @@ labels:
 milestone: CVE Workflow Improvements
 dependencies: []
 priority: high
+ordinal: 0
 ---
 
 ## Description
@@ -95,11 +96,3 @@ Migration `0112` merged (TASK-272 ✅). Next number: `0113`.
 
 - [ ] #13 #13 New migration does not modify any existing migration file
 <!-- AC:END -->
-
-## Implementation Notes
-
-<!-- SECTION:NOTES:BEGIN -->
-LOCK: claude on reckless in ~/code/crystal-forge/TASK-273-eval-cancel-history
-
-MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/237
-<!-- SECTION:NOTES:END -->
