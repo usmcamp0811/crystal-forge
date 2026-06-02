@@ -1,10 +1,10 @@
 ---
 id: TASK-284
 title: Refactor Evaluations view UI/UX to match latest design mockup
-status: Review
+status: Done
 assignee: []
 created_date: '2026-04-30 21:32'
-updated_date: '2026-05-24 01:17'
+updated_date: '2026-06-02 03:45'
 labels:
   - ui
   - ux
@@ -15,6 +15,7 @@ milestone: UI/UX Design System
 dependencies: []
 references:
   - /home/mcamp/code/crystal-forge/crystal-forge/project/data-builds.js
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/256'
 priority: medium
 ordinal: 4600
 ---
