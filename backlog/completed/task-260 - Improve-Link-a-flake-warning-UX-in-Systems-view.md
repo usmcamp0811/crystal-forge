@@ -4,7 +4,7 @@ title: Improve "Link a flake" warning UX in Systems view
 status: Done
 assignee: []
 created_date: '2026-04-11 00:00'
-updated_date: '2026-04-11 03:12'
+updated_date: '2026-04-14 00:41'
 labels:
   - ux
   - systems-view
@@ -74,7 +74,5 @@ Dependencies:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-MR !225 merged into dev: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/225
-
-Pipeline for merge commit succeeded (warning state): https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2445502520
+Promoted to To Do by explicit user request for immediate execution.
 <!-- SECTION:NOTES:END -->
