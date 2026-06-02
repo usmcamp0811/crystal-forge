@@ -1,16 +1,18 @@
 ---
 id: TASK-274
 title: 'Pre-main-merge: update docs, README, and screenshots for v0.3.0'
-status: Review
+status: Done
 assignee: []
 created_date: '2026-04-16 23:53'
-updated_date: '2026-04-16 23:56'
+updated_date: '2026-06-02 03:45'
 labels:
   - docs
   - screenshots
   - release
+milestone: Release v0.3.0
 dependencies: []
 priority: high
+ordinal: 0
 ---
 
 ## Description
@@ -60,11 +62,3 @@ Before merging dev into main for v0.3.0, several docs and screenshots are stale 
 <!-- SECTION:DESCRIPTION:END -->
 
 <!-- AC:END -->
-
-## Implementation Notes
-
-<!-- SECTION:NOTES:BEGIN -->
-LOCK: claude on reckless in ~/code/crystal-forge/dev (backlog maintenance mode — docs + test only, no app code)
-
-MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/238
-<!-- SECTION:NOTES:END -->
