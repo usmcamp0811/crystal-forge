@@ -44,7 +44,10 @@ fn ui_check_mock_auth_context() -> AuthContext {
 }
 
 fn should_show_admin_denied(route: &Route, auth_context: &Option<AuthContext>) -> bool {
-    matches!(route, Route::AdminView { .. } | Route::CvesView { .. })
+    matches!(
+        route,
+        Route::AdminView { .. } | Route::CvesView { .. } | Route::ScanningView { .. }
+    )
         && !auth::is_admin(auth_context)
 }
 
@@ -343,6 +346,29 @@ mod tests {
     #[test]
     fn cve_route_allowed_for_admin() {
         let route = Route::CvesView {};
+        assert!(!should_show_admin_denied(
+            &route,
+            &auth_context(true, vec![Role::Admin])
+        ));
+    }
+
+    #[test]
+    fn scanning_route_denied_for_non_admin() {
+        let route = Route::ScanningView {};
+        assert!(should_show_admin_denied(
+            &route,
+            &auth_context(true, vec![Role::Operator])
+        ));
+        assert!(should_show_admin_denied(
+            &route,
+            &auth_context(true, vec![Role::Viewer])
+        ));
+        assert!(should_show_admin_denied(&route, &None));
+    }
+
+    #[test]
+    fn scanning_route_allowed_for_admin() {
+        let route = Route::ScanningView {};
         assert!(!should_show_admin_denied(
             &route,
             &auth_context(true, vec![Role::Admin])

@@ -82,6 +82,64 @@ pub async fn fetch_cve_scan_freshness() -> Result<Vec<CveScanFreshnessRow>, ApiC
     fetch_json(&url).await
 }
 
+pub async fn fetch_scanning_stats() -> Result<ScanningStatsResponse, ApiClientError> {
+    let url = format!("{}/scanning/stats", base_url());
+    fetch_json(&url).await
+}
+
+pub async fn fetch_scanning_queue(
+    limit: Option<i64>,
+) -> Result<Vec<ScanningQueueItemResponse>, ApiClientError> {
+    let mut url = format!("{}/scanning/queue", base_url());
+    if let Some(limit) = limit {
+        url.push_str(&format!("?limit={}", limit.clamp(1, 500)));
+    }
+    fetch_json(&url).await
+}
+
+pub async fn fetch_scanning_systems(
+    limit: Option<i64>,
+) -> Result<Vec<ScanningSystemsItemResponse>, ApiClientError> {
+    let mut url = format!("{}/scanning/systems", base_url());
+    if let Some(limit) = limit {
+        url.push_str(&format!("?limit={}", limit.clamp(1, 500)));
+    }
+    fetch_json(&url).await
+}
+
+pub async fn fetch_scanning_system_scans(
+    system_id: &Uuid,
+    limit: Option<i64>,
+) -> Result<Vec<ScanningQueueItemResponse>, ApiClientError> {
+    let mut url = format!("{}/scanning/systems/{}/scans", base_url(), system_id);
+    if let Some(limit) = limit {
+        url.push_str(&format!("?limit={}", limit.clamp(1, 500)));
+    }
+    fetch_json(&url).await
+}
+
+pub async fn fetch_scanning_activity(
+    limit: Option<i64>,
+) -> Result<Vec<ScanningActivityItemResponse>, ApiClientError> {
+    let mut url = format!("{}/scanning/activity", base_url());
+    if let Some(limit) = limit {
+        url.push_str(&format!("?limit={}", limit.clamp(1, 500)));
+    }
+    fetch_json(&url).await
+}
+
+pub async fn fetch_scanning_schedule() -> Result<ScanSchedulePolicyResponse, ApiClientError> {
+    let url = format!("{}/scanning/schedule", base_url());
+    fetch_json(&url).await
+}
+
+pub async fn update_scanning_schedule(
+    req: &UpdateScanSchedulePolicyRequest,
+) -> Result<ScanSchedulePolicyResponse, ApiClientError> {
+    let url = format!("{}/scanning/schedule", base_url());
+    send_json_with_csrf("PUT", &url, Some(req)).await
+}
+
 pub async fn fetch_hardening_fleet_summary() -> Result<HardeningFleetSummaryResponse, ApiClientError>
 {
     let url = format!("{}/hardening/summary", base_url());

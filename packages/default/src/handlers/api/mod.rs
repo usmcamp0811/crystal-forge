@@ -17,5 +17,6 @@ pub mod environments;
 pub mod flakes;
 pub mod hardening;
 pub mod rbac;
+pub mod scanning;
 pub mod setup_wizard;
 pub mod systems;

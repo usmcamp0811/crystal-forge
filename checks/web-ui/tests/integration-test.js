@@ -3984,6 +3984,150 @@ const steps = [
       }, { base: baseUrl, id: createResponse.body.id });
     },
   },
+  {
+    name: "16c-scanning-view",
+    description: "Scanning view - live endpoint wiring, nested rows, and schedule modal",
+    action: async (page) => {
+      await page.route("**/api/v1/scanning/stats*", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            scanning: 2,
+            queued: 3,
+            stale: 4,
+            never_scanned: 1,
+            failed: 1,
+            coverage_percent: 87,
+          }),
+        });
+      });
+
+      await page.route("**/api/v1/scanning/queue*", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify([
+            {
+              scan_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+              hostname: "prod-server-01",
+              flake_name: "core-fleet",
+              commit_hash: "abc1234",
+              status: "completed",
+              completed_at: new Date().toISOString(),
+              scheduled_at: new Date().toISOString(),
+              critical_count: 1,
+              high_count: 2,
+              medium_count: 0,
+            },
+          ]),
+        });
+      });
+
+      await page.route("**/api/v1/scanning/systems*", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify([
+            {
+              system_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+              hostname: "prod-server-01",
+              environment: "prod",
+              total_configs: 3,
+              scanned: 2,
+              stale: 1,
+              needs_build: 0,
+              unscanned: 1,
+              current_crit: 1,
+              current_high: 2,
+            },
+          ]),
+        });
+      });
+
+      await page.route("**/api/v1/scanning/activity*", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify([
+            {
+              at: new Date().toISOString(),
+              name: "prod-server-01",
+              event: "completed",
+              detail: "scan finished",
+              status: "ok",
+            },
+          ]),
+        });
+      });
+
+      await page.route("**/api/v1/scanning/schedule*", async (route) => {
+        if (route.request().method() === "PUT") {
+          const req = route.request().postDataJSON();
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({
+              on_build: req.on_build,
+              deployed_interval: req.deployed_interval,
+              recent_interval: req.recent_interval,
+              archived_interval: req.archived_interval,
+              archived_enabled: req.archived_enabled,
+              rebuild_to_scan: req.rebuild_to_scan,
+              updated_at: new Date().toISOString(),
+            }),
+          });
+          return;
+        }
+
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            on_build: true,
+            deployed_interval: "24h",
+            recent_interval: "24h",
+            archived_interval: "168h",
+            archived_enabled: true,
+            rebuild_to_scan: false,
+            updated_at: new Date().toISOString(),
+          }),
+        });
+      });
+
+      await page.goto(`${baseUrl}/scanning`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1600);
+
+      await assertVisible(page.locator("main h1:has-text('Scanning')"), "Expected Scanning heading");
+      await assertVisible(page.getByText("Scanning now").first(), "Expected Scanning stat cards");
+
+      await page.locator("button:has-text('All configs')").first().click({ force: true });
+      await page.waitForTimeout(500);
+
+      await assertVisible(page.getByText("prod-server-01").first(), "Expected system row in All configs table");
+
+      await page.evaluate(() => {
+        const expandButton = document.querySelector("table.sys-table tbody tr button.btn-icon");
+        if (expandButton instanceof HTMLElement) {
+          expandButton.click();
+        }
+      });
+      await page.waitForTimeout(400);
+
+      await assertVisible(page.getByText("abc1234").first(), "Expected nested per-commit scan row after expand");
+
+      await assertVisible(
+        page.getByRole("button", { name: /^Schedule$/ }).first(),
+        "Expected schedule button to be visible",
+      );
+
+      await page.unroute("**/api/v1/scanning/stats*");
+      await page.unroute("**/api/v1/scanning/queue*");
+      await page.unroute("**/api/v1/scanning/systems*");
+      await page.unroute("**/api/v1/scanning/activity*");
+      await page.unroute("**/api/v1/scanning/schedule*");
+    },
+  },
   // ── End CVE/multi-rule policy checks ─────────────────────────────────────
   {
     name: "21-caches",
@@ -4705,6 +4849,8 @@ const CI_FAST_STEP_NAMES = new Set([
   // TASK-17: CVE dashboard evidence
   "16-cves",
   "16b-cves-severity-filter",
+  // TASK-326: Scanning view evidence
+  "16c-scanning-view",
   // TASK-303: Caches view and modal evidence
   "21-caches",
   "22-caches-modal-nix",
