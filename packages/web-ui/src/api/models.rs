@@ -454,6 +454,83 @@ pub struct FleetRescanResponse {
     pub message: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScanSchedulePolicyResponse {
+    pub on_build: bool,
+    pub deployed_interval: String,
+    pub recent_interval: String,
+    pub archived_interval: String,
+    pub archived_enabled: bool,
+    pub rebuild_to_scan: bool,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpdateScanSchedulePolicyRequest {
+    pub on_build: bool,
+    pub deployed_interval: String,
+    pub recent_interval: String,
+    pub archived_interval: String,
+    pub archived_enabled: bool,
+    pub rebuild_to_scan: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScanningStatsResponse {
+    pub scanning: i64,
+    pub queued: i64,
+    pub stale: i64,
+    pub never_scanned: i64,
+    pub failed: i64,
+    pub coverage_percent: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScanningQueueItemResponse {
+    pub scan_id: Uuid,
+    pub hostname: String,
+    pub flake_name: Option<String>,
+    pub commit_hash: Option<String>,
+    pub status: String,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub scheduled_at: Option<DateTime<Utc>>,
+    pub critical_count: i32,
+    pub high_count: i32,
+    pub medium_count: i32,
+    /// Freshness class: `deployed`, `recent`, or `archived`.
+    #[serde(default)]
+    pub freshness: String,
+    /// True when this is the latest scan row for its derivation.
+    #[serde(default)]
+    pub is_current: bool,
+    /// Scan trigger source (not yet tracked server-side).
+    #[serde(default)]
+    pub trigger: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScanningSystemsItemResponse {
+    pub system_id: Uuid,
+    pub hostname: String,
+    pub environment: Option<String>,
+    pub total_configs: i64,
+    pub scanned: i64,
+    pub stale: i64,
+    pub needs_build: i64,
+    pub unscanned: i64,
+    pub current_crit: i64,
+    pub current_high: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScanningActivityItemResponse {
+    pub at: Option<DateTime<Utc>>,
+    pub name: String,
+    pub event: String,
+    pub detail: String,
+    pub status: String,
+}
+
 /// A single recent deployment event.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RecentDeployment {
