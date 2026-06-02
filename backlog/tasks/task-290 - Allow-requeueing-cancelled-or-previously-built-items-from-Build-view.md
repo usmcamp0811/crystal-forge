@@ -1,10 +1,10 @@
 ---
 id: TASK-290
 title: 'Allow requeueing cancelled, failed, or successful builds from Build view'
-status: Review
+status: Done
 assignee: []
 created_date: '2026-05-08 02:20'
-updated_date: '2026-05-08 02:44'
+updated_date: '2026-06-02 03:44'
 labels:
   - feature
   - builds
@@ -106,34 +106,6 @@ Medium:
 - [ ] #8 Existing cancel and queue reorder flows continue to work unchanged for other entries.
 - [ ] #9 Failure paths (invalid status, missing target context, unauthorized caller) return explicit API errors and user-facing feedback.
 <!-- AC:END -->
-
-## Implementation Plan
-
-<!-- SECTION:PLAN:BEGIN -->
-1. Add server-side requeue API action guarded by Operator/Admin role.
-2. Implement query/service logic to create a new queued build attempt from eligible prior attempt context.
-3. Ensure queue insertion is tail-appended and previous attempts remain immutable.
-4. Add Build view row action for eligible terminal statuses with success/error feedback.
-5. Refresh queue/history state after requeue action.
-6. Add targeted tests for eligibility, RBAC, and attempt creation semantics.
-7. Run feature validation against local stack for cancelled/failed/success requeue flows.
-<!-- SECTION:PLAN:END -->
-
-## Implementation Notes
-
-<!-- SECTION:NOTES:BEGIN -->
-Sprint-ready refinement completed with explicit goal, non-goals, constraints, verification plan, and risk profile.
-
-Execution decisions captured: statuses=cancelled|failed|success; new attempt model; row action; no retry cap; Operator/Admin; append to tail; full-stack scope.
-
-MR !252 created: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/252
-
-Implemented backend requeue as new attempt row with immutable history and operator/admin RBAC
-
-Implemented UI requeue visibility gating to operator-or-above users and relabeled action to Requeue
-
-Verification: web-ui cargo check passes; default cargo check blocked by SQLx DB connectivity in current environment
-<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
