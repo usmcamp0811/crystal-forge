@@ -3,16 +3,17 @@ id: TASK-289
 title: >-
   Implement eval log streaming with database persistence and historical
   retrieval
-status: Review
+status: Done
 assignee: []
 created_date: '2026-05-07 14:21'
-updated_date: '2026-05-07 16:50'
+updated_date: '2026-06-02 03:45'
 labels:
   - feature
   - backend
   - frontend
   - evaluations
   - logging
+milestone: Evaluations UX
 dependencies: []
 modified_files:
   - packages/default/migrations/0121_add_eval_logs_table.sql
@@ -26,6 +27,7 @@ modified_files:
   - packages/web-ui/src/components/eval_log_modal.rs
   - packages/web-ui/src/views/evaluations.rs
 priority: high
+ordinal: 0
 ---
 
 ## Description
@@ -67,23 +69,3 @@ Three-phase implementation:
 - [ ] #11 Connection status indicator works
 - [ ] #12 Download logs button functional
 <!-- AC:END -->
-
-## Implementation Notes
-
-<!-- SECTION:NOTES:BEGIN -->
-MR !251 created: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/251
-
-Three commits: backend persistence, frontend API, UI integration
-
-All 12 acceptance criteria implemented
-
-Frontend compiles successfully (cargo check passes)
-
-Awaiting CI pass and review
-
-CI failure fixed: Added missing web_sys features (Blob, BlobPropertyBag, HtmlAnchorElement, Url) to Cargo.toml
-
-Commit 20a7f685 pushed to fix wasm32 compilation
-
-CI should now pass - awaiting rerun
-<!-- SECTION:NOTES:END -->
