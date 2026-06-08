@@ -64,7 +64,7 @@ pub use filters::{
 pub use heartbeat_spinner::HeartbeatSpinner;
 pub use icon::{Icon, IconName};
 pub use layout::{AppShell, Card, SidebarNav, TopBar};
-pub use loading::{ErrorMessage, LoadingSpinner};
+pub use loading::{DashboardLoadingSpinner, ErrorMessage, LoadingSpinner};
 pub use modals::{ConfirmDialog, RollbackConfirmDialog, SyncConfirmDialog};
 pub use notifications::Toast;
 pub use onboarding::OnboardingCoachPanel;

@@ -16,6 +16,7 @@ use crate::components::dashboard::{
 };
 use crate::components::flake::FlakeTimelineWidget;
 use crate::components::layout::Card;
+use crate::components::loading::DashboardLoadingSpinner;
 use crate::components::notifications::{AlertBanner, AlertSeverity};
 use crate::components::stat_card::StatCard;
 use crate::components::widget_grid::{GridWidget, WidgetGrid};
@@ -585,11 +586,23 @@ pub fn DashboardView() -> Element {
             class: "space-y-8",
             "data-testid": "dashboard",
 
+            // Dashboard header
+            header {
+                class: "page-head",
+                div {
+                    h1 { class: "page-title", "Dashboard" }
+                    p {
+                        class: "page-subtitle",
+                        "Fleet overview · {widget_positions.read().len()} widgets"
+                    }
+                }
+            }
+
             // Top stats row
             if *loading_dashboard.read() {
-                p {
-                    class: "text-xs px-3 py-2 rounded-lg border text-blue-100 cf-chip-info",
-                    "Loading dashboard data..."
+                DashboardLoadingSpinner {
+                    label: "Loading dashboard data...".to_string(),
+                    size: 20
                 }
             }
 
@@ -625,9 +638,9 @@ pub fn DashboardView() -> Element {
 
             // Flake Commit Timeline with multi-select filter
             if *loading_timelines.read() {
-                p {
-                    class: "text-xs px-3 py-2 rounded-lg border text-blue-100 cf-chip-info",
-                    "Loading flake timelines..."
+                DashboardLoadingSpinner {
+                    label: "Loading flake timelines...".to_string(),
+                    size: 20
                 }
             }
 

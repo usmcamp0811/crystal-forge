@@ -3897,3 +3897,30 @@ tr.kbd-focused > td {
     border-bottom: 1px solid var(--cf-divider);
   }
 }
+
+/* Enhanced dashboard loading spinner */
+.cf-loading-ring {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.cf-loading-ring svg {
+  display: block;
+}
+
+.cf-spinner-ring {
+  animation: cf-spin 1.2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  transform-origin: center;
+}
+
+@keyframes cf-spin {
+  0% {
+    transform: rotate(-90deg);
+  }
+  100% {
+    transform: rotate(270deg);
+  }
+}

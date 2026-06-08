@@ -15,6 +15,76 @@ pub fn LoadingSpinner() -> Element {
     }
 }
 
+/// Enhanced loading spinner with label - design reference inspired.
+#[component]
+pub fn DashboardLoadingSpinner(
+    #[props(default = "Loading...".to_string())] label: String,
+    #[props(default = 20)] size: i32,
+) -> Element {
+    let stroke = ((size as f64) / 8.0).round().max(2.0);
+    let radius = ((size as f64) - stroke) / 2.0;
+    let circumference = 2.0 * std::f64::consts::PI * radius;
+
+    rsx! {
+        div {
+            class: "cf-loading-row",
+            div {
+                class: "cf-loading-ring",
+                style: "width: {size}px; height: {size}px;",
+                svg {
+                    width: "{size}",
+                    height: "{size}",
+                    view_box: "0 0 {size} {size}",
+                    circle {
+                        cx: "{(size as f64) / 2.0}",
+                        cy: "{(size as f64) / 2.0}",
+                        r: "{radius}",
+                        stroke: "rgba(167, 139, 250, 0.25)",
+                        stroke_width: "{stroke}",
+                        fill: "none",
+                    }
+                    circle {
+                        cx: "{(size as f64) / 2.0}",
+                        cy: "{(size as f64) / 2.0}",
+                        r: "{radius}",
+                        stroke: "url(#cf-spinner-gradient)",
+                        stroke_width: "{stroke}",
+                        fill: "none",
+                        stroke_linecap: "round",
+                        stroke_dasharray: "{circumference}",
+                        stroke_dashoffset: "{circumference * 0.25}",
+                        transform: "rotate(-90 {(size as f64) / 2.0} {(size as f64) / 2.0})",
+                        class: "cf-spinner-ring",
+                    }
+                    defs {
+                        linearGradient {
+                            id: "cf-spinner-gradient",
+                            x1: "0%",
+                            y1: "0%",
+                            x2: "100%",
+                            y2: "100%",
+                            stop {
+                                offset: "0%",
+                                stop_color: "#a78bfa",
+                                stop_opacity: "1",
+                            }
+                            stop {
+                                offset: "100%",
+                                stop_color: "#60a5fa",
+                                stop_opacity: "0.9",
+                            }
+                        }
+                    }
+                }
+            }
+            p {
+                class: "cf-loading-label",
+                "{label}"
+            }
+        }
+    }
+}
+
 /// An error message display.
 #[component]
 pub fn ErrorMessage(message: String) -> Element {
