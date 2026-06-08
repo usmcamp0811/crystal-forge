@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - agent
 created_date: '2026-04-23 13:23'
-updated_date: '2026-04-30 21:55'
+updated_date: '2026-06-08 03:51'
 labels:
   - frontend
   - ux
@@ -26,7 +26,7 @@ documentation:
   - /home/mcamp/code/crystal-forge/design-example-systems
 parent_task_id: TASK-276
 priority: high
-ordinal: 3595
+ordinal: 6000
 ---
 
 ## Description

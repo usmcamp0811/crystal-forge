@@ -4,7 +4,7 @@ title: Relocate CVEs nav entry and add Scanning view from design reference
 status: In Progress
 assignee: []
 created_date: '2026-05-31 02:20'
-updated_date: '2026-06-01 02:13'
+updated_date: '2026-06-08 03:51'
 labels:
   - ui
   - navigation
@@ -31,7 +31,7 @@ modified_files:
   - packages/default/migrations/0124_add_scan_schedule_policy.sql
   - checks/web-ui/tests/integration-test.js
 priority: high
-ordinal: 800
+ordinal: 3000
 ---
 
 ## Description

@@ -4,7 +4,7 @@ title: Refactor Dashboard view UI/UX for exact parity with latest design example
 status: In Progress
 assignee: []
 created_date: '2026-05-31 15:14'
-updated_date: '2026-05-31 15:58'
+updated_date: '2026-06-08 03:51'
 labels:
   - ui
   - dashboard
@@ -20,7 +20,7 @@ modified_files:
   - packages/web-ui/src/components/
   - checks/web-ui/
 priority: high
-ordinal: 0
+ordinal: 2000
 ---
 
 ## Description

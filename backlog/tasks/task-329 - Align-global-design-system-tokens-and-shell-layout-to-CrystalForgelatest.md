@@ -4,7 +4,7 @@ title: Align global design system tokens and shell layout to CrystalForgelatest
 status: In Progress
 assignee: []
 created_date: '2026-05-31 15:56'
-updated_date: '2026-05-31 16:16'
+updated_date: '2026-06-08 03:51'
 labels:
   - design-parity
   - design-system
@@ -18,7 +18,7 @@ modified_files:
   - packages/web-ui/assets/app.css
   - packages/web-ui/src/theme.rs
 priority: high
-ordinal: 1610
+ordinal: 5000
 ---
 
 ## Description

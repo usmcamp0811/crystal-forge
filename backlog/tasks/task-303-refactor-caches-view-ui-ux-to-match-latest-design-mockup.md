@@ -4,7 +4,7 @@ title: Refactor Caches view UI/UX to match latest design mockup
 status: In Progress
 assignee: []
 created_date: '2026-05-19 13:21'
-updated_date: '2026-05-20 03:11'
+updated_date: '2026-06-08 03:51'
 labels:
   - ui
   - ux
@@ -21,7 +21,7 @@ modified_files:
   - packages/web-ui/src/views/caches.rs
   - checks/web-ui/tests/integration-test.js
 priority: medium
-ordinal: 4800
+ordinal: 7000
 ---
 
 ## Description

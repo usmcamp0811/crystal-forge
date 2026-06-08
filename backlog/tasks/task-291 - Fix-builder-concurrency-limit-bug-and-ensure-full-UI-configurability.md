@@ -4,7 +4,7 @@ title: Fix builder concurrency limit bug and ensure full UI configurability
 status: In Progress
 assignee: []
 created_date: '2026-05-08 02:46'
-updated_date: '2026-05-11 12:48'
+updated_date: '2026-06-08 03:51'
 labels:
   - bug
   - builders
@@ -13,7 +13,7 @@ labels:
   - high-priority
 dependencies: []
 priority: high
-ordinal: 5595
+ordinal: 8000
 ---
 
 ## Description

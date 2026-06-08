@@ -3,10 +3,10 @@ id: TASK-321
 title: >-
   Refactor Dashboard View to match latest design reference and upgrade loading
   spinner UX
-status: Review
+status: In Progress
 assignee: []
 created_date: '2026-05-24 14:36'
-updated_date: '2026-06-08 03:31'
+updated_date: '2026-06-08 03:51'
 labels:
   - ui
   - dashboard
@@ -21,7 +21,7 @@ references:
 modified_files:
   - packages/default/src/ui/
 priority: high
-ordinal: 3190
+ordinal: 1000
 ---
 
 ## Description
