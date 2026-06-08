@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-05-31 15:56'
-updated_date: '2026-06-08 03:48'
+updated_date: '2026-06-08 04:03'
 labels:
   - design-parity
   - systems
@@ -58,6 +58,77 @@ Risk: High.
 - [ ] #5 web-ui checks include screenshot + behavior assertions for systems parity scenarios
 - [ ] #6 web-ui screenshot set covers loading, empty, error, and populated states for Systems surfaces
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+## Implementation Plan
+
+Based on comprehensive code review, the Systems view implementation is already at very high parity with the JSX design reference. All core components exist:
+
+✅ **Components Implemented:**
+- HeartbeatSpinner with real-time countdown and overdue states (amber/red)
+- EnvBadge with environment-specific colors
+- StatusChip, CveChips, DeploymentChip
+- CveBar visualization
+- SystemCardV2 matching design (status rail, badges, metadata, chips, deploy button)
+- SystemsTable (table mode) with all columns
+- SystemPanel (side panel) with all sections
+- DeployModal with commit selection
+
+✅ **Styles Complete:**
+- All design tokens (colors, radii, shadows) from reference styles.css
+- .sys-card and .sys-table styles
+- .hb-spinner with animations
+- .side-panel with backdrop and slide-in animation
+- .panel-head, .panel-body, .panel-actions
+- .timeline, .cve-bar, .cve-legend, .kv-grid
+
+✅ **Backend Integration:**
+- SystemSummary and SystemDetail models with all required fields
+- API adapters using load_systems_with_fallback
+- No mock data in production path
+
+**Remaining Work:**
+
+1. **Visual Verification** - Run full-stack and compare with JSX reference pixel-by-pixel
+2. **Screenshot Coverage** - Ensure web-ui checks capture:
+   - Systems cards mode (default, compact, hover, selected)
+   - Systems table mode (default, compact, row hover, selected row)
+   - Side panel open with all sections
+   - Deploy modal open
+   - Edit modal open
+   - Filter dropdown active
+   - Search active with results
+   - Empty state
+   - Loading state
+   - Error state
+
+3. **Minor Refinements** (if visual comparison shows gaps):
+   - Adjust spacing/padding to match design exactly
+   - Verify chip colors and sizes
+   - Check status rail positioning and opacity
+   - Validate heartbeat spinner size variants
+   - Confirm modal backdrop and z-index layering
+
+4. **Behavior Assertions** - Add to web-ui checks:
+   - Filter by environment updates system count
+   - Search by hostname filters table/cards
+   - View toggle switches between cards/table
+   - Card click opens side panel
+   - Deploy button opens modal
+   - Edit action opens edit modal
+
+5. **Documentation** - Update if needed:
+   - Component usage examples
+   - API integration notes
+
+**Verification Commands:**
+1. `cargo check -p web-ui`
+2. `cargo clippy -p web-ui -- -D warnings`  
+3. `server-stack up` → visual check at http://localhost:3000/systems
+4. `just web-ui-check` → screenshot/assertion validation
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
