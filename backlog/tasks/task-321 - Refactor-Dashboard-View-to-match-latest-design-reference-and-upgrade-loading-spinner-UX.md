@@ -3,10 +3,10 @@ id: TASK-321
 title: >-
   Refactor Dashboard View to match latest design reference and upgrade loading
   spinner UX
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-05-24 14:36'
-updated_date: '2026-06-08 03:30'
+updated_date: '2026-06-08 03:31'
 labels:
   - ui
   - dashboard
@@ -71,8 +71,6 @@ Medium
 - [ ] #5 Web UI check captures updated dashboard visuals and includes evidence of the loading spinner state.
 <!-- AC:END -->
 
-
-
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
@@ -111,4 +109,18 @@ Taking over task - new LOCK: claude-sonnet-4-5 on gray in /home/mcamp/code/cryst
 - Existing functionality preserved
 
 - Loading states appear consistently
+
+---
+
+## Merge Request Created
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/268
+
+Branch: TASK-321-dashboard-view-refresh-loading-spinner
+
+Target: dev
+
+Status: Ready for review
+
+Note: Web-UI check (AC#5) skipped as requested - visual verification can be done manually or in CI
 <!-- SECTION:NOTES:END -->
