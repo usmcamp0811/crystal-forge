@@ -65,11 +65,13 @@ Medium
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 Dashboard layout and visual structure are updated to match the latest design reference closely (component arrangement, hierarchy, and key styling intent).
-- [ ] #2 Dashboard loading indicator is replaced or upgraded to the improved spinner/loading treatment from the latest design reference.
-- [ ] #3 Loading state appears consistently in relevant dashboard data-fetch paths (initial load and refresh/loading transitions where applicable).
-- [ ] #4 Existing dashboard functionality/data rendering remains intact after visual and loading UX changes.
+- [x] #2 Dashboard loading indicator is replaced or upgraded to the improved spinner/loading treatment from the latest design reference.
+- [x] #3 Loading state appears consistently in relevant dashboard data-fetch paths (initial load and refresh/loading transitions where applicable).
+- [x] #4 Existing dashboard functionality/data rendering remains intact after visual and loading UX changes.
 - [ ] #5 Web UI check captures updated dashboard visuals and includes evidence of the loading spinner state.
 <!-- AC:END -->
+
+
 
 ## Implementation Notes
 
