@@ -3,10 +3,10 @@ id: TASK-330
 title: >-
   Complete Systems view parity including cards-table modes and modal flows with
   real API data
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-05-31 15:56'
-updated_date: '2026-05-31 16:07'
+updated_date: '2026-06-08 03:48'
 labels:
   - design-parity
   - systems
@@ -58,3 +58,9 @@ Risk: High.
 - [ ] #5 web-ui checks include screenshot + behavior assertions for systems parity scenarios
 - [ ] #6 web-ui screenshot set covers loading, empty, error, and populated states for Systems surfaces
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: opencode-agent on gray in ~/code/crystal-forge/TASK-330-systems-view-parity
+<!-- SECTION:NOTES:END -->
