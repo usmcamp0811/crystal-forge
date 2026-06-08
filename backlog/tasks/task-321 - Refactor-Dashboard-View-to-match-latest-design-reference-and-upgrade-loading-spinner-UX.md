@@ -210,4 +210,6 @@ Note: Web-UI check (AC#5) skipped as requested - visual verification can be done
 <!--
 SECTION:NOTES:END
 -->
+
+LOCK: openai-gpt-5.4 on reckless in /home/mcamp/code/crystal-forge/TASK-321-dashboard-view-refresh-loading-spinner
 <!-- SECTION:NOTES:END -->
