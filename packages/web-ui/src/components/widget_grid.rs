@@ -234,7 +234,12 @@ pub fn WidgetGrid(props: WidgetGridProps) -> Element {
 /// Stored layout for persistence
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct StoredLayout {
+    pub version: u32,
     pub positions: Vec<(String, usize, usize)>, // (id, col, row)
+}
+
+impl StoredLayout {
+    pub const VERSION: u32 = 1;
 }
 
 impl StoredLayout {
@@ -266,6 +271,27 @@ impl StoredLayout {
             }
         }
     }
+
+    pub fn exists() -> bool {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let Some(window) = web_sys::window() else {
+                return false;
+            };
+            let Ok(Some(storage)) = window.local_storage() else {
+                return false;
+            };
+            storage
+                .get_item("dashboard_layout")
+                .ok()
+                .flatten()
+                .is_some()
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            false
+        }
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -274,12 +300,11 @@ impl serde::Serialize for StoredLayout {
     where
         S: serde::Serializer,
     {
-        use serde::ser::SerializeSeq;
-        let mut seq = serializer.serialize_seq(Some(self.positions.len()))?;
-        for (id, col, row) in &self.positions {
-            seq.serialize_element(&(id, col, row))?;
-        }
-        seq.end()
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("StoredLayout", 2)?;
+        state.serialize_field("version", &self.version)?;
+        state.serialize_field("positions", &self.positions)?;
+        state.end()
     }
 }
 
@@ -289,7 +314,57 @@ impl<'de> serde::Deserialize<'de> for StoredLayout {
     where
         D: serde::Deserializer<'de>,
     {
-        let positions: Vec<(String, usize, usize)> = Vec::deserialize(deserializer)?;
-        Ok(StoredLayout { positions })
+        use serde::de::{self, MapAccess, SeqAccess, Visitor};
+        use std::fmt;
+
+        struct StoredLayoutVisitor;
+
+        impl<'de> Visitor<'de> for StoredLayoutVisitor {
+            type Value = StoredLayout;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("stored dashboard layout")
+            }
+
+            fn visit_seq<A>(self, seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let positions = Vec::<(String, usize, usize)>::deserialize(
+                    de::value::SeqAccessDeserializer::new(seq),
+                )?;
+                Ok(StoredLayout {
+                    version: StoredLayout::VERSION,
+                    positions,
+                })
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut version = None;
+                let mut positions = None;
+
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "version" => version = Some(map.next_value::<u32>()?),
+                        "positions" => {
+                            positions = Some(map.next_value::<Vec<(String, usize, usize)>>()?)
+                        }
+                        _ => {
+                            let _: de::IgnoredAny = map.next_value()?;
+                        }
+                    }
+                }
+
+                Ok(StoredLayout {
+                    version: version.unwrap_or(StoredLayout::VERSION),
+                    positions: positions.unwrap_or_default(),
+                })
+            }
+        }
+
+        deserializer.deserialize_any(StoredLayoutVisitor)
     }
 }

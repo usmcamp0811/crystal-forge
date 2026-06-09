@@ -3899,6 +3899,22 @@ tr.kbd-focused > td {
 }
 
 /* Enhanced dashboard loading spinner */
+.cf-loading-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--cf-card-border);
+  border-radius: 0.75rem;
+  background: color-mix(in oklab, var(--cf-brand-purple) 8%, var(--cf-card-bg));
+}
+
+.cf-loading-label {
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--cf-text-secondary);
+}
+
 .cf-loading-ring {
   position: relative;
   display: inline-flex;

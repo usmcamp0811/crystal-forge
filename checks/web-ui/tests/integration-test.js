@@ -1140,16 +1140,19 @@ const steps = [
     description: "Dashboard loading spinner remains visible while dashboard data is pending",
     action: async (page) => {
       await routeDashboardLoadingState(page);
-      await page.goto(`${baseUrl}/`, { timeout: LOAD_TIMEOUT });
-      await assertVisible(
-        page.locator("[data-testid='dashboard-loading-spinner']"),
-        "Dashboard loading spinner should be visible while summary data is still loading",
-      );
-      await assertVisible(
-        page.getByText("Loading dashboard data..."),
-        "Dashboard loading label should be visible",
-      );
-      await unrouteDashboardLoadingState(page);
+      try {
+        await page.goto(`${baseUrl}/`, { timeout: LOAD_TIMEOUT });
+        await assertVisible(
+          page.locator("[data-testid='dashboard-loading-spinner']"),
+          "Dashboard loading spinner should be visible while summary data is still loading",
+        );
+        await assertVisible(
+          page.getByText("Loading dashboard data..."),
+          "Dashboard loading label should be visible",
+        );
+      } finally {
+        await unrouteDashboardLoadingState(page);
+      }
     },
   },
   {

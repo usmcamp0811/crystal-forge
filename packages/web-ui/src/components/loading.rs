@@ -24,6 +24,20 @@ pub fn DashboardLoadingSpinner(
     let stroke = ((size as f64) / 8.0).round().max(2.0);
     let radius = ((size as f64) - stroke) / 2.0;
     let circumference = 2.0 * std::f64::consts::PI * radius;
+    let gradient_id = format!(
+        "cf-spinner-gradient-{}",
+        label
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() {
+                    ch.to_ascii_lowercase()
+                } else {
+                    '-'
+                }
+            })
+            .collect::<String>()
+    );
+    let gradient_url = format!("url(#{gradient_id})");
 
     rsx! {
         div {
@@ -47,7 +61,7 @@ pub fn DashboardLoadingSpinner(
                         cx: "{(size as f64) / 2.0}",
                         cy: "{(size as f64) / 2.0}",
                         r: "{radius}",
-                        stroke: "url(#cf-spinner-gradient)",
+                        stroke: "{gradient_url}",
                         stroke_width: "{stroke}",
                         fill: "none",
                         stroke_linecap: "round",
@@ -58,7 +72,7 @@ pub fn DashboardLoadingSpinner(
                     }
                     defs {
                         linearGradient {
-                            id: "cf-spinner-gradient",
+                            id: "{gradient_id}",
                             x1: "0%",
                             y1: "0%",
                             x2: "100%",

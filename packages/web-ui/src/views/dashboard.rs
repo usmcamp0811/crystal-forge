@@ -162,12 +162,17 @@ fn load_widget_positions() -> Vec<WidgetPosition> {
 
 fn persist_widget_positions(positions: &[WidgetPosition]) {
     let stored = StoredLayout {
+        version: StoredLayout::VERSION,
         positions: positions
             .iter()
             .map(|pos| (pos.id.to_string(), pos.col, pos.row))
             .collect(),
     };
     stored.save();
+}
+
+fn should_persist_widget_positions(positions: &[WidgetPosition]) -> bool {
+    StoredLayout::exists() || positions != default_widget_positions()
 }
 
 /// The main dashboard page.
@@ -321,7 +326,9 @@ pub fn DashboardView() -> Element {
         let widget_positions = widget_positions.clone();
         use_effect(move || {
             let positions = widget_positions.read().clone();
-            persist_widget_positions(&positions);
+            if should_persist_widget_positions(&positions) {
+                persist_widget_positions(&positions);
+            }
         });
     }
 
