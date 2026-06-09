@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-05-24 14:36'
-updated_date: '2026-06-08 04:11'
+updated_date: '2026-06-09 02:08'
 labels:
   - ui
   - dashboard
@@ -72,14 +72,12 @@ Medium
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
-
 <!-- AC:BEGIN -->
-
-- [ ] #1 Dashboard layout and visual structure are updated to match the latest design reference closely (component arrangement, hierarchy, and key styling intent).
+- [x] #1 Dashboard layout and visual structure are updated to match the latest design reference closely (component arrangement, hierarchy, and key styling intent).
 - [x] #2 Dashboard loading indicator is replaced or upgraded to the improved spinner/loading treatment from the latest design reference.
 - [x] #3 Loading state appears consistently in relevant dashboard data-fetch paths (initial load and refresh/loading transitions where applicable).
 - [x] #4 Existing dashboard functionality/data rendering remains intact after visual and loading UX changes.
-- [ ] #5 Web UI check captures updated dashboard visuals and includes evidence of the loading spinner state.
+- [x] #5 Web UI check captures updated dashboard visuals and includes evidence of the loading spinner state.
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -94,4 +92,34 @@ Added `data-testid="dashboard-loading-spinner"` around the summary loading state
 Updated `checks/web-ui/tests/integration-test.js` with a dedicated `06-dashboard-loading-spinner` step that delays dashboard summary + flake timeline responses, asserts the spinner/label are visible, and includes the screenshot step in `CI_FAST_STEP_NAMES`.
 
 Verification run: `nix develop -c cargo check` from `packages/web-ui` passed; `nix build .#checks.x86_64-linux.web-ui` completed successfully.
+
+---
+
+## Second Pass - Design Reference Alignment
+
+Compared dashboard against CrystalForgelatest (DashboardView.jsx + screens + styles.css).
+
+### Refinements:
+
+- Widget headers: uppercase, muted, letter-spacing (matches .dash-w-title)
+
+- Drag grip only in edit mode; cards become dashed grabbable surfaces
+
+- Widgets draggable only in edit mode; Customize/Done toggle + Reset + callout
+
+- Layout persists to localStorage; removed redundant sub-header
+
+- Grid spacing tightened (14px gap, 106px rows)
+
+- Added web-ui test asserting loading spinner visibility (AC#5)
+
+### Intentional deviations:
+
+- Kept 4-col real API-backed widget set vs design's 12 mock widgets (Non-Goals: preserve data)
+
+- Per-widget View action buttons not added (out of scope; nav handled by widget content)
+
+### Verification: cargo check passes, fmt clean, 66 tests passed
+
+Pushed to MR !268
 <!-- SECTION:NOTES:END -->
