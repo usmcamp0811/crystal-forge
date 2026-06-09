@@ -6,7 +6,7 @@ title: >-
 status: Review
 assignee: []
 created_date: '2026-05-24 14:36'
-updated_date: '2026-06-09 02:11'
+updated_date: '2026-06-09 02:19'
 labels:
   - ui
   - dashboard
@@ -21,6 +21,9 @@ references:
 modified_files:
   - packages/web-ui/src/views/dashboard.rs
   - checks/web-ui/tests/integration-test.js
+  - packages/web-ui/src/components/loading.rs
+  - packages/web-ui/assets/app.css
+  - packages/web-ui/src/components/widget_grid.rs
 priority: high
 ordinal: 1000
 ---
