@@ -226,6 +226,20 @@ fn widget_meta(id: &str) -> Option<&'static WidgetMeta> {
     widget_registry().iter().find(|w| w.id == id)
 }
 
+fn is_widget_visible_for_user(id: &str, is_admin: bool) -> bool {
+    widget_meta(id)
+        .map(|meta| !meta.admin_only || is_admin)
+        .unwrap_or(false)
+}
+
+fn can_view_widget_route_for_user(route: &str, is_admin: bool) -> bool {
+    match route {
+        // App shell guards CVEs for admins only.
+        "cves" => is_admin,
+        _ => true,
+    }
+}
+
 /// A widget placed on the dashboard, with its current size.
 #[derive(Clone, Debug, PartialEq)]
 struct WidgetPosition {
@@ -551,6 +565,14 @@ pub fn DashboardView() -> Element {
         widget_positions.set(default_widget_positions());
     };
 
+    // Only render widgets the current user can actually see.
+    let visible_positions: Vec<WidgetPosition> = widget_positions
+        .read()
+        .iter()
+        .filter(|pos| is_widget_visible_for_user(pos.id, is_admin_user))
+        .cloned()
+        .collect();
+
     // Get the current filter state
     let filter = dashboard_filter.read().clone();
     let filter_label = filter.display_label();
@@ -750,7 +772,7 @@ pub fn DashboardView() -> Element {
         }
     };
 
-    let widget_count = widget_positions.read().len();
+    let widget_count = visible_positions.len();
     let is_edit = *edit_mode.read();
 
     rsx! {
@@ -844,10 +866,13 @@ pub fn DashboardView() -> Element {
 
             // Widget grid (3-column dense, design-reference parity)
             WidgetGrid {
-                for pos in widget_positions.read().iter() {
+                for pos in visible_positions.iter() {
                     {
                         let pos = pos.clone();
-                        let action_label = pos.nav.map(|_| "View →".to_string());
+                        let action_label = pos
+                            .nav
+                            .filter(|route| can_view_widget_route_for_user(route, is_admin_user))
+                            .map(|_| "View →".to_string());
                         rsx! {
                             GridWidget {
                                 key: "{pos.id}",
@@ -862,7 +887,7 @@ pub fn DashboardView() -> Element {
                                 is_dragging: dragging_id.read().map_or(false, |d| d == pos.id),
                                 is_drop_target: drop_target_id.read().map_or(false, |d| d == pos.id),
                                 on_action: {
-                                    let route = pos.nav;
+                                    let route = pos.nav.filter(|route| can_view_widget_route_for_user(route, is_admin_user));
                                     move |_| {
                                         if let Some(target) = route.and_then(route_for_nav) {
                                             nav.push(target);
@@ -900,7 +925,7 @@ pub fn DashboardView() -> Element {
 
         if *picker_open.read() {
             WidgetPicker {
-                added_ids: widget_positions.read().iter().map(|p| p.id.to_string()).collect::<HashSet<String>>(),
+                added_ids: visible_positions.iter().map(|p| p.id.to_string()).collect::<HashSet<String>>(),
                 is_admin: is_admin_user,
                 on_add: on_add_widget,
                 on_close: move |_| picker_open.set(false),
