@@ -6,7 +6,7 @@ title: >-
 status: Review
 assignee: []
 created_date: '2026-05-24 14:36'
-updated_date: '2026-06-09 02:19'
+updated_date: '2026-06-09 02:38'
 labels:
   - ui
   - dashboard
@@ -76,9 +76,32 @@ Medium
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Dashboard layout and visual structure are updated to match the latest design reference closely (component arrangement, hierarchy, and key styling intent).
+- [x] #1 Dashboard layout and visual structure are updated to match the latest design reference closely (component arrangement, hierarchy, and key styling intent).
 - [x] #2 Dashboard loading indicator is replaced or upgraded to the improved spinner/loading treatment from the latest design reference.
 - [x] #3 Loading state appears consistently in relevant dashboard data-fetch paths (initial load and refresh/loading transitions where applicable).
 - [x] #4 Existing dashboard functionality/data rendering remains intact after visual and loading UX changes.
 - [x] #5 Web UI check captures updated dashboard visuals and includes evidence of the loading spinner state.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Dashboard reworked for true JSX design-reference parity (commit 2cccc6a6).
+
+Structural changes:
+- 3-column dense dash-grid CSS ported from CrystalForgelatest (cols/rows spans, edit toolbar, widget headers, empty state, widget library styles).
+- Widget registry + ordered layout model replaces the old 4-column packing. Widgets carry icon, nav route, default cols/rows, height_resizable, admin_only.
+- Full customize mode: width (1-3) + height (1-3) segmented glyph controls, per-widget remove (x), drag-to-reorder, and an "Add widget" Widget Library modal.
+- Widget headers: icon + uppercase title + "View ->" action.
+- Fleet Health rebuilt as big healthy count + stacked bar + 4 stat tiles (was donut).
+- Added Flake Git Graph + Quick Actions widgets; removed the extra StatCard row and standalone timeline Card (folded into the grid) to match the design.
+- Layout storage versioned (v2: id/cols/rows) with reset support.
+
+Data semantics preserved (no backend/API changes); widgets remain backed by real APIs.
+
+Web UI: 06z fleet-health assertion updated to new tile markup (data-testid=fleet-health-tile, data-status, data-count). Loading-spinner step retained.
+
+Verification: cargo check OK, cargo fmt --check clean, cargo test 64 passed/0 failed. Heavy web-ui nix check not run locally per request; runs in CI.
+
+Remaining intentional deviations (minor): some JSX mock-only widgets (heartbeat ring, eval queue, cache health, env breakdown, recent commits, deployment timeline feed, top-affected list) are not all present as separate widgets where no equivalent real API is wired; the registry covers the real-data widgets and the customize/library UX matches the design.
+<!-- SECTION:NOTES:END -->
