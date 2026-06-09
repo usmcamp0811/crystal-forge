@@ -76,4 +76,4 @@ pub use system::{
 };
 pub use systems_stat_strip::{SystemsStatStrip, SystemsStats};
 pub use tables::{SortDirection, SortableHeader};
-pub use widget_grid::{GridWidget, WidgetGrid};
+pub use widget_grid::{GridWidget, StoredLayout, WidgetGrid};

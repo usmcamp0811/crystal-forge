@@ -1218,15 +1218,14 @@ const steps = [
 
       const counts = await widget.evaluate((el) => {
         const expectedLabels = new Set(["healthy", "warning", "critical", "offline"]);
-        const rows = Array.from(el.querySelectorAll("div.flex.items-center.gap-2"));
+        const tiles = Array.from(
+          el.querySelectorAll("[data-testid='fleet-health-tile']"),
+        );
         const out = {};
 
-        for (const row of rows) {
-          const spans = row.querySelectorAll("span");
-          if (spans.length < 3) continue;
-
-          const label = (spans[1].textContent || "").trim().toLowerCase();
-          const count = Number((spans[2].textContent || "").trim());
+        for (const tile of tiles) {
+          const label = (tile.getAttribute("data-status") || "").trim().toLowerCase();
+          const count = Number((tile.getAttribute("data-count") || "").trim());
 
           if (expectedLabels.has(label) && Number.isFinite(count)) {
             out[label] = count;

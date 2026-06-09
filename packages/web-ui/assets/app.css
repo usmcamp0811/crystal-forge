@@ -3940,3 +3940,225 @@ tr.kbd-focused > td {
     transform: rotate(270deg);
   }
 }
+
+/* ===========================================================================
+   Dashboard widget grid — ported from design reference (CrystalForgelatest)
+   3-column dense grid with span-based widget sizing and edit controls.
+   =========================================================================== */
+.dash-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-auto-rows: var(--dash-row, 212px);
+  grid-auto-flow: row dense;
+  gap: 14px;
+}
+@media (max-width: 1100px) {
+  .dash-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 720px) {
+  .dash-grid { grid-template-columns: 1fr; }
+}
+.dash-cols-1 { grid-column: span 1; }
+.dash-cols-2 { grid-column: span 2; }
+.dash-cols-3 { grid-column: span 3; }
+.dash-rows-1 { grid-row: span 1; }
+.dash-rows-2 { grid-row: span 2; }
+.dash-rows-3 { grid-row: span 3; }
+@media (max-width: 1100px) {
+  .dash-cols-3 { grid-column: span 2; }
+}
+@media (max-width: 720px) {
+  .dash-cols-2,
+  .dash-cols-3 { grid-column: span 1; }
+}
+
+.dash-widget {
+  background: var(--cf-card-bg);
+  border: 1px solid var(--cf-card-border);
+  border-radius: 12px;
+  padding: 14px 16px 16px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  position: relative;
+  transition: border-color 120ms, background 120ms;
+  min-height: 0;
+}
+.dash-widget.edit { cursor: grab; border-style: dashed; }
+.dash-widget.edit:active { cursor: grabbing; }
+.dash-widget.dragging { opacity: 0.5; }
+.dash-widget.over {
+  border-color: var(--cf-brand-purple);
+  background: color-mix(in oklab, var(--cf-brand-purple) 8%, var(--cf-card-bg));
+}
+.dash-widget.invalid {
+  border-color: #f87171;
+  background: color-mix(in oklab, #f87171 8%, var(--cf-card-bg));
+}
+
+.dash-widget-edit {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  padding: 6px 8px;
+  margin: -8px -8px 4px;
+  background: color-mix(in oklab, var(--cf-brand-purple) 10%, var(--cf-card-bg));
+  border-radius: 8px;
+}
+.dash-widget-grip {
+  cursor: grab;
+  color: var(--cf-text-muted);
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 6px;
+  border-radius: 4px;
+}
+.dash-widget-grip:hover { background: var(--cf-subtle-bg); }
+.dash-col-seg { flex: 0 0 auto; }
+.dash-col-seg button {
+  padding: 5px 8px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  display: inline-flex;
+  align-items: center;
+}
+.dash-col-label { font-size: 11px; color: var(--cf-text-muted); }
+.dash-size-group { display: inline-flex; align-items: center; gap: 5px; }
+.dash-wglyph { display: inline-flex; gap: 2px; align-items: center; }
+.dash-wcell {
+  width: 6px;
+  height: 10px;
+  border-radius: 1.5px;
+  background: var(--cf-text-muted);
+  opacity: 0.35;
+  transition: opacity 120ms, background 120ms;
+}
+.dash-col-seg button.active .dash-wcell.on { background: var(--cf-brand-purple); opacity: 1; }
+.dash-col-seg button .dash-wcell.on { opacity: 0.7; }
+.dash-hglyph { display: inline-flex; flex-direction: column; gap: 2px; align-items: center; }
+.dash-hcell {
+  width: 10px;
+  height: 4px;
+  border-radius: 1.5px;
+  background: var(--cf-text-muted);
+  opacity: 0.35;
+  transition: opacity 120ms, background 120ms;
+}
+.dash-col-seg button.active .dash-hcell.on { background: var(--cf-brand-purple); opacity: 1; }
+.dash-col-seg button .dash-hcell.on { opacity: 0.7; }
+.dash-widget-remove { margin-left: auto; }
+.dash-fixed-h {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10.5px;
+  font-style: italic;
+  opacity: 0.6;
+  padding: 2px 0;
+}
+
+.dash-w-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.dash-w-title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--cf-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dash-w-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+.dash-w-mini {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 10px;
+  background: var(--cf-subtle-bg);
+  border-radius: 5px;
+}
+.dash-w-mini span { color: var(--cf-text-muted); }
+.dash-w-mini strong { font-weight: 600; font-variant-numeric: tabular-nums; }
+
+/* Empty state + widget library (ported from design reference) */
+.empty {
+  padding: 48px 24px;
+  text-align: center;
+  color: var(--cf-text-muted);
+  border: 1px dashed var(--cf-card-border);
+  border-radius: var(--radius-xl);
+}
+.empty h3 { color: var(--cf-text-secondary); margin: 0 0 6px; }
+
+.widget-lib-item {
+  all: unset;
+  box-sizing: border-box;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 10px;
+  transition: background 120ms;
+}
+.widget-lib-item:hover { background: var(--cf-hover-bg); }
+.widget-lib-icon {
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  color: var(--cf-brand-purple);
+  background: color-mix(in oklab, var(--cf-brand-purple) 14%, transparent);
+  border: 1px solid color-mix(in oklab, var(--cf-brand-purple) 28%, transparent);
+}
+.widget-lib-title {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--cf-text-primary);
+}
+.widget-lib-desc {
+  display: block;
+  font-size: 11px;
+  color: var(--cf-text-muted);
+  margin-top: 1px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.widget-lib-add {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  display: grid;
+  place-items: center;
+  color: var(--cf-text-muted);
+  border: 1px solid var(--cf-divider);
+}
+.widget-lib-item:hover .widget-lib-add {
+  color: var(--cf-brand-purple);
+  border-color: var(--cf-brand-purple);
+}
+@media (max-width: 640px) {
+  .widget-lib-item .widget-lib-desc { white-space: normal; }
+}
+
+.help { font-size: 11px; color: var(--cf-text-muted); }
