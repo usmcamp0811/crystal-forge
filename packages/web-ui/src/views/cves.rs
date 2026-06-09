@@ -1312,9 +1312,8 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
     // Environment color map: Vec<(name, color_hex)> from the environments API.
     // Used by EnvBadge and the scope picker so colors match whatever the user
     // has configured, rather than a hard-coded palette.
-    let env_colors = use_resource(move || async move {
-        load_environment_colors_with_fallback().await.colors
-    });
+    let env_colors =
+        use_resource(move || async move { load_environment_colors_with_fallback().await.colors });
 
     use_effect(move || {
         use wasm_bindgen::JsCast;
@@ -2184,7 +2183,10 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
 }
 
 #[component]
-fn AffectedSystemsList(systems: Vec<CveAffectedSystemDetail>, colors: Vec<(String, String)>) -> Element {
+fn AffectedSystemsList(
+    systems: Vec<CveAffectedSystemDetail>,
+    colors: Vec<(String, String)>,
+) -> Element {
     // Group by environment while preserving encounter order for stable rendering.
     let mut by_env: Vec<(String, Vec<CveAffectedSystemDetail>)> = Vec::new();
     for sys in systems {

@@ -1,60 +1,41 @@
-//! Draggable and resizable widget grid for dashboard layouts.
+//! Draggable, resizable dashboard widget grid.
+//!
+//! Ported to match the design reference (`CrystalForgelatest`): a 3-column
+//! dense CSS grid where each widget spans `cols` (1-3) and `rows` (1-3), with
+//! an edit toolbar exposing width/height segmented controls and a remove button.
 
 use dioxus::prelude::*;
 
-use crate::theme;
-
-/// Position and size of a widget in the grid.
-#[derive(Clone, Debug, PartialEq, Default)]
-pub struct WidgetLayout {
-    /// Column start (0-based)
-    pub col: usize,
-    /// Row start (0-based)
-    pub row: usize,
-    /// Width in grid columns
-    pub width: usize,
-    /// Height in grid rows
-    pub height: usize,
-}
-
-impl WidgetLayout {
-    pub fn new(col: usize, row: usize, width: usize, height: usize) -> Self {
-        Self {
-            col,
-            row,
-            width,
-            height,
-        }
-    }
-}
-
-/// Definition of a widget for the grid
-#[derive(Clone, PartialEq)]
-pub struct WidgetDef {
-    pub id: &'static str,
-    pub title: &'static str,
-    pub default_col: usize,
-    pub default_row: usize,
-    pub width: usize,
-    pub height: usize,
-}
+use crate::components::icon::{Icon, IconName};
 
 /// Props for a single grid widget wrapper.
 #[derive(Props, Clone, PartialEq)]
 pub struct GridWidgetProps {
     pub id: String,
     pub title: String,
-    pub col: usize,
-    pub row: usize,
-    pub width: usize,
-    pub height: usize,
+    /// Header icon.
+    pub icon: IconName,
+    /// Width in columns (1-3).
+    pub cols: usize,
+    /// Height in rows (1-3).
+    pub rows: usize,
+    /// Whether this widget supports height resizing (list/feed widgets).
+    #[props(default = false)]
+    pub height_resizable: bool,
+    /// Optional "View →" header action label.
+    #[props(default)]
+    pub action_label: Option<String>,
     pub children: Element,
+    #[props(default = false)]
+    pub edit_mode: bool,
     #[props(default = false)]
     pub is_dragging: bool,
     #[props(default = false)]
     pub is_drop_target: bool,
     #[props(default = false)]
     pub is_invalid_drop_target: bool,
+    #[props(default)]
+    pub on_action: Option<EventHandler<()>>,
     #[props(default)]
     pub on_drag_start: Option<EventHandler<String>>,
     #[props(default)]
@@ -63,56 +44,65 @@ pub struct GridWidgetProps {
     pub on_drag_leave: Option<EventHandler<()>>,
     #[props(default)]
     pub on_drop: Option<EventHandler<String>>,
+    #[props(default)]
+    pub on_set_cols: Option<EventHandler<(String, usize)>>,
+    #[props(default)]
+    pub on_set_rows: Option<EventHandler<(String, usize)>>,
+    #[props(default)]
+    pub on_remove: Option<EventHandler<String>>,
 }
 
-/// A single widget in the grid with drag handle.
+/// A single dashboard widget rendered with the design-reference markup.
 #[component]
 pub fn GridWidget(props: GridWidgetProps) -> Element {
     let GridWidgetProps {
         id,
         title,
-        col,
-        row,
-        width,
-        height,
+        icon,
+        cols,
+        rows,
+        height_resizable,
+        action_label,
         children,
+        edit_mode,
         is_dragging,
         is_drop_target,
         is_invalid_drop_target,
+        on_action,
         on_drag_start,
         on_drag_over,
         on_drag_leave,
         on_drop,
+        on_set_cols,
+        on_set_rows,
+        on_remove,
     } = props;
 
-    // CSS grid positioning (1-based)
-    let grid_col = format!("{} / span {}", col + 1, width);
-    let grid_row = format!("{} / span {}", row + 1, height);
+    let cols = cols.clamp(1, 3);
+    let rows = rows.clamp(1, 3);
 
-    // Visual states
-    let drag_class = if is_dragging {
-        "opacity-50 scale-105 shadow-2xl z-50"
-    } else {
-        ""
-    };
-    let drop_class = if is_drop_target {
-        "ring-2 ring-blue-400 ring-offset-2 scale-[1.02] bg-blue-900/20"
+    let mut classes = format!("dash-widget dash-cols-{cols} dash-rows-{rows}");
+    if edit_mode {
+        classes.push_str(" edit");
+    }
+    if is_dragging {
+        classes.push_str(" dragging");
+    }
+    if is_drop_target {
+        classes.push_str(" over");
     } else if is_invalid_drop_target {
-        "ring-2 ring-red-400 ring-offset-2 bg-red-900/20"
-    } else {
-        ""
-    };
+        classes.push_str(" invalid");
+    }
 
     rsx! {
         div {
-            class: "{theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl overflow-hidden transition-all duration-150 {drag_class} {drop_class} h-full min-h-0 flex flex-col",
-            style: "grid-column: {grid_col}; grid-row: {grid_row};",
+            class: "{classes}",
             "data-widget-id": "{id}",
-            draggable: "true",
+            draggable: "{edit_mode}",
             ondragstart: {
                 let id = id.clone();
                 let on_drag_start = on_drag_start.clone();
-                move |_evt| {
+                move |_| {
                     if let Some(handler) = &on_drag_start {
                         handler.call(id.clone());
                     }
@@ -147,91 +137,166 @@ pub fn GridWidget(props: GridWidgetProps) -> Element {
                 }
             },
 
-            // Header with drag handle
-            div {
-                class: "flex items-center gap-2 px-3 py-1.5 {theme::surface::SUBTLE_BG} border-b {theme::surface::CARD_BORDER} cursor-grab active:cursor-grabbing",
-
-                // Drag handle icon (6-dot grip)
-                svg {
-                    width: "8",
-                    height: "12",
-                    view_box: "0 0 8 12",
-                    class: "shrink-0",
-                    circle { cx: "2", cy: "2", r: "1.2", fill: "#6b7280" }
-                    circle { cx: "2", cy: "6", r: "1.2", fill: "#6b7280" }
-                    circle { cx: "2", cy: "10", r: "1.2", fill: "#6b7280" }
-                    circle { cx: "6", cy: "2", r: "1.2", fill: "#6b7280" }
-                    circle { cx: "6", cy: "6", r: "1.2", fill: "#6b7280" }
-                    circle { cx: "6", cy: "10", r: "1.2", fill: "#6b7280" }
-                }
-                h3 {
-                    class: "{theme::text::PRIMARY} font-semibold text-sm whitespace-nowrap",
-                    "{title}"
+            // Edit toolbar (width / height / remove)
+            if edit_mode {
+                div {
+                    class: "dash-widget-edit",
+                    span { class: "dash-widget-grip", title: "Drag to move",
+                        Icon { name: IconName::Rows, size: 12 }
+                    }
+                    span {
+                        class: "dash-size-group",
+                        span { class: "dash-col-label", "Width" }
+                        div {
+                            class: "seg dash-col-seg",
+                            for c in 1..=3usize {
+                                button {
+                                    key: "w{c}",
+                                    class: if cols == c { "active" } else { "" },
+                                    title: "Span {c} of 3 columns",
+                                    "aria-label": "Span {c} of 3 columns",
+                                    onclick: {
+                                        let id = id.clone();
+                                        let on_set_cols = on_set_cols.clone();
+                                        move |_| {
+                                            if let Some(handler) = &on_set_cols {
+                                                handler.call((id.clone(), c));
+                                            }
+                                        }
+                                    },
+                                    span {
+                                        class: "dash-wglyph",
+                                        for i in 0..3usize {
+                                            span {
+                                                key: "wc{i}",
+                                                class: if i < c { "dash-wcell on" } else { "dash-wcell" },
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if height_resizable {
+                        span {
+                            class: "dash-size-group",
+                            span { class: "dash-col-label", "Height" }
+                            div {
+                                class: "seg dash-col-seg",
+                                for r in 1..=3usize {
+                                    button {
+                                        key: "h{r}",
+                                        class: if rows == r { "active" } else { "" },
+                                        "aria-label": "Height level {r}",
+                                        onclick: {
+                                            let id = id.clone();
+                                            let on_set_rows = on_set_rows.clone();
+                                            move |_| {
+                                                if let Some(handler) = &on_set_rows {
+                                                    handler.call((id.clone(), r));
+                                                }
+                                            }
+                                        },
+                                        span {
+                                            class: "dash-hglyph",
+                                            for i in 0..3usize {
+                                                span {
+                                                    key: "hc{i}",
+                                                    class: if i >= 3 - r { "dash-hcell on" } else { "dash-hcell" },
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        span {
+                            class: "dash-col-label dash-fixed-h",
+                            title: "This widget sizes to its content",
+                            "Fixed height"
+                        }
+                    }
+                    button {
+                        class: "btn-icon focus-ring dash-widget-remove",
+                        title: "Remove",
+                        onclick: {
+                            let id = id.clone();
+                            let on_remove = on_remove.clone();
+                            move |_| {
+                                if let Some(handler) = &on_remove {
+                                    handler.call(id.clone());
+                                }
+                            }
+                        },
+                        Icon { name: IconName::X, size: 13 }
+                    }
                 }
             }
 
-            // Widget content
+            // Header: icon + uppercase title + optional View action
             div {
-                class: "p-4 flex-1 min-h-0 overflow-hidden",
+                class: "dash-w-head",
+                div {
+                    style: "display:flex; align-items:center; gap:8px; min-width:0;",
+                    span {
+                        style: "color: var(--cf-text-muted); flex-shrink:0; display:inline-flex;",
+                        Icon { name: icon, size: 13 }
+                    }
+                    h3 { class: "dash-w-title", "{title}" }
+                }
+                if let Some(label) = action_label.clone() {
+                    button {
+                        class: "btn btn-ghost focus-ring xs",
+                        onclick: move |_| {
+                            if let Some(handler) = &on_action {
+                                handler.call(());
+                            }
+                        },
+                        "{label}"
+                    }
+                }
+            }
+
+            // Body
+            div {
+                class: "dash-w-body",
                 {children}
             }
         }
     }
 }
 
-/// Props for the widget grid container.
-#[derive(Props, Clone, PartialEq)]
-pub struct WidgetGridProps {
-    /// Number of columns in the grid
-    #[props(default = 4)]
-    pub columns: usize,
-    /// Gap between widgets in pixels
-    #[props(default = 16)]
-    pub gap: usize,
-    /// Row height in pixels
-    #[props(default = 100)]
-    pub row_height: usize,
-    /// Children (GridWidget components)
-    pub children: Element,
-}
-
-/// Container for the widget grid.
+/// Container for the dashboard widget grid (3-column dense grid).
 #[component]
-pub fn WidgetGrid(props: WidgetGridProps) -> Element {
-    let WidgetGridProps {
-        columns,
-        gap,
-        row_height,
-        children,
-    } = props;
-
-    let grid_template = format!("repeat({}, minmax(0, 1fr))", columns);
-    let grid_auto_rows = format!("{}px", row_height);
-    let grid_gap = format!("{}px", gap);
-
+pub fn WidgetGrid(children: Element) -> Element {
     rsx! {
         div {
-            class: "grid w-full",
-            style: "grid-template-columns: {grid_template}; grid-auto-rows: {grid_auto_rows}; gap: {grid_gap};",
+            class: "dash-grid",
+            "data-testid": "dashboard-grid",
             {children}
         }
     }
 }
 
-/// Stored layout for persistence
+/// Stored layout for persistence: (id, cols, rows) in display order.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct StoredLayout {
-    pub positions: Vec<(String, usize, usize)>, // (id, col, row)
+    pub version: u32,
+    pub entries: Vec<(String, usize, usize)>,
 }
 
 impl StoredLayout {
-    /// Load from localStorage
+    pub const VERSION: u32 = 2;
+    const KEY: &'static str = "cf-dashboard-layout";
+
+    /// Load from localStorage.
     pub fn load() -> Option<Self> {
         #[cfg(target_arch = "wasm32")]
         {
             let window = web_sys::window()?;
             let storage = window.local_storage().ok()??;
-            let json = storage.get_item("dashboard_layout").ok()??;
+            let json = storage.get_item(Self::KEY).ok()??;
             serde_json::from_str(&json).ok()
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -240,17 +305,47 @@ impl StoredLayout {
         }
     }
 
-    /// Save to localStorage
+    /// Save to localStorage.
     pub fn save(&self) {
         #[cfg(target_arch = "wasm32")]
         {
             if let Some(window) = web_sys::window() {
                 if let Ok(Some(storage)) = window.local_storage() {
                     if let Ok(json) = serde_json::to_string(self) {
-                        let _ = storage.set_item("dashboard_layout", &json);
+                        let _ = storage.set_item(Self::KEY, &json);
                     }
                 }
             }
+        }
+    }
+
+    /// Remove the persisted layout (used by "Reset").
+    pub fn clear() {
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Some(window) = web_sys::window() {
+                if let Ok(Some(storage)) = window.local_storage() {
+                    let _ = storage.remove_item(Self::KEY);
+                }
+            }
+        }
+    }
+
+    /// Whether a persisted layout exists.
+    pub fn exists() -> bool {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let Some(window) = web_sys::window() else {
+                return false;
+            };
+            let Ok(Some(storage)) = window.local_storage() else {
+                return false;
+            };
+            storage.get_item(Self::KEY).ok().flatten().is_some()
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            false
         }
     }
 }
@@ -261,12 +356,11 @@ impl serde::Serialize for StoredLayout {
     where
         S: serde::Serializer,
     {
-        use serde::ser::SerializeSeq;
-        let mut seq = serializer.serialize_seq(Some(self.positions.len()))?;
-        for (id, col, row) in &self.positions {
-            seq.serialize_element(&(id, col, row))?;
-        }
-        seq.end()
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("StoredLayout", 2)?;
+        state.serialize_field("version", &self.version)?;
+        state.serialize_field("entries", &self.entries)?;
+        state.end()
     }
 }
 
@@ -276,7 +370,44 @@ impl<'de> serde::Deserialize<'de> for StoredLayout {
     where
         D: serde::Deserializer<'de>,
     {
-        let positions: Vec<(String, usize, usize)> = Vec::deserialize(deserializer)?;
-        Ok(StoredLayout { positions })
+        use serde::de::{self, MapAccess, Visitor};
+        use std::fmt;
+
+        struct StoredLayoutVisitor;
+
+        impl<'de> Visitor<'de> for StoredLayoutVisitor {
+            type Value = StoredLayout;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("stored dashboard layout")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut version = None;
+                let mut entries = None;
+
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "version" => version = Some(map.next_value::<u32>()?),
+                        "entries" => {
+                            entries = Some(map.next_value::<Vec<(String, usize, usize)>>()?)
+                        }
+                        _ => {
+                            let _: de::IgnoredAny = map.next_value()?;
+                        }
+                    }
+                }
+
+                Ok(StoredLayout {
+                    version: version.unwrap_or(StoredLayout::VERSION),
+                    entries: entries.unwrap_or_default(),
+                })
+            }
+        }
+
+        deserializer.deserialize_map(StoredLayoutVisitor)
     }
 }

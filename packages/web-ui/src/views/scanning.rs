@@ -779,7 +779,9 @@ fn last_scan(row: &ScanningQueueItemResponse) -> String {
 }
 
 fn interval_select(mut value: Signal<String>, disabled: bool) -> Element {
-    let options = ["1h", "6h", "12h", "24h", "7d", "30d", "168h", "336h", "never"];
+    let options = [
+        "1h", "6h", "12h", "24h", "7d", "30d", "168h", "336h", "never",
+    ];
     rsx! {
         select {
             class: "input focus-ring",
