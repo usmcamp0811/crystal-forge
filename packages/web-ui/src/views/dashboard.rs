@@ -69,6 +69,8 @@ struct WidgetMeta {
     title: &'static str,
     description: &'static str,
     icon: IconName,
+    /// Library category (used by the Widget Library filter).
+    category: &'static str,
     /// Navigation route for the "View →" header action (None hides the action).
     nav: Option<&'static str>,
     /// Default column span (1-3).
@@ -81,6 +83,16 @@ struct WidgetMeta {
     admin_only: bool,
 }
 
+/// Library category display order (mirrors design reference CATEGORY_ORDER).
+const CATEGORY_ORDER: &[&str] = &[
+    "Fleet",
+    "Pipeline",
+    "Security",
+    "Activity",
+    "Infrastructure",
+    "Actions",
+];
+
 /// Registry of every widget that can appear on the dashboard.
 ///
 /// This is the Rust analogue of the design reference's `DASHBOARD_WIDGETS`.
@@ -92,6 +104,7 @@ fn widget_registry() -> &'static [WidgetMeta] {
             title: "Fleet Health",
             description: "System health rollup across the fleet",
             icon: IconName::Cpu,
+            category: "Fleet",
             nav: Some("systems"),
             default_cols: 2,
             default_rows: 1,
@@ -103,6 +116,7 @@ fn widget_registry() -> &'static [WidgetMeta] {
             title: "Deployment Status",
             description: "Up-to-date, behind, and never-deployed hosts",
             icon: IconName::Sync,
+            category: "Fleet",
             nav: Some("systems"),
             default_cols: 1,
             default_rows: 1,
@@ -114,6 +128,7 @@ fn widget_registry() -> &'static [WidgetMeta] {
             title: "CVE Summary",
             description: "Critical / high CVE counts across the fleet",
             icon: IconName::Shield,
+            category: "Security",
             nav: Some("cves"),
             default_cols: 1,
             default_rows: 1,
@@ -125,6 +140,7 @@ fn widget_registry() -> &'static [WidgetMeta] {
             title: "Build Queue",
             description: "Active builds and queued jobs",
             icon: IconName::Cpu,
+            category: "Pipeline",
             nav: Some("builds"),
             default_cols: 1,
             default_rows: 1,
@@ -136,6 +152,7 @@ fn widget_registry() -> &'static [WidgetMeta] {
             title: "Build Summary",
             description: "Building and queued counts at a glance",
             icon: IconName::Cpu,
+            category: "Pipeline",
             nav: Some("builds"),
             default_cols: 1,
             default_rows: 1,
@@ -147,6 +164,7 @@ fn widget_registry() -> &'static [WidgetMeta] {
             title: "Recent Deployments",
             description: "Chronological feed of recent deploys",
             icon: IconName::Sync,
+            category: "Activity",
             nav: Some("systems"),
             default_cols: 2,
             default_rows: 2,
@@ -158,6 +176,7 @@ fn widget_registry() -> &'static [WidgetMeta] {
             title: "Flake Git Graph",
             description: "Recent commits across tracked flakes",
             icon: IconName::Git,
+            category: "Activity",
             nav: Some("flakes"),
             default_cols: 3,
             default_rows: 3,
@@ -169,6 +188,7 @@ fn widget_registry() -> &'static [WidgetMeta] {
             title: "Quick Actions",
             description: "Common operator shortcuts",
             icon: IconName::Gear,
+            category: "Actions",
             nav: None,
             default_cols: 1,
             default_rows: 1,
@@ -180,6 +200,7 @@ fn widget_registry() -> &'static [WidgetMeta] {
             title: "Pipeline Readiness",
             description: "Pipeline configuration issues needing attention",
             icon: IconName::Gear,
+            category: "Pipeline",
             nav: None,
             default_cols: 2,
             default_rows: 2,
@@ -191,6 +212,7 @@ fn widget_registry() -> &'static [WidgetMeta] {
             title: "Top Vulnerable Services",
             description: "Highest-risk hardening services",
             icon: IconName::Shield,
+            category: "Security",
             nav: Some("cves"),
             default_cols: 1,
             default_rows: 2,
@@ -887,7 +909,16 @@ pub fn DashboardView() -> Element {
     }
 }
 
-/// Widget library modal — browse and add available widgets (design parity).
+/// Human-readable width label for a column span.
+fn width_label(cols: usize) -> &'static str {
+    match cols {
+        1 => "⅓ width",
+        2 => "⅔ width",
+        _ => "Full width",
+    }
+}
+
+/// Widget library modal — two-pane browse/add experience (design parity).
 #[component]
 fn WidgetPicker(
     added_ids: HashSet<String>,
@@ -902,58 +933,242 @@ fn WidgetPicker(
     let total = all.len();
     let added_count = all.iter().filter(|w| added_ids.contains(w.id)).count();
 
+    let mut query = use_signal(String::new);
+    let mut category = use_signal(|| "All".to_string());
+    let mut selected_id = use_signal(|| None::<&'static str>);
+
+    // Categories present among available widgets, in canonical order.
+    let mut cats: Vec<String> = vec!["All".to_string()];
+    cats.extend(
+        CATEGORY_ORDER
+            .iter()
+            .filter(|c| all.iter().any(|w| &w.category == *c))
+            .map(|c| c.to_string()),
+    );
+
+    let active_cat = category.read().clone();
+    let q = query.read().trim().to_lowercase();
+    let filtered: Vec<&'static WidgetMeta> = all
+        .iter()
+        .copied()
+        .filter(|w| active_cat == "All" || w.category == active_cat)
+        .filter(|w| {
+            q.is_empty()
+                || format!("{} {}", w.title, w.description)
+                    .to_lowercase()
+                    .contains(&q)
+        })
+        .collect();
+
+    // Selected widget: explicit selection, else first filtered, else first.
+    let sel: Option<&'static WidgetMeta> = selected_id
+        .read()
+        .and_then(|id| all.iter().copied().find(|w| w.id == id))
+        .or_else(|| filtered.first().copied())
+        .or_else(|| all.first().copied());
+
     rsx! {
         div {
             class: "modal-backdrop",
             onclick: move |_| on_close.call(()),
             div {
                 class: "modal",
-                style: "width: min(640px, 96vw); max-height: 88vh; display:flex; flex-direction:column;",
+                style: "width: min(820px, 96vw); max-height: 88vh; display:flex; flex-direction:column;",
                 onclick: move |evt| evt.stop_propagation(),
                 div {
                     class: "modal-head",
-                    h2 { "Widget library" }
+                    h2 {
+                        Icon { name: IconName::Plus, size: 14 }
+                        " Widget library"
+                    }
                     p { "Add widgets from the library to your dashboard. {added_count} of {total} added." }
                 }
+
                 div {
-                    style: "overflow-y:auto; padding:8px;",
-                    for w in all.iter() {
-                        {
-                            let id = w.id.to_string();
-                            let added = added_ids.contains(w.id);
-                            rsx! {
-                                button {
-                                    key: "{w.id}",
-                                    class: "focus-ring widget-lib-item",
-                                    disabled: added,
-                                    onclick: {
-                                        let id = id.clone();
-                                        move |_| {
-                                            if !added {
-                                                on_add.call(id.clone());
+                    style: "display:flex; min-height:0; flex:1;",
+
+                    // Catalog pane
+                    div {
+                        style: "flex:1 1 0; min-width:0; display:flex; flex-direction:column; border-right:1px solid var(--cf-divider);",
+
+                        // Search + category filter
+                        div {
+                            style: "padding:12px 16px; display:flex; flex-direction:column; gap:10px; border-bottom:1px solid var(--cf-divider);",
+                            div {
+                                class: "filter-search",
+                                style: "width:100%;",
+                                Icon { name: IconName::Search, size: 16 }
+                                input {
+                                    class: "input focus-ring",
+                                    placeholder: "Search widgets…",
+                                    value: "{query}",
+                                    oninput: move |evt| query.set(evt.value()),
+                                }
+                            }
+                            div {
+                                style: "display:flex; gap:6px; flex-wrap:wrap;",
+                                for c in cats.iter() {
+                                    {
+                                        let c = c.clone();
+                                        let is_active = active_cat == c;
+                                        rsx! {
+                                            button {
+                                                key: "{c}",
+                                                class: if is_active { "chip chip-info focus-ring" } else { "chip focus-ring" },
+                                                style: if is_active {
+                                                    "cursor:pointer;".to_string()
+                                                } else {
+                                                    "cursor:pointer; border:1px solid var(--cf-divider); background:transparent; color:var(--cf-text-secondary);".to_string()
+                                                },
+                                                onclick: {
+                                                    let c = c.clone();
+                                                    move |_| category.set(c.clone())
+                                                },
+                                                "{c}"
                                             }
                                         }
-                                    },
-                                    span {
-                                        class: "widget-lib-icon",
-                                        Icon { name: w.icon, size: 15 }
                                     }
-                                    span {
-                                        style: "min-width:0; flex:1;",
-                                        span { class: "widget-lib-title", "{w.title}" }
-                                        span { class: "widget-lib-desc", "{w.description}" }
-                                    }
-                                    if added {
-                                        span {
-                                            class: "chip chip-healthy",
-                                            style: "font-size:10px; flex-shrink:0;",
-                                            Icon { name: IconName::Check, size: 9 }
-                                            " Added"
+                                }
+                            }
+                        }
+
+                        // Widget list
+                        div {
+                            style: "overflow-y:auto; padding:8px;",
+                            if filtered.is_empty() {
+                                div {
+                                    class: "empty",
+                                    style: "margin:16px;",
+                                    h3 { "No widgets match" }
+                                    div { "Try a different search or category." }
+                                }
+                            } else {
+                                for w in filtered.iter() {
+                                    {
+                                        let meta = *w;
+                                        let added = added_ids.contains(meta.id);
+                                        let is_sel = sel.map(|s| s.id) == Some(meta.id);
+                                        rsx! {
+                                            button {
+                                                key: "{meta.id}",
+                                                class: "focus-ring widget-lib-item",
+                                                style: if is_sel {
+                                                    "outline:1px solid var(--cf-brand-purple); background: color-mix(in oklab, var(--cf-brand-purple) 8%, transparent);"
+                                                } else {
+                                                    ""
+                                                },
+                                                onclick: move |_| selected_id.set(Some(meta.id)),
+                                                span {
+                                                    class: "widget-lib-icon",
+                                                    Icon { name: meta.icon, size: 15 }
+                                                }
+                                                span {
+                                                    style: "min-width:0; flex:1;",
+                                                    span { class: "widget-lib-title", "{meta.title}" }
+                                                    span { class: "widget-lib-desc", "{meta.description}" }
+                                                }
+                                                if added {
+                                                    span {
+                                                        class: "chip chip-healthy",
+                                                        style: "font-size:10px; flex-shrink:0;",
+                                                        Icon { name: IconName::Check, size: 9 }
+                                                        " Added"
+                                                    }
+                                                } else {
+                                                    span {
+                                                        class: "widget-lib-add",
+                                                        Icon { name: IconName::Plus, size: 13 }
+                                                    }
+                                                }
+                                            }
                                         }
-                                    } else {
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Detail pane
+                    if let Some(meta) = sel {
+                        {
+                            let sel_added = added_ids.contains(meta.id);
+                            let sel_id = meta.id.to_string();
+                            rsx! {
+                                div {
+                                    style: "flex:0 0 300px; max-width:300px; padding:18px; display:flex; flex-direction:column; gap:14px; overflow-y:auto;",
+                                    div {
+                                        style: "display:flex; align-items:center; gap:10px;",
                                         span {
-                                            class: "widget-lib-add",
-                                            Icon { name: IconName::Plus, size: 13 }
+                                            class: "widget-lib-icon",
+                                            style: "width:38px; height:38px;",
+                                            Icon { name: meta.icon, size: 18 }
+                                        }
+                                        div {
+                                            style: "min-width:0;",
+                                            div { style: "font-size:15px; font-weight:650;", "{meta.title}" }
+                                            div {
+                                                style: "font-size:11px; color:var(--cf-brand-purple); font-weight:600;",
+                                                "{meta.category}"
+                                            }
+                                        }
+                                    }
+                                    p {
+                                        style: "margin:0; font-size:13px; color:var(--cf-text-secondary); line-height:1.55;",
+                                        "{meta.description}"
+                                    }
+                                    div {
+                                        style: "display:flex; flex-direction:column; gap:8px;",
+                                        div {
+                                            style: "font-size:10px; font-weight:700; letter-spacing:0.07em; text-transform:uppercase; color:var(--cf-text-muted);",
+                                            "Defaults"
+                                        }
+                                        div {
+                                            style: "display:flex; gap:6px; flex-wrap:wrap;",
+                                            span {
+                                                class: "chip chip-unknown",
+                                                style: "font-size:11px;",
+                                                Icon { name: IconName::Grid, size: 10 }
+                                                " {width_label(meta.default_cols)}"
+                                            }
+                                            if meta.height_resizable {
+                                                span {
+                                                    class: "chip chip-unknown",
+                                                    style: "font-size:11px;",
+                                                    Icon { name: IconName::Rows, size: 10 }
+                                                    " Adjustable height"
+                                                }
+                                            } else {
+                                                span {
+                                                    class: "chip chip-unknown",
+                                                    style: "font-size:11px;",
+                                                    "Fixed height"
+                                                }
+                                            }
+                                        }
+                                    }
+                                    div {
+                                        style: "margin-top:auto;",
+                                        if sel_added {
+                                            button {
+                                                class: "btn btn-ghost focus-ring",
+                                                disabled: true,
+                                                style: "width:100%; justify-content:center; opacity:0.7;",
+                                                Icon { name: IconName::Check, size: 13 }
+                                                " Already on dashboard"
+                                            }
+                                        } else {
+                                            button {
+                                                class: "btn btn-primary focus-ring",
+                                                style: "width:100%; justify-content:center;",
+                                                onclick: move |_| on_add.call(sel_id.clone()),
+                                                Icon { name: IconName::Plus, size: 13 }
+                                                " Add to dashboard"
+                                            }
+                                        }
+                                        div {
+                                            class: "help",
+                                            style: "margin-top:8px; text-align:center;",
+                                            "Reorder & resize it after adding."
                                         }
                                     }
                                 }
@@ -961,6 +1176,7 @@ fn WidgetPicker(
                         }
                     }
                 }
+
                 div {
                     class: "modal-foot",
                     button {
