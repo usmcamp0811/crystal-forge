@@ -47,8 +47,7 @@ fn should_show_admin_denied(route: &Route, auth_context: &Option<AuthContext>) -
     matches!(
         route,
         Route::AdminView { .. } | Route::CvesView { .. } | Route::ScanningView { .. }
-    )
-        && !auth::is_admin(auth_context)
+    ) && !auth::is_admin(auth_context)
 }
 
 /// Top-level application layout wrapping all views.

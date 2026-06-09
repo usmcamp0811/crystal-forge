@@ -7,18 +7,18 @@ use std::collections::HashSet;
 use crate::api::client::{ApiClientError, fetch_hardening_top_services, fetch_systems};
 use crate::api::models::HardeningTopServiceResponse;
 use crate::api::models::{
-    BuildQueueSummary, BuildStatus, DeploymentStatus, FlakeCommit, FlakeTimeline, HealthStatus,
-    SystemSummary, SystemsListParams,
+    BuildQueueSummary, BuildStatus, DeploymentStatus, FlakeCommit, FlakeTimeline, SystemSummary,
+    SystemsListParams,
 };
 use crate::components::dashboard::{
     BuildQueuePanel, BuildSummaryPanel, CveSummaryPanel, DeploymentStatusBreakdown,
     FleetHealthBreakdown, RecentDeploymentsList,
 };
 use crate::components::flake::FlakeTimelineWidget;
-use crate::components::layout::Card;
+use crate::components::icon::{Icon, IconName};
+use crate::components::loading::DashboardLoadingSpinner;
 use crate::components::notifications::{AlertBanner, AlertSeverity};
-use crate::components::stat_card::StatCard;
-use crate::components::widget_grid::{GridWidget, WidgetGrid};
+use crate::components::widget_grid::{GridWidget, StoredLayout, WidgetGrid};
 use crate::dashboard::adapter::{
     deterministic_mock_timestamp, empty_dashboard_summary, load_dashboard_with_fallback,
     load_flake_timelines_with_fallback,
@@ -62,85 +62,273 @@ impl DashboardFilter {
     }
 }
 
-/// Widget position in the grid.
+/// Static metadata describing an available dashboard widget.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct WidgetMeta {
+    id: &'static str,
+    title: &'static str,
+    description: &'static str,
+    icon: IconName,
+    /// Library category (used by the Widget Library filter).
+    category: &'static str,
+    /// Navigation route for the "View →" header action (None hides the action).
+    nav: Option<&'static str>,
+    /// Default column span (1-3).
+    default_cols: usize,
+    /// Default row span (1-3).
+    default_rows: usize,
+    /// Whether the widget supports height resizing.
+    height_resizable: bool,
+    /// Whether the widget is admin-only.
+    admin_only: bool,
+}
+
+/// Library category display order (mirrors design reference CATEGORY_ORDER).
+const CATEGORY_ORDER: &[&str] = &[
+    "Fleet",
+    "Pipeline",
+    "Security",
+    "Activity",
+    "Infrastructure",
+    "Actions",
+];
+
+/// Registry of every widget that can appear on the dashboard.
+///
+/// This is the Rust analogue of the design reference's `DASHBOARD_WIDGETS`.
+/// Each entry is backed by real API data already loaded by the view.
+fn widget_registry() -> &'static [WidgetMeta] {
+    &[
+        WidgetMeta {
+            id: "fleet-health",
+            title: "Fleet Health",
+            description: "System health rollup across the fleet",
+            icon: IconName::Cpu,
+            category: "Fleet",
+            nav: Some("systems"),
+            default_cols: 2,
+            default_rows: 1,
+            height_resizable: false,
+            admin_only: false,
+        },
+        WidgetMeta {
+            id: "deployment-status",
+            title: "Deployment Status",
+            description: "Up-to-date, behind, and never-deployed hosts",
+            icon: IconName::Sync,
+            category: "Fleet",
+            nav: Some("systems"),
+            default_cols: 1,
+            default_rows: 1,
+            height_resizable: false,
+            admin_only: false,
+        },
+        WidgetMeta {
+            id: "cve-summary",
+            title: "CVE Summary",
+            description: "Critical / high CVE counts across the fleet",
+            icon: IconName::Shield,
+            category: "Security",
+            nav: Some("cves"),
+            default_cols: 1,
+            default_rows: 1,
+            height_resizable: false,
+            admin_only: false,
+        },
+        WidgetMeta {
+            id: "build-queue",
+            title: "Build Queue",
+            description: "Active builds and queued jobs",
+            icon: IconName::Cpu,
+            category: "Pipeline",
+            nav: Some("builds"),
+            default_cols: 1,
+            default_rows: 1,
+            height_resizable: false,
+            admin_only: false,
+        },
+        WidgetMeta {
+            id: "build-summary",
+            title: "Build Summary",
+            description: "Building and queued counts at a glance",
+            icon: IconName::Cpu,
+            category: "Pipeline",
+            nav: Some("builds"),
+            default_cols: 1,
+            default_rows: 1,
+            height_resizable: false,
+            admin_only: false,
+        },
+        WidgetMeta {
+            id: "recent-deployments",
+            title: "Recent Deployments",
+            description: "Chronological feed of recent deploys",
+            icon: IconName::Sync,
+            category: "Activity",
+            nav: Some("systems"),
+            default_cols: 2,
+            default_rows: 2,
+            height_resizable: true,
+            admin_only: false,
+        },
+        WidgetMeta {
+            id: "flake-timeline",
+            title: "Flake Git Graph",
+            description: "Recent commits across tracked flakes",
+            icon: IconName::Git,
+            category: "Activity",
+            nav: Some("flakes"),
+            default_cols: 3,
+            default_rows: 3,
+            height_resizable: false,
+            admin_only: false,
+        },
+        WidgetMeta {
+            id: "quick-actions",
+            title: "Quick Actions",
+            description: "Common operator shortcuts",
+            icon: IconName::Gear,
+            category: "Actions",
+            nav: None,
+            default_cols: 1,
+            default_rows: 1,
+            height_resizable: false,
+            admin_only: false,
+        },
+        WidgetMeta {
+            id: "config-health",
+            title: "Pipeline Readiness",
+            description: "Pipeline configuration issues needing attention",
+            icon: IconName::Gear,
+            category: "Pipeline",
+            nav: None,
+            default_cols: 2,
+            default_rows: 2,
+            height_resizable: true,
+            admin_only: true,
+        },
+        WidgetMeta {
+            id: "hardening-top-services",
+            title: "Top Vulnerable Services",
+            description: "Highest-risk hardening services",
+            icon: IconName::Shield,
+            category: "Security",
+            nav: Some("cves"),
+            default_cols: 1,
+            default_rows: 2,
+            height_resizable: true,
+            admin_only: true,
+        },
+    ]
+}
+
+fn widget_meta(id: &str) -> Option<&'static WidgetMeta> {
+    widget_registry().iter().find(|w| w.id == id)
+}
+
+fn is_widget_visible_for_user(id: &str, is_admin: bool) -> bool {
+    widget_meta(id)
+        .map(|meta| !meta.admin_only || is_admin)
+        .unwrap_or(false)
+}
+
+fn can_view_widget_route_for_user(route: &str, is_admin: bool) -> bool {
+    match route {
+        // App shell guards CVEs for admins only.
+        "cves" => is_admin,
+        _ => true,
+    }
+}
+
+/// A widget placed on the dashboard, with its current size.
 #[derive(Clone, Debug, PartialEq)]
 struct WidgetPosition {
     id: &'static str,
     title: &'static str,
-    col: usize,
-    row: usize,
-    width: usize,
-    height: usize,
+    icon: IconName,
+    nav: Option<&'static str>,
+    cols: usize,
+    rows: usize,
+    height_resizable: bool,
 }
 
-/// Default widget layout configuration.
+impl WidgetPosition {
+    fn from_meta(meta: &WidgetMeta) -> Self {
+        Self {
+            id: meta.id,
+            title: meta.title,
+            icon: meta.icon,
+            nav: meta.nav,
+            cols: meta.default_cols,
+            rows: meta.default_rows,
+            height_resizable: meta.height_resizable,
+        }
+    }
+}
+
+/// Default ordered dashboard layout (mirrors design reference ordering).
 fn default_widget_positions() -> Vec<WidgetPosition> {
-    vec![
-        WidgetPosition {
-            id: "fleet-health",
-            title: "Fleet Health",
-            col: 0,
-            row: 0,
-            width: 2,
-            height: 2,
-        },
-        WidgetPosition {
-            id: "deployment-status",
-            title: "Deployment Status",
-            col: 2,
-            row: 0,
-            width: 2,
-            height: 2,
-        },
-        WidgetPosition {
-            id: "build-summary",
-            title: "Build Summary",
-            col: 0,
-            row: 2,
-            width: 2,
-            height: 2,
-        },
-        WidgetPosition {
-            id: "recent-deployments",
-            title: "Recent Deployments",
-            col: 2,
-            row: 2,
-            width: 2,
-            height: 3,
-        },
-        WidgetPosition {
-            id: "build-queue",
-            title: "Build Queue",
-            col: 0,
-            row: 4,
-            width: 2,
-            height: 3,
-        },
-        WidgetPosition {
-            id: "cve-summary",
-            title: "CVE Summary",
-            col: 2,
-            row: 5,
-            width: 2,
-            height: 2,
-        },
-        WidgetPosition {
-            id: "config-health",
-            title: "Pipeline Readiness",
-            col: 0,
-            row: 7,
-            width: 4,
-            height: 2,
-        },
-        WidgetPosition {
-            id: "hardening-top-services",
-            title: "Top Vulnerable Services",
-            col: 0,
-            row: 9,
-            width: 2,
-            height: 4,
-        },
+    [
+        "fleet-health",
+        "cve-summary",
+        "build-queue",
+        "build-summary",
+        "deployment-status",
+        "recent-deployments",
+        "flake-timeline",
+        "quick-actions",
+        "config-health",
+        "hardening-top-services",
     ]
+    .iter()
+    .filter_map(|id| widget_meta(id).map(WidgetPosition::from_meta))
+    .collect()
+}
+
+/// Build positions from a stored layout, falling back to defaults.
+fn load_widget_positions() -> Vec<WidgetPosition> {
+    let Some(stored) = StoredLayout::load() else {
+        return default_widget_positions();
+    };
+
+    let mut positions: Vec<WidgetPosition> = stored
+        .entries
+        .iter()
+        .filter_map(|(id, cols, rows)| {
+            widget_meta(id).map(|meta| {
+                let mut pos = WidgetPosition::from_meta(meta);
+                pos.cols = (*cols).clamp(1, 3);
+                // Only honor a stored row span for widgets the user can actually
+                // resize vertically. Fixed-height widgets always use their
+                // default row span so registry changes take effect immediately.
+                if meta.height_resizable {
+                    pos.rows = (*rows).clamp(1, 3);
+                }
+                pos
+            })
+        })
+        .collect();
+
+    if positions.is_empty() {
+        positions = default_widget_positions();
+    }
+
+    positions
+}
+
+fn persist_widget_positions(positions: &[WidgetPosition]) {
+    let stored = StoredLayout {
+        version: StoredLayout::VERSION,
+        entries: positions
+            .iter()
+            .map(|pos| (pos.id.to_string(), pos.cols, pos.rows))
+            .collect(),
+    };
+    stored.save();
+}
+
+fn should_persist_widget_positions(positions: &[WidgetPosition]) -> bool {
+    StoredLayout::exists() || positions != default_widget_positions()
 }
 
 /// The main dashboard page.
@@ -262,11 +450,6 @@ pub fn DashboardView() -> Element {
             timestamp: dashboard.timestamp,
         });
 
-    let healthy_hosts = hostnames_for_health(&systems, HealthStatus::Healthy);
-    let warning_hosts = hostnames_for_health(&systems, HealthStatus::Warning);
-    let critical_hosts = hostnames_for_health(&systems, HealthStatus::Critical);
-    let offline_hosts = hostnames_for_health(&systems, HealthStatus::Offline);
-
     let up_to_date_hosts = hostnames_for_deployment(&systems, &[DeploymentStatus::UpToDate]);
     let behind_hosts = hostnames_for_deployment(&systems, &[DeploymentStatus::Behind]);
     let never_deployed_hosts =
@@ -283,141 +466,112 @@ pub fn DashboardView() -> Element {
     let mut dashboard_filter = use_signal(DashboardFilter::default);
 
     // Widget layout state
-    let mut widget_positions = use_signal(default_widget_positions);
+    let mut widget_positions = use_signal(load_widget_positions);
     let mut dragging_id: Signal<Option<&'static str>> = use_signal(|| None);
     let mut drop_target_id: Signal<Option<&'static str>> = use_signal(|| None);
-    let mut invalid_drop_target_id: Signal<Option<&'static str>> = use_signal(|| None);
-    let mut drag_over_index: Signal<Option<usize>> = use_signal(|| None);
+    let mut edit_mode = use_signal(|| false);
+    let mut picker_open = use_signal(|| false);
 
-    // Handle drag start
+    {
+        let widget_positions = widget_positions.clone();
+        use_effect(move || {
+            let positions = widget_positions.read().clone();
+            if should_persist_widget_positions(&positions) {
+                persist_widget_positions(&positions);
+            }
+        });
+    }
+
+    // Drag start: remember the widget being moved.
     let on_drag_start = move |id: String| {
-        let positions = widget_positions.read();
-        if let Some(pos) = positions.iter().find(|p| p.id == id) {
+        if let Some(pos) = widget_positions.read().iter().find(|p| p.id == id) {
             dragging_id.set(Some(pos.id));
         }
     };
 
-    // Handle drag over (highlight drop target)
+    // Drag over: highlight the hovered drop target.
     let on_drag_over = move |id: String| {
-        let positions = widget_positions.read();
-        if let Some(pos) = positions.iter().find(|p| p.id == id) {
-            let current_dragging = *dragging_id.read();
-            if let Some(source_id) = current_dragging {
-                if source_id != pos.id {
-                    if let Some(source) = positions.iter().find(|p| p.id == source_id) {
-                        let fits = pos.col + source.width <= 4;
-                        if fits {
-                            drop_target_id.set(Some(pos.id));
-                            invalid_drop_target_id.set(None);
-                        } else {
-                            invalid_drop_target_id.set(Some(pos.id));
-                            drop_target_id.set(None);
-                        }
-                    }
+        let current = *dragging_id.read();
+        if let Some(source_id) = current {
+            if source_id != id {
+                if let Some(pos) = widget_positions.read().iter().find(|p| p.id == id) {
+                    drop_target_id.set(Some(pos.id));
                 }
             }
         }
-
-        if let Some(index) = positions.iter().position(|p| p.id == id) {
-            drag_over_index.set(Some(index));
-        }
     };
 
-    // Handle drag leave (clear highlight)
+    // Drag leave: clear the drop highlight.
     let on_drag_leave = move |_: ()| {
         drop_target_id.set(None);
-        invalid_drop_target_id.set(None);
-        drag_over_index.set(None);
     };
 
-    // Handle drop (reorder by target index and repack to avoid overlaps)
+    // Drop: reorder the widget list (CSS `row dense` handles packing).
     let on_drop = move |target_id: String| {
         let dragging = *dragging_id.read();
         if let Some(source_id) = dragging {
             if source_id != target_id {
                 let mut positions = widget_positions.write();
-                let source_idx = positions.iter().position(|p| p.id == source_id);
-                let target_idx = positions.iter().position(|p| p.id == target_id);
-
-                if let (Some(src), Some(tgt)) = (source_idx, target_idx) {
-                    let columns = 4usize;
-                    let fits = |col: usize, width: usize| col + width <= columns;
-
-                    if !fits(positions[tgt].col, positions[src].width) {
-                        dragging_id.set(None);
-                        drop_target_id.set(None);
-                        invalid_drop_target_id.set(None);
-                        drag_over_index.set(None);
-                        return;
-                    }
-
-                    let mut ordered: Vec<WidgetPosition> = positions.iter().cloned().collect();
-                    let dragged = ordered.remove(src);
-
-                    let mut insert_at = drag_over_index.read().unwrap_or(tgt);
-                    if src < insert_at {
-                        insert_at = insert_at.saturating_sub(1);
-                    }
-                    insert_at = insert_at.min(ordered.len());
-                    ordered.insert(insert_at, dragged);
-
-                    let mut occupancy: Vec<Vec<bool>> = Vec::new();
-
-                    for widget in &mut ordered {
-                        let mut row = 0usize;
-                        let width = widget.width;
-                        let height = widget.height;
-
-                        loop {
-                            if occupancy.len() < row + height {
-                                occupancy.resize_with(row + height, || vec![false; columns]);
-                            }
-
-                            let mut placed = false;
-                            for col in 0..=columns.saturating_sub(width) {
-                                let mut can_place = true;
-                                for check_row in row..row + height {
-                                    for check_col in col..col + width {
-                                        if occupancy[check_row][check_col] {
-                                            can_place = false;
-                                            break;
-                                        }
-                                    }
-                                    if !can_place {
-                                        break;
-                                    }
-                                }
-
-                                if can_place {
-                                    widget.col = col;
-                                    widget.row = row;
-                                    for mark_row in row..row + height {
-                                        for mark_col in col..col + width {
-                                            occupancy[mark_row][mark_col] = true;
-                                        }
-                                    }
-                                    placed = true;
-                                    break;
-                                }
-                            }
-
-                            if placed {
-                                break;
-                            }
-
-                            row += 1;
-                        }
-                    }
-
-                    *positions = ordered;
+                let src = positions.iter().position(|p| p.id == source_id);
+                let tgt = positions.iter().position(|p| p.id == target_id);
+                if let (Some(src), Some(tgt)) = (src, tgt) {
+                    let moved = positions.remove(src);
+                    let insert_at = tgt.min(positions.len());
+                    positions.insert(insert_at, moved);
                 }
             }
         }
         dragging_id.set(None);
         drop_target_id.set(None);
-        invalid_drop_target_id.set(None);
-        drag_over_index.set(None);
     };
+
+    // Set a widget's column span.
+    let on_set_cols = move |(id, cols): (String, usize)| {
+        let mut positions = widget_positions.write();
+        if let Some(pos) = positions.iter_mut().find(|p| p.id == id) {
+            pos.cols = cols.clamp(1, 3);
+        }
+    };
+
+    // Set a widget's row span (height).
+    let on_set_rows = move |(id, rows): (String, usize)| {
+        let mut positions = widget_positions.write();
+        if let Some(pos) = positions.iter_mut().find(|p| p.id == id) {
+            pos.rows = rows.clamp(1, 3);
+        }
+    };
+
+    // Remove a widget from the dashboard.
+    let on_remove_widget = move |id: String| {
+        let mut positions = widget_positions.write();
+        positions.retain(|p| p.id != id);
+    };
+
+    // Add a widget (from the library) using its default size.
+    let on_add_widget = move |id: String| {
+        if widget_positions.read().iter().any(|p| p.id == id) {
+            return;
+        }
+        if let Some(meta) = widget_meta(&id) {
+            widget_positions
+                .write()
+                .push(WidgetPosition::from_meta(meta));
+        }
+    };
+
+    // Reset to the default layout.
+    let on_reset_layout = move |_| {
+        StoredLayout::clear();
+        widget_positions.set(default_widget_positions());
+    };
+
+    // Only render widgets the current user can actually see.
+    let visible_positions: Vec<WidgetPosition> = widget_positions
+        .read()
+        .iter()
+        .filter(|pos| is_widget_visible_for_user(pos.id, is_admin_user))
+        .cloned()
+        .collect();
 
     // Get the current filter state
     let filter = dashboard_filter.read().clone();
@@ -448,10 +602,6 @@ pub fn DashboardView() -> Element {
                 FleetHealthBreakdown {
                     health: dashboard.fleet_health.clone(),
                     flake_filter: filter_display.clone(),
-                    healthy_hosts: healthy_hosts.clone(),
-                    warning_hosts: warning_hosts.clone(),
-                    critical_hosts: critical_hosts.clone(),
-                    offline_hosts: offline_hosts.clone(),
                 }
             },
             "deployment-status" => rsx! {
@@ -486,6 +636,48 @@ pub fn DashboardView() -> Element {
                 BuildQueuePanel {
                     queue: build_queue.clone(),
                     flake_filter: filter_display.clone()
+                }
+            },
+            "flake-timeline" => rsx! {
+                FlakeTimelineWidget {
+                    timelines: timelines.clone(),
+                    selected_flake_indices: dashboard_filter.read().selected_flake_indices.clone(),
+                    on_filter_change: {
+                        let timelines_signal = flake_timelines.clone();
+                        move |indices: HashSet<usize>| {
+                            let current_timelines = timelines_signal.read();
+                            let names: Vec<String> = indices
+                                .iter()
+                                .filter_map(|&idx| current_timelines.get(idx).map(|t| t.flake_name.clone()))
+                                .collect();
+                            dashboard_filter.set(DashboardFilter {
+                                selected_flake_indices: indices,
+                                selected_flake_names: names,
+                            });
+                        }
+                    }
+                }
+            },
+            "quick-actions" => rsx! {
+                div {
+                    class: "grid grid-cols-2 gap-1.5",
+                    for (label, route, icon) in quick_action_items() {
+                        button {
+                            key: "{route}",
+                            class: "btn btn-ghost focus-ring",
+                            style: "justify-content:flex-start; padding:8px 10px; font-size:12px; min-width:0;",
+                            onclick: move |_| {
+                                if let Some(target) = route_for_nav(route) {
+                                    nav.push(target);
+                                }
+                            },
+                            Icon { name: icon, size: 13 }
+                            span {
+                                style: "overflow:hidden; text-overflow:ellipsis; white-space:nowrap;",
+                                "{label}"
+                            }
+                        }
+                    }
                 }
             },
             "config-health" => {
@@ -580,57 +772,91 @@ pub fn DashboardView() -> Element {
         }
     };
 
+    let widget_count = visible_positions.len();
+    let is_edit = *edit_mode.read();
+
     rsx! {
         div {
-            class: "space-y-8",
+            style: "display:flex; flex-direction:column; gap:16px;",
             "data-testid": "dashboard",
 
-            // Top stats row
-            if *loading_dashboard.read() {
-                p {
-                    class: "text-xs px-3 py-2 rounded-lg border text-blue-100 cf-chip-info",
-                    "Loading dashboard data..."
+            // Page header (matches design reference page-head)
+            div {
+                class: "page-head",
+                div {
+                    h1 { class: "page-title", "Dashboard" }
+                    p {
+                        class: "page-subtitle",
+                        "{widget_count} widgets · drag to rearrange in edit mode"
+                    }
+                }
+                div {
+                    style: "display:flex; gap:8px;",
+                    if is_edit {
+                        button {
+                            class: "btn btn-ghost focus-ring",
+                            title: "Reset to default layout",
+                            onclick: on_reset_layout,
+                            Icon { name: IconName::Sync, size: 14 }
+                            "Reset"
+                        }
+                        button {
+                            class: "btn btn-ghost focus-ring",
+                            onclick: move |_| picker_open.set(true),
+                            Icon { name: IconName::Plus, size: 14 }
+                            "Add widget"
+                        }
+                    }
+                    button {
+                        class: if is_edit { "btn btn-primary focus-ring" } else { "btn btn-ghost focus-ring" },
+                        onclick: move |_| {
+                            let next = !*edit_mode.read();
+                            edit_mode.set(next);
+                        },
+                        Icon { name: if is_edit { IconName::Check } else { IconName::Gear }, size: 14 }
+                        if is_edit { "Done" } else { "Customize" }
+                    }
                 }
             }
 
+            if is_edit {
+                div {
+                    class: "sd-callout sd-callout-info",
+                    Icon { name: IconName::Gear, size: 13 }
+                    div {
+                        style: "font-size:12px;",
+                        strong { "Edit mode." }
+                        " Drag widgets to reorder, set "
+                        strong { "Width" }
+                        " and (on list widgets) "
+                        strong { "Height" }
+                        ", or remove with the × button. Click \"Add widget\" to browse the widget library."
+                    }
+                }
+            }
+
+            // Loading + notice banners
+            if *loading_dashboard.read() {
+                div {
+                    "data-testid": "dashboard-loading-spinner",
+                    DashboardLoadingSpinner {
+                        label: "Loading dashboard data...".to_string(),
+                        size: 20
+                    }
+                }
+            }
+            if *loading_timelines.read() {
+                DashboardLoadingSpinner {
+                    label: "Loading flake timelines...".to_string(),
+                    size: 20
+                }
+            }
             if let Some(message) = dashboard_notice.read().clone() {
                 p {
                     class: "text-xs px-3 py-2 rounded-lg border text-amber-100 cf-chip-warning",
                     "{message}"
                 }
             }
-
-            div {
-                class: "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4",
-                StatCard {
-                    label: "Total Systems".to_string(),
-                    value: dashboard.total_systems.to_string()
-                }
-                StatCard {
-                    label: "Up to Date".to_string(),
-                    value: dashboard.deployment_status.up_to_date.to_string(),
-                    color_class: theme::deployment::UP_TO_DATE_TEXT.to_string()
-                }
-                StatCard {
-                    label: "Behind Latest".to_string(),
-                    value: dashboard.deployment_status.behind.to_string(),
-                    color_class: theme::deployment::BEHIND_TEXT.to_string()
-                }
-                StatCard {
-                    label: "No Recent Heartbeat".to_string(),
-                    value: dashboard.fleet_health.offline.to_string(),
-                    color_class: theme::health::OFFLINE_TEXT.to_string()
-                }
-            }
-
-            // Flake Commit Timeline with multi-select filter
-            if *loading_timelines.read() {
-                p {
-                    class: "text-xs px-3 py-2 rounded-lg border text-blue-100 cf-chip-info",
-                    "Loading flake timelines..."
-                }
-            }
-
             if let Some(message) = timelines_notice.read().clone() {
                 p {
                     class: "text-xs px-3 py-2 rounded-lg border text-amber-100 cf-chip-warning",
@@ -638,68 +864,350 @@ pub fn DashboardView() -> Element {
                 }
             }
 
-            Card {
-                title: None,
-                children: rsx! {
-                    FlakeTimelineWidget {
-                        timelines: timelines.clone(),
-                        selected_flake_indices: dashboard_filter.read().selected_flake_indices.clone(),
-                        on_filter_change: {
-                            let timelines_signal = flake_timelines.clone();
-                            move |indices: HashSet<usize>| {
-                                let current_timelines = timelines_signal.read();
-                                let names: Vec<String> = indices.iter()
-                                    .filter_map(|&idx| current_timelines.get(idx).map(|t| t.flake_name.clone()))
-                                    .collect();
-                                dashboard_filter.set(DashboardFilter {
-                                    selected_flake_indices: indices,
-                                    selected_flake_names: names,
-                                });
+            // Widget grid (3-column dense, design-reference parity)
+            WidgetGrid {
+                for pos in visible_positions.iter() {
+                    {
+                        let pos = pos.clone();
+                        let action_label = pos
+                            .nav
+                            .filter(|route| can_view_widget_route_for_user(route, is_admin_user))
+                            .map(|_| "View →".to_string());
+                        rsx! {
+                            GridWidget {
+                                key: "{pos.id}",
+                                id: pos.id.to_string(),
+                                title: pos.title.to_string(),
+                                icon: pos.icon,
+                                cols: pos.cols,
+                                rows: pos.rows,
+                                height_resizable: pos.height_resizable,
+                                action_label,
+                                edit_mode: is_edit,
+                                is_dragging: dragging_id.read().map_or(false, |d| d == pos.id),
+                                is_drop_target: drop_target_id.read().map_or(false, |d| d == pos.id),
+                                on_action: {
+                                    let route = pos.nav.filter(|route| can_view_widget_route_for_user(route, is_admin_user));
+                                    move |_| {
+                                        if let Some(target) = route.and_then(route_for_nav) {
+                                            nav.push(target);
+                                        }
+                                    }
+                                },
+                                on_drag_start: on_drag_start,
+                                on_drag_over: on_drag_over,
+                                on_drag_leave: on_drag_leave,
+                                on_drop: on_drop,
+                                on_set_cols: on_set_cols,
+                                on_set_rows: on_set_rows,
+                                on_remove: on_remove_widget,
+                                children: render_widget_content(pos.id)
                             }
                         }
                     }
                 }
+                if widget_count == 0 {
+                    div {
+                        class: "empty",
+                        style: "grid-column: 1 / -1;",
+                        h3 { "Empty dashboard" }
+                        div {
+                            "Click "
+                            strong { "Customize" }
+                            " then "
+                            strong { "Add widget" }
+                            " to get started."
+                        }
+                    }
+                }
             }
+        }
 
-            // Widget grid header with reset button
+        if *picker_open.read() {
+            WidgetPicker {
+                added_ids: visible_positions.iter().map(|p| p.id.to_string()).collect::<HashSet<String>>(),
+                is_admin: is_admin_user,
+                on_add: on_add_widget,
+                on_close: move |_| picker_open.set(false),
+            }
+        }
+    }
+}
+
+/// Human-readable width label for a column span.
+fn width_label(cols: usize) -> &'static str {
+    match cols {
+        1 => "⅓ width",
+        2 => "⅔ width",
+        _ => "Full width",
+    }
+}
+
+/// Widget library modal — two-pane browse/add experience (design parity).
+#[component]
+fn WidgetPicker(
+    added_ids: HashSet<String>,
+    is_admin: bool,
+    on_add: EventHandler<String>,
+    on_close: EventHandler<()>,
+) -> Element {
+    let all: Vec<&'static WidgetMeta> = widget_registry()
+        .iter()
+        .filter(|w| !w.admin_only || is_admin)
+        .collect();
+    let total = all.len();
+    let added_count = all.iter().filter(|w| added_ids.contains(w.id)).count();
+
+    let mut query = use_signal(String::new);
+    let mut category = use_signal(|| "All".to_string());
+    let mut selected_id = use_signal(|| None::<&'static str>);
+
+    // Categories present among available widgets, in canonical order.
+    let mut cats: Vec<String> = vec!["All".to_string()];
+    cats.extend(
+        CATEGORY_ORDER
+            .iter()
+            .filter(|c| all.iter().any(|w| &w.category == *c))
+            .map(|c| c.to_string()),
+    );
+
+    let active_cat = category.read().clone();
+    let q = query.read().trim().to_lowercase();
+    let filtered: Vec<&'static WidgetMeta> = all
+        .iter()
+        .copied()
+        .filter(|w| active_cat == "All" || w.category == active_cat)
+        .filter(|w| {
+            q.is_empty()
+                || format!("{} {}", w.title, w.description)
+                    .to_lowercase()
+                    .contains(&q)
+        })
+        .collect();
+
+    // Selected widget: explicit selection, else first filtered, else first.
+    let sel: Option<&'static WidgetMeta> = selected_id
+        .read()
+        .and_then(|id| all.iter().copied().find(|w| w.id == id))
+        .or_else(|| filtered.first().copied())
+        .or_else(|| all.first().copied());
+
+    rsx! {
+        div {
+            class: "modal-backdrop",
+            onclick: move |_| on_close.call(()),
             div {
-                class: "flex items-center justify-between",
-                h2 {
-                    class: "text-lg font-semibold {theme::text::PRIMARY}",
-                    "Dashboard Widgets"
+                class: "modal",
+                style: "width: min(820px, 96vw); max-height: 88vh; display:flex; flex-direction:column;",
+                onclick: move |evt| evt.stop_propagation(),
+                div {
+                    class: "modal-head",
+                    h2 {
+                        Icon { name: IconName::Plus, size: 14 }
+                        " Widget library"
+                    }
+                    p { "Add widgets from the library to your dashboard. {added_count} of {total} added." }
                 }
-                button {
-                    class: "px-3 py-1.5 text-xs font-medium {theme::text::SECONDARY} {theme::interactive::HOVER_BG} {theme::surface::SUBTLE_BG} border {theme::surface::CARD_BORDER} rounded-lg transition-colors",
-                    onclick: move |_| {
-                        widget_positions.set(default_widget_positions());
-                    },
-                    "Reset Layout"
+
+                div {
+                    style: "display:flex; min-height:0; flex:1;",
+
+                    // Catalog pane
+                    div {
+                        style: "flex:1 1 0; min-width:0; display:flex; flex-direction:column; border-right:1px solid var(--cf-divider);",
+
+                        // Search + category filter
+                        div {
+                            style: "padding:12px 16px; display:flex; flex-direction:column; gap:10px; border-bottom:1px solid var(--cf-divider);",
+                            div {
+                                class: "filter-search",
+                                style: "width:100%;",
+                                Icon { name: IconName::Search, size: 16 }
+                                input {
+                                    class: "input focus-ring",
+                                    placeholder: "Search widgets…",
+                                    value: "{query}",
+                                    oninput: move |evt| query.set(evt.value()),
+                                }
+                            }
+                            div {
+                                style: "display:flex; gap:6px; flex-wrap:wrap;",
+                                for c in cats.iter() {
+                                    {
+                                        let c = c.clone();
+                                        let is_active = active_cat == c;
+                                        rsx! {
+                                            button {
+                                                key: "{c}",
+                                                class: if is_active { "chip chip-info focus-ring" } else { "chip focus-ring" },
+                                                style: if is_active {
+                                                    "cursor:pointer;".to_string()
+                                                } else {
+                                                    "cursor:pointer; border:1px solid var(--cf-divider); background:transparent; color:var(--cf-text-secondary);".to_string()
+                                                },
+                                                onclick: {
+                                                    let c = c.clone();
+                                                    move |_| category.set(c.clone())
+                                                },
+                                                "{c}"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Widget list
+                        div {
+                            style: "overflow-y:auto; padding:8px;",
+                            if filtered.is_empty() {
+                                div {
+                                    class: "empty",
+                                    style: "margin:16px;",
+                                    h3 { "No widgets match" }
+                                    div { "Try a different search or category." }
+                                }
+                            } else {
+                                for w in filtered.iter() {
+                                    {
+                                        let meta = *w;
+                                        let added = added_ids.contains(meta.id);
+                                        let is_sel = sel.map(|s| s.id) == Some(meta.id);
+                                        rsx! {
+                                            button {
+                                                key: "{meta.id}",
+                                                class: "focus-ring widget-lib-item",
+                                                style: if is_sel {
+                                                    "outline:1px solid var(--cf-brand-purple); background: color-mix(in oklab, var(--cf-brand-purple) 8%, transparent);"
+                                                } else {
+                                                    ""
+                                                },
+                                                onclick: move |_| selected_id.set(Some(meta.id)),
+                                                span {
+                                                    class: "widget-lib-icon",
+                                                    Icon { name: meta.icon, size: 15 }
+                                                }
+                                                span {
+                                                    style: "min-width:0; flex:1;",
+                                                    span { class: "widget-lib-title", "{meta.title}" }
+                                                    span { class: "widget-lib-desc", "{meta.description}" }
+                                                }
+                                                if added {
+                                                    span {
+                                                        class: "chip chip-healthy",
+                                                        style: "font-size:10px; flex-shrink:0;",
+                                                        Icon { name: IconName::Check, size: 9 }
+                                                        " Added"
+                                                    }
+                                                } else {
+                                                    span {
+                                                        class: "widget-lib-add",
+                                                        Icon { name: IconName::Plus, size: 13 }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Detail pane
+                    if let Some(meta) = sel {
+                        {
+                            let sel_added = added_ids.contains(meta.id);
+                            let sel_id = meta.id.to_string();
+                            rsx! {
+                                div {
+                                    style: "flex:0 0 300px; max-width:300px; padding:18px; display:flex; flex-direction:column; gap:14px; overflow-y:auto;",
+                                    div {
+                                        style: "display:flex; align-items:center; gap:10px;",
+                                        span {
+                                            class: "widget-lib-icon",
+                                            style: "width:38px; height:38px;",
+                                            Icon { name: meta.icon, size: 18 }
+                                        }
+                                        div {
+                                            style: "min-width:0;",
+                                            div { style: "font-size:15px; font-weight:650;", "{meta.title}" }
+                                            div {
+                                                style: "font-size:11px; color:var(--cf-brand-purple); font-weight:600;",
+                                                "{meta.category}"
+                                            }
+                                        }
+                                    }
+                                    p {
+                                        style: "margin:0; font-size:13px; color:var(--cf-text-secondary); line-height:1.55;",
+                                        "{meta.description}"
+                                    }
+                                    div {
+                                        style: "display:flex; flex-direction:column; gap:8px;",
+                                        div {
+                                            style: "font-size:10px; font-weight:700; letter-spacing:0.07em; text-transform:uppercase; color:var(--cf-text-muted);",
+                                            "Defaults"
+                                        }
+                                        div {
+                                            style: "display:flex; gap:6px; flex-wrap:wrap;",
+                                            span {
+                                                class: "chip chip-unknown",
+                                                style: "font-size:11px;",
+                                                Icon { name: IconName::Grid, size: 10 }
+                                                " {width_label(meta.default_cols)}"
+                                            }
+                                            if meta.height_resizable {
+                                                span {
+                                                    class: "chip chip-unknown",
+                                                    style: "font-size:11px;",
+                                                    Icon { name: IconName::Rows, size: 10 }
+                                                    " Adjustable height"
+                                                }
+                                            } else {
+                                                span {
+                                                    class: "chip chip-unknown",
+                                                    style: "font-size:11px;",
+                                                    "Fixed height"
+                                                }
+                                            }
+                                        }
+                                    }
+                                    div {
+                                        style: "margin-top:auto;",
+                                        if sel_added {
+                                            button {
+                                                class: "btn btn-ghost focus-ring",
+                                                disabled: true,
+                                                style: "width:100%; justify-content:center; opacity:0.7;",
+                                                Icon { name: IconName::Check, size: 13 }
+                                                " Already on dashboard"
+                                            }
+                                        } else {
+                                            button {
+                                                class: "btn btn-primary focus-ring",
+                                                style: "width:100%; justify-content:center;",
+                                                onclick: move |_| on_add.call(sel_id.clone()),
+                                                Icon { name: IconName::Plus, size: 13 }
+                                                " Add to dashboard"
+                                            }
+                                        }
+                                        div {
+                                            class: "help",
+                                            style: "margin-top:8px; text-align:center;",
+                                            "Reorder & resize it after adding."
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
-            }
 
-            // Widget grid with draggable widgets
-            WidgetGrid {
-                columns: 4,
-                gap: 16,
-                row_height: 100,
-
-                for pos in widget_positions.read().iter() {
-                    GridWidget {
-                        key: "{pos.id}",
-                        id: pos.id.to_string(),
-                        title: pos.title.to_string(),
-                        col: pos.col,
-                        row: pos.row,
-                        width: pos.width,
-                        height: pos.height,
-                        is_dragging: dragging_id.read().map_or(false, |d| d == pos.id),
-                        is_drop_target: drop_target_id.read().map_or(false, |d| d == pos.id),
-                        is_invalid_drop_target: invalid_drop_target_id.read().map_or(false, |d| d == pos.id),
-                        on_drag_start: on_drag_start,
-                        on_drag_over: on_drag_over,
-                        on_drag_leave: on_drag_leave,
-                        on_drop: on_drop,
-                        children: render_widget_content(pos.id)
+                div {
+                    class: "modal-foot",
+                    button {
+                        class: "btn btn-ghost focus-ring",
+                        onclick: move |_| on_close.call(()),
+                        "Done"
                     }
                 }
             }
@@ -848,6 +1356,32 @@ pub fn mock_flake_timelines() -> Vec<FlakeTimeline> {
     ]
 }
 
+/// Map a widget `nav` slug to a concrete route.
+fn route_for_nav(route: &str) -> Option<Route> {
+    Some(match route {
+        "systems" => Route::SystemsView {},
+        "flakes" => Route::FlakesView {},
+        "builds" => Route::BuildsView {},
+        "evals" => Route::EvaluationsView {},
+        "cves" => Route::CvesView {},
+        "caches" => Route::CachesView {},
+        "environments" => Route::EnvironmentsView {},
+        _ => return None,
+    })
+}
+
+/// Quick-action shortcuts shown in the Quick Actions widget.
+fn quick_action_items() -> Vec<(&'static str, &'static str, IconName)> {
+    vec![
+        ("Systems", "systems", IconName::Cpu),
+        ("Builds", "builds", IconName::Cpu),
+        ("Evaluations", "evals", IconName::Gear),
+        ("Flakes", "flakes", IconName::Git),
+        ("CVEs", "cves", IconName::Shield),
+        ("Caches", "caches", IconName::Download),
+    ]
+}
+
 fn should_redirect_to_login(error: &ApiClientError) -> bool {
     matches!(
         error,
@@ -883,15 +1417,6 @@ async fn load_dashboard_systems() -> Result<Vec<SystemSummary>, ApiClientError> 
     }
 
     Ok(systems)
-}
-
-fn hostnames_for_health(systems: &[SystemSummary], status: HealthStatus) -> Vec<String> {
-    systems
-        .iter()
-        .filter(|system| system.health_status == status)
-        .map(|system| system.hostname.clone())
-        .take(24)
-        .collect()
 }
 
 fn hostnames_for_deployment(
