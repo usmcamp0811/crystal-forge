@@ -204,6 +204,52 @@ function mockFleetHealthSystemsPage() {
   };
 }
 
+function mockDashboardLoadingTimelines() {
+  return [
+    {
+      flake_id: 1,
+      flake_name: "infrastructure",
+      repo_url: "github:example/infrastructure",
+      commits: [
+        {
+          id: 1,
+          hash: "a1b2c3d4",
+          message: "feat: dashboard loading evidence",
+          author_name: "Test Admin",
+          authored_at: nowIso(),
+          branch: "main",
+          deployment_count: 3,
+        },
+      ],
+    },
+  ];
+}
+
+async function routeDashboardLoadingState(page, delayMs = 4000) {
+  await page.route("**/api/v1/dashboard/summary*", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(mockFleetHealthDashboardSummary()),
+    });
+  });
+
+  await page.route("**/api/v1/flakes/timelines?view=dashboard*", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(mockDashboardLoadingTimelines()),
+    });
+  });
+}
+
+async function unrouteDashboardLoadingState(page) {
+  await page.unroute("**/api/v1/dashboard/summary*");
+  await page.unroute("**/api/v1/flakes/timelines?view=dashboard*");
+}
+
 async function routeFleetHealthWidgetData(page) {
   await page.route("**/api/v1/dashboard/summary*", async (route) => {
     await route.fulfill({
@@ -1087,6 +1133,23 @@ const steps = [
         page.locator("[data-testid='onboarding-coach-panel']"),
         "Onboarding coach panel should be visible on dashboard",
       );
+    },
+  },
+  {
+    name: "06-dashboard-loading-spinner",
+    description: "Dashboard loading spinner remains visible while dashboard data is pending",
+    action: async (page) => {
+      await routeDashboardLoadingState(page);
+      await page.goto(`${baseUrl}/`, { timeout: LOAD_TIMEOUT });
+      await assertVisible(
+        page.locator("[data-testid='dashboard-loading-spinner']"),
+        "Dashboard loading spinner should be visible while summary data is still loading",
+      );
+      await assertVisible(
+        page.getByText("Loading dashboard data..."),
+        "Dashboard loading label should be visible",
+      );
+      await unrouteDashboardLoadingState(page);
     },
   },
   {
@@ -4818,6 +4881,7 @@ const CI_FAST_STEP_NAMES = new Set([
   "04-post-register-login",
   "05-login-submit",
   "06-dashboard",
+  "06-dashboard-loading-spinner",
   "06x-pipeline-readiness-scroll",
   "06y-recent-deployments-scroll",
   "06z-fleet-health-widget-assert",

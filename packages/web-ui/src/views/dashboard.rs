@@ -19,7 +19,7 @@ use crate::components::layout::Card;
 use crate::components::loading::DashboardLoadingSpinner;
 use crate::components::notifications::{AlertBanner, AlertSeverity};
 use crate::components::stat_card::StatCard;
-use crate::components::widget_grid::{GridWidget, WidgetGrid};
+use crate::components::widget_grid::{GridWidget, StoredLayout, WidgetGrid};
 use crate::dashboard::adapter::{
     deterministic_mock_timestamp, empty_dashboard_summary, load_dashboard_with_fallback,
     load_flake_timelines_with_fallback,
@@ -142,6 +142,32 @@ fn default_widget_positions() -> Vec<WidgetPosition> {
             height: 4,
         },
     ]
+}
+
+fn load_widget_positions() -> Vec<WidgetPosition> {
+    let mut positions = default_widget_positions();
+    let Some(stored) = StoredLayout::load() else {
+        return positions;
+    };
+
+    for (id, col, row) in stored.positions {
+        if let Some(pos) = positions.iter_mut().find(|p| p.id == id) {
+            pos.col = col;
+            pos.row = row;
+        }
+    }
+
+    positions
+}
+
+fn persist_widget_positions(positions: &[WidgetPosition]) {
+    let stored = StoredLayout {
+        positions: positions
+            .iter()
+            .map(|pos| (pos.id.to_string(), pos.col, pos.row))
+            .collect(),
+    };
+    stored.save();
 }
 
 /// The main dashboard page.
@@ -284,11 +310,20 @@ pub fn DashboardView() -> Element {
     let mut dashboard_filter = use_signal(DashboardFilter::default);
 
     // Widget layout state
-    let mut widget_positions = use_signal(default_widget_positions);
+    let mut widget_positions = use_signal(load_widget_positions);
     let mut dragging_id: Signal<Option<&'static str>> = use_signal(|| None);
     let mut drop_target_id: Signal<Option<&'static str>> = use_signal(|| None);
     let mut invalid_drop_target_id: Signal<Option<&'static str>> = use_signal(|| None);
     let mut drag_over_index: Signal<Option<usize>> = use_signal(|| None);
+    let mut edit_mode = use_signal(|| false);
+
+    {
+        let widget_positions = widget_positions.clone();
+        use_effect(move || {
+            let positions = widget_positions.read().clone();
+            persist_widget_positions(&positions);
+        });
+    }
 
     // Handle drag start
     let on_drag_start = move |id: String| {
@@ -593,16 +628,54 @@ pub fn DashboardView() -> Element {
                     h1 { class: "page-title", "Dashboard" }
                     p {
                         class: "page-subtitle",
-                        "Fleet overview · {widget_positions.read().len()} widgets"
+                        "{widget_positions.read().len()} widgets · drag to rearrange in edit mode"
                     }
+                }
+                div {
+                    class: "flex items-center gap-2",
+                    if *edit_mode.read() {
+                        button {
+                            class: "px-3 py-2 text-xs font-medium rounded-lg border transition-colors {theme::surface::CARD_BG} {theme::surface::CARD_BORDER} {theme::text::SECONDARY} {theme::interactive::HOVER_BG}",
+                            onclick: move |_| {
+                                widget_positions.set(default_widget_positions());
+                            },
+                            "Reset layout"
+                        }
+                    }
+                    button {
+                        class: if *edit_mode.read() {
+                            "px-3 py-2 text-xs font-semibold rounded-lg border transition-colors cf-primary-btn text-white border-transparent"
+                        } else {
+                            "px-3 py-2 text-xs font-medium rounded-lg border transition-colors {theme::surface::CARD_BG} {theme::surface::CARD_BORDER} {theme::text::SECONDARY} {theme::interactive::HOVER_BG}"
+                        },
+                        onclick: move |_| {
+                            let next = !*edit_mode.read();
+                            edit_mode.set(next);
+                        },
+                        if *edit_mode.read() { "Done" } else { "Customize" }
+                    }
+                }
+            }
+
+            if *edit_mode.read() {
+                div {
+                    class: "rounded-xl border px-4 py-3 text-sm {theme::surface::CARD_BG} {theme::surface::CARD_BORDER} {theme::text::SECONDARY}",
+                    strong {
+                        class: "{theme::text::PRIMARY}",
+                        "Edit mode. "
+                    }
+                    "Drag widgets to reorder the dashboard layout, then click Done when finished."
                 }
             }
 
             // Top stats row
             if *loading_dashboard.read() {
-                DashboardLoadingSpinner {
-                    label: "Loading dashboard data...".to_string(),
-                    size: 20
+                div {
+                    "data-testid": "dashboard-loading-spinner",
+                    DashboardLoadingSpinner {
+                        label: "Loading dashboard data...".to_string(),
+                        size: 20
+                    }
                 }
             }
 
@@ -674,27 +747,11 @@ pub fn DashboardView() -> Element {
                 }
             }
 
-            // Widget grid header with reset button
-            div {
-                class: "flex items-center justify-between",
-                h2 {
-                    class: "text-lg font-semibold {theme::text::PRIMARY}",
-                    "Dashboard Widgets"
-                }
-                button {
-                    class: "px-3 py-1.5 text-xs font-medium {theme::text::SECONDARY} {theme::interactive::HOVER_BG} {theme::surface::SUBTLE_BG} border {theme::surface::CARD_BORDER} rounded-lg transition-colors",
-                    onclick: move |_| {
-                        widget_positions.set(default_widget_positions());
-                    },
-                    "Reset Layout"
-                }
-            }
-
             // Widget grid with draggable widgets
             WidgetGrid {
                 columns: 4,
-                gap: 16,
-                row_height: 100,
+                gap: 14,
+                row_height: 106,
 
                 for pos in widget_positions.read().iter() {
                     GridWidget {
@@ -705,6 +762,7 @@ pub fn DashboardView() -> Element {
                         row: pos.row,
                         width: pos.width,
                         height: pos.height,
+                        edit_mode: *edit_mode.read(),
                         is_dragging: dragging_id.read().map_or(false, |d| d == pos.id),
                         is_drop_target: drop_target_id.read().map_or(false, |d| d == pos.id),
                         is_invalid_drop_target: invalid_drop_target_id.read().map_or(false, |d| d == pos.id),

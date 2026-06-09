@@ -50,6 +50,8 @@ pub struct GridWidgetProps {
     pub height: usize,
     pub children: Element,
     #[props(default = false)]
+    pub edit_mode: bool,
+    #[props(default = false)]
     pub is_dragging: bool,
     #[props(default = false)]
     pub is_drop_target: bool,
@@ -76,6 +78,7 @@ pub fn GridWidget(props: GridWidgetProps) -> Element {
         width,
         height,
         children,
+        edit_mode,
         is_dragging,
         is_drop_target,
         is_invalid_drop_target,
@@ -103,12 +106,19 @@ pub fn GridWidget(props: GridWidgetProps) -> Element {
         ""
     };
 
+    // In edit mode the whole card becomes a dashed, grabbable surface (matching design ref).
+    let edit_class = if edit_mode {
+        "border-dashed cursor-grab active:cursor-grabbing"
+    } else {
+        ""
+    };
+
     rsx! {
         div {
-            class: "{theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl overflow-hidden transition-all duration-150 {drag_class} {drop_class} h-full min-h-0 flex flex-col",
+            class: "{theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl overflow-hidden transition-all duration-150 {edit_class} {drag_class} {drop_class} h-full min-h-0 flex flex-col",
             style: "grid-column: {grid_col}; grid-row: {grid_row};",
             "data-widget-id": "{id}",
-            draggable: "true",
+            draggable: "{edit_mode}",
             ondragstart: {
                 let id = id.clone();
                 let on_drag_start = on_drag_start.clone();
@@ -147,32 +157,35 @@ pub fn GridWidget(props: GridWidgetProps) -> Element {
                 }
             },
 
-            // Header with drag handle
+            // Widget header — uppercase, muted, letter-spaced title (matches design reference).
+            // The drag grip only appears in edit mode.
             div {
-                class: "flex items-center gap-2 px-3 py-1.5 {theme::surface::SUBTLE_BG} border-b {theme::surface::CARD_BORDER} cursor-grab active:cursor-grabbing",
+                class: "flex items-center gap-2 px-4 pt-3.5 pb-1",
 
-                // Drag handle icon (6-dot grip)
-                svg {
-                    width: "8",
-                    height: "12",
-                    view_box: "0 0 8 12",
-                    class: "shrink-0",
-                    circle { cx: "2", cy: "2", r: "1.2", fill: "#6b7280" }
-                    circle { cx: "2", cy: "6", r: "1.2", fill: "#6b7280" }
-                    circle { cx: "2", cy: "10", r: "1.2", fill: "#6b7280" }
-                    circle { cx: "6", cy: "2", r: "1.2", fill: "#6b7280" }
-                    circle { cx: "6", cy: "6", r: "1.2", fill: "#6b7280" }
-                    circle { cx: "6", cy: "10", r: "1.2", fill: "#6b7280" }
+                // Drag handle icon (6-dot grip) — edit mode only
+                if edit_mode {
+                    svg {
+                        width: "8",
+                        height: "12",
+                        view_box: "0 0 8 12",
+                        class: "shrink-0 cursor-grab active:cursor-grabbing",
+                        circle { cx: "2", cy: "2", r: "1.2", fill: "#6b7280" }
+                        circle { cx: "2", cy: "6", r: "1.2", fill: "#6b7280" }
+                        circle { cx: "2", cy: "10", r: "1.2", fill: "#6b7280" }
+                        circle { cx: "6", cy: "2", r: "1.2", fill: "#6b7280" }
+                        circle { cx: "6", cy: "6", r: "1.2", fill: "#6b7280" }
+                        circle { cx: "6", cy: "10", r: "1.2", fill: "#6b7280" }
+                    }
                 }
                 h3 {
-                    class: "{theme::text::PRIMARY} font-semibold text-sm whitespace-nowrap",
+                    class: "{theme::text::SECONDARY} font-semibold text-xs uppercase tracking-[0.06em] whitespace-nowrap m-0",
                     "{title}"
                 }
             }
 
             // Widget content
             div {
-                class: "p-4 flex-1 min-h-0 overflow-hidden",
+                class: "px-4 pb-4 pt-1 flex-1 min-h-0 overflow-y-auto",
                 {children}
             }
         }
