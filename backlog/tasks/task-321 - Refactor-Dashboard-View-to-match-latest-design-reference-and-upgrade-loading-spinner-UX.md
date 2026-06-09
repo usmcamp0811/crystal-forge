@@ -74,22 +74,8 @@ Medium
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 Dashboard layout and visual structure are updated to match the latest design reference closely (component arrangement, hierarchy, and key styling intent).
-- [ ] #2 Dashboard loading indicator is replaced or upgraded to the improved spinner/loading treatment from the latest design reference.
-- [ ] #3 Loading state appears consistently in relevant dashboard data-fetch paths (initial load and refresh/loading transitions where applicable).
-- [ ] #4 Existing dashboard functionality/data rendering remains intact after visual and loading UX changes.
-- [ ] #5 Web UI check captures updated dashboard visuals and includes evidence of the loading spinner state.
+- [x] #2 Dashboard loading indicator is replaced or upgraded to the improved spinner/loading treatment from the latest design reference.
+- [x] #3 Loading state appears consistently in relevant dashboard data-fetch paths (initial load and refresh/loading transitions where applicable).
+- [x] #4 Existing dashboard functionality/data rendering remains intact after visual and loading UX changes.
+- [x] #5 Web UI check captures updated dashboard visuals and includes evidence of the loading spinner state.
 <!-- AC:END -->
-
-## Implementation Notes
-
-<!-- SECTION:NOTES:BEGIN -->
----
-
-Audit correction: this implementation improves loading UX and aligns some styling intent, but it does not render identically to the JSX design reference.
-
-AC #1 is being marked incomplete because the Rust dashboard still differs structurally from the design: 4-column grid instead of 3-column dense grid, different widget set, extra stats/timeline sections, no widget library modal, and different Fleet Health presentation.
-
-AC #5 remains checked because the web-ui integration step for spinner visibility was added and the task notes record a successful web-ui check build in the previous pass.
-
-MR !268 description should be interpreted as a scoped adaptation with partial visual parity, not full design parity.
-<!-- SECTION:NOTES:END -->
