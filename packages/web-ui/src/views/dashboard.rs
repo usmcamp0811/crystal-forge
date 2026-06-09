@@ -94,7 +94,7 @@ fn widget_registry() -> &'static [WidgetMeta] {
             icon: IconName::Cpu,
             nav: Some("systems"),
             default_cols: 2,
-            default_rows: 2,
+            default_rows: 1,
             height_resizable: false,
             admin_only: false,
         },
@@ -105,7 +105,7 @@ fn widget_registry() -> &'static [WidgetMeta] {
             icon: IconName::Sync,
             nav: Some("systems"),
             default_cols: 1,
-            default_rows: 2,
+            default_rows: 1,
             height_resizable: false,
             admin_only: false,
         },
@@ -116,7 +116,7 @@ fn widget_registry() -> &'static [WidgetMeta] {
             icon: IconName::Shield,
             nav: Some("cves"),
             default_cols: 1,
-            default_rows: 2,
+            default_rows: 1,
             height_resizable: false,
             admin_only: false,
         },
@@ -127,7 +127,7 @@ fn widget_registry() -> &'static [WidgetMeta] {
             icon: IconName::Cpu,
             nav: Some("builds"),
             default_cols: 1,
-            default_rows: 2,
+            default_rows: 1,
             height_resizable: false,
             admin_only: false,
         },
@@ -138,7 +138,7 @@ fn widget_registry() -> &'static [WidgetMeta] {
             icon: IconName::Cpu,
             nav: Some("builds"),
             default_cols: 1,
-            default_rows: 2,
+            default_rows: 1,
             height_resizable: false,
             admin_only: false,
         },
@@ -149,7 +149,7 @@ fn widget_registry() -> &'static [WidgetMeta] {
             icon: IconName::Sync,
             nav: Some("systems"),
             default_cols: 2,
-            default_rows: 3,
+            default_rows: 2,
             height_resizable: true,
             admin_only: false,
         },
@@ -183,7 +183,7 @@ fn widget_registry() -> &'static [WidgetMeta] {
             nav: None,
             default_cols: 2,
             default_rows: 2,
-            height_resizable: false,
+            height_resizable: true,
             admin_only: true,
         },
         WidgetMeta {
@@ -193,7 +193,7 @@ fn widget_registry() -> &'static [WidgetMeta] {
             icon: IconName::Shield,
             nav: Some("cves"),
             default_cols: 1,
-            default_rows: 3,
+            default_rows: 2,
             height_resizable: true,
             admin_only: true,
         },
@@ -262,7 +262,12 @@ fn load_widget_positions() -> Vec<WidgetPosition> {
             widget_meta(id).map(|meta| {
                 let mut pos = WidgetPosition::from_meta(meta);
                 pos.cols = (*cols).clamp(1, 3);
-                pos.rows = (*rows).clamp(1, 3);
+                // Only honor a stored row span for widgets the user can actually
+                // resize vertically. Fixed-height widgets always use their
+                // default row span so registry changes take effect immediately.
+                if meta.height_resizable {
+                    pos.rows = (*rows).clamp(1, 3);
+                }
                 pos
             })
         })
