@@ -4,7 +4,7 @@ title: Add day delineation and time filter to individual system log view
 status: Review
 assignee: []
 created_date: '2026-04-19 12:30'
-updated_date: '2026-04-19 14:08'
+updated_date: '2026-06-09 03:51'
 labels:
   - ui
   - logs
@@ -14,6 +14,7 @@ labels:
   - frontend
 dependencies: []
 priority: medium
+ordinal: 2000
 ---
 
 ## Description
