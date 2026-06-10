@@ -1,10 +1,11 @@
 ---
 id: TASK-329
 title: 'Foundation: shell, tokens, topbar, and sidebar parity to CrystalForgelatest'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - gpt-5.4
 created_date: '2026-05-31 15:56'
-updated_date: '2026-06-10 17:45'
+updated_date: '2026-06-10 21:17'
 labels:
   - design-parity
   - design-system
@@ -82,3 +83,9 @@ Goal: bring global tokens + shell chrome (sidebar groups, topbar, base primitive
 - [ ] #4 No duplicate conflicting token/primitive definitions remain for btn/input/card/chip/env-badge
 - [ ] #5 web-ui check captures shell + topbar screenshots for both themes and asserts notifications panel opens
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: gpt-5.4 on gray in /home/mcamp/code/crystal-forge/TASK-329-shell-tokens-topbar-sidebar-parity
+<!-- SECTION:NOTES:END -->
