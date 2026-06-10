@@ -1,19 +1,21 @@
 ---
 id: TASK-340
-title: Create Policies view parity task against CrystalForgelatest
+title: Policies sidebar surface umbrella
 status: Backlog
 assignee: []
 created_date: '2026-06-10 02:58'
+updated_date: '2026-06-10 03:36'
 labels:
   - design-parity
   - policies
   - web-ui
   - api-integration
-milestone: m-20
+milestone: 'm-20: Design Parity Missing Surfaces'
 dependencies: []
 references:
   - >-
     /home/mcamp/code/crystal-forge/CrystalForgelatest/components/PoliciesView.jsx
+  - design/doc-13 - Sidebar-surface-execution-map.md
 modified_files:
   - packages/web-ui/src/views/policies.rs
   - checks/web-ui/tests/integration-test.js
@@ -24,9 +26,11 @@ ordinal: 1700
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Problem: Policies functionality exists, but the backlog does not currently have a dedicated task to bring the Policies surface into full parity with the CrystalForgelatest design reference.
+Problem: Policies functionality exists, but the backlog needs one easy-to-read surface record for bringing the Policies experience into full parity with the CrystalForgelatest reference.
 
-Desired Outcome: A dedicated parity task exists for the Policies view so layout, filters, chips, rule affordances, and backend-backed states can be closed deliberately under the new parity plan.
+Desired Outcome: this task acts as the umbrella/surface record for Policies, with detailed discrepancy tasks added beneath it over time as needed.
+
+Scope: may include direct implementation if the work remains small, but should primarily serve as the user-facing Policies planning anchor.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
