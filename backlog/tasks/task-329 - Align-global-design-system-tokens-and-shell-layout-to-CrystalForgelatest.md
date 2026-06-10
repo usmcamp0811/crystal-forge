@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - gpt-5.4
 created_date: '2026-05-31 15:56'
-updated_date: '2026-06-10 23:13'
+updated_date: '2026-06-10 23:58'
 labels:
   - design-parity
   - design-system
@@ -25,7 +25,6 @@ documentation:
   - design/doc-14 - Parity-execution-playbook-agent-proof.md
 modified_files:
   - packages/web-ui/assets/app.css
-  - packages/web-ui/src/theme.rs
   - packages/web-ui/src/components/layout/sidebar.rs
   - packages/web-ui/src/components/layout/topbar.rs
   - checks/web-ui/tests/integration-test.js
@@ -77,11 +76,11 @@ Goal: bring global tokens + shell chrome (sidebar groups, topbar, base primitive
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Shared color/spacing/typography/radius/shadow tokens match CrystalForgelatest values for dark and light
-- [ ] #2 Sidebar section grouping matches the design (Fleet / Pipeline / Compliance / System) while preserving role gating
-- [ ] #3 Topbar includes a working notifications dropdown matching Shell.jsx (bell, unread badge, panel, settings link)
-- [ ] #4 No duplicate conflicting token/primitive definitions remain for btn/input/card/chip/env-badge
-- [ ] #5 web-ui check captures shell + topbar screenshots for both themes and asserts notifications panel opens
+- [x] #1 Shared color/spacing/typography/radius/shadow tokens match CrystalForgelatest values for dark and light
+- [x] #2 Sidebar section grouping matches the design (Fleet / Pipeline / Compliance / System) while preserving role gating
+- [x] #3 Topbar includes a working notifications dropdown matching Shell.jsx (bell, unread badge, panel, settings link)
+- [x] #4 No duplicate conflicting token/primitive definitions remain for btn/input/card/chip/env-badge
+- [x] #5 web-ui check captures shell + topbar screenshots for both themes and asserts notifications panel opens
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -96,5 +95,11 @@ Goal: bring global tokens + shell chrome (sidebar groups, topbar, base primitive
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Approved implementation detail: use non-interactive placeholders for design-only destinations that do not yet exist in the repo (Compliance and notification settings/profile targets), rather than silently dropping them from the shell.
+Implemented Shell parity updates in the task worktree: sidebar grouping now matches Fleet / Pipeline / Compliance / System, with non-interactive placeholders for missing Compliance destinations; topbar now includes the notifications dropdown, unread badge, and placeholder settings action.
+
+Updated `checks/web-ui/tests/integration-test.js` to assert section labels, capture a light-theme shell screenshot, and capture notifications-open screenshots in dark and light themes.
+
+Verification executed: `nix develop -c cargo fmt --all --manifest-path packages/web-ui/Cargo.toml -- --check`, `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown`, and `nix build .#checks.x86_64-linux.web-ui`.
+
+`distill` did not provide the requested compact summaries for verbose commands in this environment, so verification was judged from the underlying command exit status and raw output instead.
 <!-- SECTION:NOTES:END -->
