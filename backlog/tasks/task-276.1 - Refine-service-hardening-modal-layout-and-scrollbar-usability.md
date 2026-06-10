@@ -1,11 +1,11 @@
 ---
 id: TASK-276.1
 title: Refine service hardening modal layout and scrollbar usability
-status: To Do
+status: Done
 assignee:
-  - agent
+  - '@agent'
 created_date: '2026-04-23 13:23'
-updated_date: '2026-06-10 02:53'
+updated_date: '2026-06-10 02:54'
 labels:
   - frontend
   - ux
@@ -24,9 +24,13 @@ references:
     /home/mcamp/code/crystal-forge/TASK-276.1-hardening-modal-polish/checks/web-ui/tests/integration-test.js
 documentation:
   - /home/mcamp/code/crystal-forge/design-example-systems
+modified_files:
+  - packages/web-ui/src/views/system_detail.rs
+  - packages/web-ui/assets/app.css
+  - checks/web-ui/tests/integration-test.js
 parent_task_id: TASK-276
 priority: high
-ordinal: 16000
+ordinal: 6000
 ---
 
 ## Description
@@ -77,12 +81,8 @@ Verification Plan
 - [x] #4 Existing web-ui build/test checks remain passing after scoped updates.
 <!-- AC:END -->
 
-## Implementation Notes
+## Final Summary
 
-<!-- SECTION:NOTES:BEGIN -->
-Opened MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/246
-
-Rebased branch on dev before final verification and MR creation.
-
-Verification executed: nix develop -c cargo check (web-ui), nix develop -c cargo test (web-ui), nix build .#checks.x86_64-linux.web-ui. Hardening screenshots now include 27-hardening-fleet and 28-system-hardening-tab.
-<!-- SECTION:NOTES:END -->
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Merged via MR !246; hardening tab/modal parity refinements landed and screenshot coverage was captured.
+<!-- SECTION:FINAL_SUMMARY:END -->
