@@ -3,10 +3,10 @@ id: TASK-330
 title: >-
   Complete Systems view parity including cards-table modes and modal flows with
   real API data
-status: In Progress
+status: To Do
 assignee: []
 created_date: '2026-05-31 15:56'
-updated_date: '2026-06-08 04:03'
+updated_date: '2026-06-10 02:53'
 labels:
   - design-parity
   - systems
@@ -23,7 +23,7 @@ modified_files:
   - packages/web-ui/src/systems/adapter.rs
   - packages/web-ui/src/api/models.rs
 priority: high
-ordinal: 1620
+ordinal: 20000
 ---
 
 ## Description
