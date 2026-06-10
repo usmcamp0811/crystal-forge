@@ -3,16 +3,16 @@ id: TASK-336
 title: >-
   Create Admin view with exact CrystalForgelatest parity and real administrative
   data flows
-status: To Do
+status: Backlog
 assignee: []
 created_date: '2026-05-31 16:02'
-updated_date: '2026-06-10 02:53'
+updated_date: '2026-06-10 02:57'
 labels:
   - design-parity
   - admin
   - web-ui
   - api-integration
-milestone: m-16
+milestone: m-20
 dependencies:
   - TASK-328
   - TASK-329
@@ -25,7 +25,7 @@ modified_files:
   - packages/server/src
   - checks/web-ui
 priority: high
-ordinal: 7000
+ordinal: 1670
 ---
 
 ## Description
@@ -37,19 +37,13 @@ Goal: Implement/refine Admin view to match CrystalForgelatest exactly, including
 
 Non-goals: New admin capabilities not represented in design scope; unrelated IAM redesign.
 
+Replan note: this is an m-20 missing-surface task and should be executed as a vertical slice with the minimal real-data backend support required.
+
 Scope details:
 - Build/align Admin page structure and visual system to reference design.
-- Implement design-specified controls/workflows (tables, filters, toggles, actions, dialogs) with exact interaction behavior.
+- Implement design-specified controls/workflows with exact interaction behavior.
 - Ensure backend API integration for displayed values and action results.
 - Standardize loading/empty/error/success states to design parity.
-
-Verification plan:
-- Add assertion-based Admin behavior checks in `checks/web-ui`.
-- Capture Admin screenshots for all required states.
-- Execute targeted web-ui parity validation.
-
-Impact areas: packages/web-ui/src/views/admin.rs, admin components, backend handlers/models if required.
-Risk: High.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -60,3 +54,9 @@ Risk: High.
 - [ ] #4 web-ui check includes assertion-based validation for critical Admin workflows
 - [ ] #5 web-ui check captures screenshots for Admin loading, empty, error, populated, and dialog states
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Prefer vertical-slice completion with real admin data and outcomes, not placeholder-first UI.
+<!-- SECTION:NOTES:END -->
