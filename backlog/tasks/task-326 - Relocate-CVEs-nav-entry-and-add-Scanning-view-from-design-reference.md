@@ -1,10 +1,10 @@
 ---
 id: TASK-326
 title: Relocate CVEs nav entry and add Scanning view from design reference
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-05-31 02:20'
-updated_date: '2026-06-10 02:53'
+updated_date: '2026-06-10 02:54'
 labels:
   - ui
   - navigation
@@ -31,7 +31,7 @@ modified_files:
   - packages/default/migrations/0124_add_scan_schedule_policy.sql
   - checks/web-ui/tests/integration-test.js
 priority: high
-ordinal: 19000
+ordinal: 3000
 ---
 
 ## Description
@@ -90,10 +90,8 @@ The sidebar information architecture has changed: CVEs is moving to a different 
 - [x] #21 Worker enforcement of policy intervals/flags is explicitly out of scope and tracked by TASK-327
 <!-- AC:END -->
 
-## Implementation Notes
+## Final Summary
 
-<!-- SECTION:NOTES:BEGIN -->
-Updated queue/UI parity per user request: added backend queue fields freshness/is_current/trigger contract + icon-level parity conversion in Scanning view.
-
-Commit: 2a3c27ea pushed to MR !267.
-<!-- SECTION:NOTES:END -->
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Merged via MR !267; Scanning view parity and backend scanning APIs landed on dev.
+<!-- SECTION:FINAL_SUMMARY:END -->
