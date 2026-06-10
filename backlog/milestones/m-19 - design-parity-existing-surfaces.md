@@ -1,6 +1,6 @@
 ---
 id: m-19
-title: "m-19: Design Parity Existing Surfaces"
+title: "Design Parity Existing Surfaces"
 ---
 
 ## Description
