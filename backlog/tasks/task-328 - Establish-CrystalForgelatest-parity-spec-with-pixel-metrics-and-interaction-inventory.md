@@ -3,15 +3,15 @@ id: TASK-328
 title: >-
   Establish CrystalForgelatest parity spec with pixel metrics and interaction
   inventory
-status: To Do
+status: Backlog
 assignee: []
 created_date: '2026-05-31 15:56'
-updated_date: '2026-06-10 02:53'
+updated_date: '2026-06-10 02:57'
 labels:
   - design-parity
   - ui-ux
   - planning
-milestone: m-16
+milestone: m-18
 dependencies: []
 references:
   - /home/mcamp/code/crystal-forge/CrystalForgelatest
@@ -20,7 +20,7 @@ references:
   - design/doc-8 - CrystalForgelatest-UI-Parity-Matrix-TASK-328.md
   - design/doc-9 - M16-Baseline-UI-Parity-Scorecard-Initial.md
 priority: high
-ordinal: 18000
+ordinal: 4000
 ---
 
 ## Description
@@ -28,22 +28,17 @@ ordinal: 18000
 <!-- SECTION:DESCRIPTION:BEGIN -->
 Problem: We do not yet have a single executable parity spec mapping every CrystalForgelatest surface to current web-ui implementation, making exact parity subjective.
 
-Goal: Produce a canonical parity matrix for all target views/components in /home/mcamp/code/crystal-forge/CrystalForgelatest, including visual tokens, spacing/typography rules, component states, and interaction flows.
+Goal: Produce and maintain the canonical parity matrix for all target views/components in `/home/mcamp/code/crystal-forge/CrystalForgelatest`, including visual tokens, spacing/typography rules, component states, interaction flows, and owner files.
 
 Non-goals: Implementing UI changes; changing API contracts in this task.
 
+Replan note: this task is reset to Backlog and now serves as the foundation contract for milestone m-18. It should be completed before broad surface-by-surface parity work resumes.
+
 Scope details:
-- Inventory all design-source pages/components (Systems, Flakes, Builds, Evals, CVEs, Caches, Compliance, Admin, shared shell/sidebar/topbar/tweaks).
-- Define measurable pixel standards per surface: spacing, radius, typography sizes/weights, color tokens, borders, shadows, breakpoints, table row heights, chip dimensions, modal geometry, and empty/loading/error states.
-- Create a parity checklist that maps each design element to web-ui file ownership.
-- Define acceptance screenshot set required for web-ui check.
-
-Verification plan:
-- Generate a markdown parity matrix doc under backlog docs.
-- Confirm every in-scope view has at least one reference screenshot target and one interaction scenario.
-
-Impact areas: packages/web-ui (all view layers), API payload consumers.
-Risk: Medium (spec quality drives all downstream work).
+- Inventory all design-source pages/components.
+- Define measurable pixel/value standards per surface.
+- Map each design element to current web-ui ownership.
+- Define screenshot and assertion requirements consumed by downstream parity tasks.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -60,5 +55,5 @@ Risk: Medium (spec quality drives all downstream work).
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Baseline scorecard created: doc-9 with initial per-view A/B/C/D grades and prioritized execution order.
+Reset to Backlog for re-planning. This task remains the authoritative parity-spec contract for downstream UI work.
 <!-- SECTION:NOTES:END -->
