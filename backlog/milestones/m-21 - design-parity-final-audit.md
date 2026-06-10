@@ -1,6 +1,6 @@
 ---
 id: m-21
-title: "m-21: Design Parity Final Audit"
+title: "Design Parity Final Audit"
 ---
 
 ## Description
