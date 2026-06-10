@@ -1,10 +1,10 @@
 ---
 id: TASK-329
 title: Align global design system tokens and shell layout to CrystalForgelatest
-status: In Progress
+status: To Do
 assignee: []
 created_date: '2026-05-31 15:56'
-updated_date: '2026-06-08 03:51'
+updated_date: '2026-06-10 02:53'
 labels:
   - design-parity
   - design-system
@@ -18,7 +18,7 @@ modified_files:
   - packages/web-ui/assets/app.css
   - packages/web-ui/src/theme.rs
 priority: high
-ordinal: 5000
+ordinal: 17000
 ---
 
 ## Description
