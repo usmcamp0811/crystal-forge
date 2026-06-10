@@ -3,11 +3,11 @@ id: TASK-328
 title: >-
   Establish CrystalForgelatest parity spec with pixel metrics and interaction
   inventory
-status: In Progress
+status: Done
 assignee:
   - gpt-5.4
 created_date: '2026-05-31 15:56'
-updated_date: '2026-06-10 19:37'
+updated_date: '2026-06-10 21:16'
 labels:
   - design-parity
   - ui-ux
@@ -85,7 +85,13 @@ Goal: Produce and maintain the canonical parity matrix for all target views/comp
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Updated `doc-8` into a full surface matrix covering shell, all primary CrystalForgelatest views, explicit owner files, mandatory interactions, and screenshot requirements for dark/light plus loading/empty/error/populated states.
-
-Verified the resulting backlog/doc state is clean after the document tool update (`git status --porcelain` showed no remaining changes in both `dev` and the task worktree).
+Removed the unused dedicated task worktree after completion: `/home/mcamp/code/crystal-forge/TASK-328-parity-spec`.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Expanded doc-8 into the authoritative CrystalForgelatest parity contract covering every primary surface, owner-file mapping, mandatory interactions/assertions, and screenshot requirements for dark/light plus loading/empty/error/populated states.
+
+Completed as backlog-only maintenance on the integration worktree; no application code changed.
+<!-- SECTION:FINAL_SUMMARY:END -->
