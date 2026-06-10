@@ -3,10 +3,10 @@ id: TASK-321
 title: >-
   Refactor Dashboard View to match latest design reference and upgrade loading
   spinner UX
-status: Review
+status: Done
 assignee: []
 created_date: '2026-05-24 14:36'
-updated_date: '2026-06-09 02:38'
+updated_date: '2026-06-10 00:56'
 labels:
   - ui
   - dashboard
@@ -86,22 +86,21 @@ Medium
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Dashboard reworked for true JSX design-reference parity (commit 2cccc6a6).
-
-Structural changes:
-- 3-column dense dash-grid CSS ported from CrystalForgelatest (cols/rows spans, edit toolbar, widget headers, empty state, widget library styles).
-- Widget registry + ordered layout model replaces the old 4-column packing. Widgets carry icon, nav route, default cols/rows, height_resizable, admin_only.
-- Full customize mode: width (1-3) + height (1-3) segmented glyph controls, per-widget remove (x), drag-to-reorder, and an "Add widget" Widget Library modal.
-- Widget headers: icon + uppercase title + "View ->" action.
-- Fleet Health rebuilt as big healthy count + stacked bar + 4 stat tiles (was donut).
-- Added Flake Git Graph + Quick Actions widgets; removed the extra StatCard row and standalone timeline Card (folded into the grid) to match the design.
-- Layout storage versioned (v2: id/cols/rows) with reset support.
-
-Data semantics preserved (no backend/API changes); widgets remain backed by real APIs.
-
-Web UI: 06z fleet-health assertion updated to new tile markup (data-testid=fleet-health-tile, data-status, data-count). Loading-spinner step retained.
-
-Verification: cargo check OK, cargo fmt --check clean, cargo test 64 passed/0 failed. Heavy web-ui nix check not run locally per request; runs in CI.
-
-Remaining intentional deviations (minor): some JSX mock-only widgets (heartbeat ring, eval queue, cache health, env breakdown, recent commits, deployment timeline feed, top-affected list) are not all present as separate widgets where no equivalent real API is wired; the registry covers the real-data widgets and the customize/library UX matches the design.
+Merged into integration branch and worktree removed/pruned.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Implemented the dashboard redesign and loading-spinner refresh to closely match the JSX design reference while preserving real API-backed behavior.
+
+Key outcomes:
+- Ported the dashboard to a 3-column dense widget grid with registry-backed layout metadata
+- Added full customize mode (reorder, width/height controls, remove, reset, add-widget library modal with search/filter/detail pane)
+- Rebuilt Fleet Health to the stacked-bar + stat-tile design
+- Aligned widget headers and loading spinner visuals with the reference design system
+- Removed empty admin-only cards for non-admin users and corrected visible widget counts
+- Kept web-ui loading-state evidence coverage and updated fleet-health assertions
+
+Merged successfully and cleaned up the dedicated task worktree.
+<!-- SECTION:FINAL_SUMMARY:END -->
