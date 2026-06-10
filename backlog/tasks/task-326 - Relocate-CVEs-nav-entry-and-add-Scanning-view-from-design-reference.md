@@ -1,10 +1,10 @@
 ---
 id: TASK-326
 title: Relocate CVEs nav entry and add Scanning view from design reference
-status: In Progress
+status: To Do
 assignee: []
 created_date: '2026-05-31 02:20'
-updated_date: '2026-06-08 03:51'
+updated_date: '2026-06-10 02:53'
 labels:
   - ui
   - navigation
@@ -31,7 +31,7 @@ modified_files:
   - packages/default/migrations/0124_add_scan_schedule_policy.sql
   - checks/web-ui/tests/integration-test.js
 priority: high
-ordinal: 3000
+ordinal: 19000
 ---
 
 ## Description
