@@ -4,7 +4,7 @@ title: 'Refine System History view: functional filters, pagination, sticky heade
 status: To Do
 assignee: []
 created_date: '2026-04-14 01:16'
-updated_date: '2026-04-14 01:38'
+updated_date: '2026-06-10 02:53'
 labels:
   - ui
   - systems
@@ -13,7 +13,7 @@ labels:
 milestone: System Details Hardening
 dependencies: []
 priority: high
-ordinal: 2680
+ordinal: 10000
 ---
 
 ## Description

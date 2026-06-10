@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-05-31 16:02'
-updated_date: '2026-05-31 16:07'
+updated_date: '2026-06-10 02:53'
 labels:
   - design-parity
   - user-profile
@@ -27,7 +27,7 @@ modified_files:
   - packages/web-ui/src/api/client.rs
   - checks/web-ui
 priority: high
-ordinal: 1680
+ordinal: 8000
 ---
 
 ## Description

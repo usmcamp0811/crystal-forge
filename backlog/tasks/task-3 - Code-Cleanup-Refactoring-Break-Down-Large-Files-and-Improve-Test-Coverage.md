@@ -5,7 +5,7 @@ status: To Do
 assignee:
   - KimiK2.5
 created_date: '2026-02-04 20:15'
-updated_date: '2026-03-01 14:27'
+updated_date: '2026-06-10 02:53'
 labels:
   - refactoring
   - architecture
@@ -14,6 +14,7 @@ milestone: m-2
 dependencies:
   - TASK-2
 priority: high
+ordinal: 13000
 ---
 
 ## Description

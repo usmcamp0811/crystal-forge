@@ -4,7 +4,7 @@ title: 'UI/UX refresh umbrella: Builds and Evaluations views'
 status: To Do
 assignee: []
 created_date: '2026-04-30 21:35'
-updated_date: '2026-05-24 01:17'
+updated_date: '2026-06-10 02:53'
 labels:
   - ui
   - ux
@@ -18,7 +18,7 @@ references:
   - TASK-284
   - /home/mcamp/code/crystal-forge/crystal-forge/project/data-builds.js
 priority: medium
-ordinal: 4400
+ordinal: 12000
 ---
 
 ## Description

@@ -1,10 +1,10 @@
 ---
 id: TASK-291
 title: Fix builder concurrency limit bug and ensure full UI configurability
-status: In Progress
+status: To Do
 assignee: []
 created_date: '2026-05-08 02:46'
-updated_date: '2026-06-08 03:51'
+updated_date: '2026-06-10 02:53'
 labels:
   - bug
   - builders
@@ -13,7 +13,7 @@ labels:
   - high-priority
 dependencies: []
 priority: high
-ordinal: 8000
+ordinal: 15000
 ---
 
 ## Description

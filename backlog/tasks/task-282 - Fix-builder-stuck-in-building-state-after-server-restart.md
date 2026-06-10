@@ -5,7 +5,7 @@ status: To Do
 assignee:
   - openai-gpt-5.4
 created_date: '2026-04-20 19:22'
-updated_date: '2026-04-23 13:29'
+updated_date: '2026-06-10 02:53'
 labels:
   - bug
   - builder
@@ -19,7 +19,7 @@ references:
   - packages/default/src/services/
   - packages/default/src/handlers/
 priority: high
-ordinal: 4200
+ordinal: 11000
 ---
 
 ## Description

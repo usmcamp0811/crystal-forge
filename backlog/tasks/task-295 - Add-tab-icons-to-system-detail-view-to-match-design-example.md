@@ -4,7 +4,7 @@ title: Add tab icons to system detail view to match design example
 status: To Do
 assignee: []
 created_date: '2026-05-10 13:28'
-updated_date: '2026-05-31 16:07'
+updated_date: '2026-06-10 02:53'
 labels:
   - ui
   - design-system
@@ -16,7 +16,7 @@ dependencies:
 references:
   - /home/mcamp/code/crystal-forge/CrystalForgelatest
 priority: medium
-ordinal: 0
+ordinal: 1000
 ---
 
 ## Description

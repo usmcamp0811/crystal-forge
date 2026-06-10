@@ -4,7 +4,7 @@ title: Remove legacy FlakesListView implementation after FlakesListViewNew parit
 status: To Do
 assignee: []
 created_date: '2026-05-15 15:44'
-updated_date: '2026-05-31 16:07'
+updated_date: '2026-06-10 02:53'
 labels:
   - web-ui
   - flakes
@@ -20,7 +20,7 @@ references:
   - TASK-297
 parent_task_id: TASK-297
 priority: medium
-ordinal: 0
+ordinal: 2000
 ---
 
 ## Description

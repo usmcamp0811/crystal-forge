@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-05-31 15:56'
-updated_date: '2026-05-31 16:07'
+updated_date: '2026-06-10 02:53'
 labels:
   - design-parity
   - multi-view
@@ -25,7 +25,7 @@ modified_files:
   - packages/web-ui/src/views/caches.rs
   - packages/web-ui/src/views/admin.rs
 priority: high
-ordinal: 1630
+ordinal: 3000
 ---
 
 ## Description

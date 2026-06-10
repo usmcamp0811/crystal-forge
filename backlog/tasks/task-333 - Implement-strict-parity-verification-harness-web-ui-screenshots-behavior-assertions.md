@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-05-31 15:57'
-updated_date: '2026-05-31 16:07'
+updated_date: '2026-06-10 02:53'
 labels:
   - design-parity
   - verification
@@ -21,7 +21,7 @@ dependencies:
 modified_files:
   - checks/web-ui
 priority: high
-ordinal: 1650
+ordinal: 5000
 ---
 
 ## Description
