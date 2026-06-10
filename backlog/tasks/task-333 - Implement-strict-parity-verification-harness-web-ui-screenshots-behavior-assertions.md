@@ -3,15 +3,15 @@ id: TASK-333
 title: >-
   Implement strict parity verification harness (web-ui screenshots + behavior
   assertions)
-status: To Do
+status: Backlog
 assignee: []
 created_date: '2026-05-31 15:57'
-updated_date: '2026-06-10 02:53'
+updated_date: '2026-06-10 02:57'
 labels:
   - design-parity
   - verification
   - web-ui-check
-milestone: m-16
+milestone: m-21
 dependencies:
   - TASK-328
   - TASK-329
@@ -21,7 +21,7 @@ dependencies:
 modified_files:
   - checks/web-ui
 priority: high
-ordinal: 5000
+ordinal: 1650
 ---
 
 ## Description
@@ -33,17 +33,12 @@ Goal: Extend checks/web-ui to enforce design parity with required screenshots an
 
 Non-goals: Broad E2E coverage unrelated to parity criteria.
 
+Replan note: move this to the final-audit milestone. The harness can evolve incrementally, but final acceptance closure should happen after the foundational and surface tasks define the states worth asserting.
+
 Scope details:
-- Capture canonical screenshots for every target view/state defined in parity matrix.
+- Capture canonical screenshots for every target view/state defined in the parity matrix.
 - Add assertions for key interactions (filtering, toggles, modal open/close, table/card mode switches, counts from API).
 - Wire checks to fail on screenshot or assertion drift with clear diagnostics.
-
-Verification plan:
-- Run check locally and in CI path used by repository.
-- Validate expected failure on intentional style drift.
-
-Impact areas: checks/web-ui, Playwright/E2E fixtures (if used), test data setup.
-Risk: Medium.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -55,3 +50,9 @@ Risk: Medium.
 - [ ] #5 Screenshot coverage includes every in-scope view and state (loading, empty, error, populated, modal/tab variants)
 - [ ] #6 Assertion coverage verifies critical user flows and state transitions for each in-scope view
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Build harness updates incrementally, but hold full parity-closure expectations until the milestone-audit phase.
+<!-- SECTION:NOTES:END -->
