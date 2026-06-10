@@ -1,6 +1,6 @@
 ---
 id: m-15
-title: "m-15: Testing & Quality Assurance"
+title: "Testing & Quality Assurance"
 ---
 
 ## Description
