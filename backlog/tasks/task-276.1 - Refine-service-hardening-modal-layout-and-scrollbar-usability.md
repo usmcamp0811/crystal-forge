@@ -1,11 +1,11 @@
 ---
 id: TASK-276.1
 title: Refine service hardening modal layout and scrollbar usability
-status: In Progress
+status: To Do
 assignee:
   - agent
 created_date: '2026-04-23 13:23'
-updated_date: '2026-06-08 03:51'
+updated_date: '2026-06-10 02:53'
 labels:
   - frontend
   - ux
@@ -26,7 +26,7 @@ documentation:
   - /home/mcamp/code/crystal-forge/design-example-systems
 parent_task_id: TASK-276
 priority: high
-ordinal: 6000
+ordinal: 16000
 ---
 
 ## Description
