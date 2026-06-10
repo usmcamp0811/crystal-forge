@@ -1,10 +1,10 @@
 ---
 id: TASK-327
 title: Refactor Dashboard view UI/UX for exact parity with latest design examples
-status: In Progress
+status: To Do
 assignee: []
 created_date: '2026-05-31 15:14'
-updated_date: '2026-06-08 03:51'
+updated_date: '2026-06-10 02:53'
 labels:
   - ui
   - dashboard
@@ -20,7 +20,7 @@ modified_files:
   - packages/web-ui/src/components/
   - checks/web-ui/
 priority: high
-ordinal: 2000
+ordinal: 20000
 ---
 
 ## Description
