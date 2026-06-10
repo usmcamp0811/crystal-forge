@@ -1,12 +1,10 @@
 ---
 id: TASK-335
-title: >-
-  Create User Profile view with exact CrystalForgelatest parity and
-  backend-backed account data
+title: Create User Profile view (new route+view) with CrystalForgelatest parity
 status: Backlog
 assignee: []
 created_date: '2026-05-31 16:02'
-updated_date: '2026-06-10 02:57'
+updated_date: '2026-06-10 13:26'
 labels:
   - design-parity
   - user-profile
@@ -19,13 +17,20 @@ dependencies:
   - TASK-332
   - TASK-333
 references:
-  - /home/mcamp/code/crystal-forge/CrystalForgelatest
+  - /home/mcamp/code/crystal-forge/CrystalForgelatest/components/ProfileView.jsx
+  - packages/web-ui/src/routes.rs
+  - packages/web-ui/src/views/mod.rs
+  - design/doc-14 - Parity-execution-playbook-agent-proof.md
+documentation:
+  - design/doc-14 - Parity-execution-playbook-agent-proof.md
 modified_files:
   - packages/web-ui/src/views/profile.rs
-  - packages/web-ui/src/state/auth.rs
+  - packages/web-ui/src/views/mod.rs
+  - packages/web-ui/src/routes.rs
+  - packages/web-ui/src/components/layout/sidebar.rs
   - packages/web-ui/src/api/models.rs
   - packages/web-ui/src/api/client.rs
-  - checks/web-ui
+  - checks/web-ui/tests/integration-test.js
 priority: high
 ordinal: 1680
 ---
@@ -33,32 +38,43 @@ ordinal: 1680
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Problem: User profile/account surface is missing or not aligned to latest design standards and lacks complete parity verification.
+Problem: there is NO Profile route or view in the repo today (verified: not in routes.rs or views/mod.rs), but the design has `components/ProfileView.jsx`.
 
-Goal: Create/refine User Profile view with exact visual and interaction parity to CrystalForgelatest and real backend-backed account/session data.
+Goal: create the Profile surface from scratch with design parity and backend-backed account data.
 
-Non-goals: Reworking global auth architecture beyond profile surface requirements.
+See guide doc-14 for the standard procedure.
 
-Replan note: this is a missing-surface m-20 task. Deliver it as a vertical slice with real data rather than placeholder-first UI.
+## Exact scope (new files + wiring)
+1. Create `packages/web-ui/src/views/profile.rs` with a `ProfileView` component.
+2. Register module in `packages/web-ui/src/views/mod.rs`.
+3. Add a `ProfileView` route in `packages/web-ui/src/routes.rs` (e.g. `/profile`) and a title entry.
+4. Wire the sidebar user block (bottom of `components/layout/sidebar.rs`) to navigate to Profile, matching `Shell.jsx`.
+5. Implement sections/controls from `ProfileView.jsx`: account info, preferences, security/session as applicable.
+6. Back the data with the real API client; add endpoints only if missing (and note them for a backend follow-up).
+7. Implement edit/save/cancel/validation and loading/empty/error/success states.
 
-Scope details:
-- Implement User Profile page sections and controls matching reference design.
-- Ensure profile/account data, preferences, and security-related states are sourced from backend APIs.
-- Match interaction details for edit/save/cancel/validation/feedback states.
-- Align loading/empty/error/success states with design standards.
+## Non-goals
+- No global auth architecture rework beyond what the profile surface needs.
+
+## Files
+- packages/web-ui/src/views/profile.rs (new)
+- packages/web-ui/src/views/mod.rs
+- packages/web-ui/src/routes.rs
+- packages/web-ui/src/components/layout/sidebar.rs
+- packages/web-ui/src/api/models.rs, client.rs (if needed)
+- checks/web-ui/tests/integration-test.js (new step)
+
+## Verification
+- nix develop -c cargo fmt -- --check
+- nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown
+- nix build .#checks.x86_64-linux.web-ui (with a new profile step)
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 User Profile view is pixel-aligned with CrystalForgelatest references across supported breakpoints
-- [ ] #2 Profile interactions (edit/save/cancel/validation feedback) match design behavior exactly
-- [ ] #3 Profile/account content is backend-driven in production path
-- [ ] #4 web-ui check includes assertion-based validation for critical profile workflows and state transitions
-- [ ] #5 web-ui check captures screenshots for profile loading, empty, error, populated, and editing/confirmation states
+- [ ] #1 New ProfileView route and view module exist and are wired in routes.rs and views/mod.rs
+- [ ] #2 Sidebar user block navigates to the Profile view as in the design
+- [ ] #3 Profile layout/controls match ProfileView.jsx across supported breakpoints
+- [ ] #4 Edit/save/cancel/validation feedback works and profile/account content is backend-driven
+- [ ] #5 web-ui check captures profile loading, populated, and editing states and asserts a real interaction
 <!-- AC:END -->
-
-## Implementation Notes
-
-<!-- SECTION:NOTES:BEGIN -->
-Prefer UI + backend account data together to avoid rework from placeholder states.
-<!-- SECTION:NOTES:END -->
