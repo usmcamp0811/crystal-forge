@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - gpt-5.4
 created_date: '2026-05-31 15:56'
-updated_date: '2026-06-10 19:33'
+updated_date: '2026-06-10 19:37'
 labels:
   - design-parity
   - ui-ux
@@ -65,13 +65,13 @@ Goal: Produce and maintain the canonical parity matrix for all target views/comp
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A complete design parity matrix exists covering all primary views represented in CrystalForgelatest
-- [ ] #2 Each matrix row includes measurable criteria (pixel/value based) not subjective language
-- [ ] #3 Each matrix row maps to owning implementation files in packages/web-ui
-- [ ] #4 A screenshot target list for web-ui checks is defined for all in-scope views
-- [ ] #5 Interaction inventory includes filter/search/toggle/modal/table/card flows per relevant view
-- [ ] #6 The parity matrix defines mandatory web-ui assertions per view/state (not screenshot-only checks)
-- [ ] #7 The parity matrix requires screenshot coverage for all in-scope states including loading, empty, error, and populated states
+- [x] #1 A complete design parity matrix exists covering all primary views represented in CrystalForgelatest
+- [x] #2 Each matrix row includes measurable criteria (pixel/value based) not subjective language
+- [x] #3 Each matrix row maps to owning implementation files in packages/web-ui
+- [x] #4 A screenshot target list for web-ui checks is defined for all in-scope views
+- [x] #5 Interaction inventory includes filter/search/toggle/modal/table/card flows per relevant view
+- [x] #6 The parity matrix defines mandatory web-ui assertions per view/state (not screenshot-only checks)
+- [x] #7 The parity matrix requires screenshot coverage for all in-scope states including loading, empty, error, and populated states
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -81,3 +81,11 @@ Goal: Produce and maintain the canonical parity matrix for all target views/comp
 2. Update `backlog/docs/design/doc-8 - CrystalForgelatest-UI-Parity-Matrix-TASK-328.md` so every in-scope surface has objective criteria, owner files, interaction inventory coverage, mandatory assertions, and screenshot targets for loading/empty/error/populated states plus view-specific variants.
 3. Re-read the updated matrix against the design-source file list and the task acceptance criteria to verify full coverage and keep the matrix aligned with `doc-14`.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Updated `doc-8` into a full surface matrix covering shell, all primary CrystalForgelatest views, explicit owner files, mandatory interactions, and screenshot requirements for dark/light plus loading/empty/error/populated states.
+
+Verified the resulting backlog/doc state is clean after the document tool update (`git status --porcelain` showed no remaining changes in both `dev` and the task worktree).
+<!-- SECTION:NOTES:END -->
