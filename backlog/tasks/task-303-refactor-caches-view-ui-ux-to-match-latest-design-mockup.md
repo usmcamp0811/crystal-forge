@@ -21,7 +21,7 @@ modified_files:
   - packages/web-ui/src/views/caches.rs
   - checks/web-ui/tests/integration-test.js
 priority: medium
-ordinal: 16000
+ordinal: 18000
 ---
 
 ## Description
