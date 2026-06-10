@@ -1,19 +1,21 @@
 ---
 id: TASK-339
-title: Create Environments view parity task against CrystalForgelatest
+title: Environments sidebar surface umbrella
 status: Backlog
 assignee: []
 created_date: '2026-06-10 02:58'
+updated_date: '2026-06-10 03:36'
 labels:
   - design-parity
   - environments
   - web-ui
   - api-integration
-milestone: m-20
+milestone: 'm-20: Design Parity Missing Surfaces'
 dependencies: []
 references:
   - >-
     /home/mcamp/code/crystal-forge/CrystalForgelatest/components/EnvironmentsView.jsx
+  - design/doc-13 - Sidebar-surface-execution-map.md
 modified_files:
   - packages/web-ui/src/views/environments.rs
   - checks/web-ui/tests/integration-test.js
@@ -24,9 +26,11 @@ ordinal: 1710
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Problem: Environments functionality exists, but the backlog does not currently have a dedicated task to bring the Environments surface into full parity with the CrystalForgelatest design reference.
+Problem: Environments functionality exists, but the backlog needs one easy-to-read surface record for bringing the Environments experience into full parity with the CrystalForgelatest reference.
 
-Desired Outcome: A dedicated parity task exists for the Environments view so layout, status chips, environment actions, and real-data states can be aligned deliberately under the new parity plan.
+Desired Outcome: this task acts as the umbrella/surface record for Environments, with detailed discrepancy tasks added beneath it over time as needed.
+
+Scope: may include direct implementation if the work remains small, but should primarily serve as the user-facing Environments planning anchor.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
