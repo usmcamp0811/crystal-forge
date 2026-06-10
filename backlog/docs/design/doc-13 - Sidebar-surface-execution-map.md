@@ -3,6 +3,7 @@ id: doc-13
 title: Sidebar surface execution map
 type: specification
 created_date: '2026-06-10 03:34'
+updated_date: '2026-06-10 03:35'
 tags:
   - planning
   - sidebar
@@ -59,7 +60,7 @@ Related discrepancy tasks:
 
 ### 6. Builds
 Primary umbrella:
-- `TASK-344` — Builds sidebar surface umbrella
+- `TASK-347` — Builds sidebar surface umbrella
 
 Related discrepancy tasks:
 - `TASK-275` — builds/evaluations coherence+density
@@ -73,7 +74,7 @@ Related discrepancy tasks:
 
 ### 8. CVEs / Scanning
 Primary umbrella:
-- `TASK-346` — CVEs and Scanning sidebar surface umbrella
+- `TASK-348` — CVEs and Scanning sidebar surface umbrella
 
 Related discrepancy tasks:
 - `TASK-327` — scanning worker policy enforcement
@@ -85,7 +86,7 @@ Primary umbrella:
 
 ### 10. Compliance
 Primary umbrella:
-- `TASK-347` — Compliance sidebar surface umbrella
+- `TASK-344` — Compliance sidebar surface umbrella
 
 Related implementation tasks:
 - `TASK-320` — compliance proof system epic
@@ -98,7 +99,7 @@ Primary umbrella:
 
 ### 12. Builders
 Primary umbrella:
-- `TASK-348` — Builders sidebar surface umbrella
+- `TASK-346` — Builders sidebar surface umbrella
 
 Related discrepancy tasks:
 - `TASK-204` — builders view 403 fix
