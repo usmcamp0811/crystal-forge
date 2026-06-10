@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - gpt-5.4
 created_date: '2026-05-31 15:56'
-updated_date: '2026-06-10 21:17'
+updated_date: '2026-06-10 23:13'
 labels:
   - design-parity
   - design-system
@@ -84,8 +84,17 @@ Goal: bring global tokens + shell chrome (sidebar groups, topbar, base primitive
 - [ ] #5 web-ui check captures shell + topbar screenshots for both themes and asserts notifications panel opens
 <!-- AC:END -->
 
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Align `packages/web-ui/assets/app.css` with `CrystalForgelatest/styles.css`, then remove duplicate `.btn/.input/.card/.chip/.env-badge` definitions so one canonical shell/token block remains.
+2. Update `packages/web-ui/src/components/layout/sidebar.rs` to match the design grouping in both desktop and mobile navigation while preserving existing admin gating; use non-interactive placeholders where the design references missing destinations.
+3. Update `packages/web-ui/src/components/layout/topbar.rs` to add the notifications dropdown behavior and wire the bell/panel interactions without changing theme/tweaks behavior; use a non-interactive placeholder for notification settings/profile destinations that do not yet exist.
+4. Add the missing shell notification styles and update `checks/web-ui/tests/integration-test.js` so the web-ui check asserts the notifications panel opens and captures the shell states in both themes.
+<!-- SECTION:PLAN:END -->
+
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-LOCK: gpt-5.4 on gray in /home/mcamp/code/crystal-forge/TASK-329-shell-tokens-topbar-sidebar-parity
+Approved implementation detail: use non-interactive placeholders for design-only destinations that do not yet exist in the repo (Compliance and notification settings/profile targets), rather than silently dropping them from the shell.
 <!-- SECTION:NOTES:END -->
