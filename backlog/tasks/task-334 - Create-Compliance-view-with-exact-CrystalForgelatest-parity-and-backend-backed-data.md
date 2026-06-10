@@ -6,7 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-05-31 16:02'
-updated_date: '2026-06-10 02:57'
+updated_date: '2026-06-10 03:27'
 labels:
   - design-parity
   - compliance
@@ -20,6 +20,11 @@ dependencies:
   - TASK-333
 references:
   - /home/mcamp/code/crystal-forge/CrystalForgelatest
+  - TASK-317
+  - TASK-319
+documentation:
+  - design/doc-10 - CrystalForgelatest-parity-execution-plan.md
+  - design/doc-11 - CrystalForgelatest-design-source-index.md
 modified_files:
   - packages/web-ui/src/views/compliance.rs
   - checks/web-ui
@@ -34,9 +39,9 @@ Problem: Compliance view is not fully implemented to match latest design standar
 
 Goal: Implement the Compliance view so it matches CrystalForgelatest layout/interactions pixel-for-pixel and renders authoritative backend data for all primary states.
 
-Non-goals: Broad redesign of unrelated views; speculative compliance features outside reference design.
+Non-goals: Broad redesign of unrelated views; speculative compliance features outside reference design; replacing the compliance MVP/evaluator with UI-only placeholders.
 
-Replan note: this is a net-new/missing-surface task in m-20. Prefer vertical-slice delivery: required UI plus the minimal real-data backend support needed for the view to be truthful.
+Replan note: this is the final design-parity pass for the Compliance surface. It should build on top of the backend-backed compliance UX established by TASK-319 and the evaluator/domain work established by TASK-317 and its dependencies.
 
 Scope details:
 - Create/complete Compliance view surface with exact visual parity.
@@ -57,5 +62,5 @@ Scope details:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Execute as a vertical slice: UI plus required authoritative data, not placeholder-first UI.
+Final compliance surface polish task; do not start until compliance evaluator outputs and baseline backend-backed compliance flow exist.
 <!-- SECTION:NOTES:END -->
