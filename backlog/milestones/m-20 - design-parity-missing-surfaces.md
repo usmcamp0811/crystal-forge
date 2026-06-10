@@ -1,6 +1,6 @@
 ---
 id: m-20
-title: "m-20: Design Parity Missing Surfaces"
+title: "Design Parity Missing Surfaces"
 ---
 
 ## Description
