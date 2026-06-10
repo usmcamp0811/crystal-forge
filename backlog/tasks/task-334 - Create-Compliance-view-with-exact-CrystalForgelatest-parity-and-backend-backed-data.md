@@ -3,16 +3,16 @@ id: TASK-334
 title: >-
   Create Compliance view with exact CrystalForgelatest parity and backend-backed
   data
-status: To Do
+status: Backlog
 assignee: []
 created_date: '2026-05-31 16:02'
-updated_date: '2026-06-10 02:53'
+updated_date: '2026-06-10 02:57'
 labels:
   - design-parity
   - compliance
   - web-ui
   - api-integration
-milestone: m-16
+milestone: m-20
 dependencies:
   - TASK-328
   - TASK-329
@@ -24,7 +24,7 @@ modified_files:
   - packages/web-ui/src/views/compliance.rs
   - checks/web-ui
 priority: high
-ordinal: 6000
+ordinal: 1660
 ---
 
 ## Description
@@ -36,19 +36,13 @@ Goal: Implement the Compliance view so it matches CrystalForgelatest layout/inte
 
 Non-goals: Broad redesign of unrelated views; speculative compliance features outside reference design.
 
+Replan note: this is a net-new/missing-surface task in m-20. Prefer vertical-slice delivery: required UI plus the minimal real-data backend support needed for the view to be truthful.
+
 Scope details:
-- Create/complete Compliance view surface with exact visual parity (spacing, typography, tokens, cards/tables/chips, controls).
+- Create/complete Compliance view surface with exact visual parity.
 - Implement required interactions from design (filters/search/tabs/actions/modals as applicable).
-- Ensure all primary displayed values are backend-driven (no production mock/fallback placeholders).
+- Ensure all primary displayed values are backend-driven.
 - Align empty/loading/error/populated states with design source.
-
-Verification plan:
-- Extend `checks/web-ui` with assertion-based tests for Compliance interactions and state transitions.
-- Capture screenshot evidence for all Compliance states.
-- Run targeted web-ui parity check.
-
-Impact areas: packages/web-ui/src/views/compliance*.rs (or equivalent), supporting components, API model adapters if required.
-Risk: High.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -59,3 +53,9 @@ Risk: High.
 - [ ] #4 web-ui check includes assertion-based validation of Compliance interactions and state transitions
 - [ ] #5 web-ui check captures screenshots for Compliance loading, empty, error, populated, and modal/tab states
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Execute as a vertical slice: UI plus required authoritative data, not placeholder-first UI.
+<!-- SECTION:NOTES:END -->
