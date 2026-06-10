@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - gpt-5.4
 created_date: '2026-05-31 15:56'
-updated_date: '2026-06-10 17:47'
+updated_date: '2026-06-10 19:33'
 labels:
   - design-parity
   - ui-ux
@@ -74,8 +74,10 @@ Goal: Produce and maintain the canonical parity matrix for all target views/comp
 - [ ] #7 The parity matrix requires screenshot coverage for all in-scope states including loading, empty, error, and populated states
 <!-- AC:END -->
 
-## Implementation Notes
+## Implementation Plan
 
-<!-- SECTION:NOTES:BEGIN -->
-LOCK: gpt-5.4 on gray in /home/mcamp/code/crystal-forge/TASK-328-parity-spec
-<!-- SECTION:NOTES:END -->
+<!-- SECTION:PLAN:BEGIN -->
+1. Audit the current parity matrix against `CrystalForgelatest/components/*` and `app.jsx` to identify missing surfaces, states, owner mappings, and assertion gaps.
+2. Update `backlog/docs/design/doc-8 - CrystalForgelatest-UI-Parity-Matrix-TASK-328.md` so every in-scope surface has objective criteria, owner files, interaction inventory coverage, mandatory assertions, and screenshot targets for loading/empty/error/populated states plus view-specific variants.
+3. Re-read the updated matrix against the design-source file list and the task acceptance criteria to verify full coverage and keep the matrix aligned with `doc-14`.
+<!-- SECTION:PLAN:END -->
