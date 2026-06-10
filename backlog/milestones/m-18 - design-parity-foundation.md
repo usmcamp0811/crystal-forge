@@ -1,6 +1,6 @@
 ---
 id: m-18
-title: "m-18: Design Parity Foundation"
+title: "Design Parity Foundation"
 ---
 
 ## Description
