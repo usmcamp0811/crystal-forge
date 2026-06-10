@@ -1,18 +1,16 @@
 ---
 id: TASK-336
-title: >-
-  Create Admin view with exact CrystalForgelatest parity and real administrative
-  data flows
+title: Admin sidebar surface umbrella
 status: Backlog
 assignee: []
 created_date: '2026-05-31 16:02'
-updated_date: '2026-06-10 02:57'
+updated_date: '2026-06-10 03:36'
 labels:
   - design-parity
   - admin
   - web-ui
   - api-integration
-milestone: m-20
+milestone: 'm-20: Design Parity Missing Surfaces'
 dependencies:
   - TASK-328
   - TASK-329
@@ -20,6 +18,7 @@ dependencies:
   - TASK-333
 references:
   - /home/mcamp/code/crystal-forge/CrystalForgelatest
+  - design/doc-13 - Sidebar-surface-execution-map.md
 modified_files:
   - packages/web-ui/src/views/admin.rs
   - packages/server/src
@@ -33,11 +32,11 @@ ordinal: 1670
 <!-- SECTION:DESCRIPTION:BEGIN -->
 Problem: Admin view does not yet fully match latest design standards and may not provide complete backend-backed behavior for key administrative surfaces.
 
-Goal: Implement/refine Admin view to match CrystalForgelatest exactly, including interaction patterns and authoritative data rendering.
+Goal: This task serves as the umbrella record for the Admin sidebar surface and tracks the work required to match CrystalForgelatest with authoritative data and correct interactions.
 
 Non-goals: New admin capabilities not represented in design scope; unrelated IAM redesign.
 
-Replan note: this is an m-20 missing-surface task and should be executed as a vertical slice with the minimal real-data backend support required.
+Replan note: this is the primary Admin surface record. If implementation scope expands, add focused discrepancy tasks beneath it rather than overloading one branch/worktree.
 
 Scope details:
 - Build/align Admin page structure and visual system to reference design.
@@ -58,5 +57,5 @@ Scope details:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Prefer vertical-slice completion with real admin data and outcomes, not placeholder-first UI.
+Primary Admin surface record under the sidebar-oriented plan.
 <!-- SECTION:NOTES:END -->
