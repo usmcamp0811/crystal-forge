@@ -1,87 +1,64 @@
-//! CVE summary panel components.
+//! CVE summary panel — design-reference parity (TASK-342.2).
+//!
+//! Layout: big critical count hero + "critical CVEs" label, then a 2-col
+//! `dash-w-mini` grid showing High and total CVE count.
 
 use dioxus::prelude::*;
 
 use crate::api::models::CveSummary;
-use crate::theme;
 
-/// CVE summary panel with severity badges.
+/// CVE summary panel using the canonical dash-w-body / dash-w-mini layout.
 #[component]
 pub fn CveSummaryPanel(
     cves: CveSummary,
     #[props(default)] flake_filter: Option<String>,
 ) -> Element {
-    // Apply filter - in real app, this would come from API
-    let display_cves = if let Some(ref _flake_name) = flake_filter {
-        CveSummary {
-            critical: cves.critical / 2,
-            high: cves.high / 2,
-            medium: cves.medium / 2,
-            low: cves.low / 2,
-        }
-    } else {
-        cves.clone()
-    };
+    let display_cves = cves.clone();
+    let filter_note = flake_filter
+        .as_ref()
+        .map(|flake| format!("{flake} filter active · CVE summary remains fleet-wide"));
 
     let total = display_cves.total();
 
     rsx! {
         div {
-            class: "flex flex-col h-full",
+            class: "dash-w-body",
             "data-testid": "cve-summary",
 
-            // Show filter indicator if filtered
-            if let Some(ref flake_name) = flake_filter {
+            if let Some(note) = filter_note {
                 div {
-                    class: "text-xs text-blue-400 mb-2 flex items-center gap-1 shrink-0",
-                    svg {
-                        class: "w-3 h-3",
-                        fill: "none",
-                        stroke: "currentColor",
-                        view_box: "0 0 24 24",
-                        path {
-                            stroke_linecap: "round",
-                            stroke_linejoin: "round",
-                            stroke_width: "2",
-                            d: "M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z"
-                        }
-                    }
-                    span { "{flake_name}" }
+                    style: "font-size:11px; color:var(--cf-text-muted);",
+                    "{note}"
                 }
             }
 
-            // Total count header
+            // Hero: critical count
             div {
-                class: "flex items-baseline gap-2 mb-3 shrink-0",
-                span { class: "text-2xl font-bold {theme::text::PRIMARY}", "{total}" }
-                span { class: "{theme::text::SECONDARY} text-sm", "vulnerabilities" }
+                style: "display:flex; align-items:baseline; gap:10px;",
+                span {
+                    style: "font-size:32px; font-weight:700; color:#f87171; line-height:1; font-variant-numeric:tabular-nums;",
+                    "{display_cves.critical}"
+                }
+                span {
+                    style: "font-size:12px; color:var(--cf-text-muted);",
+                    "critical CVEs"
+                }
             }
 
-            // Severity breakdown - fills remaining space
+            // 2-col mini grid: High + Total
             div {
-                class: "grid grid-cols-2 gap-2 flex-1 min-h-0",
-                CveSeverityBadge { label: "Critical", count: display_cves.critical, text_class: theme::cve::CRITICAL_TEXT, bg_class: theme::cve::CRITICAL_BG }
-                CveSeverityBadge { label: "High", count: display_cves.high, text_class: theme::cve::HIGH_TEXT, bg_class: theme::cve::HIGH_BG }
-                CveSeverityBadge { label: "Medium", count: display_cves.medium, text_class: theme::cve::MEDIUM_TEXT, bg_class: theme::cve::MEDIUM_BG }
-                CveSeverityBadge { label: "Low", count: display_cves.low, text_class: theme::cve::LOW_TEXT, bg_class: theme::cve::LOW_BG }
+                style: "display:grid; grid-template-columns:1fr 1fr; gap:6px; font-size:11px;",
+                div {
+                    class: "dash-w-mini",
+                    span { "High" }
+                    strong { style: "color:#fbbf24;", "{display_cves.high}" }
+                }
+                div {
+                    class: "dash-w-mini",
+                    span { "Total" }
+                    strong { "{total}" }
+                }
             }
-        }
-    }
-}
-
-/// A single CVE severity badge with count.
-#[component]
-pub fn CveSeverityBadge(
-    label: &'static str,
-    count: i64,
-    text_class: &'static str,
-    bg_class: &'static str,
-) -> Element {
-    rsx! {
-        div {
-            class: "flex items-center justify-between px-3 py-2 rounded-lg {bg_class}",
-            span { class: "{text_class} font-medium text-sm", "{label}" }
-            span { class: "{text_class} text-lg font-bold", "{count}" }
         }
     }
 }
