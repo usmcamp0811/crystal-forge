@@ -1,10 +1,11 @@
 ---
 id: TASK-329
 title: 'Foundation: shell, tokens, topbar, and sidebar parity to CrystalForgelatest'
-status: Backlog
-assignee: []
+status: In Progress
+assignee:
+  - gpt-5.4
 created_date: '2026-05-31 15:56'
-updated_date: '2026-06-10 13:26'
+updated_date: '2026-06-10 21:17'
 labels:
   - design-parity
   - design-system
@@ -39,8 +40,6 @@ Problem: shared shell primitives drift from CrystalForgelatest, which blocks rel
 
 Goal: bring global tokens + shell chrome (sidebar groups, topbar, base primitives) into parity so all later view work is fast and consistent.
 
-This is the FIRST task to execute. See guide doc-14 for the standard procedure.
-
 ## Exact scope (do all of these)
 1. Tokens: make `packages/web-ui/assets/app.css` token values match `CrystalForgelatest/styles.css` exactly (colors, radii 6/10/14/16/999, font sizes, shadows, focus ring) for BOTH dark and light.
 2. Sidebar groups: align `components/layout/sidebar.rs` section grouping to the design in `components/Shell.jsx`: Fleet (Dashboard, Systems, Flakes, Environments), Pipeline (Builds, Evaluations, Scanning), Compliance (CVEs, Policies, Compliance), System (Builders, Caches, Server/Admin). Keep existing role-gating.
@@ -51,17 +50,29 @@ This is the FIRST task to execute. See guide doc-14 for the standard procedure.
 - No per-view business logic changes.
 - Classification banners are OUT of scope here (separate task if desired).
 
-## Files
-- packages/web-ui/assets/app.css
-- packages/web-ui/src/theme.rs
-- packages/web-ui/src/components/layout/sidebar.rs
-- packages/web-ui/src/components/layout/topbar.rs
+## Architectural constraints
+- Follow the parity execution workflow in `design/doc-14 - Parity-execution-playbook-agent-proof.md`.
+- Preserve existing role-gating and theme/tweaks behavior.
+- Keep changes confined to shared shell/tokens/primitives; do not redesign individual feature views.
 
-## Verification
-- nix develop -c cargo fmt -- --check
-- nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown
-- nix build .#checks.x86_64-linux.web-ui
+## Impact areas
+- `packages/web-ui/assets/app.css`
+- `packages/web-ui/src/theme.rs`
+- `packages/web-ui/src/components/layout/sidebar.rs`
+- `packages/web-ui/src/components/layout/topbar.rs`
+- `checks/web-ui/tests/integration-test.js`
+
+## Risk level
+- Medium: shared shell/token changes can affect multiple downstream web-ui surfaces.
+
+## Verification plan
+- `nix develop -c cargo fmt -- --check`
+- `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown`
+- `nix build .#checks.x86_64-linux.web-ui`
 - Add/confirm web-ui steps that screenshot sidebar (expanded/collapsed) and topbar notifications open, in both themes.
+
+## Notes
+- Task metadata currently marks `TASK-328` as a dependency even though this task text historically called itself the first execution task; execution order must honor the dependency unless explicitly changed.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -76,5 +87,5 @@ This is the FIRST task to execute. See guide doc-14 for the standard procedure.
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-First execution task. Foundation for all surface parity.
+LOCK: gpt-5.4 on gray in /home/mcamp/code/crystal-forge/TASK-329-shell-tokens-topbar-sidebar-parity
 <!-- SECTION:NOTES:END -->
