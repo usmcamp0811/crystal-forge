@@ -1,11 +1,13 @@
-//! Build summary panel component.
+//! Build summary panel — design-reference parity (TASK-342.2).
+//!
+//! Layout: big building-count hero in #60a5fa + "building" label, then a
+//! 2-col `dash-w-mini` grid for Queued and total active counts.
 
 use dioxus::prelude::*;
 
-use crate::api::models::{BuildQueueSummary, BuildStatus};
-use crate::components::charts::{DonutChartWithLegend, DonutSegment};
+use crate::api::models::BuildQueueSummary;
 
-/// Build summary panel showing active builds with donut chart.
+/// Build summary panel using the canonical dash-w-body / dash-w-mini layout.
 #[component]
 pub fn BuildSummaryPanel(
     queue: BuildQueueSummary,
@@ -13,58 +15,38 @@ pub fn BuildSummaryPanel(
 ) -> Element {
     let building = queue.building_count;
     let queued = queue.queued_count;
-    let total = (building + queued).max(1) as f64;
-
-    let building_systems: Vec<String> = queue
-        .items
-        .iter()
-        .filter(|item| item.status == BuildStatus::Building)
-        .map(build_summary_label)
-        .collect();
-    let queued_systems: Vec<String> = queue
-        .items
-        .iter()
-        .filter(|item| item.status == BuildStatus::Queued)
-        .map(build_summary_label)
-        .collect();
     let _ = flake_filter;
-
-    let segments = vec![
-        DonutSegment {
-            percent: building as f64 / total * 100.0,
-            color: "#42ff65",
-            label: "Building",
-            count: building,
-            systems: if building_systems.is_empty() {
-                vec!["No active builds".to_string()]
-            } else {
-                building_systems
-            },
-        },
-        DonutSegment {
-            percent: queued as f64 / total * 100.0,
-            color: "#e57c00",
-            label: "Queued",
-            count: queued,
-            systems: if queued_systems.is_empty() {
-                vec!["No queued builds".to_string()]
-            } else {
-                queued_systems
-            },
-        },
-    ];
 
     rsx! {
         div {
-            class: "h-full flex flex-col",
+            class: "dash-w-body",
             "data-testid": "build-summary-panel",
 
+            // Hero: building count
             div {
-                class: "flex-1",
-                DonutChartWithLegend {
-                    segments: segments,
-                    center_value: building + queued,
-                    center_label: "BUILDS"
+                style: "display:flex; align-items:baseline; gap:10px;",
+                span {
+                    style: "font-size:32px; font-weight:700; color:#60a5fa; line-height:1; font-variant-numeric:tabular-nums;",
+                    "{building}"
+                }
+                span {
+                    style: "font-size:12px; color:var(--cf-text-muted);",
+                    "building"
+                }
+            }
+
+            // 2-col mini grid: Queued + Total
+            div {
+                style: "display:grid; grid-template-columns:1fr 1fr; gap:6px; font-size:11px;",
+                div {
+                    class: "dash-w-mini",
+                    span { "Queued" }
+                    strong { "{queued}" }
+                }
+                div {
+                    class: "dash-w-mini",
+                    span { "Active" }
+                    strong { "{building + queued}" }
                 }
             }
         }
