@@ -2,6 +2,8 @@
 
 use crate::components::layout::sidebar::SidebarContext;
 use crate::routes::Route;
+use crate::state::app_state::AppState;
+use crate::state::auth;
 use crate::state::theme::UiTheme;
 use crate::theme;
 use dioxus::prelude::*;
@@ -28,6 +30,20 @@ enum NotificationKind {
     Shield,
     Warning,
     Evaluation,
+}
+
+fn admin_only_route(route: &Option<Route>) -> bool {
+    matches!(
+        route,
+        Some(Route::CvesView { .. } | Route::ScanningView { .. } | Route::AdminView { .. })
+    )
+}
+
+fn visible_notifications(is_admin_user: bool) -> Vec<NotificationItem> {
+    notifications()
+        .into_iter()
+        .filter(|item| is_admin_user || !admin_only_route(&item.route))
+        .collect()
 }
 
 fn load_pref(key: &str, default: &str) -> String {
@@ -116,6 +132,9 @@ fn notifications() -> Vec<NotificationItem> {
 pub fn TopBar(title: String) -> Element {
     let mut ui_theme = use_context::<Signal<UiTheme>>();
     let nav = navigator();
+    let app_state = use_context::<Signal<AppState>>();
+    let auth_context = app_state.read().auth.clone();
+    let is_admin_user = auth::is_admin(&auth_context);
 
     let sidebar_ctx = use_context::<SidebarContext>();
     let mut is_mobile_drawer_open = sidebar_ctx.is_mobile_drawer_open;
@@ -124,8 +143,12 @@ pub fn TopBar(title: String) -> Element {
     let mut notifications_open = use_signal(|| false);
     let mut density = use_signal(|| load_pref(DENSITY_KEY, "comfortable"));
     let mut default_view = use_signal(|| load_pref(SYSTEMS_VIEW_KEY, "cards"));
-    let notification_items = notifications();
-    let unread_count = notification_items.iter().filter(|item| item.unread).count();
+    let mut notification_items = use_signal(|| visible_notifications(is_admin_user));
+    let unread_count = notification_items
+        .read()
+        .iter()
+        .filter(|item| item.unread)
+        .count();
 
     let toggle_drawer = move |_| {
         is_mobile_drawer_open.set(!is_mobile_drawer_open());
@@ -145,6 +168,10 @@ pub fn TopBar(title: String) -> Element {
 
     use_effect(move || {
         set_root_attr("data-density", &density());
+    });
+
+    use_effect(move || {
+        notification_items.set(visible_notifications(is_admin_user));
     });
 
     rsx! {
@@ -239,10 +266,15 @@ pub fn TopBar(title: String) -> Element {
                             class: "notif-head",
                             strong { "Notifications" }
                             button {
+                                "data-testid": "topbar-notifications-mark-read",
                                 class: "btn-icon focus-ring",
                                 title: "Mark all read",
                                 style: "padding: 4px;",
-                                onclick: move |_| notifications_open.set(false),
+                                onclick: move |_| {
+                                    notification_items.write().iter_mut().for_each(|item| {
+                                        item.unread = false;
+                                    });
+                                },
                                 svg {
                                     class: "w-3.5 h-3.5",
                                     fill: "none",
@@ -255,14 +287,22 @@ pub fn TopBar(title: String) -> Element {
                         }
                         div {
                             class: "notif-list",
-                            for item in notification_items.clone() {
+                            for item in notification_items.read().clone() {
                                 button {
                                     key: "notif-{item.id}",
                                     class: if item.unread { "notif-item unread focus-ring" } else { "notif-item focus-ring" },
                                     onclick: {
                                         let nav = nav.clone();
                                         let route = item.route.clone();
+                                        let item_id = item.id;
                                         move |_| {
+                                            if let Some(clicked) = notification_items
+                                                .write()
+                                                .iter_mut()
+                                                .find(|candidate| candidate.id == item_id)
+                                            {
+                                                clicked.unread = false;
+                                            }
                                             notifications_open.set(false);
                                             if let Some(route) = route.clone() {
                                                 nav.push(route);
@@ -353,6 +393,7 @@ pub fn TopBar(title: String) -> Element {
                                 class: "btn btn-ghost focus-ring xs",
                                 r#type: "button",
                                 title: "Notification settings coming soon",
+                                disabled: true,
                                 "aria-disabled": "true",
                                 "Notification settings"
                             }

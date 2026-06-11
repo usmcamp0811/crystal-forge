@@ -2254,9 +2254,18 @@ const steps = [
         page.locator("[data-testid='topbar-notifications-badge']"),
         "Expected notifications unread badge",
       );
-      await assertVisible(
-        page.locator("[data-testid='topbar-notifications-settings-placeholder']"),
-        "Expected notifications settings placeholder",
+      const settingsPlaceholder = page.locator(
+        "[data-testid='topbar-notifications-settings-placeholder']",
+      );
+      await assertVisible(settingsPlaceholder, "Expected notifications settings placeholder");
+      await assertDisabled(settingsPlaceholder, "Expected notifications settings placeholder to be disabled");
+
+      const markRead = page.locator("[data-testid='topbar-notifications-mark-read']");
+      await assertVisible(markRead, "Expected mark-all-read action");
+      await markRead.click();
+      await assertHidden(
+        page.locator("[data-testid='topbar-notifications-badge']"),
+        "Expected notifications unread badge to clear after mark-all-read",
       );
     },
   },
@@ -2281,6 +2290,28 @@ const steps = [
       if (theme !== "light") {
         throw new Error(`Expected light theme for notifications screenshot, got: ${theme}`);
       }
+    },
+  },
+  {
+    name: "09i-topbar-notifications-non-admin",
+    description: "Non-admin shell hides admin-gated notifications",
+    action: async (page) => {
+      await page.setViewportSize(VIEWPORTS.desktop);
+      await page.goto(`${baseUrl}/systems?ui_check_auth=1&ui_check_role=viewer`, {
+        timeout: LOAD_TIMEOUT,
+      });
+      await page.waitForTimeout(1500);
+
+      const bell = page.locator("[data-testid='topbar-notifications-button']");
+      await assertVisible(bell, "Expected notifications bell button for non-admin shell");
+      await bell.click();
+
+      const panel = page.locator("[data-testid='topbar-notifications-panel']");
+      await assertVisible(panel, "Expected notifications panel to open for non-admin shell");
+      await assertHidden(
+        panel.getByText("New critical CVE: CVE-2026-31822"),
+        "Expected admin-gated CVE notification to be hidden for non-admin shell",
+      );
     },
   },
   {
@@ -4967,6 +4998,7 @@ const CI_FAST_STEP_NAMES = new Set([
   "09f-sidebar-light-expanded",
   "09g-topbar-notifications-dark",
   "09h-topbar-notifications-light",
+  "09i-topbar-notifications-non-admin",
   "11b-builders",
   "11c-builders-edit-modal",
   "15-builds",
