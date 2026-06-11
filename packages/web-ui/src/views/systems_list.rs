@@ -17,12 +17,11 @@ use crate::components::filters::{
 };
 use crate::components::forms::{AddSystemForm, NewSystemDraft, validate_new_system};
 use crate::components::heartbeat_spinner::HeartbeatSpinner;
-use crate::components::layout::Card;
 use crate::components::modals::{
     GeneratedKeyPair, KeyPairModal, RemoveSystemDialog, UpdatePublicKeyModal, generate_key_pair,
 };
 use crate::components::notifications::{AlertBanner, AlertSeverity};
-use crate::components::system::{DeploySystemModal, EditSystemModal, SystemCard, SystemCardV2};
+use crate::components::system::{DeploySystemModal, EditSystemModal, SystemCardV2};
 use crate::components::systems_stat_strip::SystemsStatStrip;
 use crate::components::tables::SystemsTable;
 use crate::components::{Chip, ChipVariant, EnvBadge};
@@ -34,9 +33,9 @@ use crate::state::app_state::AppState;
 use crate::state::auth;
 use crate::systems::adapter::{
     create_system_via_api, deactivate_system_via_api, deploy_system_via_api, fallback_flake_names,
-    fallback_systems, fetch_system_commits_via_api, load_flake_context_with_fallback,
-    load_flake_names_with_fallback, load_system_detail_with_fallback, load_systems_with_fallback,
-    update_system_public_key_via_api, update_system_via_api,
+    fetch_system_commits_via_api, load_flake_context_with_fallback, load_flake_names_with_fallback,
+    load_system_detail_with_fallback, load_systems_with_fallback, update_system_public_key_via_api,
+    update_system_via_api,
 };
 use crate::theme;
 
@@ -170,7 +169,8 @@ pub fn SystemsListView() -> Element {
         use_resource(move || async move { load_flake_context_with_fallback().await });
 
     // Local mutable state for systems (allows client-side add/remove until backend supports it)
-    let mut local_systems = use_signal(fallback_systems);
+    let mut local_systems = use_signal(Vec::<SystemSummary>::new);
+    let mut load_error = use_signal(|| None::<String>);
     let mut api_notice = use_signal(|| None::<String>);
     let mut loading = use_signal(|| true);
 
@@ -183,7 +183,7 @@ pub fn SystemsListView() -> Element {
                 return;
             }
             local_systems.set(result.systems.clone());
-            api_notice.set(result.notice.clone());
+            load_error.set(result.notice.clone());
             loading.set(false);
         }
     });
@@ -273,12 +273,35 @@ pub fn SystemsListView() -> Element {
         .unwrap_or_default();
 
     let filtered_systems: Vec<SystemSummary> = current_systems
-        .into_iter()
+        .iter()
+        .cloned()
         .filter(|system| matches_environment(system, &environment_filter.read()))
         .filter(|system| matches_health(system, &health_filter.read()))
         .filter(|system| matches_deployment(system, &deployment_filter.read()))
         .filter(|system| matches_search(system, &search.read()))
         .collect();
+    let has_active_filters = !search.read().trim().is_empty()
+        || !environment_filter.read().is_empty()
+        || !health_filter.read().is_empty()
+        || !deployment_filter.read().is_empty();
+    let systems_subtitle = if *loading.read() {
+        "Loading systems…".to_string()
+    } else if load_error.read().is_some() {
+        "Systems are temporarily unavailable".to_string()
+    } else {
+        format!(
+            "{} systems · {} healthy · {} needing attention",
+            current_systems.len(),
+            current_systems
+                .iter()
+                .filter(|s| s.health_status == HealthStatus::Healthy)
+                .count(),
+            current_systems
+                .iter()
+                .filter(|s| s.health_status != HealthStatus::Healthy)
+                .count()
+        )
+    };
 
     let registered_flakes_for_submit = registered_flakes.clone();
 
@@ -324,7 +347,7 @@ pub fn SystemsListView() -> Element {
                 }
             }
 
-            // API fallback notice banner (shown when using mock data)
+            // Action notice banner for create, update, deploy, or remove flows.
             if let Some(ref notice) = *api_notice.read() {
                 div {
                     class: "rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-4 py-3 text-sm text-yellow-300",
@@ -431,9 +454,7 @@ pub fn SystemsListView() -> Element {
                     h1 { class: "page-title", "Systems" }
                     p {
                         class: "page-subtitle",
-                        "{local_systems.read().len()} systems · \
-                        {local_systems.read().iter().filter(|s| s.health_status == HealthStatus::Healthy).count()} healthy · \
-                        {local_systems.read().iter().filter(|s| s.health_status != HealthStatus::Healthy).count()} needing attention"
+                        "{systems_subtitle}"
                     }
                 }
                 div {
@@ -522,10 +543,11 @@ pub fn SystemsListView() -> Element {
                 }
             }
 
-            // Statistics Strip
-            SystemsStatStrip {
-                systems: filtered_systems.clone(),
-                environment_colors: environment_color_pairs.clone(),
+            if !*loading.read() && load_error.read().is_none() {
+                SystemsStatStrip {
+                    systems: filtered_systems.clone(),
+                    environment_colors: environment_color_pairs.clone(),
+                }
             }
 
             // System Form Modal
@@ -691,96 +713,123 @@ pub fn SystemsListView() -> Element {
                 }
             }
 
-            // Filters Bar
-            div {
-                class: "filterbar",
-                id: "{container_id}",
+            if !*loading.read() && load_error.read().is_none() {
+                // Filters Bar
                 div {
-                    class: "filter-search",
-                    svg {
-                        class: "w-3.5 h-3.5",
-                        fill: "none",
-                        stroke: "currentColor",
-                        stroke_width: "2",
-                        view_box: "0 0 24 24",
-                        circle { cx: "11", cy: "11", r: "8" }
-                        path { d: "m21 21-4.35-4.35" }
-                    }
-                    input {
-                        class: "input focus-ring",
-                        r#type: "search",
-                        placeholder: "Filter by hostname, commit, or flake…",
-                        value: "{search.read()}",
-                        oninput: move |evt| search.set(evt.value()),
-                    }
-                }
-                EnvironmentFilterDropdown {
-                    environments: environments.clone(),
-                    selected: environment_filter,
-                    open_dropdown: open_dropdown,
-                }
-                HealthFilterDropdown {
-                    selected: health_filter,
-                    open_dropdown: open_dropdown,
-                }
-                DeploymentFilterDropdown {
-                    selected: deployment_filter,
-                    open_dropdown: open_dropdown,
-                }
-                div {
-                    class: "seg",
-                    role: "tablist",
-                    "aria-label": "View mode",
-                    button {
-                        class: if *view_mode.read() == ViewMode::Cards { "active" } else { "" },
-                        onclick: move |_| {
-                            view_mode.set(ViewMode::Cards);
-                            let _ = LocalStorage::set(VIEW_PREF_KEY, ViewMode::Cards.as_storage());
-                        },
+                    class: "filterbar",
+                    id: "{container_id}",
+                    div {
+                        class: "filter-search",
                         svg {
-                            class: "w-3 h-3",
+                            class: "w-3.5 h-3.5",
                             fill: "none",
                             stroke: "currentColor",
                             stroke_width: "2",
                             view_box: "0 0 24 24",
-                            rect { x: "3", y: "3", width: "7", height: "7" }
-                            rect { x: "14", y: "3", width: "7", height: "7" }
-                            rect { x: "14", y: "14", width: "7", height: "7" }
-                            rect { x: "3", y: "14", width: "7", height: "7" }
+                            circle { cx: "11", cy: "11", r: "8" }
+                            path { d: "m21 21-4.35-4.35" }
                         }
-                        " Cards"
-                    }
-                    button {
-                        class: if *view_mode.read() == ViewMode::Table { "active" } else { "" },
-                        onclick: move |_| {
-                            view_mode.set(ViewMode::Table);
-                            let _ = LocalStorage::set(VIEW_PREF_KEY, ViewMode::Table.as_storage());
-                        },
-                        svg {
-                            class: "w-3 h-3",
-                            fill: "none",
-                            stroke: "currentColor",
-                            stroke_width: "2",
-                            view_box: "0 0 24 24",
-                            line { x1: "3", y1: "6", x2: "21", y2: "6" }
-                            line { x1: "3", y1: "12", x2: "21", y2: "12" }
-                            line { x1: "3", y1: "18", x2: "21", y2: "18" }
+                        input {
+                            class: "input focus-ring",
+                            r#type: "search",
+                            placeholder: "Filter by hostname, commit, or flake…",
+                            value: "{search.read()}",
+                            oninput: move |evt| search.set(evt.value()),
                         }
-                        " Table"
                     }
-                }
-                div {
-                    class: "filter-count",
-                    "{filtered_systems.len()} shown"
+                    EnvironmentFilterDropdown {
+                        environments: environments.clone(),
+                        selected: environment_filter,
+                        open_dropdown: open_dropdown,
+                    }
+                    HealthFilterDropdown {
+                        selected: health_filter,
+                        open_dropdown: open_dropdown,
+                    }
+                    DeploymentFilterDropdown {
+                        selected: deployment_filter,
+                        open_dropdown: open_dropdown,
+                    }
+                    div {
+                        class: "seg",
+                        role: "tablist",
+                        "aria-label": "View mode",
+                        button {
+                            class: if *view_mode.read() == ViewMode::Cards { "active" } else { "" },
+                            onclick: move |_| {
+                                view_mode.set(ViewMode::Cards);
+                                let _ = LocalStorage::set(VIEW_PREF_KEY, ViewMode::Cards.as_storage());
+                            },
+                            svg {
+                                class: "w-3 h-3",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                view_box: "0 0 24 24",
+                                rect { x: "3", y: "3", width: "7", height: "7" }
+                                rect { x: "14", y: "3", width: "7", height: "7" }
+                                rect { x: "14", y: "14", width: "7", height: "7" }
+                                rect { x: "3", y: "14", width: "7", height: "7" }
+                            }
+                            " Cards"
+                        }
+                        button {
+                            class: if *view_mode.read() == ViewMode::Table { "active" } else { "" },
+                            onclick: move |_| {
+                                view_mode.set(ViewMode::Table);
+                                let _ = LocalStorage::set(VIEW_PREF_KEY, ViewMode::Table.as_storage());
+                            },
+                            svg {
+                                class: "w-3 h-3",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                view_box: "0 0 24 24",
+                                line { x1: "3", y1: "6", x2: "21", y2: "6" }
+                                line { x1: "3", y1: "12", x2: "21", y2: "12" }
+                                line { x1: "3", y1: "18", x2: "21", y2: "18" }
+                            }
+                            " Table"
+                        }
+                    }
+                    div {
+                        class: "filter-count",
+                        "{filtered_systems.len()} shown"
+                    }
                 }
             }
 
             // Systems List (Cards or Table)
-            if filtered_systems.is_empty() {
-                Card {
-                    title: Some("No systems".to_string()),
-                    children: rsx! {
-                        p { class: "{theme::text::SECONDARY}", "No systems matched your filters." }
+            if *loading.read() {
+                div {
+                    class: "empty",
+                    style: "margin: 24px;",
+                    "data-testid": "systems-loading-state",
+                    div {
+                        class: "mx-auto mb-3 animate-spin rounded-full h-8 w-8 border-b-2 border-blue-400"
+                    }
+                    h3 { "Loading systems" }
+                    div { "Fetching fleet data from the API." }
+                }
+            } else if let Some(error_message) = load_error.read().clone() {
+                div {
+                    class: "empty",
+                    style: "margin: 24px;",
+                    "data-testid": "systems-error-state",
+                    h3 { "Unable to load systems" }
+                    div { "{error_message}" }
+                }
+            } else if filtered_systems.is_empty() {
+                div {
+                    class: "empty",
+                    style: "margin: 24px;",
+                    "data-testid": "systems-empty-state",
+                    if has_active_filters {
+                        h3 { "No systems match" }
+                        div { "Try clearing a filter or changing the search." }
+                    } else {
+                        h3 { "No systems yet" }
+                        div { "Use Add system to register your first managed machine." }
                     }
                 }
             } else if *view_mode.read() == ViewMode::Cards {
@@ -1401,8 +1450,6 @@ fn env_colors_for_badge(
         ),
     }
 }
-
-// Mock data has been moved to `crate::systems::adapter::fallback_systems`.
 
 /// Generate an OSCAL-style System Security Plan (SSP) component inventory JSON
 /// and trigger a browser download.

@@ -948,6 +948,20 @@ async function unrouteSystemsApiFailure(page) {
   await page.unroute("**/api/v1/systems**");
 }
 
+async function routeSystemsEmptyData(page) {
+  await page.route("**/api/v1/systems**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ items: [], total: 0, page: 1, per_page: 50 }),
+    });
+  });
+}
+
+async function unrouteSystemsEmptyData(page) {
+  await page.unroute("**/api/v1/systems**");
+}
+
 async function routeEnvironmentWarningData(page) {
   const environments = [
     {
@@ -2558,6 +2572,37 @@ const steps = [
     action: async (page) => {
       await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
+    },
+  },
+  {
+    name: "12a-systems-empty-state",
+    description: "Systems empty state from real API data",
+    action: async (page) => {
+      await routeSystemsEmptyData(page);
+      await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1500);
+
+      await assertVisible(
+        page.locator("[data-testid='systems-empty-state']").first(),
+        "Expected systems empty state to render",
+        10000,
+      );
+      await assertVisible(
+        page.getByText("No systems yet").first(),
+        "Expected empty systems heading",
+        10000,
+      );
+
+      const tableVisible = await page
+        .locator("[data-testid='systems-table']")
+        .first()
+        .isVisible()
+        .catch(() => false);
+      if (tableVisible) {
+        throw new Error("Expected systems table to stay hidden for empty API response");
+      }
+
+      await unrouteSystemsEmptyData(page);
     },
   },
   {
@@ -5181,6 +5226,7 @@ const CI_FAST_STEP_NAMES = new Set([
   "11c-builders-edit-modal",
   "15-builds",
   "11b-builds-queue-card-focus",
+  "12a-systems-empty-state",
   "12b-systems-config-warning",
   "12c-systems-modal-config-field",
   "12e-systems-edit-modal",
