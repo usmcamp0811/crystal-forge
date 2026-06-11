@@ -3,10 +3,10 @@ id: TASK-330
 title: >-
   Complete Systems view parity including cards-table modes and modal flows with
   real API data
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-05-31 15:56'
-updated_date: '2026-06-10 02:57'
+updated_date: '2026-06-11 21:41'
 labels:
   - design-parity
   - systems
@@ -53,9 +53,3 @@ Scope details:
 - [ ] #5 web-ui checks include screenshot + behavior assertions for systems parity scenarios
 - [ ] #6 web-ui screenshot set covers loading, empty, error, and populated states for Systems surfaces
 <!-- AC:END -->
-
-## Implementation Notes
-
-<!-- SECTION:NOTES:BEGIN -->
-Reset to Backlog for milestone sequencing. Reuse existing component work and focus next pass on proof, backend-truth cleanup, and screenshot/assertion closure.
-<!-- SECTION:NOTES:END -->
