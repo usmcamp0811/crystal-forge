@@ -1,11 +1,11 @@
 ---
 id: TASK-329
 title: 'Foundation: shell, tokens, topbar, and sidebar parity to CrystalForgelatest'
-status: Review
+status: Done
 assignee:
   - gpt-5.4
 created_date: '2026-05-31 15:56'
-updated_date: '2026-06-11 02:28'
+updated_date: '2026-06-11 02:57'
 labels:
   - design-parity
   - design-system
@@ -99,9 +99,9 @@ Goal: bring global tokens + shell chrome (sidebar groups, topbar, base primitive
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-MR blocker fix implementation: notifications are now filtered by role for non-admin users, mark-all-read updates local unread state, the settings placeholder is actually disabled, and the UI-check mock auth helper can synthesize non-admin roles for shell verification.
+Confirmed MR !269 is merged: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/269
 
-Verification on this follow-up: `nix develop -c cargo fmt --all --manifest-path packages/web-ui/Cargo.toml -- --check` and `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` passed. I did not rerun `nix build .#checks.x86_64-linux.web-ui` locally because of the earlier user request to leave the expensive check to CI.
+Removed merged task worktree `/home/mcamp/code/crystal-forge/TASK-329-shell-tokens-topbar-sidebar-parity` and pruned worktree metadata.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
@@ -109,5 +109,5 @@ Verification on this follow-up: `nix develop -c cargo fmt --all --manifest-path 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
 Aligned the shared web-ui shell with CrystalForgelatest by regrouping sidebar navigation, adding the topbar notifications dropdown, and extending shell-level screenshot/assertion coverage for both themes.
 
-Used non-interactive placeholders for design-only destinations that do not yet exist in the repo, keeping the change scoped to shared shell parity.
+Used non-interactive placeholders for design-only destinations that do not yet exist in the repo, kept notifications role-aware for non-admin users, implemented real local mark-all-read behavior, and left the expensive final web-ui check follow-up to CI where explicitly requested.
 <!-- SECTION:FINAL_SUMMARY:END -->
