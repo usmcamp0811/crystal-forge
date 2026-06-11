@@ -11,7 +11,7 @@ labels:
   - compliance
   - epic
   - planning
-milestone: 'm-16: Compliance MVP - Prove, Don''t Just Display'
+milestone: 'm-22: Compliance MVP - Prove, Don''t Just Display'
 dependencies: []
 documentation:
   - design/doc-10 - CrystalForgelatest-parity-execution-plan.md
