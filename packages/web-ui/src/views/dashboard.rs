@@ -1,14 +1,12 @@
 //! Dashboard view — fleet-wide overview with health, deployment, and CVE summaries.
 
-use chrono::Duration;
 use dioxus::prelude::*;
 use std::collections::HashSet;
 
 use crate::api::client::{ApiClientError, fetch_hardening_top_services, fetch_systems};
 use crate::api::models::HardeningTopServiceResponse;
 use crate::api::models::{
-    BuildQueueSummary, BuildStatus, DeploymentStatus, FlakeCommit, FlakeTimeline, SystemSummary,
-    SystemsListParams,
+    BuildQueueSummary, DeploymentStatus, FlakeTimeline, SystemSummary, SystemsListParams,
 };
 use crate::components::dashboard::{
     BuildQueuePanel, BuildSummaryPanel, CveSummaryPanel, DeploymentStatusBreakdown,
@@ -20,8 +18,7 @@ use crate::components::loading::DashboardLoadingSpinner;
 use crate::components::notifications::{AlertBanner, AlertSeverity};
 use crate::components::widget_grid::{GridWidget, StoredLayout, WidgetGrid};
 use crate::dashboard::adapter::{
-    deterministic_mock_timestamp, empty_dashboard_summary, load_dashboard_with_fallback,
-    load_flake_timelines_with_fallback,
+    empty_dashboard_summary, load_dashboard_with_fallback, load_flake_timelines_with_fallback,
 };
 use crate::routes::Route;
 use crate::state::app_state::AppState;
@@ -1213,147 +1210,6 @@ fn WidgetPicker(
             }
         }
     }
-}
-
-// =============================================================================
-// Mock Data Functions (for development)
-// =============================================================================
-
-/// Generate mock flake timeline data for development.
-pub fn mock_flake_timelines() -> Vec<FlakeTimeline> {
-    let now = deterministic_mock_timestamp();
-
-    vec![
-        FlakeTimeline {
-            flake_id: 1,
-            flake_name: "infrastructure".to_string(),
-            repo_url: "github:acme/infra".to_string(),
-            commits: vec![
-                FlakeCommit {
-                    id: 1,
-                    hash: "a1b2c3d4e5f6789012345678".to_string(),
-                    message: "feat: add monitoring stack".to_string(),
-                    author: "alice".to_string(),
-                    committed_at: now - Duration::hours(3),
-                    system_count: 5,
-                    commits_behind: 0,
-                    systems: vec![
-                        "atlas-01".to_string(),
-                        "atlas-02".to_string(),
-                        "atlas-03".to_string(),
-                        "atlas-04".to_string(),
-                        "atlas-05".to_string(),
-                    ],
-                    system_paths: vec![],
-                    build_status: Some(BuildStatus::Building),
-                    evaluation_status: None,
-                    evaluation_error_message: None,
-                },
-                FlakeCommit {
-                    id: 2,
-                    hash: "b2c3d4e5f6789012345678ab".to_string(),
-                    message: "fix: nginx config reload".to_string(),
-                    author: "bob".to_string(),
-                    committed_at: now - Duration::hours(6),
-                    system_count: 2,
-                    commits_behind: 1,
-                    systems: vec!["luna-01".to_string(), "luna-02".to_string()],
-                    system_paths: vec![],
-                    build_status: Some(BuildStatus::Queued),
-                    evaluation_status: None,
-                    evaluation_error_message: None,
-                },
-                FlakeCommit {
-                    id: 3,
-                    hash: "c3d4e5f6789012345678abcd".to_string(),
-                    message: "chore: update nixpkgs".to_string(),
-                    author: "alice".to_string(),
-                    committed_at: now - Duration::days(3),
-                    system_count: 1,
-                    commits_behind: 2,
-                    systems: vec!["orion-01".to_string()],
-                    system_paths: vec![],
-                    build_status: Some(BuildStatus::Idle),
-                    evaluation_status: None,
-                    evaluation_error_message: None,
-                },
-            ],
-        },
-        FlakeTimeline {
-            flake_id: 2,
-            flake_name: "workstations".to_string(),
-            repo_url: "github:acme/workstations".to_string(),
-            commits: vec![
-                FlakeCommit {
-                    id: 4,
-                    hash: "f1a2b3c4d5e6f7890123456".to_string(),
-                    message: "feat: add vscode extensions".to_string(),
-                    author: "dave".to_string(),
-                    committed_at: now - Duration::hours(8),
-                    system_count: 8,
-                    commits_behind: 0,
-                    systems: vec![
-                        "ws-001".to_string(),
-                        "ws-002".to_string(),
-                        "ws-003".to_string(),
-                        "ws-004".to_string(),
-                        "ws-005".to_string(),
-                        "ws-006".to_string(),
-                        "ws-007".to_string(),
-                        "ws-008".to_string(),
-                    ],
-                    system_paths: vec![],
-                    build_status: Some(BuildStatus::Queued),
-                    evaluation_status: None,
-                    evaluation_error_message: None,
-                },
-                FlakeCommit {
-                    id: 5,
-                    hash: "a2b3c4d5e6f78901234567ab".to_string(),
-                    message: "fix: bluetooth audio".to_string(),
-                    author: "eve".to_string(),
-                    committed_at: now - Duration::days(2),
-                    system_count: 2,
-                    commits_behind: 1,
-                    systems: vec!["ws-009".to_string(), "ws-010".to_string()],
-                    system_paths: vec![],
-                    build_status: Some(BuildStatus::Queued),
-                    evaluation_status: None,
-                    evaluation_error_message: None,
-                },
-            ],
-        },
-        FlakeTimeline {
-            flake_id: 3,
-            flake_name: "edge-nodes".to_string(),
-            repo_url: "github:acme/edge".to_string(),
-            commits: vec![FlakeCommit {
-                id: 6,
-                hash: "1234567890abcdef12345678".to_string(),
-                message: "fix: wireguard tunnel".to_string(),
-                author: "frank".to_string(),
-                committed_at: now - Duration::hours(5),
-                system_count: 10,
-                commits_behind: 0,
-                systems: vec![
-                    "edge-us-east".to_string(),
-                    "edge-us-west".to_string(),
-                    "edge-eu-west".to_string(),
-                    "edge-eu-central".to_string(),
-                    "edge-ap-south".to_string(),
-                    "edge-ap-north".to_string(),
-                    "edge-sa-east".to_string(),
-                    "edge-ca-central".to_string(),
-                    "edge-us-south".to_string(),
-                    "edge-us-north".to_string(),
-                ],
-                system_paths: vec![],
-                build_status: Some(BuildStatus::Queued),
-                evaluation_status: None,
-                evaluation_error_message: None,
-            }],
-        },
-    ]
 }
 
 /// Map a widget `nav` slug to a concrete route.

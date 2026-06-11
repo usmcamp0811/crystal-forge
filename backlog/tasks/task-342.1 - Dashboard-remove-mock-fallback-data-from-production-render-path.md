@@ -1,9 +1,10 @@
 ---
 id: TASK-342.1
 title: 'Dashboard: remove mock/fallback data from production render path'
-status: Backlog
+status: Review
 assignee: []
 created_date: '2026-06-10 13:30'
+updated_date: '2026-06-11 14:13'
 labels:
   - design-parity
   - dashboard
@@ -62,9 +63,9 @@ Ensure all dashboard widgets render from real backend data in production; remove
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Dashboard widgets render from real API data in the production path
-- [ ] #2 Mock timestamp helper is not used in production rendering
-- [ ] #3 Empty state renders genuine empty/zero values, not fabricated data
-- [ ] #4 API error renders a real error state rather than mock data
-- [ ] #5 web-ui step asserts no fabricated dashboard values render on error/empty
+- [x] #1 Dashboard widgets render from real API data in the production path
+- [x] #2 Mock timestamp helper is not used in production rendering
+- [x] #3 Empty state renders genuine empty/zero values, not fabricated data
+- [x] #4 API error renders a real error state rather than mock data
+- [x] #5 web-ui step asserts no fabricated dashboard values render on error/empty
 <!-- AC:END -->

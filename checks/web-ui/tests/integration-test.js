@@ -273,6 +273,60 @@ async function unrouteFleetHealthWidgetData(page) {
   await page.unroute("**/api/v1/systems*");
 }
 
+// Force the dashboard data endpoints to fail so we can assert the production
+// path renders a genuine empty/zero state (no fabricated/mock values) plus a
+// notice banner, per TASK-342.1.
+async function routeDashboardErrorState(page) {
+  await page.route("**/api/v1/dashboard/summary*", async (route) => {
+    await route.fulfill({
+      status: 500,
+      contentType: "application/json",
+      body: JSON.stringify({ error: "internal server error" }),
+    });
+  });
+
+  await page.route("**/api/v1/flakes/timelines?view=dashboard*", async (route) => {
+    await route.fulfill({
+      status: 500,
+      contentType: "application/json",
+      body: JSON.stringify({ error: "internal server error" }),
+    });
+  });
+
+  await page.route("**/api/v1/systems*", async (route) => {
+    await route.fulfill({
+      status: 500,
+      contentType: "application/json",
+      body: JSON.stringify({ error: "internal server error" }),
+    });
+  });
+}
+
+async function unrouteDashboardErrorState(page) {
+  await page.unroute("**/api/v1/dashboard/summary*");
+  await page.unroute("**/api/v1/flakes/timelines?view=dashboard*");
+  await page.unroute("**/api/v1/systems*");
+}
+
+// Hostnames/commit fragments that previously appeared in removed dashboard
+// mock/fallback data.
+// If any of these render, fabricated data has leaked back
+// into the production path.
+const FORBIDDEN_DASHBOARD_MOCK_TOKENS = [
+  "atlas-01",
+  "atlas-02",
+  "nova-05",
+  "luna-01",
+  "luna-02",
+  "orion-03",
+  "vega-04",
+  "edge-us-west",
+  "ws-009",
+  "github:acme/infra",
+  "github:acme/workstations",
+  "github:acme/edge",
+];
+
 function mockRecentDeploymentsScrollSummary() {
   const timestamp = nowIso();
   const recent_deployments = Array.from({ length: 12 }, (_, i) => ({
@@ -1245,6 +1299,69 @@ const steps = [
       }
 
       await unrouteFleetHealthWidgetData(page);
+    },
+  },
+  {
+    name: "06z2-dashboard-error-no-fabricated-data",
+    description:
+      "Dashboard renders a genuine empty/zero state (no fabricated mock data) when the API fails",
+    action: async (page) => {
+      await routeDashboardErrorState(page);
+      try {
+        await page.goto(`${baseUrl}/`, { timeout: LOAD_TIMEOUT });
+        await page.waitForTimeout(1800);
+
+        // The Fleet Health widget must still render, but with zeroed counts.
+        const widget = page.locator("[data-testid='fleet-health-breakdown']");
+        await assertVisible(
+          widget,
+          "Fleet Health widget should render an empty state on API error",
+        );
+
+        const counts = await widget.evaluate((el) => {
+          const tiles = Array.from(
+            el.querySelectorAll("[data-testid='fleet-health-tile']"),
+          );
+          const out = {};
+          for (const tile of tiles) {
+            const label = (tile.getAttribute("data-status") || "").trim().toLowerCase();
+            const count = Number((tile.getAttribute("data-count") || "").trim());
+            if (Number.isFinite(count)) {
+              out[label] = count;
+            }
+          }
+          return out;
+        });
+
+        for (const status of ["healthy", "warning", "critical", "offline"]) {
+          if (!(status in counts)) {
+            throw new Error(`Fleet Health missing ${status} count tile`);
+          }
+          if (counts[status] !== 0) {
+            throw new Error(
+              `Fleet Health should show 0 on API error, got ${counts[status]} for ${status}`,
+            );
+          }
+        }
+
+        // No fabricated hostnames/repos from the removed mock data may appear.
+        const bodyText = (await page.locator("body").innerText()).toLowerCase();
+        for (const token of FORBIDDEN_DASHBOARD_MOCK_TOKENS) {
+          if (bodyText.includes(token.toLowerCase())) {
+            throw new Error(
+              `Fabricated dashboard mock token "${token}" rendered on API error`,
+            );
+          }
+        }
+
+        // A real error/notice banner should communicate the failure.
+        await assertVisible(
+          page.getByText("Dashboard API unavailable", { exact: false }),
+          "Dashboard should show a real error notice when the summary API fails",
+        );
+      } finally {
+        await unrouteDashboardErrorState(page);
+      }
     },
   },
   {
@@ -4994,6 +5111,7 @@ const CI_FAST_STEP_NAMES = new Set([
   "06x-pipeline-readiness-scroll",
   "06y-recent-deployments-scroll",
   "06z-fleet-health-widget-assert",
+  "06z2-dashboard-error-no-fabricated-data",
   "09e-sidebar-sections-fullwidth",
   "09f-sidebar-light-expanded",
   "09g-topbar-notifications-dark",
