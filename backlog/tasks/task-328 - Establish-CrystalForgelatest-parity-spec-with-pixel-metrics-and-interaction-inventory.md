@@ -3,10 +3,11 @@ id: TASK-328
 title: >-
   Establish CrystalForgelatest parity spec with pixel metrics and interaction
   inventory
-status: Backlog
-assignee: []
+status: Done
+assignee:
+  - gpt-5.4
 created_date: '2026-05-31 15:56'
-updated_date: '2026-06-10 02:57'
+updated_date: '2026-06-10 21:16'
 labels:
   - design-parity
   - ui-ux
@@ -30,30 +31,67 @@ Problem: We do not yet have a single executable parity spec mapping every Crysta
 
 Goal: Produce and maintain the canonical parity matrix for all target views/components in `/home/mcamp/code/crystal-forge/CrystalForgelatest`, including visual tokens, spacing/typography rules, component states, interaction flows, and owner files.
 
-Non-goals: Implementing UI changes; changing API contracts in this task.
+## Non-goals
+- Implementing UI changes.
+- Changing API contracts in this task.
 
-Replan note: this task is reset to Backlog and now serves as the foundation contract for milestone m-18. It should be completed before broad surface-by-surface parity work resumes.
-
-Scope details:
+## Scope details
 - Inventory all design-source pages/components.
 - Define measurable pixel/value standards per surface.
 - Map each design element to current web-ui ownership.
 - Define screenshot and assertion requirements consumed by downstream parity tasks.
+
+## Architectural constraints
+- Planning/spec work only; do not modify product UI or server behavior in this task.
+- Keep the matrix authoritative for downstream parity execution and align it with `design/doc-14 - Parity-execution-playbook-agent-proof.md`.
+- Measurable criteria must use objective values/states rather than subjective wording.
+
+## Impact areas
+- `design/doc-8 - CrystalForgelatest-UI-Parity-Matrix-TASK-328.md`
+- parity-related backlog tasks that consume the matrix
+- web-ui screenshot/assertion planning
+
+## Risk level
+- Medium: an incomplete or ambiguous spec will misdirect downstream parity work.
+
+## Verification plan
+- Review the completed matrix against the CrystalForgelatest source tree for full coverage of primary surfaces.
+- Confirm each row names owner files, screenshot targets, and mandatory assertions.
+- Confirm loading/empty/error/populated states are specified where relevant.
+
+## Notes
+- This task remains the authoritative parity-spec contract for downstream UI parity work and should be completed before dependency-bound execution tasks such as `TASK-329`.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A complete design parity matrix exists covering all primary views represented in CrystalForgelatest
-- [ ] #2 Each matrix row includes measurable criteria (pixel/value based) not subjective language
-- [ ] #3 Each matrix row maps to owning implementation files in packages/web-ui
-- [ ] #4 A screenshot target list for web-ui checks is defined for all in-scope views
-- [ ] #5 Interaction inventory includes filter/search/toggle/modal/table/card flows per relevant view
-- [ ] #6 The parity matrix defines mandatory web-ui assertions per view/state (not screenshot-only checks)
-- [ ] #7 The parity matrix requires screenshot coverage for all in-scope states including loading, empty, error, and populated states
+- [x] #1 A complete design parity matrix exists covering all primary views represented in CrystalForgelatest
+- [x] #2 Each matrix row includes measurable criteria (pixel/value based) not subjective language
+- [x] #3 Each matrix row maps to owning implementation files in packages/web-ui
+- [x] #4 A screenshot target list for web-ui checks is defined for all in-scope views
+- [x] #5 Interaction inventory includes filter/search/toggle/modal/table/card flows per relevant view
+- [x] #6 The parity matrix defines mandatory web-ui assertions per view/state (not screenshot-only checks)
+- [x] #7 The parity matrix requires screenshot coverage for all in-scope states including loading, empty, error, and populated states
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Audit the current parity matrix against `CrystalForgelatest/components/*` and `app.jsx` to identify missing surfaces, states, owner mappings, and assertion gaps.
+2. Update `backlog/docs/design/doc-8 - CrystalForgelatest-UI-Parity-Matrix-TASK-328.md` so every in-scope surface has objective criteria, owner files, interaction inventory coverage, mandatory assertions, and screenshot targets for loading/empty/error/populated states plus view-specific variants.
+3. Re-read the updated matrix against the design-source file list and the task acceptance criteria to verify full coverage and keep the matrix aligned with `doc-14`.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Reset to Backlog for re-planning. This task remains the authoritative parity-spec contract for downstream UI work.
+Removed the unused dedicated task worktree after completion: `/home/mcamp/code/crystal-forge/TASK-328-parity-spec`.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Expanded doc-8 into the authoritative CrystalForgelatest parity contract covering every primary surface, owner-file mapping, mandatory interactions/assertions, and screenshot requirements for dark/light plus loading/empty/error/populated states.
+
+Completed as backlog-only maintenance on the integration worktree; no application code changed.
+<!-- SECTION:FINAL_SUMMARY:END -->

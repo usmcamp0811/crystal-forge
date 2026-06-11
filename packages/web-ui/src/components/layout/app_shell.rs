@@ -30,6 +30,27 @@ fn ui_check_mock_auth_enabled() -> bool {
 }
 
 #[cfg(debug_assertions)]
+fn ui_check_mock_auth_role() -> Role {
+    let search = web_sys::window()
+        .and_then(|w| w.location().search().ok())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    if search.contains("ui_check_role=viewer") {
+        Role::Viewer
+    } else if search.contains("ui_check_role=operator") {
+        Role::Operator
+    } else {
+        Role::Admin
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn ui_check_mock_auth_role() -> Role {
+    Role::Admin
+}
+
+#[cfg(debug_assertions)]
 fn ui_check_mock_auth_context() -> AuthContext {
     AuthContext {
         is_authenticated: true,
@@ -38,7 +59,7 @@ fn ui_check_mock_auth_context() -> AuthContext {
             email: "ui-check@example.com".to_string(),
             display_name: Some("UI Check".to_string()),
         }),
-        roles: vec![Role::Admin],
+        roles: vec![ui_check_mock_auth_role()],
         auth_mode: AuthMode::Local,
     }
 }

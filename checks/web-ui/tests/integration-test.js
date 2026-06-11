@@ -2205,7 +2205,113 @@ const steps = [
       if (!box || box.width < 200) {
         throw new Error(`Sections shot: sidebar not expanded: ${box ? box.width : "missing"}`);
       }
+      await assertVisible(sidebar.getByText("Fleet").first(), "Expected Fleet section label");
+      await assertVisible(sidebar.getByText("Pipeline").first(), "Expected Pipeline section label");
+      await assertVisible(sidebar.getByText("Compliance").first(), "Expected Compliance section label");
+      await assertVisible(sidebar.getByText("System").first(), "Expected System section label");
       // Screenshot taken here: full desktop expanded sidebar, all groups visible
+    },
+  },
+  {
+    name: "09f-sidebar-light-expanded",
+    description: "Desktop light theme: expanded shell parity screenshot",
+    action: async (page) => {
+      await page.setViewportSize(VIEWPORTS.desktop);
+      await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+      await page.evaluate(() => {
+        localStorage.setItem("cf-sidebar-collapsed", "false");
+        localStorage.setItem("cf.ui.theme", "light");
+      });
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1500);
+
+      const sidebar = page.locator("[data-testid='sidebar-nav']");
+      await assertVisible(sidebar, "Light shell: sidebar should be visible");
+      const theme = await page.locator("html").getAttribute("data-theme");
+      if (theme !== "light") {
+        throw new Error(`Expected light theme for shell screenshot, got: ${theme}`);
+      }
+    },
+  },
+  {
+    name: "09g-topbar-notifications-dark",
+    description: "Dark theme notifications panel opens with unread badge and settings placeholder",
+    action: async (page) => {
+      await page.setViewportSize(VIEWPORTS.desktop);
+      await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+      await page.evaluate(() => {
+        localStorage.setItem("cf.ui.theme", "dark");
+      });
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1500);
+
+      const bell = page.locator("[data-testid='topbar-notifications-button']");
+      await assertVisible(bell, "Expected notifications bell button");
+      await bell.click();
+      const panel = page.locator("[data-testid='topbar-notifications-panel']");
+      await assertVisible(panel, "Expected notifications panel to open");
+      await assertVisible(
+        page.locator("[data-testid='topbar-notifications-badge']"),
+        "Expected notifications unread badge",
+      );
+      const settingsPlaceholder = page.locator(
+        "[data-testid='topbar-notifications-settings-placeholder']",
+      );
+      await assertVisible(settingsPlaceholder, "Expected notifications settings placeholder");
+      await assertDisabled(settingsPlaceholder, "Expected notifications settings placeholder to be disabled");
+
+      const markRead = page.locator("[data-testid='topbar-notifications-mark-read']");
+      await assertVisible(markRead, "Expected mark-all-read action");
+      await markRead.click();
+      await assertHidden(
+        page.locator("[data-testid='topbar-notifications-badge']"),
+        "Expected notifications unread badge to clear after mark-all-read",
+      );
+    },
+  },
+  {
+    name: "09h-topbar-notifications-light",
+    description: "Light theme notifications panel opens with unread badge and settings placeholder",
+    action: async (page) => {
+      await page.setViewportSize(VIEWPORTS.desktop);
+      await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+      await page.evaluate(() => {
+        localStorage.setItem("cf.ui.theme", "light");
+      });
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1500);
+
+      const bell = page.locator("[data-testid='topbar-notifications-button']");
+      await assertVisible(bell, "Expected notifications bell button");
+      await bell.click();
+      const panel = page.locator("[data-testid='topbar-notifications-panel']");
+      await assertVisible(panel, "Expected notifications panel to open");
+      const theme = await page.locator("html").getAttribute("data-theme");
+      if (theme !== "light") {
+        throw new Error(`Expected light theme for notifications screenshot, got: ${theme}`);
+      }
+    },
+  },
+  {
+    name: "09i-topbar-notifications-non-admin",
+    description: "Non-admin shell hides admin-gated notifications",
+    action: async (page) => {
+      await page.setViewportSize(VIEWPORTS.desktop);
+      await page.goto(`${baseUrl}/systems?ui_check_auth=1&ui_check_role=viewer`, {
+        timeout: LOAD_TIMEOUT,
+      });
+      await page.waitForTimeout(1500);
+
+      const bell = page.locator("[data-testid='topbar-notifications-button']");
+      await assertVisible(bell, "Expected notifications bell button for non-admin shell");
+      await bell.click();
+
+      const panel = page.locator("[data-testid='topbar-notifications-panel']");
+      await assertVisible(panel, "Expected notifications panel to open for non-admin shell");
+      await assertHidden(
+        panel.getByText("New critical CVE: CVE-2026-31822"),
+        "Expected admin-gated CVE notification to be hidden for non-admin shell",
+      );
     },
   },
   {
@@ -2215,6 +2321,7 @@ const steps = [
       await page.setViewportSize(VIEWPORTS.desktop);
       await page.evaluate(() => {
         localStorage.removeItem("cf-sidebar-collapsed");
+        localStorage.setItem("cf.ui.theme", "dark");
       });
       await page.goto(`${baseUrl}/`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(1200);
@@ -4887,6 +4994,11 @@ const CI_FAST_STEP_NAMES = new Set([
   "06x-pipeline-readiness-scroll",
   "06y-recent-deployments-scroll",
   "06z-fleet-health-widget-assert",
+  "09e-sidebar-sections-fullwidth",
+  "09f-sidebar-light-expanded",
+  "09g-topbar-notifications-dark",
+  "09h-topbar-notifications-light",
+  "09i-topbar-notifications-non-admin",
   "11b-builders",
   "11c-builders-edit-modal",
   "15-builds",
