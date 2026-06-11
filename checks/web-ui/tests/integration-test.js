@@ -309,7 +309,8 @@ async function unrouteDashboardErrorState(page) {
 }
 
 // Hostnames/commit fragments that previously appeared in removed dashboard
-// mock/fallback data. If any of these render, fabricated data has leaked back
+// mock/fallback data.
+// If any of these render, fabricated data has leaked back
 // into the production path.
 const FORBIDDEN_DASHBOARD_MOCK_TOKENS = [
   "atlas-01",
@@ -1332,10 +1333,13 @@ const steps = [
           return out;
         });
 
-        for (const [status, count] of Object.entries(counts)) {
-          if (count !== 0) {
+        for (const status of ["healthy", "warning", "critical", "offline"]) {
+          if (!(status in counts)) {
+            throw new Error(`Fleet Health missing ${status} count tile`);
+          }
+          if (counts[status] !== 0) {
             throw new Error(
-              `Fleet Health should show 0 on API error, got ${count} for ${status}`,
+              `Fleet Health should show 0 on API error, got ${counts[status]} for ${status}`,
             );
           }
         }
