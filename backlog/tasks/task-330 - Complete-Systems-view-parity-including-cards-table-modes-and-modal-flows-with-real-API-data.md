@@ -3,10 +3,11 @@ id: TASK-330
 title: >-
   Complete Systems view parity including cards-table modes and modal flows with
   real API data
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@gpt-5.4'
 created_date: '2026-05-31 15:56'
-updated_date: '2026-06-11 21:41'
+updated_date: '2026-06-11 21:45'
 labels:
   - design-parity
   - systems
@@ -53,3 +54,11 @@ Scope details:
 - [ ] #5 web-ui checks include screenshot + behavior assertions for systems parity scenarios
 - [ ] #6 web-ui screenshot set covers loading, empty, error, and populated states for Systems surfaces
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: gpt-5.4 on reckless in /home/mcamp/code/crystal-forge/TASK-330-systems-view-parity
+
+Executing TASK-330 in a single dedicated worktree with child tasks 330.1-330.3 treated as planning-only breakdown per user instruction.
+<!-- SECTION:NOTES:END -->
