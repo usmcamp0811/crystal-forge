@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@gpt-5.4'
 created_date: '2026-05-31 15:56'
-updated_date: '2026-06-11 21:45'
+updated_date: '2026-06-11 21:47'
 labels:
   - design-parity
   - systems
@@ -55,10 +55,19 @@ Scope details:
 - [ ] #6 web-ui screenshot set covers loading, empty, error, and populated states for Systems surfaces
 <!-- AC:END -->
 
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Refresh the dedicated TASK-330 worktree onto the latest `dev` head before coding so the branch includes MR 272 and other merged work.
+2. Phase 1: remove production-path systems mock/fallback rendering, replace it with real loading/empty/error states, and extend the existing systems API error check so it proves mock data never renders on API failure.
+3. Open a draft MR for TASK-330 after Phase 1 verification so the user can review incremental progress without marking the task complete.
+4. Phase 2: align the Systems header, stat strip, filter bar, cards/table density, selected-state treatment, and shown-count behavior to the CrystalForgelatest reference using real API-backed values.
+5. Phase 3: align the side panel plus deploy/edit/add modal visuals and interactions, keeping API-backed submit flows and extending screenshot/assertion coverage for panel and modal states.
+6. Run scoped verification after each phase and keep TASK-330 notes updated with progress, blockers, and MR context.
+<!-- SECTION:PLAN:END -->
+
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-LOCK: gpt-5.4 on reckless in /home/mcamp/code/crystal-forge/TASK-330-systems-view-parity
-
-Executing TASK-330 in a single dedicated worktree with child tasks 330.1-330.3 treated as planning-only breakdown per user instruction.
+User approved phased execution with a draft MR opened after phase 1 for incremental review; task remains In Progress until full TASK-330 scope is complete.
 <!-- SECTION:NOTES:END -->
