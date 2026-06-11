@@ -1,9 +1,10 @@
 ---
 id: TASK-342.1
 title: 'Dashboard: remove mock/fallback data from production render path'
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-06-10 13:30'
+updated_date: '2026-06-11 12:39'
 labels:
   - design-parity
   - dashboard
