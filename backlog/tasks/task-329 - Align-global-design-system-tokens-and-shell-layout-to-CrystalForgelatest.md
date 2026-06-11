@@ -1,11 +1,11 @@
 ---
 id: TASK-329
 title: 'Foundation: shell, tokens, topbar, and sidebar parity to CrystalForgelatest'
-status: In Progress
+status: Review
 assignee:
   - gpt-5.4
 created_date: '2026-05-31 15:56'
-updated_date: '2026-06-10 23:58'
+updated_date: '2026-06-11 00:40'
 labels:
   - design-parity
   - design-system
@@ -95,11 +95,17 @@ Goal: bring global tokens + shell chrome (sidebar groups, topbar, base primitive
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Implemented Shell parity updates in the task worktree: sidebar grouping now matches Fleet / Pipeline / Compliance / System, with non-interactive placeholders for missing Compliance destinations; topbar now includes the notifications dropdown, unread badge, and placeholder settings action.
+MR opened: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/269
 
-Updated `checks/web-ui/tests/integration-test.js` to assert section labels, capture a light-theme shell screenshot, and capture notifications-open screenshots in dark and light themes.
+Committed on branch `TASK-329-shell-tokens-topbar-sidebar-parity` as `e60aa463 feat: align shell parity foundation`.
 
-Verification executed: `nix develop -c cargo fmt --all --manifest-path packages/web-ui/Cargo.toml -- --check`, `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown`, and `nix build .#checks.x86_64-linux.web-ui`.
-
-`distill` did not provide the requested compact summaries for verbose commands in this environment, so verification was judged from the underlying command exit status and raw output instead.
+Uploaded UI screenshots to the MR via GitLab uploads from the `web-ui` check output.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Aligned the shared web-ui shell with CrystalForgelatest by regrouping sidebar navigation, adding the topbar notifications dropdown, and extending shell-level screenshot/assertion coverage for both themes.
+
+Used non-interactive placeholders for design-only destinations that do not yet exist in the repo, keeping the change scoped to shared shell parity.
+<!-- SECTION:FINAL_SUMMARY:END -->
