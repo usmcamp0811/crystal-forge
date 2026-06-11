@@ -5,7 +5,7 @@ status: Review
 assignee:
   - gpt-5.4
 created_date: '2026-05-31 15:56'
-updated_date: '2026-06-11 02:06'
+updated_date: '2026-06-11 02:10'
 labels:
   - design-parity
   - design-system
@@ -91,14 +91,13 @@ Goal: bring global tokens + shell chrome (sidebar groups, topbar, base primitive
 3. Update `packages/web-ui/src/components/layout/topbar.rs` to add the notifications dropdown behavior and wire the bell/panel interactions without changing theme/tweaks behavior; use a non-interactive placeholder for notification settings/profile destinations that do not yet exist.
 4. Add the missing shell notification styles and update `checks/web-ui/tests/integration-test.js` so the web-ui check asserts the notifications panel opens and captures the shell states in both themes.
 5. Apply review feedback by centering the notifications popup footer button with a minimal shell-style change and rerun targeted verification when appropriate.
+6. Apply MR review fixes by filtering admin-only notifications for non-admin users, making mark-all-read update local unread state, making the settings placeholder truly disabled, and adding non-admin notification coverage to the web-ui check.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Follow-up MR tweak: centered the notifications popup footer button via a minimal CSS change in `packages/web-ui/assets/app.css`.
-
-Local re-run of `nix build .#checks.x86_64-linux.web-ui` was started but user explicitly stopped it due cost; this follow-up is awaiting CI verification and is not claimed as locally re-verified.
+MR review follow-up: fix role-aware visibility for admin-gated notifications, replace the fake mark-all-read action with real local unread-state handling, make the notification settings placeholder actually disabled, and add non-admin check coverage.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
