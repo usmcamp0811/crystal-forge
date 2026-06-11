@@ -1,9 +1,10 @@
 ---
 id: TASK-342.2
 title: 'Dashboard: widget grid layout + widget visuals parity'
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-06-10 13:30'
+updated_date: '2026-06-11 20:16'
 labels:
   - design-parity
   - dashboard
