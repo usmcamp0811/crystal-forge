@@ -2092,7 +2092,7 @@ html[data-theme="light"] .sd-nix {
 }
 
 .notif-foot {
-  justify-content: flex-end;
+  justify-content: center;
   border-bottom: 0;
   border-top: 1px solid var(--cf-divider);
 }
