@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@gpt-5.4'
 created_date: '2026-05-31 15:56'
-updated_date: '2026-06-11 21:47'
+updated_date: '2026-06-11 22:19'
 labels:
   - design-parity
   - systems
@@ -69,5 +69,5 @@ Scope details:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-User approved phased execution with a draft MR opened after phase 1 for incremental review; task remains In Progress until full TASK-330 scope is complete.
+User requested that the expensive `nix build .#checks.x86_64-linux.web-ui` run only at an actual review point; keep interim verification lightweight until Phase 1 is ready.
 <!-- SECTION:NOTES:END -->
