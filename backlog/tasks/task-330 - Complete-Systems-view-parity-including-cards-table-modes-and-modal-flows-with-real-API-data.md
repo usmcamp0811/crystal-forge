@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@gpt-5.4'
 created_date: '2026-05-31 15:56'
-updated_date: '2026-06-11 22:19'
+updated_date: '2026-06-11 22:21'
 labels:
   - design-parity
   - systems
@@ -69,5 +69,9 @@ Scope details:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-User requested that the expensive `nix build .#checks.x86_64-linux.web-ui` run only at an actual review point; keep interim verification lightweight until Phase 1 is ready.
+Phase 1 implementation in progress: removed production-path fallback seeding from `systems_list.rs`, introduced dedicated loading/error/empty states, and added web-ui integration-test coverage for empty + API failure states.
+
+Light verification completed so far: `nix develop -c cargo fmt --manifest-path packages/web-ui/Cargo.toml --all -- --check`, `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown`, and `node --check checks/web-ui/tests/integration-test.js`.
+
+Verified with repo search that legacy `systems_mock*` files still exist but are not referenced by the Systems production render path; remaining references are in legacy modules and Flakes mock usage, which stays out of scope for this phase.
 <!-- SECTION:NOTES:END -->
