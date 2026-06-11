@@ -5,7 +5,7 @@ status: Review
 assignee:
   - gpt-5.4
 created_date: '2026-05-31 15:56'
-updated_date: '2026-06-11 01:57'
+updated_date: '2026-06-11 02:06'
 labels:
   - design-parity
   - design-system
@@ -90,13 +90,15 @@ Goal: bring global tokens + shell chrome (sidebar groups, topbar, base primitive
 2. Update `packages/web-ui/src/components/layout/sidebar.rs` to match the design grouping in both desktop and mobile navigation while preserving existing admin gating; use non-interactive placeholders where the design references missing destinations.
 3. Update `packages/web-ui/src/components/layout/topbar.rs` to add the notifications dropdown behavior and wire the bell/panel interactions without changing theme/tweaks behavior; use a non-interactive placeholder for notification settings/profile destinations that do not yet exist.
 4. Add the missing shell notification styles and update `checks/web-ui/tests/integration-test.js` so the web-ui check asserts the notifications panel opens and captures the shell states in both themes.
-5. Apply review feedback by centering the notifications popup footer button with a minimal shell-style change and rerun targeted verification.
+5. Apply review feedback by centering the notifications popup footer button with a minimal shell-style change and rerun targeted verification when appropriate.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Review feedback follow-up: center the notifications popup footer button in the existing TASK-329 branch and MR.
+Follow-up MR tweak: centered the notifications popup footer button via a minimal CSS change in `packages/web-ui/assets/app.css`.
+
+Local re-run of `nix build .#checks.x86_64-linux.web-ui` was started but user explicitly stopped it due cost; this follow-up is awaiting CI verification and is not claimed as locally re-verified.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
