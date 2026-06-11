@@ -5,7 +5,7 @@ status: Review
 assignee:
   - gpt-5.4
 created_date: '2026-05-31 15:56'
-updated_date: '2026-06-11 00:40'
+updated_date: '2026-06-11 01:57'
 labels:
   - design-parity
   - design-system
@@ -90,16 +90,13 @@ Goal: bring global tokens + shell chrome (sidebar groups, topbar, base primitive
 2. Update `packages/web-ui/src/components/layout/sidebar.rs` to match the design grouping in both desktop and mobile navigation while preserving existing admin gating; use non-interactive placeholders where the design references missing destinations.
 3. Update `packages/web-ui/src/components/layout/topbar.rs` to add the notifications dropdown behavior and wire the bell/panel interactions without changing theme/tweaks behavior; use a non-interactive placeholder for notification settings/profile destinations that do not yet exist.
 4. Add the missing shell notification styles and update `checks/web-ui/tests/integration-test.js` so the web-ui check asserts the notifications panel opens and captures the shell states in both themes.
+5. Apply review feedback by centering the notifications popup footer button with a minimal shell-style change and rerun targeted verification.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-MR opened: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/269
-
-Committed on branch `TASK-329-shell-tokens-topbar-sidebar-parity` as `e60aa463 feat: align shell parity foundation`.
-
-Uploaded UI screenshots to the MR via GitLab uploads from the `web-ui` check output.
+Review feedback follow-up: center the notifications popup footer button in the existing TASK-329 branch and MR.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
