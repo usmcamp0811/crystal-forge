@@ -1,12 +1,34 @@
 //! Top bar layout component.
 
 use crate::components::layout::sidebar::SidebarContext;
+use crate::routes::Route;
 use crate::state::theme::UiTheme;
 use crate::theme;
 use dioxus::prelude::*;
 
 const DENSITY_KEY: &str = "cf.ui.density";
 const SYSTEMS_VIEW_KEY: &str = "crystal_forge.systems.view";
+
+#[derive(Clone)]
+struct NotificationItem {
+    id: u8,
+    title: &'static str,
+    subtitle: &'static str,
+    age: &'static str,
+    color: &'static str,
+    unread: bool,
+    route: Option<Route>,
+    kind: NotificationKind,
+}
+
+#[derive(Clone, Copy)]
+enum NotificationKind {
+    Deploy,
+    Build,
+    Shield,
+    Warning,
+    Evaluation,
+}
 
 fn load_pref(key: &str, default: &str) -> String {
     web_sys::window()
@@ -34,25 +56,81 @@ fn set_root_attr(name: &str, value: &str) {
     }
 }
 
+fn notifications() -> Vec<NotificationItem> {
+    vec![
+        NotificationItem {
+            id: 1,
+            title: "3 systems awaiting deploy approval",
+            subtitle: "production · manual policy",
+            age: "2m ago",
+            color: "#fbbf24",
+            unread: true,
+            route: Some(Route::SystemsView {}),
+            kind: NotificationKind::Deploy,
+        },
+        NotificationItem {
+            id: 2,
+            title: "Build failed: openssl-3.3.2",
+            subtitle: "hydra-02 · attempt 3",
+            age: "12m ago",
+            color: "#f87171",
+            unread: true,
+            route: Some(Route::BuildsView {}),
+            kind: NotificationKind::Build,
+        },
+        NotificationItem {
+            id: 3,
+            title: "New critical CVE: CVE-2026-31822",
+            subtitle: "affects 6 systems · openssl",
+            age: "38m ago",
+            color: "#f87171",
+            unread: true,
+            route: Some(Route::CvesView {}),
+            kind: NotificationKind::Shield,
+        },
+        NotificationItem {
+            id: 4,
+            title: "Heartbeat lost: edge-fra-01",
+            subtitle: "no signal for 6h",
+            age: "1h ago",
+            color: "#fbbf24",
+            unread: false,
+            route: Some(Route::SystemsView {}),
+            kind: NotificationKind::Warning,
+        },
+        NotificationItem {
+            id: 5,
+            title: "Eval complete: infrastructure@a3f8c12",
+            subtitle: "12 systems · all policies passed",
+            age: "2h ago",
+            color: "#34d399",
+            unread: false,
+            route: Some(Route::EvaluationsView {}),
+            kind: NotificationKind::Evaluation,
+        },
+    ]
+}
+
 /// Header bar displaying the current page title and optional actions.
 #[component]
 pub fn TopBar(title: String) -> Element {
     let mut ui_theme = use_context::<Signal<UiTheme>>();
+    let nav = navigator();
 
     let sidebar_ctx = use_context::<SidebarContext>();
     let mut is_mobile_drawer_open = sidebar_ctx.is_mobile_drawer_open;
     let mut is_collapsed = sidebar_ctx.is_collapsed;
     let mut tweaks_open = use_signal(|| false);
+    let mut notifications_open = use_signal(|| false);
     let mut density = use_signal(|| load_pref(DENSITY_KEY, "comfortable"));
     let mut default_view = use_signal(|| load_pref(SYSTEMS_VIEW_KEY, "cards"));
+    let notification_items = notifications();
+    let unread_count = notification_items.iter().filter(|item| item.unread).count();
 
     let toggle_drawer = move |_| {
         is_mobile_drawer_open.set(!is_mobile_drawer_open());
     };
 
-    // Measure the topbar's bottom edge after mount and write it as --coach-top so the
-    // floating coach panel always sits directly below the topbar regardless of any
-    // banners or other elements above it in the layout.
     use_effect(move || {
         let _ = js_sys::eval(
             "(() => { \
@@ -72,7 +150,6 @@ pub fn TopBar(title: String) -> Element {
     rsx! {
         header {
             class: "topbar",
-            // Mobile (<480px): hamburger drawer button
             button {
                 "data-testid": "mobile-nav-toggle",
                 class: "cf-mobile-only inline-flex items-center justify-center p-2 rounded-lg border {theme::surface::CARD_BORDER} {theme::interactive::HOVER_BG} {theme::text::SECONDARY} min-h-[44px] min-w-[44px]",
@@ -88,14 +165,13 @@ pub fn TopBar(title: String) -> Element {
                 }
             }
 
-            // Breadcrumbs
             div {
                 class: "breadcrumbs",
                 span { "Fleet" }
                 span { class: "sep", "/" }
                 span { class: "crumb-current", "{title}" }
             }
-            // Search bar
+
             div {
                 class: "topbar-search",
                 svg {
@@ -122,24 +198,169 @@ pub fn TopBar(title: String) -> Element {
                 }
             }
 
-            // Bell (notifications) button
-            button {
-                class: "btn-icon focus-ring",
-                "aria-label": "Notifications",
-                title: "Notifications",
-                svg {
-                    class: "w-4 h-4",
-                    fill: "none",
-                    stroke: "currentColor",
-                    stroke_width: "2",
-                    view_box: "0 0 24 24",
-                    path {
-                        d: "M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"
+            div {
+                class: "topbar-notifications-wrap",
+                button {
+                    "data-testid": "topbar-notifications-button",
+                    class: "btn-icon focus-ring topbar-bell",
+                    "aria-label": "Notifications",
+                    title: "Notifications",
+                    onclick: move |_| {
+                        notifications_open.set(!notifications_open());
+                    },
+                    svg {
+                        class: "w-4 h-4",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        view_box: "0 0 24 24",
+                        path {
+                            d: "M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"
+                        }
+                    }
+                    if unread_count > 0 {
+                        span {
+                            "data-testid": "topbar-notifications-badge",
+                            class: "topbar-bell-badge",
+                            "{unread_count}"
+                        }
+                    }
+                }
+
+                if notifications_open() {
+                    div {
+                        class: "cf-overlay-backdrop",
+                        onclick: move |_| notifications_open.set(false),
+                    }
+                    div {
+                        "data-testid": "topbar-notifications-panel",
+                        class: "notif-panel",
+                        div {
+                            class: "notif-head",
+                            strong { "Notifications" }
+                            button {
+                                class: "btn-icon focus-ring",
+                                title: "Mark all read",
+                                style: "padding: 4px;",
+                                onclick: move |_| notifications_open.set(false),
+                                svg {
+                                    class: "w-3.5 h-3.5",
+                                    fill: "none",
+                                    stroke: "currentColor",
+                                    stroke_width: "2",
+                                    view_box: "0 0 24 24",
+                                    path { d: "M5 13l4 4L19 7" }
+                                }
+                            }
+                        }
+                        div {
+                            class: "notif-list",
+                            for item in notification_items.clone() {
+                                button {
+                                    key: "notif-{item.id}",
+                                    class: if item.unread { "notif-item unread focus-ring" } else { "notif-item focus-ring" },
+                                    onclick: {
+                                        let nav = nav.clone();
+                                        let route = item.route.clone();
+                                        move |_| {
+                                            notifications_open.set(false);
+                                            if let Some(route) = route.clone() {
+                                                nav.push(route);
+                                            }
+                                        }
+                                    },
+                                    span {
+                                        class: "notif-icon",
+                                        style: "color: {item.color}; background: color-mix(in oklab, {item.color} 16%, transparent);",
+                                        match item.kind {
+                                            NotificationKind::Deploy => rsx!(
+                                                svg {
+                                                    class: "w-3.5 h-3.5",
+                                                    fill: "none",
+                                                    stroke: "currentColor",
+                                                    stroke_width: "2",
+                                                    view_box: "0 0 24 24",
+                                                    path { d: "M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" }
+                                                }
+                                            ),
+                                            NotificationKind::Build => rsx!(
+                                                svg {
+                                                    class: "w-3.5 h-3.5",
+                                                    fill: "none",
+                                                    stroke: "currentColor",
+                                                    stroke_width: "2",
+                                                    view_box: "0 0 24 24",
+                                                    path { d: "M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" }
+                                                }
+                                            ),
+                                            NotificationKind::Shield => rsx!(
+                                                svg {
+                                                    class: "w-3.5 h-3.5",
+                                                    fill: "none",
+                                                    stroke: "currentColor",
+                                                    stroke_width: "2",
+                                                    view_box: "0 0 24 24",
+                                                    path { d: "M12 3l7 3v6c0 5-3 7.5-7 9-4-1.5-7-4-7-9V6l7-3z" }
+                                                }
+                                            ),
+                                            NotificationKind::Warning => rsx!(
+                                                svg {
+                                                    class: "w-3.5 h-3.5",
+                                                    fill: "none",
+                                                    stroke: "currentColor",
+                                                    stroke_width: "2",
+                                                    view_box: "0 0 24 24",
+                                                    path { d: "M12 9v4m0 4h.01" }
+                                                    path { d: "M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" }
+                                                }
+                                            ),
+                                            NotificationKind::Evaluation => rsx!(
+                                                svg {
+                                                    class: "w-3.5 h-3.5",
+                                                    fill: "none",
+                                                    stroke: "currentColor",
+                                                    stroke_width: "2",
+                                                    view_box: "0 0 24 24",
+                                                    path { d: "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2" }
+                                                    path { d: "M9 5a2 2 0 002 2h2a2 2 0 002-2" }
+                                                    path { d: "M9 12l2 2 4-4" }
+                                                }
+                                            ),
+                                        }
+                                    }
+                                    span {
+                                        style: "min-width: 0; flex: 1;",
+                                        span {
+                                            class: "notif-title",
+                                            "{item.title}"
+                                        }
+                                        span {
+                                            class: "notif-sub",
+                                            "{item.subtitle}"
+                                        }
+                                    }
+                                    span {
+                                        class: "notif-at",
+                                        "{item.age}"
+                                    }
+                                }
+                            }
+                        }
+                        div {
+                            class: "notif-foot",
+                            button {
+                                "data-testid": "topbar-notifications-settings-placeholder",
+                                class: "btn btn-ghost focus-ring xs",
+                                r#type: "button",
+                                title: "Notification settings coming soon",
+                                "aria-disabled": "true",
+                                "Notification settings"
+                            }
+                        }
                     }
                 }
             }
 
-            // Theme toggle button
             button {
                 class: "btn-icon focus-ring",
                 "aria-label": "Toggle theme",
@@ -149,7 +370,6 @@ pub fn TopBar(title: String) -> Element {
                     ui_theme.set(next);
                 },
                 if ui_theme() == UiTheme::Dark {
-                    // Sun icon - switch to light
                     svg {
                         class: "w-4 h-4",
                         fill: "none",
@@ -162,7 +382,6 @@ pub fn TopBar(title: String) -> Element {
                         }
                     }
                 } else {
-                    // Moon icon - switch to dark
                     svg {
                         class: "w-4 h-4",
                         fill: "none",
@@ -176,7 +395,6 @@ pub fn TopBar(title: String) -> Element {
                 }
             }
 
-            // Tweaks button
             button {
                 class: "btn-icon focus-ring",
                 "aria-label": "Tweaks",

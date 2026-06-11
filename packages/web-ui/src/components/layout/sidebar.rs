@@ -211,6 +211,21 @@ pub fn SidebarNav() -> Element {
                 NavSection { collapsed: is_collapsed, label: "Pipeline" }
                 NavLink {
                     collapsed: is_collapsed,
+                    to: Route::BuildsView {},
+                    label: "Builds",
+                    icon: rsx!(
+                        svg {
+                            class: "w-4 h-4",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "1.75",
+                            view_box: "0 0 24 24",
+                            path { d: "M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" }
+                        }
+                    )
+                }
+                NavLink {
+                    collapsed: is_collapsed,
                     to: Route::EvaluationsView {},
                     label: "Evaluations",
                     icon: rsx!(
@@ -223,21 +238,6 @@ pub fn SidebarNav() -> Element {
                             path { d: "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2" }
                             path { d: "M9 5a2 2 0 002 2h2a2 2 0 002-2" }
                             path { d: "M9 12l2 2 4-4" }
-                        }
-                    )
-                }
-                NavLink {
-                    collapsed: is_collapsed,
-                    to: Route::BuildsView {},
-                    label: "Builds",
-                    icon: rsx!(
-                        svg {
-                            class: "w-4 h-4",
-                            fill: "none",
-                            stroke: "currentColor",
-                            stroke_width: "1.75",
-                            view_box: "0 0 24 24",
-                            path { d: "M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" }
                         }
                     )
                 }
@@ -260,8 +260,8 @@ pub fn SidebarNav() -> Element {
                 }
 
                 // ── Compliance ────────────────────────────────────────────
+                NavSection { collapsed: is_collapsed, label: "Compliance" }
                 if show_admin {
-                    NavSection { collapsed: is_collapsed, label: "Compliance" }
                     NavLink {
                         collapsed: is_collapsed,
                         to: Route::CvesView {},
@@ -278,9 +278,6 @@ pub fn SidebarNav() -> Element {
                         )
                     }
                 }
-
-                // ── System ────────────────────────────────────────────────
-                NavSection { collapsed: is_collapsed, label: "System" }
                 NavLink {
                     collapsed: is_collapsed,
                     to: Route::PoliciesView {},
@@ -296,6 +293,24 @@ pub fn SidebarNav() -> Element {
                         }
                     )
                 }
+                PlaceholderNavItem {
+                    collapsed: is_collapsed,
+                    label: "Compliance",
+                    icon: rsx!(
+                        svg {
+                            class: "w-4 h-4",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "1.75",
+                            view_box: "0 0 24 24",
+                            path { d: "M12 3l7 3v6c0 5-3 7.5-7 9-4-1.5-7-4-7-9V6l7-3z" }
+                            path { d: "M9 12l2 2 4-4" }
+                        }
+                    )
+                }
+
+                // ── System ────────────────────────────────────────────────
+                NavSection { collapsed: is_collapsed, label: "System" }
                 NavLink {
                     collapsed: is_collapsed,
                     to: Route::BuildersView {},
@@ -330,9 +345,7 @@ pub fn SidebarNav() -> Element {
                         }
                     )
                 }
-                // ── Admin (role-gated) ────────────────────────────────────
                 if show_admin {
-                    NavSection { collapsed: is_collapsed, label: "Admin" }
                     NavLink {
                         collapsed: is_collapsed,
                         to: Route::AdminView {},
@@ -491,6 +504,7 @@ pub fn MobileDrawer() -> Element {
                 class: "flex-1 px-3 overflow-y-auto",
                 style: "padding-top: 0.25rem; padding-bottom: 0.25rem;",
 
+                NavSection { collapsed: false, label: "Fleet" }
                 NavLink {
                     collapsed: false,
                     to: Route::DashboardView {},
@@ -507,8 +521,6 @@ pub fn MobileDrawer() -> Element {
                         }
                     )
                 }
-
-                NavSection { collapsed: false, label: "Fleet" }
                 NavLink {
                     collapsed: false,
                     to: Route::SystemsView {},
@@ -523,6 +535,23 @@ pub fn MobileDrawer() -> Element {
                             rect { x: "3", y: "5", width: "18", height: "12", rx: "2" }
                             path { d: "M7 21h10" }
                             path { d: "M12 17v4" }
+                        }
+                    )
+                }
+                NavLink {
+                    collapsed: false,
+                    to: Route::FlakesView {},
+                    label: "Flakes",
+                    icon: rsx!(
+                        svg {
+                            class: "w-4 h-4",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "1.75",
+                            view_box: "0 0 24 24",
+                            path { d: "M12 2L2 7l10 5 10-5-10-5z" }
+                            path { d: "M2 17l10 5 10-5" }
+                            path { d: "M2 12l10 5 10-5" }
                         }
                     )
                 }
@@ -544,11 +573,11 @@ pub fn MobileDrawer() -> Element {
                     )
                 }
 
-                NavSection { collapsed: false, label: "Nix Pipeline" }
+                NavSection { collapsed: false, label: "Pipeline" }
                 NavLink {
                     collapsed: false,
-                    to: Route::FlakesView {},
-                    label: "Flakes",
+                    to: Route::BuildsView {},
+                    label: "Builds",
                     icon: rsx!(
                         svg {
                             class: "w-4 h-4",
@@ -556,9 +585,7 @@ pub fn MobileDrawer() -> Element {
                             stroke: "currentColor",
                             stroke_width: "1.75",
                             view_box: "0 0 24 24",
-                            path { d: "M12 2L2 7l10 5 10-5-10-5z" }
-                            path { d: "M2 17l10 5 10-5" }
-                            path { d: "M2 12l10 5 10-5" }
+                            path { d: "M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" }
                         }
                     )
                 }
@@ -576,21 +603,6 @@ pub fn MobileDrawer() -> Element {
                             path { d: "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2" }
                             path { d: "M9 5a2 2 0 002 2h2a2 2 0 002-2" }
                             path { d: "M9 12l2 2 4-4" }
-                        }
-                    )
-                }
-                NavLink {
-                    collapsed: false,
-                    to: Route::BuildsView {},
-                    label: "Builds",
-                    icon: rsx!(
-                        svg {
-                            class: "w-4 h-4",
-                            fill: "none",
-                            stroke: "currentColor",
-                            stroke_width: "1.75",
-                            view_box: "0 0 24 24",
-                            path { d: "M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" }
                         }
                     )
                 }
@@ -612,7 +624,56 @@ pub fn MobileDrawer() -> Element {
                     }
                 }
 
-                NavSection { collapsed: false, label: "Infrastructure" }
+                NavSection { collapsed: false, label: "Compliance" }
+                if show_admin {
+                    NavLink {
+                        collapsed: false,
+                        to: Route::CvesView {},
+                        label: "CVEs",
+                        icon: rsx!(
+                            svg {
+                                class: "w-4 h-4",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "1.75",
+                                view_box: "0 0 24 24",
+                                path { d: "M12 3l7 3v6c0 5-3 7.5-7 9-4-1.5-7-4-7-9V6l7-3z" }
+                            }
+                        )
+                    }
+                }
+                NavLink {
+                    collapsed: false,
+                    to: Route::PoliciesView {},
+                    label: "Policies",
+                    icon: rsx!(
+                        svg {
+                            class: "w-4 h-4",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "1.75",
+                            view_box: "0 0 24 24",
+                            path { d: "M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" }
+                        }
+                    )
+                }
+                PlaceholderNavItem {
+                    collapsed: false,
+                    label: "Compliance",
+                    icon: rsx!(
+                        svg {
+                            class: "w-4 h-4",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "1.75",
+                            view_box: "0 0 24 24",
+                            path { d: "M12 3l7 3v6c0 5-3 7.5-7 9-4-1.5-7-4-7-9V6l7-3z" }
+                            path { d: "M9 12l2 2 4-4" }
+                        }
+                    )
+                }
+
+                NavSection { collapsed: false, label: "System" }
                 NavLink {
                     collapsed: false,
                     to: Route::BuildersView {},
@@ -648,42 +709,7 @@ pub fn MobileDrawer() -> Element {
                     )
                 }
 
-                NavSection { collapsed: false, label: "Compliance" }
                 if show_admin {
-                    NavLink {
-                        collapsed: false,
-                        to: Route::CvesView {},
-                        label: "CVEs",
-                        icon: rsx!(
-                            svg {
-                                class: "w-4 h-4",
-                                fill: "none",
-                                stroke: "currentColor",
-                                stroke_width: "1.75",
-                                view_box: "0 0 24 24",
-                                path { d: "M12 3l7 3v6c0 5-3 7.5-7 9-4-1.5-7-4-7-9V6l7-3z" }
-                            }
-                        )
-                    }
-                }
-                NavLink {
-                    collapsed: false,
-                    to: Route::PoliciesView {},
-                    label: "Deployment Policies",
-                    icon: rsx!(
-                        svg {
-                            class: "w-4 h-4",
-                            fill: "none",
-                            stroke: "currentColor",
-                            stroke_width: "1.75",
-                            view_box: "0 0 24 24",
-                            path { d: "M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" }
-                        }
-                    )
-                }
-
-                if show_admin {
-                    NavSection { collapsed: false, label: "Admin" }
                     NavLink {
                         collapsed: false,
                         to: Route::AdminView {},
@@ -798,6 +824,27 @@ fn NavSection(collapsed: bool, label: &'static str) -> Element {
             div {
                 class: "nav-section-label",
                 "{label}"
+            }
+        }
+    }
+}
+
+#[component]
+fn PlaceholderNavItem(collapsed: bool, label: &'static str, icon: Element) -> Element {
+    rsx! {
+        div {
+            class: "nav-item nav-item-placeholder",
+            title: if collapsed { label } else { "Coming soon" },
+            "aria-disabled": "true",
+            div {
+                class: "nav-icon",
+                {icon}
+            }
+            if !collapsed {
+                span {
+                    class: "nav-label",
+                    "{label}"
+                }
             }
         }
     }
