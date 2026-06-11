@@ -1,9 +1,10 @@
 ---
 id: TASK-342.2
 title: 'Dashboard: widget grid layout + widget visuals parity'
-status: Backlog
+status: Review
 assignee: []
 created_date: '2026-06-10 13:30'
+updated_date: '2026-06-11 21:05'
 labels:
   - design-parity
   - dashboard
@@ -69,9 +70,9 @@ Pixel-align the dashboard grid arrangement, widget headers, spacing, and the fle
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Widget grid columns/gaps/sizing match the design within doc-8 tolerances
-- [ ] #2 Widget headers and spacing match the design
-- [ ] #3 Fleet Health renders the stacked-bar + stat-tile design
-- [ ] #4 Loading spinner state matches the design treatment
-- [ ] #5 web-ui step screenshots the populated dashboard and asserts the fleet-health widget
+- [x] #1 Widget grid columns/gaps/sizing match the design within doc-8 tolerances
+- [x] #2 Widget headers and spacing match the design
+- [x] #3 Fleet Health renders the stacked-bar + stat-tile design
+- [x] #4 Loading spinner state matches the design treatment
+- [x] #5 web-ui step screenshots the populated dashboard and asserts the fleet-health widget
 <!-- AC:END -->

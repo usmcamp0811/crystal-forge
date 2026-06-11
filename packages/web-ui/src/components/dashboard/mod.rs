@@ -12,7 +12,7 @@ mod recent_deployments;
 
 pub use build_queue::{BuildQueuePanel, BuildQueueRow};
 pub use build_summary::BuildSummaryPanel;
-pub use cve_summary::{CveSeverityBadge, CveSummaryPanel};
+pub use cve_summary::CveSummaryPanel;
 pub use deployment_status::DeploymentStatusBreakdown;
 pub use fleet_health::FleetHealthBreakdown;
 pub use recent_deployments::{RecentDeploymentRow, RecentDeploymentsList};

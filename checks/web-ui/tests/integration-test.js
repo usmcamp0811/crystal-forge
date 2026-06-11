@@ -1365,6 +1365,65 @@ const steps = [
     },
   },
   {
+    name: "06z3-dashboard-widget-visuals-parity",
+    description:
+      "Dashboard CVE and Build Summary widgets render with design-parity hero counts and dash-w-mini grid",
+    action: async (page) => {
+      await routeFleetHealthWidgetData(page);
+      try {
+        await page.goto(`${baseUrl}/`, { timeout: LOAD_TIMEOUT });
+        await page.waitForTimeout(1800);
+
+        // CVE summary widget: hero count must be visible
+        const cveSummary = page.locator("[data-testid='cve-summary']");
+        await assertVisible(
+          cveSummary,
+          "CVE summary widget should be visible on the populated dashboard",
+        );
+        await assertVisible(
+          cveSummary.getByText("critical CVEs"),
+          "CVE summary should show the critical CVEs hero label",
+        );
+        await assertVisible(
+          cveSummary.getByText("High"),
+          "CVE summary should show the High mini-stat",
+        );
+        await assertVisible(
+          cveSummary.getByText("Total"),
+          "CVE summary should show the Total mini-stat",
+        );
+
+        // Build summary widget: hero count must be visible
+        const buildSummary = page.locator("[data-testid='build-summary-panel']");
+        await assertVisible(
+          buildSummary,
+          "Build summary panel should be visible on the populated dashboard",
+        );
+        await assertVisible(
+          buildSummary.getByText("building"),
+          "Build summary should show the building hero label",
+        );
+        await assertVisible(
+          buildSummary.getByText("Queued"),
+          "Build summary should show the Queued mini-stat",
+        );
+        await assertVisible(
+          buildSummary.getByText("Active"),
+          "Build summary should show the Active mini-stat",
+        );
+
+        // Fleet Health widget must also be present (parity regression guard)
+        await assertVisible(
+          page.locator("[data-testid='fleet-health-breakdown']"),
+          "Fleet Health breakdown should be visible on the populated dashboard",
+        );
+      } finally {
+        await page.unroute("**/api/v1/dashboard/summary*");
+        await page.unroute("**/api/v1/systems*");
+      }
+    },
+  },
+  {
     name: "06a-onboarding-coach-dashboard",
     description: "Non-blocking onboarding coach panel on dashboard",
     action: async (page) => {
@@ -5112,6 +5171,7 @@ const CI_FAST_STEP_NAMES = new Set([
   "06y-recent-deployments-scroll",
   "06z-fleet-health-widget-assert",
   "06z2-dashboard-error-no-fabricated-data",
+  "06z3-dashboard-widget-visuals-parity",
   "09e-sidebar-sections-fullwidth",
   "09f-sidebar-light-expanded",
   "09g-topbar-notifications-dark",
