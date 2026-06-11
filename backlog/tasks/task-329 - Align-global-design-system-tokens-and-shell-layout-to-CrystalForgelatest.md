@@ -5,7 +5,7 @@ status: Review
 assignee:
   - gpt-5.4
 created_date: '2026-05-31 15:56'
-updated_date: '2026-06-11 02:10'
+updated_date: '2026-06-11 02:28'
 labels:
   - design-parity
   - design-system
@@ -28,6 +28,7 @@ modified_files:
   - packages/web-ui/src/components/layout/sidebar.rs
   - packages/web-ui/src/components/layout/topbar.rs
   - checks/web-ui/tests/integration-test.js
+  - packages/web-ui/src/components/layout/app_shell.rs
 priority: high
 ordinal: 5000
 ---
@@ -60,6 +61,7 @@ Goal: bring global tokens + shell chrome (sidebar groups, topbar, base primitive
 - `packages/web-ui/src/components/layout/sidebar.rs`
 - `packages/web-ui/src/components/layout/topbar.rs`
 - `checks/web-ui/tests/integration-test.js`
+- `packages/web-ui/src/components/layout/app_shell.rs`
 
 ## Risk level
 - Medium: shared shell/token changes can affect multiple downstream web-ui surfaces.
@@ -97,7 +99,9 @@ Goal: bring global tokens + shell chrome (sidebar groups, topbar, base primitive
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-MR review follow-up: fix role-aware visibility for admin-gated notifications, replace the fake mark-all-read action with real local unread-state handling, make the notification settings placeholder actually disabled, and add non-admin check coverage.
+MR blocker fix implementation: notifications are now filtered by role for non-admin users, mark-all-read updates local unread state, the settings placeholder is actually disabled, and the UI-check mock auth helper can synthesize non-admin roles for shell verification.
+
+Verification on this follow-up: `nix develop -c cargo fmt --all --manifest-path packages/web-ui/Cargo.toml -- --check` and `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` passed. I did not rerun `nix build .#checks.x86_64-linux.web-ui` locally because of the earlier user request to leave the expensive check to CI.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
