@@ -1,10 +1,10 @@
 ---
 id: TASK-342.2
 title: 'Dashboard: widget grid layout + widget visuals parity'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-06-10 13:30'
-updated_date: '2026-06-11 20:16'
+updated_date: '2026-06-11 20:17'
 labels:
   - design-parity
   - dashboard
@@ -76,3 +76,9 @@ Pixel-align the dashboard grid arrangement, widget headers, spacing, and the fle
 - [ ] #4 Loading spinner state matches the design treatment
 - [ ] #5 web-ui step screenshots the populated dashboard and asserts the fleet-health widget
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: opencode-agent on reckless in /home/mcamp/code/crystal-forge/TASK-342.2-dashboard-widget-parity
+<!-- SECTION:NOTES:END -->
