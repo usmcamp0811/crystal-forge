@@ -1380,12 +1380,36 @@ const steps = [
           cveSummary,
           "CVE summary widget should be visible on the populated dashboard",
         );
+        await assertVisible(
+          cveSummary.getByText("critical CVEs"),
+          "CVE summary should show the critical CVEs hero label",
+        );
+        await assertVisible(
+          cveSummary.getByText("High"),
+          "CVE summary should show the High mini-stat",
+        );
+        await assertVisible(
+          cveSummary.getByText("Total"),
+          "CVE summary should show the Total mini-stat",
+        );
 
         // Build summary widget: hero count must be visible
         const buildSummary = page.locator("[data-testid='build-summary-panel']");
         await assertVisible(
           buildSummary,
           "Build summary panel should be visible on the populated dashboard",
+        );
+        await assertVisible(
+          buildSummary.getByText("building"),
+          "Build summary should show the building hero label",
+        );
+        await assertVisible(
+          buildSummary.getByText("Queued"),
+          "Build summary should show the Queued mini-stat",
+        );
+        await assertVisible(
+          buildSummary.getByText("Active"),
+          "Build summary should show the Active mini-stat",
         );
 
         // Fleet Health widget must also be present (parity regression guard)

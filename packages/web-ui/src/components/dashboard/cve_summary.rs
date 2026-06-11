@@ -13,17 +13,10 @@ pub fn CveSummaryPanel(
     cves: CveSummary,
     #[props(default)] flake_filter: Option<String>,
 ) -> Element {
-    let display_cves = if flake_filter.is_some() {
-        // Conservative halving for filtered view until per-flake CVE API lands.
-        CveSummary {
-            critical: cves.critical / 2,
-            high: cves.high / 2,
-            medium: cves.medium / 2,
-            low: cves.low / 2,
-        }
-    } else {
-        cves.clone()
-    };
+    let display_cves = cves.clone();
+    let filter_note = flake_filter
+        .as_ref()
+        .map(|flake| format!("{flake} filter active · CVE summary remains fleet-wide"));
 
     let total = display_cves.total();
 
@@ -31,6 +24,13 @@ pub fn CveSummaryPanel(
         div {
             class: "dash-w-body",
             "data-testid": "cve-summary",
+
+            if let Some(note) = filter_note {
+                div {
+                    style: "font-size:11px; color:var(--cf-text-muted);",
+                    "{note}"
+                }
+            }
 
             // Hero: critical count
             div {
