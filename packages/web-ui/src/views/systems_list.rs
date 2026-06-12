@@ -438,16 +438,6 @@ pub fn SystemsListView() -> Element {
                 }
             }
 
-            // Loading spinner (shown during initial fetch)
-            if *loading.read() {
-                div {
-                    class: "flex items-center justify-center py-12",
-                    div {
-                        class: "animate-spin rounded-full h-8 w-8 border-b-2 border-blue-400"
-                    }
-                }
-            }
-
             header {
                 class: "page-head",
                 div {

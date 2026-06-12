@@ -2579,30 +2579,32 @@ const steps = [
     description: "Systems empty state from real API data",
     action: async (page) => {
       await routeSystemsEmptyData(page);
-      await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
-      await page.waitForTimeout(1500);
+      try {
+        await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+        await page.waitForTimeout(1500);
 
-      await assertVisible(
-        page.locator("[data-testid='systems-empty-state']").first(),
-        "Expected systems empty state to render",
-        10000,
-      );
-      await assertVisible(
-        page.getByText("No systems yet").first(),
-        "Expected empty systems heading",
-        10000,
-      );
+        await assertVisible(
+          page.locator("[data-testid='systems-empty-state']").first(),
+          "Expected systems empty state to render",
+          10000,
+        );
+        await assertVisible(
+          page.getByText("No systems yet").first(),
+          "Expected empty systems heading",
+          10000,
+        );
 
-      const tableVisible = await page
-        .locator("[data-testid='systems-table']")
-        .first()
-        .isVisible()
-        .catch(() => false);
-      if (tableVisible) {
-        throw new Error("Expected systems table to stay hidden for empty API response");
+        const tableVisible = await page
+          .locator("[data-testid='systems-table']")
+          .first()
+          .isVisible()
+          .catch(() => false);
+        if (tableVisible) {
+          throw new Error("Expected systems table to stay hidden for empty API response");
+        }
+      } finally {
+        await unrouteSystemsEmptyData(page);
       }
-
-      await unrouteSystemsEmptyData(page);
     },
   },
   {
