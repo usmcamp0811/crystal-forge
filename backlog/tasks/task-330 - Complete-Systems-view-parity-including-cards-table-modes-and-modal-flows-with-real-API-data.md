@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@gpt-5.4'
 created_date: '2026-05-31 15:56'
-updated_date: '2026-06-11 22:34'
+updated_date: '2026-06-12 01:58'
 labels:
   - design-parity
   - systems
@@ -69,7 +69,7 @@ Scope details:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Phase 1 draft MR opened for incremental review: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/273
+Addressed phase-1 review feedback in MR !273: wrapped the new `12a-systems-empty-state` route override in `try/finally` cleanup and removed the older duplicate generic loading spinner in favor of the dedicated `systems-loading-state`.
 
-Phase 1 expensive verification completed at the review point: `nix build .#checks.x86_64-linux.web-ui` passed and produced `12a-systems-empty-state.png` plus `12d-systems-api-error-no-mock-fallback.png` uploaded into MR !273.
+Post-feedback lightweight verification passed: `node --check checks/web-ui/tests/integration-test.js` and `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown`. Skipped rerunning the expensive web-ui build per user preference because these fixes did not change screenshot scope.
 <!-- SECTION:NOTES:END -->
