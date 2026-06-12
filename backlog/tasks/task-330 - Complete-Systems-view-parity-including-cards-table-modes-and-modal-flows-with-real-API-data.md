@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@gpt-5.4'
 created_date: '2026-05-31 15:56'
-updated_date: '2026-06-12 01:58'
+updated_date: '2026-06-12 03:14'
 labels:
   - design-parity
   - systems
@@ -69,7 +69,9 @@ Scope details:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Addressed phase-1 review feedback in MR !273: wrapped the new `12a-systems-empty-state` route override in `try/finally` cleanup and removed the older duplicate generic loading spinner in favor of the dedicated `systems-loading-state`.
+Phase 2 implementation pushed to MR !273: aligned the Systems header with the design (removed non-design Sync all and duplicate header view toggle), refactored cards to use the design semantic classes, restored the clean CVE chip, and aligned table row actions to Deploy + Edit.
 
-Post-feedback lightweight verification passed: `node --check checks/web-ui/tests/integration-test.js` and `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown`. Skipped rerunning the expensive web-ui build per user preference because these fixes did not change screenshot scope.
+Extended the `12-systems` web-ui step to exercise real API-backed table/cards toggling plus shown-count filtering. An initial fixture bug used an invalid deployment_status and forced the error path; fixed in follow-up commit `c8cd4c95`.
+
+Phase 2 review artifact uploaded to GitLab uploads: `12-systems.png` (`![12-systems](/uploads/117b1eec58da42e7ca177659dda10269/12-systems.png)`). I verified the critical `12-systems` step is green and the screenshot artifact exists. I did not get a separate uncached raw exit-status proof for the whole `nix build .#checks.x86_64-linux.web-ui` rerun because a later confirmation command timed out.
 <!-- SECTION:NOTES:END -->
