@@ -117,16 +117,6 @@ pub fn SystemCardV2(
         .clone()
         .unwrap_or_else(|| "unknown".to_string());
 
-    // Debug: log environment value to console
-    #[cfg(debug_assertions)]
-    {
-        let msg = format!(
-            "SystemCardV2: hostname={}, environment='{}' (raw: {:?})",
-            system.hostname, environment, system.environment
-        );
-        web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&msg));
-    }
-
     let env = env_colors(&environment, &environment_colors);
     let status_col = status_color(&system.health_status);
 
@@ -189,24 +179,19 @@ pub fn SystemCardV2(
 
             // Card head with hostname and environment badge
             div {
-                class: "flex items-start justify-between gap-3",
+                class: "sys-card-head",
                 div {
-                    class: "min-w-0 flex-1",
+                    class: "sys-title",
                     div {
-                        class: "flex items-center gap-2 mb-1",
+                        class: "sys-hostname",
                         StatusDot {
                             color: status_col.to_string(),
                             large: false,
                         }
-                        h3 {
-                            class: "text-sm font-semibold",
-                            style: "color: var(--cf-text-primary)",
-                            "{system.hostname}"
-                        }
+                        "{system.hostname}"
                     }
                     div {
-                        class: "text-xs mono",
-                        style: "color: var(--cf-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
+                        class: "sys-fqdn",
                         "{system.hostname}.local"
                     }
                 }
@@ -221,43 +206,23 @@ pub fn SystemCardV2(
             // Card body with two-column metadata
             if !compact {
                 div {
-                    class: "grid grid-cols-2 gap-x-4 gap-y-3 text-xs",
-                    // Flake
+                    class: "sys-card-body",
+                    // Flake · branch
                     div {
-                        div {
-                            class: "text-[11px] uppercase tracking-wider mb-1",
-                            style: "color: var(--cf-text-muted); letter-spacing: 0.06em;",
-                            "Flake"
-                        }
-                        div {
-                            class: "mono text-xs",
-                            style: "color: var(--cf-text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
-                            "{flake_name}"
-                        }
+                        div { class: "sys-kv-key", "Flake" }
+                        div { class: "sys-kv-val", "{flake_name}" }
                     }
                     // Commit
                     div {
-                        div {
-                            class: "text-[11px] uppercase tracking-wider mb-1",
-                            style: "color: var(--cf-text-muted); letter-spacing: 0.06em;",
-                            "Commit"
-                        }
-                        div {
-                            class: "mono text-xs",
-                            style: "color: var(--cf-text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
-                            "{flake_commit_short}"
-                        }
+                        div { class: "sys-kv-key", "Commit" }
+                        div { class: "sys-kv-val", "{flake_commit_short}" }
                     }
                     // Heartbeat
                     div {
+                        div { class: "sys-kv-key", "Heartbeat" }
                         div {
-                            class: "text-[11px] uppercase tracking-wider mb-1",
-                            style: "color: var(--cf-text-muted); letter-spacing: 0.06em;",
-                            "Heartbeat"
-                        }
-                        div {
-                            class: "text-xs",
-                            style: "color: var(--cf-text-primary); display: flex; align-items: center; gap: 8px;",
+                            class: "sys-kv-val",
+                            style: "font-family: var(--font-sans); display: flex; align-items: center; gap: 8px;",
                             HeartbeatSpinner {
                                 interval_sec: heartbeat_interval_sec,
                                 next_in_sec: heartbeat_next_in_sec,
@@ -269,26 +234,35 @@ pub fn SystemCardV2(
                     }
                     // Policy
                     div {
+                        div { class: "sys-kv-key", "Policy" }
                         div {
-                            class: "text-[11px] uppercase tracking-wider mb-1",
-                            style: "color: var(--cf-text-muted); letter-spacing: 0.06em;",
-                            "Policy"
-                        }
-                        div {
-                            class: "text-xs",
-                            style: "color: var(--cf-text-primary)",
+                            class: "sys-kv-val",
+                            style: "font-family: var(--font-sans);",
                             "{system.deployment_policy}"
                         }
                     }
                 }
             }
 
+            // Compact body: condensed inline metadata
+            if compact {
+                div {
+                    style: "display: flex; gap: 12px; font-size: 12px; color: var(--cf-text-secondary); flex-wrap: wrap;",
+                    span {
+                        class: "mono",
+                        style: "color: var(--cf-text-primary);",
+                        "{flake_name}"
+                    }
+                    span { class: "mono", "{flake_commit_short}" }
+                    span { "{last_seen}" }
+                }
+            }
+
             // Card footer with status chips and deploy button
             div {
-                class: "flex items-center justify-between gap-2 pt-3",
-                style: "border-top: 1px solid var(--cf-divider)",
+                class: "sys-card-foot",
                 div {
-                    class: "flex gap-2 flex-wrap",
+                    class: "chips-row",
                     // Health chip
                     Chip {
                         variant: health_chip_variant(&system.health_status),
@@ -301,7 +275,7 @@ pub fn SystemCardV2(
                         show_dot: false,
                         "{system.deployment_status.label()}"
                     }
-                    // CVE chips (if any critical)
+                    // CVE chips: crit/high when present, otherwise a clean chip
                     if system.cve_counts.critical > 0 {
                         Chip {
                             variant: ChipVariant::Critical,
@@ -315,6 +289,9 @@ pub fn SystemCardV2(
                             show_dot: false,
                             "{system.cve_counts.high} high"
                         }
+                    }
+                    if system.cve_counts.critical == 0 && system.cve_counts.high == 0 {
+                        span { class: "chip chip-healthy", "✓ clean" }
                     }
                 }
                 button {
@@ -330,7 +307,7 @@ pub fn SystemCardV2(
                         stroke: "currentColor",
                         stroke_width: "2",
                         view_box: "0 0 24 24",
-                        path { d: "M5 12h14M12 5l7 7-7 7" }
+                        path { d: "M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" }
                     }
                     " Deploy"
                 }

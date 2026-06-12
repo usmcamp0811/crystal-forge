@@ -962,6 +962,72 @@ async function unrouteSystemsEmptyData(page) {
   await page.unroute("**/api/v1/systems**");
 }
 
+function mockSystemsPopulatedPage() {
+  const mk = (idx, hostname, environment, health, deployment, cve) => ({
+    id: `00000000-0000-4000-8000-${String(idx).padStart(12, "0")}`,
+    hostname,
+    system_configuration_name: hostname,
+    environment,
+    flake_id: null,
+    primary_ip: `10.20.0.${idx}`,
+    health_status: health,
+    deployment_status: deployment,
+    pipeline_stage: "ready_for_build",
+    cve_counts: cve,
+    nixos_version: "24.11",
+    last_seen: nowIso(),
+    deployment_policy: "manual",
+  });
+
+  const items = [
+    mk(1, "parity-prod-01", "production", "healthy", "up_to_date", {
+      critical: 0,
+      high: 0,
+      medium: 0,
+      low: 0,
+    }),
+    mk(2, "parity-stage-02", "staging", "warning", "behind", {
+      critical: 0,
+      high: 2,
+      medium: 1,
+      low: 0,
+    }),
+    mk(3, "parity-dev-03", "dev", "critical", "failed", {
+      critical: 1,
+      high: 0,
+      medium: 0,
+      low: 0,
+    }),
+    mk(4, "parity-edge-04", "edge", "offline", "unknown", {
+      critical: 0,
+      high: 0,
+      medium: 0,
+      low: 1,
+    }),
+  ];
+
+  return { items, total: items.length, page: 1, per_page: 50 };
+}
+
+async function routeSystemsPopulatedData(page) {
+  await page.route("**/api/v1/systems**", async (route) => {
+    const pathname = new URL(route.request().url()).pathname;
+    if (pathname !== "/api/v1/systems") {
+      await route.fallback();
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(mockSystemsPopulatedPage()),
+    });
+  });
+}
+
+async function unrouteSystemsPopulatedData(page) {
+  await page.unroute("**/api/v1/systems**");
+}
+
 async function routeEnvironmentWarningData(page) {
   const environments = [
     {
@@ -2568,10 +2634,72 @@ const steps = [
   },
   {
     name: "12-systems",
-    description: "Systems list",
+    description: "Systems list cards/table parity with view toggle and shown count",
     action: async (page) => {
-      await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
-      await page.waitForTimeout(2000);
+      await routeSystemsPopulatedData(page);
+      try {
+        await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+        await page.waitForTimeout(1500);
+
+        // Default cards view renders API-backed systems.
+        await assertVisible(
+          page.locator("[data-testid='systems-cards']").first(),
+          "Expected systems cards grid to render from API data",
+          10000,
+        );
+        await assertVisible(
+          page.getByText("parity-prod-01").first(),
+          "Expected an API-backed system hostname to render in cards view",
+          10000,
+        );
+
+        // Stat strip + shown count reflect the loaded API data (4 systems).
+        const shownCount = page.locator(".filter-count").first();
+        await assertVisible(shownCount, "Expected filter shown-count to render", 10000);
+        const shownText = (await shownCount.textContent()) || "";
+        if (!shownText.includes("4 shown")) {
+          throw new Error(`Expected '4 shown' from API data, got: ${shownText.trim()}`);
+        }
+
+        // Toggle to table mode and assert the table renders the same data.
+        await page.getByRole("button", { name: "Table" }).first().click();
+        await page.waitForTimeout(400);
+        await assertVisible(
+          page.locator("[data-testid='systems-table']").first(),
+          "Expected systems table to render after toggling to table mode",
+          10000,
+        );
+        const cardsAfterToggle = await page
+          .locator("[data-testid='systems-cards']")
+          .first()
+          .isVisible()
+          .catch(() => false);
+        if (cardsAfterToggle) {
+          throw new Error("Expected cards grid to be hidden in table mode");
+        }
+
+        // Search filters the rendered data and updates the shown count.
+        const searchInput = page.getByPlaceholder("Filter by hostname, commit, or flake…").first();
+        await searchInput.fill("parity-prod-01");
+        await page.waitForTimeout(400);
+        const filteredText = (await shownCount.textContent()) || "";
+        if (!filteredText.includes("1 shown")) {
+          throw new Error(`Expected '1 shown' after filtering, got: ${filteredText.trim()}`);
+        }
+        await searchInput.fill("");
+        await page.waitForTimeout(300);
+
+        // Toggle back to cards mode for the default screenshot.
+        await page.getByRole("button", { name: "Cards" }).first().click();
+        await page.waitForTimeout(400);
+        await assertVisible(
+          page.locator("[data-testid='systems-cards']").first(),
+          "Expected cards grid to render after toggling back to cards mode",
+          10000,
+        );
+      } finally {
+        await unrouteSystemsPopulatedData(page);
+      }
     },
   },
   {
@@ -5228,6 +5356,7 @@ const CI_FAST_STEP_NAMES = new Set([
   "11c-builders-edit-modal",
   "15-builds",
   "11b-builds-queue-card-focus",
+  "12-systems",
   "12a-systems-empty-state",
   "12b-systems-config-warning",
   "12c-systems-modal-config-field",

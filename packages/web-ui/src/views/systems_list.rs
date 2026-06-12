@@ -13,7 +13,7 @@ use crate::api::models::{
 };
 use crate::components::environments::{normalize_color_hex, with_alpha};
 use crate::components::filters::{
-    DeploymentFilterDropdown, EnvironmentFilterDropdown, HealthFilterDropdown, ViewMode, ViewToggle,
+    DeploymentFilterDropdown, EnvironmentFilterDropdown, HealthFilterDropdown, ViewMode,
 };
 use crate::components::forms::{AddSystemForm, NewSystemDraft, validate_new_system};
 use crate::components::heartbeat_spinner::HeartbeatSpinner;
@@ -449,19 +449,6 @@ pub fn SystemsListView() -> Element {
                 }
                 div {
                     style: "display: flex; gap: 8px;",
-                    // Sync all
-                    button {
-                        class: "btn btn-ghost focus-ring",
-                        svg {
-                            class: "w-3.5 h-3.5",
-                            fill: "none",
-                            stroke: "currentColor",
-                            stroke_width: "2",
-                            view_box: "0 0 24 24",
-                            path { d: "M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" }
-                        }
-                        "Sync all"
-                    }
                     // Export — downloads OSCAL SSP system inventory JSON
                     button {
                         class: "btn btn-ghost focus-ring",
@@ -521,13 +508,6 @@ pub fn SystemsListView() -> Element {
                                 p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
                                 p { style: "margin:2px 0 0 0;", "Click Add system to register your first managed machine." }
                             }
-                        }
-                    }
-                    ViewToggle {
-                        view_mode: *view_mode.read(),
-                        on_change: move |mode| {
-                            view_mode.set(mode);
-                            let _ = LocalStorage::set(VIEW_PREF_KEY, mode.as_storage());
                         }
                     }
                 }

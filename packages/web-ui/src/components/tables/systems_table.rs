@@ -171,15 +171,6 @@ pub fn SystemsTable(
                                 td {
                                     {
                                         let env = environment_label(&system);
-
-                                        // Debug: log environment value to console
-                                        #[cfg(debug_assertions)]
-                                        {
-                                            let msg = format!("SystemsTable: hostname={}, environment='{}' (raw: {:?})",
-                                                system.hostname, env, system.environment);
-                                            web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&msg));
-                                        }
-
                                         let colors = env_colors(&env, &environment_colors);
                                         rsx! {
                                             EnvBadge {
@@ -299,7 +290,7 @@ pub fn SystemsTable(
                                         }
                                     }
                                 }
-                                // Row actions: Deploy | Evaluate | More (matching design)
+                                // Row actions: Deploy | Edit (matching design SystemRow)
                                 td {
                                     div {
                                         class: "row-actions",
@@ -307,6 +298,7 @@ pub fn SystemsTable(
                                         button {
                                             class: "btn-icon focus-ring",
                                             title: "Deploy",
+                                            "aria-label": "Deploy",
                                             onclick: move |evt| {
                                                 evt.stop_propagation();
                                                 on_deploy.call(system.id);
@@ -320,12 +312,14 @@ pub fn SystemsTable(
                                                 path { d: "M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" }
                                             }
                                         }
-                                        // Evaluate
+                                        // Edit
                                         button {
                                             class: "btn-icon focus-ring",
-                                            title: "Evaluate",
+                                            title: "Edit",
+                                            "aria-label": "Edit",
                                             onclick: move |evt| {
                                                 evt.stop_propagation();
+                                                on_edit.call(system.id);
                                             },
                                             svg {
                                                 class: "w-3.5 h-3.5",
@@ -333,23 +327,8 @@ pub fn SystemsTable(
                                                 stroke: "currentColor",
                                                 stroke_width: "2",
                                                 view_box: "0 0 24 24",
-                                                path { d: "M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" }
-                                            }
-                                        }
-                                        // More
-                                        button {
-                                            class: "btn-icon focus-ring",
-                                            title: "More",
-                                            onclick: move |evt| {
-                                                evt.stop_propagation();
-                                            },
-                                            svg {
-                                                class: "w-3.5 h-3.5",
-                                                fill: "currentColor",
-                                                view_box: "0 0 24 24",
-                                                circle { cx: "5", cy: "12", r: "2" }
-                                                circle { cx: "12", cy: "12", r: "2" }
-                                                circle { cx: "19", cy: "12", r: "2" }
+                                                path { d: "M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" }
+                                                path { d: "M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" }
                                             }
                                         }
                                     }
