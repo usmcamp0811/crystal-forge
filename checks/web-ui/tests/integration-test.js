@@ -992,7 +992,7 @@ function mockSystemsPopulatedPage() {
       medium: 1,
       low: 0,
     }),
-    mk(3, "parity-dev-03", "dev", "critical", "failed", {
+    mk(3, "parity-dev-03", "dev", "critical", "behind", {
       critical: 1,
       high: 0,
       medium: 0,
@@ -2641,19 +2641,8 @@ const steps = [
         await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
         await page.waitForTimeout(1500);
 
-        // Default cards view renders API-backed systems.
-        await assertVisible(
-          page.locator("[data-testid='systems-cards']").first(),
-          "Expected systems cards grid to render from API data",
-          10000,
-        );
-        await assertVisible(
-          page.getByText("parity-prod-01").first(),
-          "Expected an API-backed system hostname to render in cards view",
-          10000,
-        );
-
-        // Stat strip + shown count reflect the loaded API data (4 systems).
+        // Filter bar + shown count reflect the loaded API data (4 systems),
+        // independent of the persisted default view mode.
         const shownCount = page.locator(".filter-count").first();
         await assertVisible(shownCount, "Expected filter shown-count to render", 10000);
         const shownText = (await shownCount.textContent()) || "";
@@ -2661,21 +2650,43 @@ const steps = [
           throw new Error(`Expected '4 shown' from API data, got: ${shownText.trim()}`);
         }
 
-        // Toggle to table mode and assert the table renders the same data.
+        // Switch to table mode and assert the table renders the API data.
         await page.getByRole("button", { name: "Table" }).first().click();
         await page.waitForTimeout(400);
         await assertVisible(
           page.locator("[data-testid='systems-table']").first(),
-          "Expected systems table to render after toggling to table mode",
+          "Expected systems table to render in table mode",
           10000,
         );
-        const cardsAfterToggle = await page
+        await assertVisible(
+          page.getByText("parity-prod-01").first(),
+          "Expected an API-backed system hostname to render in table mode",
+          10000,
+        );
+        const cardsInTableMode = await page
           .locator("[data-testid='systems-cards']")
           .first()
           .isVisible()
           .catch(() => false);
-        if (cardsAfterToggle) {
+        if (cardsInTableMode) {
           throw new Error("Expected cards grid to be hidden in table mode");
+        }
+
+        // Switch to cards mode and assert the cards grid renders the API data.
+        await page.getByRole("button", { name: "Cards" }).first().click();
+        await page.waitForTimeout(400);
+        await assertVisible(
+          page.locator("[data-testid='systems-cards']").first(),
+          "Expected systems cards grid to render in cards mode",
+          10000,
+        );
+        const tableInCardsMode = await page
+          .locator("[data-testid='systems-table']")
+          .first()
+          .isVisible()
+          .catch(() => false);
+        if (tableInCardsMode) {
+          throw new Error("Expected systems table to be hidden in cards mode");
         }
 
         // Search filters the rendered data and updates the shown count.
@@ -2688,15 +2699,6 @@ const steps = [
         }
         await searchInput.fill("");
         await page.waitForTimeout(300);
-
-        // Toggle back to cards mode for the default screenshot.
-        await page.getByRole("button", { name: "Cards" }).first().click();
-        await page.waitForTimeout(400);
-        await assertVisible(
-          page.locator("[data-testid='systems-cards']").first(),
-          "Expected cards grid to render after toggling back to cards mode",
-          10000,
-        );
       } finally {
         await unrouteSystemsPopulatedData(page);
       }
