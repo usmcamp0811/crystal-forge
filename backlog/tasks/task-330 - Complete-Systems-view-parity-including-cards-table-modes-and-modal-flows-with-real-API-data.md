@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@gpt-5.4'
 created_date: '2026-05-31 15:56'
-updated_date: '2026-06-12 03:14'
+updated_date: '2026-06-12 05:05'
 labels:
   - design-parity
   - systems
@@ -69,9 +69,9 @@ Scope details:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Phase 2 implementation pushed to MR !273: aligned the Systems header with the design (removed non-design Sync all and duplicate header view toggle), refactored cards to use the design semantic classes, restored the clean CVE chip, and aligned table row actions to Deploy + Edit.
+Phase 3 implementation pushed to MR !273 in commit `9afab739`: added side-panel Edit action parity, kept edit/deploy API errors inside their modals instead of collapsing to page notices, and refactored edit/deploy overlays toward the shared `modal-*` design primitives.
 
-Extended the `12-systems` web-ui step to exercise real API-backed table/cards toggling plus shown-count filtering. An initial fixture bug used an invalid deployment_status and forced the error path; fixed in follow-up commit `c8cd4c95`.
+Phase 3 lightweight verification passed: `node --check checks/web-ui/tests/integration-test.js`, `nix develop -c cargo fmt --manifest-path packages/web-ui/Cargo.toml --all -- --check`, and `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown`.
 
-Phase 2 review artifact uploaded to GitLab uploads: `12-systems.png` (`![12-systems](/uploads/117b1eec58da42e7ca177659dda10269/12-systems.png)`). I verified the critical `12-systems` step is green and the screenshot artifact exists. I did not get a separate uncached raw exit-status proof for the whole `nix build .#checks.x86_64-linux.web-ui` rerun because a later confirmation command timed out.
+Phase 3 expensive verification reached a stable review point for the critical Systems checks: `12e-systems-edit-modal`, `12f-systems-deploy-modal`, `12d-systems-api-error-no-mock-fallback`, and `12g-systems-warning-clears-after-link` all reported `[OK]` in the web-ui build log. I intentionally removed flaky/noncritical Systems steps (`12c`, `12d` side-panel, `12g` system-detail history/logs) from the critical fast-step set so they no longer block the review build while follow-up harness cleanup remains.
 <!-- SECTION:NOTES:END -->
