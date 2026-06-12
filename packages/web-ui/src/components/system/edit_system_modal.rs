@@ -8,6 +8,7 @@ use dioxus::prelude::*;
 pub fn EditSystemModal(
     system: SystemDetail,
     flake_names: Vec<String>,
+    #[props(default)] error_message: Option<String>,
     on_close: EventHandler<()>,
     on_save: EventHandler<UpdateSystemRequest>,
 ) -> Element {
@@ -24,6 +25,15 @@ pub fn EditSystemModal(
             .unwrap_or_default()
     });
     let mut is_saving = use_signal(|| false);
+
+    {
+        let error_message = error_message.clone();
+        use_effect(move || {
+            if error_message.is_some() {
+                is_saving.set(false);
+            }
+        });
+    }
 
     let handle_save = move |_| {
         is_saving.set(true);
@@ -52,42 +62,38 @@ pub fn EditSystemModal(
     };
 
     rsx! {
-        // Modal backdrop
         div {
-            class: "fixed inset-0 z-50 bg-black/50 p-4 flex items-center justify-center overflow-y-auto cf-modal-overlay",
+            class: "modal-backdrop",
             onclick: move |_| on_close.call(()),
 
-            // Modal content — narrower than full-width forms; lg cap is enough for these fields
             div {
-                class: "bg-gray-900 rounded-xl border {theme::surface::CARD_BORDER} shadow-2xl w-full max-w-lg max-h-[90vh] overflow-hidden flex flex-col",
+                class: "modal",
+                style: "width:min(620px,96vw); max-height:92vh;",
                 onclick: move |e| e.stop_propagation(),
 
-                // Header
                 div {
-                    class: "px-6 py-4 border-b {theme::surface::CARD_BORDER}",
+                    class: "modal-head",
                     h2 {
-                        class: "text-lg font-semibold text-white",
-                        "Edit System"
+                        "Edit {system.hostname}"
                     }
                     p {
-                        class: "text-sm text-gray-400 mt-1",
-                        "Update system configuration and deployment settings"
+                        "Update system registration, flake assignment, and deployment policy."
                     }
                 }
 
-                // Form
                 div {
-                    class: "px-6 py-4 space-y-4 overflow-y-auto flex-1",
+                    class: "modal-body",
+                    style: "overflow-y:auto;",
 
                     // Hostname
                     div {
                         label {
-                            class: "block text-sm font-medium text-gray-300 mb-1",
+                            class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
                             "Hostname"
                         }
                         input {
                             r#type: "text",
-                            class: "w-full px-3 py-2 bg-gray-800 border {theme::surface::CARD_BORDER} rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500",
+                            class: "input focus-ring mono",
                             value: "{hostname}",
                             oninput: move |e| hostname.set(e.value().clone()),
                         }
@@ -96,11 +102,11 @@ pub fn EditSystemModal(
                     // Flake Name
                     div {
                         label {
-                            class: "block text-sm font-medium text-gray-300 mb-1",
+                            class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
                             "Flake"
                         }
                         select {
-                            class: "w-full px-3 py-2 bg-gray-800 border {theme::surface::CARD_BORDER} rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500",
+                            class: "input focus-ring",
                             onchange: move |e| flake_name.set(e.value().clone()),
                             option {
                                 value: "",
@@ -126,13 +132,13 @@ pub fn EditSystemModal(
                     // System Configuration Name
                     div {
                         label {
-                            class: "block text-sm font-medium text-gray-300 mb-1",
+                            class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
                             "System Configuration Name"
                             span { class: "text-gray-500 text-xs ml-2", "(optional)" }
                         }
                         input {
                             r#type: "text",
-                            class: "w-full px-3 py-2 bg-gray-800 border {theme::surface::CARD_BORDER} rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500",
+                            class: "input focus-ring mono",
                             value: "{system_configuration_name}",
                             placeholder: "Defaults to hostname if not set",
                             oninput: move |e| system_configuration_name.set(e.value().clone()),
@@ -142,13 +148,13 @@ pub fn EditSystemModal(
                     // Environment
                     div {
                         label {
-                            class: "block text-sm font-medium text-gray-300 mb-1",
+                            class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
                             "Environment"
                             span { class: "text-gray-500 text-xs ml-2", "(optional)" }
                         }
                         input {
                             r#type: "text",
-                            class: "w-full px-3 py-2 bg-gray-800 border {theme::surface::CARD_BORDER} rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500",
+                            class: "input focus-ring",
                             value: "{environment}",
                             placeholder: "e.g., production, staging",
                             oninput: move |e| environment.set(e.value().clone()),
@@ -158,11 +164,11 @@ pub fn EditSystemModal(
                     // Deployment Policy
                     div {
                         label {
-                            class: "block text-sm font-medium text-gray-300 mb-1",
+                            class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
                             "Deployment Policy"
                         }
                         select {
-                            class: "w-full px-3 py-2 bg-gray-800 border {theme::surface::CARD_BORDER} rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500",
+                            class: "input focus-ring",
                             onchange: move |e| deployment_policy.set(e.value().clone()),
                             option {
                                 value: "auto_latest",
@@ -181,7 +187,7 @@ pub fn EditSystemModal(
                             }
                         }
                         p {
-                            class: "text-xs text-gray-500 mt-1",
+                            class: "text-xs {theme::text::SECONDARY} mt-1",
                             match deployment_policy.read().as_str() {
                                 "auto_latest" => "Automatically deploy the latest commit",
                                 "manual" => "Require manual deployment approval",
@@ -190,21 +196,26 @@ pub fn EditSystemModal(
                             }
                         }
                     }
+                    if let Some(message) = &error_message {
+                        div {
+                            class: "rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200",
+                            "{message}"
+                        }
+                    }
                 }
 
-                // Footer
                 div {
-                    class: "px-6 py-4 border-t {theme::surface::CARD_BORDER} flex justify-end gap-3",
+                    class: "modal-foot",
 
                     button {
-                        class: "px-4 py-2 text-sm text-gray-300 hover:text-white transition-colors",
+                        class: "btn btn-ghost focus-ring",
                         onclick: move |_| on_close.call(()),
                         disabled: is_saving(),
                         "Cancel"
                     }
 
                     button {
-                        class: "px-4 py-2 text-sm bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed",
+                        class: "btn btn-primary focus-ring disabled:opacity-50 disabled:cursor-not-allowed",
                         onclick: handle_save,
                         disabled: is_saving() || hostname.read().trim().is_empty(),
 

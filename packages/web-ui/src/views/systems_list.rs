@@ -238,6 +238,7 @@ pub fn SystemsListView() -> Element {
 
     // New modal state for edit and deploy
     let mut edit_modal_system = use_signal(|| None::<SystemDetail>);
+    let mut edit_modal_error = use_signal(|| None::<String>);
     let mut deploy_modal_system = use_signal(|| {
         None::<(
             SystemDetail,
@@ -825,7 +826,9 @@ pub fn SystemsListView() -> Element {
                             on_update_key: move |_| update_key_for_system(local_systems, pending_update_key, system.id),
                             on_edit: move |_| {
                                 let mut edit_modal_system = edit_modal_system.clone();
+                                let mut edit_modal_error = edit_modal_error.clone();
                                 spawn(async move {
+                                    edit_modal_error.set(None);
                                     let detail = load_system_detail_with_fallback(&system.id.to_string()).await;
                                     if let Some(detail) = detail.system {
                                         edit_modal_system.set(Some(detail));
@@ -860,12 +863,14 @@ pub fn SystemsListView() -> Element {
                     flake_context: flake_context.clone(),
                     on_remove: move |id| remove_system_by_id(local_systems, pending_remove, id),
                     on_update_key: move |id| update_key_for_system(local_systems, pending_update_key, id),
-                    on_edit: move |id: uuid::Uuid| {
-                        let mut edit_modal_system = edit_modal_system.clone();
-                        spawn(async move {
-                            let detail = load_system_detail_with_fallback(&id.to_string()).await;
-                            if let Some(detail) = detail.system {
-                                edit_modal_system.set(Some(detail));
+                     on_edit: move |id: uuid::Uuid| {
+                         let mut edit_modal_system = edit_modal_system.clone();
+                         let mut edit_modal_error = edit_modal_error.clone();
+                         spawn(async move {
+                             edit_modal_error.set(None);
+                             let detail = load_system_detail_with_fallback(&id.to_string()).await;
+                             if let Some(detail) = detail.system {
+                                 edit_modal_system.set(Some(detail));
                             }
                         });
                     },
@@ -900,35 +905,46 @@ pub fn SystemsListView() -> Element {
 
             // Side panel preview (design: detail peek drawer)
             if let Some(detail) = preview_system.read().clone() {
-                SystemPreviewPanel {
-                    detail: detail.clone(),
-                    environment_colors: environment_color_pairs.clone(),
-                    on_close: move |_| preview_system.set(None),
-                    on_open_detail: move |_| {
-                        preview_system.set(None);
-                        nav.push(Route::SystemDetailView { id: detail.id.to_string() });
-                    },
-                    on_deploy: move |_| {
-                        let detail_for_deploy = detail.clone();
-                        let mut deploy_modal_system = deploy_modal_system.clone();
-                        let mut preview_system = preview_system.clone();
-                        spawn(async move {
-                            match fetch_system_commits_via_api(detail_for_deploy.id).await {
-                                Ok(commits_response) => {
-                                    deploy_modal_system.set(Some((
-                                        detail_for_deploy.clone(),
-                                        commits_response.commits,
-                                        commits_response.current_commit,
-                                    )));
-                                }
-                                Err(_) => {
-                                    deploy_modal_system
-                                        .set(Some((detail_for_deploy.clone(), vec![], None)));
-                                }
-                            }
-                            preview_system.set(None);
-                        });
-                    },
+                {
+                    let detail_for_edit = detail.clone();
+                    let detail_for_open_detail = detail.clone();
+                    rsx! {
+                        SystemPreviewPanel {
+                            detail: detail.clone(),
+                            environment_colors: environment_color_pairs.clone(),
+                            on_close: move |_| preview_system.set(None),
+                            on_edit: move |_| {
+                                edit_modal_error.set(None);
+                                edit_modal_system.set(Some(detail_for_edit.clone()));
+                                preview_system.set(None);
+                            },
+                            on_open_detail: move |_| {
+                                preview_system.set(None);
+                                nav.push(Route::SystemDetailView { id: detail_for_open_detail.id.to_string() });
+                            },
+                            on_deploy: move |_| {
+                                let detail_for_deploy = detail.clone();
+                                let mut deploy_modal_system = deploy_modal_system.clone();
+                                let mut preview_system = preview_system.clone();
+                                spawn(async move {
+                                    match fetch_system_commits_via_api(detail_for_deploy.id).await {
+                                        Ok(commits_response) => {
+                                            deploy_modal_system.set(Some((
+                                                detail_for_deploy.clone(),
+                                                commits_response.commits,
+                                                commits_response.current_commit,
+                                            )));
+                                        }
+                                        Err(_) => {
+                                            deploy_modal_system
+                                                .set(Some((detail_for_deploy.clone(), vec![], None)));
+                                        }
+                                    }
+                                    preview_system.set(None);
+                                });
+                            },
+                        }
+                    }
                 }
             }
 
@@ -990,7 +1006,11 @@ pub fn SystemsListView() -> Element {
                 EditSystemModal {
                     system: detail.clone(),
                     flake_names: registered_flakes.clone(),
-                    on_close: move |_| edit_modal_system.set(None),
+                    error_message: edit_modal_error.read().clone(),
+                    on_close: move |_| {
+                        edit_modal_error.set(None);
+                        edit_modal_system.set(None)
+                    },
                     on_save: move |request: crate::api::models::UpdateSystemRequest| {
                         let system_id = detail.id;
                         spawn(async move {
@@ -1005,23 +1025,22 @@ pub fn SystemsListView() -> Element {
                                 Ok(updated_detail) => {
                                     // Update local systems list
                                     let mut values = local_systems.read().clone();
-                                    if let Some(pos) = values.iter().position(|s| s.id == system_id) {
-                                        values[pos].hostname = updated_detail.hostname.clone();
-                                        values[pos].system_configuration_name = updated_detail.system_configuration_name.clone();
+                                     if let Some(pos) = values.iter().position(|s| s.id == system_id) {
+                                         values[pos].hostname = updated_detail.hostname.clone();
+                                         values[pos].system_configuration_name = updated_detail.system_configuration_name.clone();
                                         values[pos].environment = updated_detail.environment.clone();
                                         values[pos].deployment_policy = updated_detail.deployment_policy.clone();
                                         values[pos].flake_id = updated_detail.flake.as_ref().map(|flake| flake.id);
-                                        local_systems.set(values);
-                                    }
-                                    edit_modal_system.set(None);
-                                }
-                                Err(error_message) => {
-                                    // TODO: Show error in modal
-                                    api_notice.set(Some(error_message));
-                                    edit_modal_system.set(None);
-                                }
-                            }
-                        });
+                                         local_systems.set(values);
+                                     }
+                                     edit_modal_error.set(None);
+                                     edit_modal_system.set(None);
+                                 }
+                                 Err(error_message) => {
+                                     edit_modal_error.set(Some(error_message));
+                                 }
+                             }
+                         });
                     }
                 }
             }
@@ -1034,6 +1053,7 @@ pub fn SystemsListView() -> Element {
                     deployment_policy: detail.deployment_policy.clone(),
                     commits: commits.clone(),
                     current_commit: current_commit.clone(),
+                    error_message: deploy_error.read().clone(),
                     on_close: move |_| {
                         deploy_modal_system.set(None);
                         deploy_error.set(None);
@@ -1050,8 +1070,6 @@ pub fn SystemsListView() -> Element {
                                 }
                                 Err(error_message) => {
                                     deploy_error.set(Some(error_message.clone()));
-                                    api_notice.set(Some(error_message));
-                                    deploy_modal_system.set(None);
                                 }
                             }
                         });
@@ -1067,6 +1085,7 @@ fn SystemPreviewPanel(
     detail: SystemDetail,
     #[props(default)] environment_colors: Vec<(String, String)>,
     on_close: EventHandler<()>,
+    on_edit: EventHandler<()>,
     on_open_detail: EventHandler<()>,
     on_deploy: EventHandler<()>,
 ) -> Element {
@@ -1177,6 +1196,7 @@ fn SystemPreviewPanel(
             class: "side-panel",
             role: "dialog",
             "aria-modal": "true",
+            "data-testid": "systems-side-panel",
 
             div {
                 class: "panel-head",
@@ -1244,6 +1264,7 @@ fn SystemPreviewPanel(
                     dl {
                         class: "kv-grid",
                         dt { "Flake" } dd { "{flake_name}" }
+                        dt { "Generation" } dd { "#{detail.generation.unwrap_or_default()}" }
                         dt { "Commit" } dd { "{flake_commit}" }
                         dt { "NixOS" } dd { "{nixos_version}" }
                         dt { "Kernel" } dd { "{kernel}" }
@@ -1259,6 +1280,7 @@ fn SystemPreviewPanel(
                         dt { "CPU" } dd { "{cpu_brand}" }
                         dt { "Memory" } dd { "{memory_text}" }
                         dt { "IPv4" } dd { "{primary_ip}" }
+                        dt { "IPv6" } dd { "-" }
                         dt { "Last heartbeat" } dd { "{last_heartbeat}" }
                     }
                     div {
@@ -1333,7 +1355,8 @@ fn SystemPreviewPanel(
                 }
                 button {
                     class: "btn btn-ghost focus-ring",
-                    "Evaluate"
+                    onclick: move |_| on_edit.call(()),
+                    "Edit"
                 }
                 button {
                     class: "btn btn-primary focus-ring",

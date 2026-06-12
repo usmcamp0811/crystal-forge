@@ -11,11 +11,21 @@ pub fn DeploySystemModal(
     deployment_policy: String,
     commits: Vec<CommitInfo>,
     current_commit: Option<String>,
+    #[props(default)] error_message: Option<String>,
     on_close: EventHandler<()>,
     on_deploy: EventHandler<DeploySystemRequest>,
 ) -> Element {
     let mut selected_commit = use_signal(|| current_commit.clone().unwrap_or_default());
     let mut is_deploying = use_signal(|| false);
+
+    {
+        let error_message = error_message.clone();
+        use_effect(move || {
+            if error_message.is_some() {
+                is_deploying.set(false);
+            }
+        });
+    }
 
     let is_auto_latest = deployment_policy == "auto_latest";
     let can_deploy = matches!(deployment_policy.as_str(), "manual" | "pinned");
@@ -35,32 +45,28 @@ pub fn DeploySystemModal(
     };
 
     rsx! {
-        // Modal backdrop
         div {
-            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
+            class: "modal-backdrop",
             onclick: move |_| on_close.call(()),
 
-            // Modal content
             div {
-                class: "bg-gray-900 rounded-xl border {theme::surface::CARD_BORDER} shadow-2xl w-full max-w-2xl mx-4 max-h-[90vh] overflow-hidden flex flex-col",
+                class: "modal",
+                style: "width:min(620px,96vw); max-height:92vh;",
                 onclick: move |e| e.stop_propagation(),
 
-                // Header
                 div {
-                    class: "px-6 py-4 border-b {theme::surface::CARD_BORDER}",
+                    class: "modal-head",
                     h2 {
-                        class: "text-xl font-semibold text-white",
-                        "Deploy System"
+                        "Deploy to {hostname}"
                     }
                     p {
-                        class: "text-sm text-gray-400 mt-1",
-                        "Deploy {hostname} to a specific commit"
+                        "Select a commit to deploy for this system."
                     }
                 }
 
-                // Content
                 div {
-                    class: "px-6 py-4 space-y-4 overflow-y-auto flex-1",
+                    class: "modal-body",
+                    style: "overflow-y:auto;",
 
                     if is_auto_latest {
                         // Auto-latest notice
@@ -134,66 +140,43 @@ pub fn DeploySystemModal(
                             }
 
                             div {
-                                class: "space-y-2 max-h-96 overflow-y-auto",
+                                class: "sd-commit-list",
+                                style: "max-height:220px;",
 
                                 if commits.is_empty() {
                                     div {
-                                        class: "text-center py-8 text-gray-500",
+                                        class: "empty",
+                                        style: "margin: 12px;",
                                         p { "No commits available" }
                                     }
                                 } else {
                                     for commit in &commits {
-                                        div {
+                                        button {
                                             key: "{commit.sha}",
-                                            class: "border {theme::surface::CARD_BORDER} rounded-lg hover:bg-gray-800/50 transition-colors cursor-pointer",
-                                            class: if selected_commit() == commit.sha { "bg-emerald-500/10 border-emerald-500/50" } else { "" },
+                                            class: if selected_commit() == commit.sha { "sd-commit-item focus-ring selected" } else { "sd-commit-item focus-ring" },
                                             onclick: {
                                                 let sha = commit.sha.clone();
                                                 move |_| selected_commit.set(sha.clone())
                                             },
 
                                             div {
-                                                class: "px-4 py-3",
-                                                div {
-                                                    class: "flex items-start justify-between gap-4",
-                                                    div {
-                                                        class: "flex-1 min-w-0",
-                                                        p {
-                                                            class: "text-sm font-medium text-white truncate",
-                                                            "{commit.message}"
-                                                        }
-                                                        div {
-                                                            class: "flex items-center gap-3 mt-1 text-xs text-gray-400",
-                                                            span {
-                                                                class: "font-mono",
-                                                                "{commit.short_sha}"
-                                                            }
-                                                            span { "•" }
-                                                            span { "{commit.author}" }
-                                                            span { "•" }
-                                                            span { "{commit.timestamp}" }
-                                                        }
-                                                    }
-                                                    if selected_commit() == commit.sha {
-                                                        div {
-                                                            class: "text-emerald-400",
-                                                            // Checkmark icon
-                                                            svg {
-                                                                class: "w-5 h-5",
-                                                                xmlns: "http://www.w3.org/2000/svg",
-                                                                fill: "none",
-                                                                view_box: "0 0 24 24",
-                                                                stroke: "currentColor",
-                                                                path {
-                                                                    stroke_linecap: "round",
-                                                                    stroke_linejoin: "round",
-                                                                    stroke_width: "2",
-                                                                    d: "M5 13l4 4L19 7"
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
+                                                class: "sd-commit-sha",
+                                                "{commit.short_sha}"
+                                            }
+                                            div {
+                                                class: "sd-commit-msg",
+                                                "{commit.message}"
+                                            }
+                                            div {
+                                                class: "sd-commit-meta mono",
+                                                "{commit.author}"
+                                            }
+                                            div {
+                                                class: "sd-commit-meta",
+                                                "{commit.timestamp}"
+                                            }
+                                            if current_commit.as_ref() == Some(&commit.sha) {
+                                                span { class: "chip chip-info", style: "font-size:10px", "current" }
                                             }
                                         }
                                     }
@@ -201,14 +184,20 @@ pub fn DeploySystemModal(
                             }
                         }
                     }
+
+                    if let Some(message) = &error_message {
+                        div {
+                            class: "rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200",
+                            "{message}"
+                        }
+                    }
                 }
 
-                // Footer
                 div {
-                    class: "px-6 py-4 border-t {theme::surface::CARD_BORDER} flex justify-end gap-3",
+                    class: "modal-foot",
 
                     button {
-                        class: "px-4 py-2 text-gray-300 hover:text-white transition-colors",
+                        class: "btn btn-ghost focus-ring",
                         onclick: move |_| on_close.call(()),
                         disabled: is_deploying(),
                         "Cancel"
@@ -216,7 +205,7 @@ pub fn DeploySystemModal(
 
                     if can_deploy {
                         button {
-                            class: "px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed",
+                            class: "btn btn-primary focus-ring disabled:opacity-50 disabled:cursor-not-allowed",
                             onclick: handle_deploy,
                             disabled: is_deploying() || selected_commit.read().is_empty(),
 
