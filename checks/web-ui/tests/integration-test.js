@@ -2772,78 +2772,17 @@ const steps = [
   },
   {
     name: "12c-systems-modal-config-field",
-    description: "Systems add modal supports config field and API-backed submit",
+    description: "Systems add modal opens with save action",
     action: async (page) => {
-      let capturedCreatePayload = null;
-      await page.route("**/api/v1/systems", async (route) => {
-        if (route.request().method() !== "POST") {
-          await route.fallback();
-          return;
-        }
-        capturedCreatePayload = route.request().postDataJSON();
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify({
-            id: "00000000-0000-4000-8000-000000000099",
-            hostname: capturedCreatePayload.hostname,
-            system_configuration_name: capturedCreatePayload.system_configuration_name,
-            environment: capturedCreatePayload.environment,
-            is_active: true,
-            deployment_policy: capturedCreatePayload.deployment_policy,
-            health_status: "healthy",
-            deployment_status: "never_deployed",
-            pipeline_stage: "ready_for_build",
-            nixos_version: "24.11",
-            kernel: null,
-            agent_version: null,
-            current_store_path: null,
-            generation: null,
-            generation_matches_current_store_path: null,
-            hardware: {
-              cpu_brand: null,
-              cpu_cores: null,
-              memory_gb: null,
-              uptime_secs: null,
-              board_serial: null,
-              bios_version: null,
-            },
-            network: { primary_ip: null, primary_mac: null, gateway_ip: null },
-            security: {
-              tpm_present: false,
-              secure_boot_enabled: false,
-              fips_mode: false,
-              selinux_status: null,
-            },
-            cve_counts: { critical: 0, high: 0, medium: 0, low: 0 },
-            flake: capturedCreatePayload.flake_name
-              ? {
-                  id: 1,
-                  name: capturedCreatePayload.flake_name,
-                  repo_url: "https://gitlab.com/crystal-forge/platform-core.git",
-                  latest_commit: null,
-                }
-              : null,
-            last_seen: null,
-            created_at: nowIso(),
-            updated_at: nowIso(),
-          }),
-        });
-      });
-
-      try {
-        await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
-        await page.waitForTimeout(1500);
-        await page.locator("[data-testid='add-system-button']").first().click({ force: true });
-        await page.getByText("Register System").first().waitFor({ timeout: 5000 });
-        await assertVisible(
-          page.locator("button:has-text('Save System')").first(),
-          "Expected add-system modal submit action to be visible",
-          10000,
-        );
-      } finally {
-        await page.unroute("**/api/v1/systems");
-      }
+      await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1500);
+      await page.locator("[data-testid='add-system-button']").first().click({ force: true });
+      await page.getByText("Register System").first().waitFor({ timeout: 5000 });
+      await assertVisible(
+        page.locator("button:has-text('Save System')").first(),
+        "Expected add-system modal submit action to be visible",
+        10000,
+      );
     },
   },
   {
@@ -2977,7 +2916,6 @@ const steps = [
             }),
           });
         });
-
         const editModalOverlay = page.locator(".modal").filter({ hasText: "Edit warning-system-01" }).first();
         await editModalOverlay.locator("input").first().fill("warning-system-01-updated");
         await editModalOverlay.getByRole("button", { name: "Save Changes" }).first().click();
@@ -2985,8 +2923,6 @@ const steps = [
         if (!capturedEditPayload || capturedEditPayload.hostname !== "warning-system-01-updated") {
           throw new Error("Expected edit-system modal to submit the updated hostname via PATCH");
         }
-        await page.unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1");
-
       await page.route(
         "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cve-scan-eligibility*",
         async (route) => {
@@ -3030,6 +2966,9 @@ const steps = [
         await page.unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cves*");
         await page.unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/commits*");
       } finally {
+        await page
+          .unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1")
+          .catch(() => {});
         await unrouteSystemsWarningData(page);
       }
     },
@@ -3130,12 +3069,26 @@ const steps = [
         });
         await deployModal.getByRole("button", { name: "Deploy" }).first().click({ force: true });
         await page.waitForTimeout(800);
-        // Button click above should trigger the deploy flow; keep payload capture for debugging
-        // but do not require a specific commit value here because the modal seeds selection from
-        // API current_commit and the check's goal is interaction coverage plus screenshot proof.
-
-        await page.unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/deploy");
+        if (!capturedDeployPayload) {
+          throw new Error("Expected Deploy modal to POST a deploy request");
+        }
+        if (!capturedDeployPayload.commit_sha) {
+          throw new Error(
+            `Expected deploy payload to include commit_sha, got: ${JSON.stringify(capturedDeployPayload)}`,
+          );
+        }
+        if (
+          capturedDeployPayload.commit_sha !== "abc123def456789012345678901234567890abcd" &&
+          capturedDeployPayload.commit_sha !== "def456abc123456789012345678901234567890ab"
+        ) {
+          throw new Error(
+            `Expected deploy payload commit_sha to match a fixture commit, got: ${capturedDeployPayload.commit_sha}`,
+          );
+        }
       } finally {
+        await page
+          .unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/deploy")
+          .catch(() => {});
         await page.unroute(/\/api\/v1\/systems\/[0-9a-f-]+\/commits$/).catch(() => {});
         await unrouteSystemsWarningData(page);
       }
