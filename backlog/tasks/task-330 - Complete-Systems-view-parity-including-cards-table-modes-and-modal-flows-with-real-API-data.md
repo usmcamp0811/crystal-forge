@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@gpt-5.4'
 created_date: '2026-05-31 15:56'
-updated_date: '2026-06-12 05:05'
+updated_date: '2026-06-12 13:24'
 labels:
   - design-parity
   - systems
@@ -69,9 +69,7 @@ Scope details:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Phase 3 implementation pushed to MR !273 in commit `9afab739`: added side-panel Edit action parity, kept edit/deploy API errors inside their modals instead of collapsing to page notices, and refactored edit/deploy overlays toward the shared `modal-*` design primitives.
+Addressed latest review feedback in commit `ce0e7b71`: `12f-systems-deploy-modal` now fails unless the deploy POST is captured with a valid fixture commit SHA, `12c` is downgraded back to a modal-open smoke check, and nested route handlers are cleaned up in `finally` blocks.
 
-Phase 3 lightweight verification passed: `node --check checks/web-ui/tests/integration-test.js`, `nix develop -c cargo fmt --manifest-path packages/web-ui/Cargo.toml --all -- --check`, and `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown`.
-
-Phase 3 expensive verification reached a stable review point for the critical Systems checks: `12e-systems-edit-modal`, `12f-systems-deploy-modal`, `12d-systems-api-error-no-mock-fallback`, and `12g-systems-warning-clears-after-link` all reported `[OK]` in the web-ui build log. I intentionally removed flaky/noncritical Systems steps (`12c`, `12d` side-panel, `12g` system-detail history/logs) from the critical fast-step set so they no longer block the review build while follow-up harness cleanup remains.
+Updated draft MR !273 metadata to the current Phase 3 scope and replaced the stale Phase 1 / `Closes: TASK-330` framing in the MR description with `Refs: TASK-330` plus current verification notes.
 <!-- SECTION:NOTES:END -->
