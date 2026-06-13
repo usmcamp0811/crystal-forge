@@ -4,7 +4,7 @@ title: Close full Systems surface parity gaps against CrystalForgelatest
 status: Review
 assignee: []
 created_date: '2026-06-13 14:53'
-updated_date: '2026-06-13 20:03'
+updated_date: '2026-06-13 20:28'
 labels:
   - design-parity
   - systems
@@ -25,14 +25,20 @@ references:
   - TASK-338
   - TASK-295
   - TASK-281
+  - TASK-355
+  - TASK-356
 documentation:
   - /home/mcamp/code/crystal-forge/CrystalForgelatest/components/Systems.jsx
   - >-
     /home/mcamp/code/crystal-forge/CrystalForgelatest/components/SystemDetail.jsx
 modified_files:
-  - packages/web-ui/src/views/systems_list.rs
+  - packages/default/migrations/0135_add_system_reachability.sql
+  - packages/default/src/api/models.rs
+  - packages/default/src/handlers/api/systems.rs
+  - packages/default/src/queries/systems.rs
+  - packages/default/src/services/systems.rs
+  - packages/web-ui/src/api/models.rs
   - packages/web-ui/src/views/system_detail.rs
-  - packages/web-ui/src/components/system
   - checks/web-ui/tests/integration-test.js
 priority: high
 ordinal: 1695
@@ -109,5 +115,5 @@ This task covers the **full Systems surface**:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Maintainer explicitly authorized temporary mock/placeholder data for System Detail parity gaps that lack backend support, especially Compliance tab content. Requirements: code comments around mock data, task notes listing mocked items, and follow-up Backlog tasks to replace mocks with real backend data. Reachability should be made real via DB/API field.
+Mocked data introduced under explicit maintainer authorization: System Detail Compliance tab bundle rollups only (`mocked_compliance_bundles()` in `packages/web-ui/src/views/system_detail.rs`). Mocked fields: applicable bundle names, framework/version labels, owner, control counts, score percentage, pass/warn/fail/waiver counts, and placeholder View evidence action. Follow-ups created: TASK-355 replaces mock bundle rollups with real backend API data; TASK-356 wires View evidence to real per-control evidence UI. Reachability is not mocked: added persisted `systems.reachability` DB field projected through `view_system_detail` and API/Web UI models.
 <!-- SECTION:NOTES:END -->
