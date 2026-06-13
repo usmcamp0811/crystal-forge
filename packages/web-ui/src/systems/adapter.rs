@@ -1,4 +1,4 @@
-//! Systems adapter — API fetch with runtime-safe empty-state fallbacks.
+//! Systems adapter — API fetch with runtime-safe empty-state handling.
 //!
 //! # Behaviour
 //!
@@ -7,7 +7,7 @@
 //! | API returns 2xx       | Real data, no notice                        |
 //! | API returns 401/403   | `redirect_to_login: true`                   |
 //! | API 5xx / network err | Empty list/detail + notice shown            |
-//! | Empty list from API   | Empty `items` vec                            |
+//! | Empty list from API   | Empty `items` vec                           |
 //!
 //! Views MUST NOT call [`crate::api::client`] directly.
 //! All HTTP interactions go through the functions in this module.
@@ -36,9 +36,9 @@ use crate::api::models::{
 /// Result of loading the systems list.
 #[derive(Debug, Clone)]
 pub struct SystemsLoadResult {
-    /// The systems to display. May be real data, fallback mock, or empty.
+    /// The systems to display. Real on success, empty on error or empty API response.
     pub systems: Vec<SystemSummary>,
-    /// Human-readable notice shown when using fallback data.
+    /// Human-readable notice shown when list loading fails.
     pub notice: Option<String>,
     /// True when the API returned 401/403 — view should redirect to login.
     pub redirect_to_login: bool,
@@ -47,9 +47,9 @@ pub struct SystemsLoadResult {
 /// Result of loading a single system's detail.
 #[derive(Debug, Clone)]
 pub struct SystemDetailLoadResult {
-    /// The system detail. May be real data or fallback mock.
+    /// The system detail. Real on success, `None` on failure.
     pub system: Option<SystemDetail>,
-    /// Human-readable notice shown when using fallback data.
+    /// Human-readable notice shown when detail loading fails.
     pub notice: Option<String>,
     /// True when the API returned 401/403 — view should redirect to login.
     pub redirect_to_login: bool,
@@ -64,9 +64,11 @@ pub struct FlakeNamesLoadResult {
 }
 
 /// Result of loading flake context for system list/card display.
+///
+/// Each tuple is `(flake_id, name, branch, latest_commit)`.
 #[derive(Debug, Clone)]
 pub struct FlakeContextLoadResult {
-    pub flakes: Vec<(i32, String, Option<String>)>,
+    pub flakes: Vec<(i32, String, String, Option<String>)>,
     pub notice: Option<String>,
     pub redirect_to_login: bool,
 }
@@ -202,7 +204,7 @@ pub async fn load_flake_context_with_fallback() -> FlakeContextLoadResult {
                 .into_iter()
                 .map(|f: FlakeRegistryItem| {
                     let latest = timeline_hashes.get(&f.id).cloned().flatten();
-                    (f.id, f.name, latest)
+                    (f.id, f.name, f.branch, latest)
                 })
                 .collect();
 

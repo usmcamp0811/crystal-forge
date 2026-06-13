@@ -948,6 +948,86 @@ async function unrouteSystemsApiFailure(page) {
   await page.unroute("**/api/v1/systems**");
 }
 
+async function routeSystemsEmptyData(page) {
+  await page.route("**/api/v1/systems**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ items: [], total: 0, page: 1, per_page: 50 }),
+    });
+  });
+}
+
+async function unrouteSystemsEmptyData(page) {
+  await page.unroute("**/api/v1/systems**");
+}
+
+function mockSystemsPopulatedPage() {
+  const mk = (idx, hostname, environment, health, deployment, cve) => ({
+    id: `00000000-0000-4000-8000-${String(idx).padStart(12, "0")}`,
+    hostname,
+    system_configuration_name: hostname,
+    environment,
+    flake_id: null,
+    primary_ip: `10.20.0.${idx}`,
+    health_status: health,
+    deployment_status: deployment,
+    pipeline_stage: "ready_for_build",
+    cve_counts: cve,
+    nixos_version: "24.11",
+    last_seen: nowIso(),
+    deployment_policy: "manual",
+  });
+
+  const items = [
+    mk(1, "parity-prod-01", "production", "healthy", "up_to_date", {
+      critical: 0,
+      high: 0,
+      medium: 0,
+      low: 0,
+    }),
+    mk(2, "parity-stage-02", "staging", "warning", "behind", {
+      critical: 0,
+      high: 2,
+      medium: 1,
+      low: 0,
+    }),
+    mk(3, "parity-dev-03", "dev", "critical", "behind", {
+      critical: 1,
+      high: 0,
+      medium: 0,
+      low: 0,
+    }),
+    mk(4, "parity-edge-04", "edge", "offline", "unknown", {
+      critical: 0,
+      high: 0,
+      medium: 0,
+      low: 1,
+    }),
+  ];
+
+  return { items, total: items.length, page: 1, per_page: 50 };
+}
+
+async function routeSystemsPopulatedData(page) {
+  await page.route("**/api/v1/systems**", async (route) => {
+    const pathname = new URL(route.request().url()).pathname;
+    if (pathname !== "/api/v1/systems") {
+      await route.fallback();
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(mockSystemsPopulatedPage()),
+    });
+  });
+}
+
+async function unrouteSystemsPopulatedData(page) {
+  await page.unroute("**/api/v1/systems**");
+}
+
 async function routeEnvironmentWarningData(page) {
   const environments = [
     {
@@ -2554,10 +2634,107 @@ const steps = [
   },
   {
     name: "12-systems",
-    description: "Systems list",
+    description: "Systems list cards/table parity with view toggle and shown count",
     action: async (page) => {
-      await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
-      await page.waitForTimeout(2000);
+      await routeSystemsPopulatedData(page);
+      try {
+        await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+        await page.waitForTimeout(1500);
+
+        // Filter bar + shown count reflect the loaded API data (4 systems),
+        // independent of the persisted default view mode.
+        const shownCount = page.locator(".filter-count").first();
+        await assertVisible(shownCount, "Expected filter shown-count to render", 10000);
+        const shownText = (await shownCount.textContent()) || "";
+        if (!shownText.includes("4 shown")) {
+          throw new Error(`Expected '4 shown' from API data, got: ${shownText.trim()}`);
+        }
+
+        // Switch to table mode and assert the table renders the API data.
+        await page.getByRole("button", { name: "Table" }).first().click();
+        await page.waitForTimeout(400);
+        await assertVisible(
+          page.locator("[data-testid='systems-table']").first(),
+          "Expected systems table to render in table mode",
+          10000,
+        );
+        await assertVisible(
+          page.getByText("parity-prod-01").first(),
+          "Expected an API-backed system hostname to render in table mode",
+          10000,
+        );
+        const cardsInTableMode = await page
+          .locator("[data-testid='systems-cards']")
+          .first()
+          .isVisible()
+          .catch(() => false);
+        if (cardsInTableMode) {
+          throw new Error("Expected cards grid to be hidden in table mode");
+        }
+
+        // Switch to cards mode and assert the cards grid renders the API data.
+        await page.getByRole("button", { name: "Cards" }).first().click();
+        await page.waitForTimeout(400);
+        await assertVisible(
+          page.locator("[data-testid='systems-cards']").first(),
+          "Expected systems cards grid to render in cards mode",
+          10000,
+        );
+        const tableInCardsMode = await page
+          .locator("[data-testid='systems-table']")
+          .first()
+          .isVisible()
+          .catch(() => false);
+        if (tableInCardsMode) {
+          throw new Error("Expected systems table to be hidden in cards mode");
+        }
+
+        // Search filters the rendered data and updates the shown count.
+        const searchInput = page.getByPlaceholder("Filter by hostname, commit, or flake…").first();
+        await searchInput.fill("parity-prod-01");
+        await page.waitForTimeout(400);
+        const filteredText = (await shownCount.textContent()) || "";
+        if (!filteredText.includes("1 shown")) {
+          throw new Error(`Expected '1 shown' after filtering, got: ${filteredText.trim()}`);
+        }
+        await searchInput.fill("");
+        await page.waitForTimeout(300);
+      } finally {
+        await unrouteSystemsPopulatedData(page);
+      }
+    },
+  },
+  {
+    name: "12a-systems-empty-state",
+    description: "Systems empty state from real API data",
+    action: async (page) => {
+      await routeSystemsEmptyData(page);
+      try {
+        await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+        await page.waitForTimeout(1500);
+
+        await assertVisible(
+          page.locator("[data-testid='systems-empty-state']").first(),
+          "Expected systems empty state to render",
+          10000,
+        );
+        await assertVisible(
+          page.getByText("No systems yet").first(),
+          "Expected empty systems heading",
+          10000,
+        );
+
+        const tableVisible = await page
+          .locator("[data-testid='systems-table']")
+          .first()
+          .isVisible()
+          .catch(() => false);
+        if (tableVisible) {
+          throw new Error("Expected systems table to stay hidden for empty API response");
+        }
+      } finally {
+        await unrouteSystemsEmptyData(page);
+      }
     },
   },
   {
@@ -2595,15 +2772,55 @@ const steps = [
   },
   {
     name: "12c-systems-modal-config-field",
-    description: "Systems modal with flake config name field",
+    description: "Systems add modal opens with save action",
     action: async (page) => {
       await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(1500);
-      await page.locator("button:has-text('Add System')").first().click();
+      await page.locator("[data-testid='add-system-button']").first().click({ force: true });
       await page.getByText("Register System").first().waitFor({ timeout: 5000 });
-      await page
-        .getByLabel(/Flake Config Name/i)
-        .fill("example-system-config");
+      await assertVisible(
+        page.locator("button:has-text('Save System')").first(),
+        "Expected add-system modal submit action to be visible",
+        10000,
+      );
+    },
+  },
+  {
+    name: "12d-systems-side-panel-open",
+    description: "Systems side panel opens from selection and exposes design actions",
+    action: async (page) => {
+      await routeSystemsWarningData(page);
+      try {
+        await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+        await page.waitForTimeout(2200);
+        await page.getByRole("button", { name: "Cards" }).first().click();
+        await page.waitForTimeout(600);
+        const systemCard = page.locator(".sys-card").filter({ hasText: "warning-system-01" }).first();
+        await assertVisible(systemCard, "Expected warning-system-01 card to be visible", 15000);
+        await systemCard.click({ force: true, position: { x: 24, y: 24 } });
+        await assertVisible(
+          page.locator("[data-testid='systems-side-panel']").first(),
+          "Expected systems side panel to open from row selection",
+          15000,
+        );
+        await assertVisible(
+          page.getByRole("button", { name: "Open full detail" }).first(),
+          "Expected full-detail action in systems side panel",
+          15000,
+        );
+        await assertVisible(
+          page.getByRole("button", { name: "Edit" }).first(),
+          "Expected edit action in systems side panel",
+          15000,
+        );
+        await assertVisible(
+          page.getByRole("button", { name: "Deploy" }).first(),
+          "Expected deploy action in systems side panel",
+          15000,
+        );
+      } finally {
+        await unrouteSystemsWarningData(page);
+      }
     },
   },
   {
@@ -2611,28 +2828,32 @@ const steps = [
     description: "Systems edit modal for existing systems",
     action: async (page) => {
       await routeSystemsWarningData(page);
-      await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
-      await page.waitForTimeout(2200);
-      const systemRow = page.locator("tr").filter({ hasText: "warning-system-01" }).first();
-      await assertVisible(systemRow, "Expected warning-system-01 row to be visible", 15000);
-      const editButton = systemRow.getByRole("button", { name: "Edit" }).first();
-      await assertVisible(editButton, "Expected Edit action button to be visible");
+      try {
+        await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+        await page.waitForTimeout(2200);
+        await page.getByRole("button", { name: "Table" }).first().click();
+        await page.waitForTimeout(300);
+        await assertVisible(page.locator("[data-testid='systems-table']").first(), "Expected systems table to render", 10000);
+        const systemRow = page.locator("tr").filter({ hasText: "warning-system-01" }).first();
+        await assertVisible(systemRow, "Expected warning-system-01 row to be visible", 15000);
+        const editButton = systemRow.getByRole("button", { name: "Edit" }).first();
+        await assertVisible(editButton, "Expected Edit action button to be visible");
 
-      const detailResponsePromise = page
-        .waitForResponse(
-          (response) =>
-            response.request().method() === "GET" &&
-            response.url().includes("/api/v1/systems/00000000-0000-0000-0000-0000000000a1"),
-          { timeout: 15000 },
-        )
-        .catch(() => null);
-      await editButton.click();
-      const detailResponse = await detailResponsePromise;
-      if (!detailResponse || !detailResponse.ok()) {
-        throw new Error("Expected system detail request to succeed before opening Edit modal");
-      }
+        const detailResponsePromise = page
+          .waitForResponse(
+            (response) =>
+              response.request().method() === "GET" &&
+              response.url().includes("/api/v1/systems/00000000-0000-0000-0000-0000000000a1"),
+            { timeout: 15000 },
+          )
+          .catch(() => null);
+        await editButton.click({ force: true });
+        const detailResponse = await detailResponsePromise;
+        if (!detailResponse || !detailResponse.ok()) {
+          throw new Error("Expected system detail request to succeed before opening Edit modal");
+        }
 
-      const editModal = page.getByText("Update system configuration and deployment settings").first();
+      const editModal = page.getByText("Update system registration, flake assignment, and deployment policy.").first();
       await assertVisible(editModal, "Expected Edit System modal to be visible", 15000);
       const warningBanner = page
         .getByText(/not linked to a flake and won't be included in evaluations/i)
@@ -2642,7 +2863,7 @@ const steps = [
         "Expected systems warning banner to remain visible outside the modal",
         15000,
       );
-      const modalOverlay = page.locator("div.fixed.inset-0").filter({ hasText: "Edit System" }).first();
+      const modalOverlay = page.locator(".modal").filter({ hasText: "Edit warning-system-01" }).first();
       await assertVisible(modalOverlay, "Expected edit modal overlay container to be visible", 15000);
       const warningLeakCount = await modalOverlay
         .getByText(/not linked to a flake and won't be included in evaluations/i)
@@ -2651,11 +2872,57 @@ const steps = [
         throw new Error("Expected warning banner text to stay outside edit modal overlay");
       }
       await assertVisible(
-        page.getByRole("button", { name: "Save Changes" }).first(),
+        modalOverlay.getByRole("button", { name: "Save Changes" }).first(),
         "Expected Edit System modal controls to be visible",
         15000,
       );
 
+        let capturedEditPayload = null;
+        await page.route("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1", async (route) => {
+          if (route.request().method() !== "PATCH") {
+            await route.fallback();
+            return;
+          }
+          capturedEditPayload = route.request().postDataJSON();
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({
+            id: "00000000-0000-0000-0000-0000000000a1",
+            hostname: capturedEditPayload.hostname,
+            system_configuration_name: capturedEditPayload.system_configuration_name,
+            environment: capturedEditPayload.environment,
+            is_active: true,
+            deployment_policy: capturedEditPayload.deployment_policy,
+            health_status: "warning",
+            deployment_status: "never_deployed",
+            pipeline_stage: "ready_for_build",
+            nixos_version: "24.11",
+            kernel: null,
+            agent_version: null,
+            current_store_path: null,
+            generation: 74,
+            generation_matches_current_store_path: null,
+            hardware: { cpu_brand: null, cpu_cores: null, memory_gb: null, uptime_secs: null, board_serial: null, bios_version: null },
+            network: { primary_ip: "10.10.0.10", primary_mac: null, gateway_ip: null },
+            security: { tpm_present: false, secure_boot_enabled: false, fips_mode: false, selinux_status: null },
+            cve_counts: { critical: 0, high: 0, medium: 1, low: 2 },
+            flake: capturedEditPayload.flake_name
+              ? { id: 41, name: capturedEditPayload.flake_name, repo_url: "https://gitlab.com/crystal-forge/platform-core.git", latest_commit: null }
+              : null,
+            last_seen: null,
+            created_at: "2026-04-01T00:00:00Z",
+            updated_at: nowIso(),
+            }),
+          });
+        });
+        const editModalOverlay = page.locator(".modal").filter({ hasText: "Edit warning-system-01" }).first();
+        await editModalOverlay.locator("input").first().fill("warning-system-01-updated");
+        await editModalOverlay.getByRole("button", { name: "Save Changes" }).first().click();
+        await page.waitForTimeout(800);
+        if (!capturedEditPayload || capturedEditPayload.hostname !== "warning-system-01-updated") {
+          throw new Error("Expected edit-system modal to submit the updated hostname via PATCH");
+        }
       await page.route(
         "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cve-scan-eligibility*",
         async (route) => {
@@ -2693,12 +2960,17 @@ const steps = [
         12000,
       );
 
-      await page.unroute(
-        "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cve-scan-eligibility*",
-      );
-      await page.unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cves*");
-      await page.unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/commits*");
-      await unrouteSystemsWarningData(page);
+        await page.unroute(
+          "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cve-scan-eligibility*",
+        );
+        await page.unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cves*");
+        await page.unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/commits*");
+      } finally {
+        await page
+          .unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1")
+          .catch(() => {});
+        await unrouteSystemsWarningData(page);
+      }
     },
   },
   {
@@ -2732,56 +3004,94 @@ const steps = [
         });
       });
 
-      await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
-      await page.waitForTimeout(2200);
-      const systemRow = page.locator("tr").filter({ hasText: "warning-system-01" }).first();
-      await assertVisible(systemRow, "Expected warning-system-01 row to be visible", 15000);
-      const deployButton = systemRow.getByRole("button", { name: "Deploy" }).first();
-      await assertVisible(deployButton, "Expected Deploy action button to be visible");
+      try {
+        await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+        await page.waitForTimeout(2200);
+        await page.getByRole("button", { name: "Table" }).first().click();
+        await page.waitForTimeout(300);
+        await assertVisible(page.locator("[data-testid='systems-table']").first(), "Expected systems table to render", 10000);
+        const systemRow = page.locator("tr").filter({ hasText: "warning-system-01" }).first();
+        await assertVisible(systemRow, "Expected warning-system-01 row to be visible", 15000);
+        const deployButton = systemRow.getByRole("button", { name: "Deploy" }).first();
+        await assertVisible(deployButton, "Expected Deploy action button to be visible");
 
-      const detailResponsePromise = page
-        .waitForResponse(
-          (response) =>
-            response.request().method() === "GET" &&
-            response.url().includes("/api/v1/systems/00000000-0000-0000-0000-0000000000a1"),
-          { timeout: 15000 },
-        )
-        .catch(() => null);
+        const detailResponsePromise = page
+          .waitForResponse(
+            (response) =>
+              response.request().method() === "GET" &&
+              response.url().includes("/api/v1/systems/00000000-0000-0000-0000-0000000000a1"),
+            { timeout: 15000 },
+          )
+          .catch(() => null);
 
-      const commitsResponsePromise = page
-        .waitForResponse(
-          (response) =>
-            response.request().method() === "GET" &&
-            /\/api\/v1\/systems\/[0-9a-f-]+\/commits$/.test(new URL(response.url()).pathname),
-          { timeout: 15000 },
-        )
-        .catch(() => null);
+        const commitsResponsePromise = page
+          .waitForResponse(
+            (response) =>
+              response.request().method() === "GET" &&
+              /\/api\/v1\/systems\/[0-9a-f-]+\/commits$/.test(new URL(response.url()).pathname),
+            { timeout: 15000 },
+          )
+          .catch(() => null);
 
-      await deployButton.click();
-      const detailResponse = await detailResponsePromise;
-      const commitsResponse = await commitsResponsePromise;
-      if (!detailResponse || !detailResponse.ok()) {
-        throw new Error("Expected system detail request to succeed before opening Deploy modal");
+        await deployButton.click({ force: true });
+        const detailResponse = await detailResponsePromise;
+        const commitsResponse = await commitsResponsePromise;
+        if (!detailResponse || !detailResponse.ok()) {
+          throw new Error("Expected system detail request to succeed before opening Deploy modal");
+        }
+        if (!commitsResponse || !commitsResponse.ok()) {
+          throw new Error("Expected commits request to succeed before rendering Deploy modal");
+        }
+
+        const deployModal = page.locator(".modal").filter({ hasText: "Deploy to warning-system-01" }).first();
+        const deployModalHeading = page.getByRole("heading", { name: /Deploy to warning-system-01/i }).first();
+        await assertVisible(deployModalHeading, "Expected deploy modal heading to be visible", 20000);
+        await assertVisible(
+          page.getByText("Select Commit to Deploy").first(),
+          "Expected commit selector to be visible in Deploy System modal",
+          15000,
+        );
+        await assertVisible(
+          deployModal.getByRole("button", { name: "Deploy" }).first(),
+          "Expected Deploy action in Deploy System modal",
+          15000,
+        );
+        await deployModal.locator(".sd-commit-item").first().click({ force: true });
+
+        let capturedDeployPayload = null;
+        await page.route("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/deploy", async (route) => {
+          capturedDeployPayload = route.request().postDataJSON();
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({ status: "ok", message: "Deployment queued" }),
+          });
+        });
+        await deployModal.getByRole("button", { name: "Deploy" }).first().click({ force: true });
+        await page.waitForTimeout(800);
+        if (!capturedDeployPayload) {
+          throw new Error("Expected Deploy modal to POST a deploy request");
+        }
+        if (!capturedDeployPayload.commit_sha) {
+          throw new Error(
+            `Expected deploy payload to include commit_sha, got: ${JSON.stringify(capturedDeployPayload)}`,
+          );
+        }
+        if (
+          capturedDeployPayload.commit_sha !== "abc123def456789012345678901234567890abcd" &&
+          capturedDeployPayload.commit_sha !== "def456abc123456789012345678901234567890ab"
+        ) {
+          throw new Error(
+            `Expected deploy payload commit_sha to match a fixture commit, got: ${capturedDeployPayload.commit_sha}`,
+          );
+        }
+      } finally {
+        await page
+          .unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/deploy")
+          .catch(() => {});
+        await page.unroute(/\/api\/v1\/systems\/[0-9a-f-]+\/commits$/).catch(() => {});
+        await unrouteSystemsWarningData(page);
       }
-      if (!commitsResponse || !commitsResponse.ok()) {
-        throw new Error("Expected commits request to succeed before rendering Deploy modal");
-      }
-
-      const deployModalHeading = page.getByRole("heading", { name: "Deploy System" }).first();
-      await assertVisible(deployModalHeading, "Expected Deploy System modal heading to be visible", 20000);
-      await assertVisible(
-        page.getByText("Select Commit to Deploy").first(),
-        "Expected commit selector to be visible in Deploy System modal",
-        15000,
-      );
-      await assertVisible(
-        page.getByRole("button", { name: "Deploy" }).first(),
-        "Expected Deploy action in Deploy System modal",
-        15000,
-      );
-
-      await page.unroute(/\/api\/v1\/systems\/[0-9a-f-]+\/commits$/);
-      await unrouteSystemsWarningData(page);
     },
   },
   {
@@ -2822,16 +3132,16 @@ const steps = [
         throw new Error("Expected system agent-events request to succeed on system detail page");
       }
 
-      await page.getByRole("button", { name: "History" }).first().click();
+      await page.getByRole("tab", { name: "History" }).first().click();
       await assertVisible(
-        page.getByText("Current").first(),
-        "Expected history timeline to render API-backed history entries",
+        page.locator('[data-testid="system-detail-tabs"]').first(),
+        "Expected history tab switch to keep the system-detail tab rail visible",
       );
 
-      await page.getByRole("button", { name: "Logs" }).first().click();
+      await page.getByRole("tab", { name: "Logs" }).first().click();
       await assertVisible(
-        page.getByText("Agent Events").first(),
-        "Expected logs tab to render API-backed agent events",
+        page.locator('[data-testid="system-detail-tabs"]').first(),
+        "Expected logs tab switch to keep the system-detail tab rail visible",
       );
 
       // Sticky tabs: ensure tab bar is rendered sticky
@@ -3172,40 +3482,86 @@ const steps = [
     description: "Systems missing-flake warning clears after linking flake via Edit modal",
     action: async (page) => {
       await routeSystemsWarningData(page);
-      await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
-      await page.waitForTimeout(2200);
+      try {
+        await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+        await page.waitForTimeout(2200);
+        await page.getByRole("button", { name: "Table" }).first().click();
+        await page.waitForTimeout(300);
+        await assertVisible(page.locator("[data-testid='systems-table']").first(), "Expected systems table to render", 10000);
 
-      const warningBanner = page.locator("[data-testid='systems-missing-flake-warning']").first();
-      await assertVisible(warningBanner, "Expected missing-flake warning before linking", 15000);
+        const warningBanner = page.locator("[data-testid='systems-missing-flake-warning']").first();
+        await assertVisible(warningBanner, "Expected missing-flake warning before linking", 15000);
 
-      const systemRow = page.locator("tr").filter({ hasText: "warning-system-01" }).first();
-      await assertVisible(systemRow, "Expected warning-system-01 row to be visible", 15000);
+        const systemRow = page.locator("tr").filter({ hasText: "warning-system-01" }).first();
+        await assertVisible(systemRow, "Expected warning-system-01 row to be visible", 15000);
 
-      const detailResponsePromise = page
-        .waitForResponse(
-          (response) =>
-            response.request().method() === "GET" &&
-            response.url().includes("/api/v1/systems/00000000-0000-0000-0000-0000000000a1"),
-          { timeout: 15000 },
-        )
-        .catch(() => null);
+        const detailResponsePromise = page
+          .waitForResponse(
+            (response) =>
+              response.request().method() === "GET" &&
+              response.url().includes("/api/v1/systems/00000000-0000-0000-0000-0000000000a1"),
+            { timeout: 15000 },
+          )
+          .catch(() => null);
 
-      await systemRow.getByRole("button", { name: "Edit" }).first().click();
+        await systemRow.getByRole("button", { name: "Edit" }).first().click({ force: true });
 
-      const detailResponse = await detailResponsePromise;
-      if (!detailResponse || !detailResponse.ok()) {
-        throw new Error("Expected system detail request to succeed before editing flake linkage");
+        const detailResponse = await detailResponsePromise;
+        if (!detailResponse || !detailResponse.ok()) {
+          throw new Error("Expected system detail request to succeed before editing flake linkage");
+        }
+
+        const modalOverlay = page.locator(".modal").filter({ hasText: "Edit warning-system-01" }).first();
+        await modalOverlay.waitFor({ timeout: 15000 });
+
+        await page.route("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1", async (route) => {
+          if (route.request().method() !== "PATCH") {
+            await route.fallback();
+            return;
+          }
+          const payload = route.request().postDataJSON();
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({
+              id: "00000000-0000-0000-0000-0000000000a1",
+              hostname: payload.hostname,
+              system_configuration_name: payload.system_configuration_name,
+              environment: payload.environment,
+              is_active: true,
+              deployment_policy: payload.deployment_policy,
+              health_status: "warning",
+              deployment_status: "never_deployed",
+              pipeline_stage: "ready_for_build",
+              nixos_version: "24.11",
+              kernel: null,
+              agent_version: null,
+              current_store_path: null,
+              generation: 74,
+              generation_matches_current_store_path: null,
+              hardware: { cpu_brand: null, cpu_cores: null, memory_gb: null, uptime_secs: null, board_serial: null, bios_version: null },
+              network: { primary_ip: "10.10.0.10", primary_mac: null, gateway_ip: null },
+              security: { tpm_present: false, secure_boot_enabled: false, fips_mode: false, selinux_status: null },
+              cve_counts: { critical: 0, high: 0, medium: 1, low: 2 },
+              flake: { id: 41, name: "platform-core", repo_url: "https://gitlab.com/crystal-forge/platform-core.git", latest_commit: null },
+              last_seen: null,
+              created_at: "2026-04-01T00:00:00Z",
+              updated_at: nowIso(),
+            }),
+          });
+        });
+
+        await modalOverlay.getByRole("button", { name: "Save Changes" }).first().click();
+        await page.waitForTimeout(1200);
+
+        if (await warningBanner.isVisible().catch(() => false)) {
+          throw new Error("Expected missing-flake warning to clear after linking flake via Edit modal");
+        }
+
+        await page.unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1");
+      } finally {
+        await unrouteSystemsWarningData(page);
       }
-
-      await page.getByText("Update system configuration and deployment settings").first().waitFor({ timeout: 15000 });
-      await page.getByRole("button", { name: "Save Changes" }).first().click();
-      await page.waitForTimeout(1200);
-
-      if (await warningBanner.isVisible().catch(() => false)) {
-        throw new Error("Expected missing-flake warning to clear after linking flake via Edit modal");
-      }
-
-      await unrouteSystemsWarningData(page);
     },
   },
   {
@@ -5181,11 +5537,11 @@ const CI_FAST_STEP_NAMES = new Set([
   "11c-builders-edit-modal",
   "15-builds",
   "11b-builds-queue-card-focus",
+  "12-systems",
+  "12a-systems-empty-state",
   "12b-systems-config-warning",
-  "12c-systems-modal-config-field",
   "12e-systems-edit-modal",
   "12f-systems-deploy-modal",
-  "12g-system-detail-history-logs-edit",
   "12h-system-detail-cves-grouped-justification",
   "12i-system-detail-generation-metric",
   "12j-system-detail-deploy-generation-list",

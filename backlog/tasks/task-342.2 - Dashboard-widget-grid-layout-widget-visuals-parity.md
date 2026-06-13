@@ -76,3 +76,21 @@ Pixel-align the dashboard grid arrangement, widget headers, spacing, and the fle
 - [x] #4 Loading spinner state matches the design treatment
 - [x] #5 web-ui step screenshots the populated dashboard and asserts the fleet-health widget
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: opencode-agent on reckless in /home/mcamp/code/crystal-forge/TASK-342.2-dashboard-widget-parity
+
+MR !272: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/272
+
+Implemented by aligning the remaining dashboard stat widgets with the CrystalForgelatest visual pattern: Build Summary and CVE Summary now use the shared `dash-w-body` + `dash-w-mini` dashboard layout with large hero counts and compact stat cells.
+
+Added `06z3-dashboard-widget-visuals-parity` to the `web-ui` integration suite to assert the populated dashboard renders Fleet Health, CVE Summary, and Build Summary widgets and to capture a review screenshot.
+
+Verification passed: `node --check checks/web-ui/tests/integration-test.js`, `nix develop -c cargo fmt --manifest-path packages/web-ui/Cargo.toml -- --check`, `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown`, `nix develop -c cargo test --manifest-path packages/web-ui/Cargo.toml build_summary`, `nix build .#checks.x86_64-linux.web-ui`.
+
+Screenshot captured from passing `web-ui` check step: `06z3-dashboard-widget-visuals-parity.png`.
+
+Audit notes: dashboard grid CSS, widget headers, fleet-health layout, and loading spinner treatment were already parity-aligned in the current codebase; the remaining gaps addressed here were the Build Summary and CVE Summary widget internals plus populated-dashboard screenshot coverage.
+<!-- SECTION:NOTES:END -->

@@ -2498,6 +2498,11 @@ html[data-theme="light"] .sd-nix {
   transform: translateY(-1px);
 }
 
+.sys-card.selected {
+  background: color-mix(in oklab, var(--cf-brand-purple) 10%, var(--cf-card-bg));
+  border-color: color-mix(in oklab, var(--cf-brand-purple) 45%, var(--cf-card-border));
+}
+
 .sys-card.compact {
   padding: 12px;
   gap: 8px;
