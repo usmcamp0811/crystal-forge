@@ -1,9 +1,10 @@
 ---
 id: TASK-353
 title: Close full Systems surface parity gaps against CrystalForgelatest
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-06-13 14:53'
+updated_date: '2026-06-13 15:18'
 labels:
   - design-parity
   - systems
@@ -138,7 +139,15 @@ Why high:
 - [ ] #5 System detail tab rail matches the reference in structure, ordering, iconography, active states, and badge treatment
 - [ ] #6 System detail Overview, Deploy, History, Logs, Config, CVEs, and Hardening surfaces materially match the reference for core states
 - [ ] #7 All displayed Systems list and Systems detail values are sourced from authoritative backend APIs in production paths unless explicitly tracked as backend follow-up gaps
-- [ ] #8 checks/web-ui captures screenshot evidence and behavior assertions for the full Systems surface, including both /systems and /systems/{id}
+- [ ] #8 `checks/web-ui` captures screenshot evidence and behavior assertions for the full Systems surface, including both `/systems` and `/systems/{id}`
 - [ ] #9 A human reviewer can compare the implemented Systems surface against the CrystalForgelatest reference and find no remaining material parity gaps
 <!-- SECTION:DESCRIPTION:END -->
+
 <!-- AC:END -->
+<!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Moved to To Do by explicit human instruction after TASK-295 and TASK-330 were merged into dev.
+<!-- SECTION:NOTES:END -->
