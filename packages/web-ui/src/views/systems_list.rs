@@ -11,6 +11,7 @@ use crate::components::environments::{normalize_color_hex, with_alpha};
 use crate::components::filters::ViewMode;
 use crate::components::forms::{AddSystemForm, NewSystemDraft, validate_new_system};
 use crate::components::heartbeat_spinner::HeartbeatSpinner;
+use crate::components::icon::{Icon, IconName};
 use crate::components::modals::{
     GeneratedKeyPair, KeyPairModal, RemoveSystemDialog, UpdatePublicKeyModal, generate_key_pair,
 };
@@ -1365,16 +1366,19 @@ fn SystemPreviewPanel(
                 button {
                     class: "btn btn-ghost focus-ring",
                     onclick: move |_| on_open_detail.call(()),
+                    Icon { name: IconName::ArrowRight, size: 12 }
                     "Open full detail"
                 }
                 button {
                     class: "btn btn-ghost focus-ring",
                     onclick: move |_| on_edit.call(()),
+                    Icon { name: IconName::Gear, size: 12 }
                     "Edit"
                 }
                 button {
                     class: "btn btn-primary focus-ring",
                     onclick: move |_| on_deploy.call(()),
+                    Icon { name: IconName::Deploy, size: 12 }
                     "Deploy"
                 }
             }

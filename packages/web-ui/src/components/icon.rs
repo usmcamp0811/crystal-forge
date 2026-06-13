@@ -21,6 +21,8 @@ pub enum IconName {
     Cpu,
     Gear,
     Warn,
+    ArrowLeft,
+    Rollback,
     /// System detail tab icons (match CrystalForgelatest Icon.jsx paths).
     Dashboard,
     Deploy,
@@ -158,6 +160,25 @@ pub fn Icon(name: IconName, #[props(default = 16)] size: u32) -> Element {
                 stroke_linejoin: "round"
             }
             path { d: "M12 9v4M12 17h.01" }
+        },
+        IconName::ArrowLeft => rsx! {
+            path {
+                d: "M19 12H5M11 19l-7-7 7-7",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+        },
+        IconName::Rollback => rsx! {
+            path {
+                d: "M3 7h11a6 6 0 1 1 0 12H8",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+            path {
+                d: "m8 3-5 4 5 4",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
         },
         // Dashboard: four rects laid out as a panel grid (design Icon.jsx "dashboard").
         IconName::Dashboard => rsx! {

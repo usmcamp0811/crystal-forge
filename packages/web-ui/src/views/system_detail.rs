@@ -40,7 +40,8 @@ use crate::components::modals::{RollbackConfirmDialog, SyncConfirmDialog};
 use crate::components::notifications::Toast;
 use crate::components::system::{
     AgentCard, BooleanRow, EditSystemModal, HardwareCard, InfoRow, InfoRowMono, LogLine, LogsTab,
-    NetworkCard, SecurityCard, StatusBadge, SystemInfoCard, environment_style, format_uptime,
+    NetworkCard, SecurityCard, StatusBadge, SystemInfoCard, deployment_state_label,
+    environment_style, format_uptime,
 };
 use crate::routes::Route;
 use crate::state::{app_state::AppState, auth};
@@ -106,6 +107,7 @@ enum Tab {
     Logs,
     Config,
     Cves,
+    Compliance,
 }
 
 impl Tab {
@@ -118,9 +120,25 @@ impl Tab {
             Self::Logs => "Logs",
             Self::Config => "Config",
             Self::Cves => "CVEs",
+            Self::Compliance => "Compliance",
         }
     }
 }
+
+fn derived_fqdn(hostname: &str, environment: Option<&str>) -> String {
+    let env = environment.unwrap_or("unknown").to_lowercase();
+    format!("{hostname}.{env}.cf.internal")
+}
+
+const DETAIL_TAB_ORDER: [Tab; 7] = [
+    Tab::Overview,
+    Tab::Deploy,
+    Tab::History,
+    Tab::Logs,
+    Tab::Config,
+    Tab::Cves,
+    Tab::Hardening,
+];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Main Component
@@ -135,6 +153,7 @@ pub fn SystemDetailView(id: String) -> Element {
     // Current tab state
     let mut active_tab = use_signal(|| Tab::Overview);
     let mut edit_modal_open = use_signal(|| false);
+    let mut show_ssh_modal = use_signal(|| false);
 
     // Confirmation dialog state for Sync
     let mut show_sync_dialog = use_signal(|| false);
@@ -423,6 +442,16 @@ pub fn SystemDetailView(id: String) -> Element {
         HealthStatus::Offline => "chip chip-unknown",
     };
     let health_label = system.health_status.label();
+    let detail_fqdn = derived_fqdn(&system.hostname, system.environment.as_deref());
+    let deployment_chip_class = match system.deployment_status {
+        DeploymentStatus::UpToDate => "chip chip-healthy",
+        DeploymentStatus::Behind => "chip chip-warning",
+        DeploymentStatus::Ahead => "chip chip-info",
+        DeploymentStatus::NeverDeployed
+        | DeploymentStatus::NoCommitsAvailable
+        | DeploymentStatus::Unknown => "chip chip-unknown",
+    };
+    let deployment_chip_label = deployment_state_label(&system.deployment_status);
 
     // Format last seen for header
     let last_seen_text = system
@@ -463,14 +492,7 @@ pub fn SystemDetailView(id: String) -> Element {
                         nav.push(Route::SystemsView {});
                     },
                     "aria-label": "Back to systems",
-                    svg {
-                        class: "w-3.5 h-3.5",
-                        fill: "none",
-                        stroke: "currentColor",
-                        stroke_width: "2",
-                        view_box: "0 0 24 24",
-                        path { d: "M15 19l-7-7 7-7" }
-                    }
+                    Icon { name: IconName::ArrowLeft, size: 14 }
                 }
                 span {
                     class: "sd-crumb-text",
@@ -493,7 +515,7 @@ pub fn SystemDetailView(id: String) -> Element {
                         }
                         div {
                             h1 { class: "sd-hostname", "{system.hostname}" }
-                            div { class: "sd-fqdn mono", "{system.hostname}.local" }
+                            div { class: "sd-fqdn mono", "{detail_fqdn}" }
                         }
                         span {
                             class: "env-badge",
@@ -503,307 +525,40 @@ pub fn SystemDetailView(id: String) -> Element {
                         }
                         span { class: "{health_chip_class}", "{health_label}" }
                         span {
-                            class: "chip chip-info",
-                            "{system.deployment_status.label()}"
+                            class: "{deployment_chip_class}",
+                            "{deployment_chip_label}"
                         }
                     }
 
                     div {
                         class: "sd-head-actions",
-                        // Evaluate
-                        button {
-                            class: "btn btn-ghost focus-ring",
-                            disabled: !can_mutate,
-                            svg {
-                                class: "w-3.5 h-3.5",
-                                fill: "none",
-                                stroke: "currentColor",
-                                stroke_width: "2",
-                                view_box: "0 0 24 24",
-                                path { d: "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 12l2 2 4-4" }
-                            }
-                            "Evaluate"
-                        }
-                        // Rollback
                         button {
                             class: "btn btn-ghost focus-ring",
                             disabled: !can_mutate,
                             onclick: move |_| show_rollback_dialog.set(true),
-                            svg {
-                                class: "w-3.5 h-3.5",
-                                fill: "none",
-                                stroke: "currentColor",
-                                stroke_width: "2",
-                                view_box: "0 0 24 24",
-                                path { d: "M9 14l-4-4 4-4M5 10h7a4 4 0 014 4v1" }
-                            }
+                            Icon { name: IconName::Rollback, size: 14 }
                             "Rollback"
                         }
-                        // Deploy (primary)
+                        button {
+                            class: "btn btn-ghost focus-ring",
+                            onclick: move |_| show_ssh_modal.set(true),
+                            Icon { name: IconName::Terminal, size: 14 }
+                            "SSH"
+                        }
+                        button {
+                            class: "btn btn-ghost focus-ring",
+                            disabled: !can_mutate,
+                            onclick: move |_| edit_modal_open.set(true),
+                            Icon { name: IconName::Gear, size: 14 }
+                            "Edit"
+                        }
                         button {
                             class: "btn btn-primary focus-ring",
                             disabled: !can_mutate,
                             onclick: move |_| active_tab.set(Tab::Deploy),
-                            svg {
-                                class: "w-3.5 h-3.5",
-                                fill: "none",
-                                stroke: "currentColor",
-                                stroke_width: "2",
-                                view_box: "0 0 24 24",
-                                path { d: "M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" }
-                            }
+                            Icon { name: IconName::Deploy, size: 14 }
                             "Deploy"
                         }
-                        button {
-                            class: "inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} {theme::text::PRIMARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors disabled:opacity-60 disabled:cursor-not-allowed",
-                            disabled: !can_mutate,
-                            onclick: move |_| edit_modal_open.set(true),
-                            if !can_mutate {
-                                "Edit (Operator/Admin required)"
-                            } else {
-                            "Edit"
-                        }
-                    }
-                    button {
-                        class: "inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING} transition-colors disabled:opacity-60 disabled:cursor-not-allowed",
-                        disabled: *cve_scan_in_progress.read() || !can_mutate || !cve_scan_eligible,
-                        title: if cve_scan_eligible {
-                            Some("Run CVE scan immediately for this system configuration")
-                        } else {
-                            Some(cve_scan_blocked_reason.as_str())
-                        },
-                        onclick: {
-                            let system_id = system.id;
-                            move |_| {
-                                if !can_mutate || !cve_scan_eligible {
-                                    return;
-                                }
-
-                                cve_scan_in_progress.set(true);
-                                cve_scan_status_text.set(Some("CVE scan queued...".to_string()));
-                                spawn(async move {
-                                    let trigger_result = trigger_system_cve_scan(&system_id).await;
-                                    match trigger_result {
-                                        Ok(triggered) => {
-                                            cve_scan_status_text
-                                                .set(Some("CVE scan running...".to_string()));
-                                            let mut terminal_status: Option<String> = None;
-
-                                            for _ in 0..25 {
-                                                match fetch_cve_scan_status(&triggered.scan_id).await {
-                                                    Ok(status) => {
-                                                        let normalized = status.status.to_lowercase();
-                                                        if normalized == "completed" {
-                                                            terminal_status = Some(format!(
-                                                                "CVE scan completed: {} vulnerabilities found",
-                                                                status.total_vulnerabilities
-                                                            ));
-                                                            break;
-                                                        }
-                                                        if normalized == "failed" {
-                                                            terminal_status = Some(
-                                                                "CVE scan failed. Check server logs for details."
-                                                                    .to_string(),
-                                                            );
-                                                            break;
-                                                        }
-                                                        cve_scan_status_text
-                                                            .set(Some("CVE scan running...".to_string()));
-                                                    }
-                                                    Err(_) => {
-                                                        terminal_status = Some(
-                                                            "Unable to poll CVE scan status."
-                                                                .to_string(),
-                                                        );
-                                                        break;
-                                                    }
-                                                }
-
-                                                use gloo_timers::future::TimeoutFuture;
-                                                TimeoutFuture::new(1500).await;
-                                            }
-
-                                            if let Some(msg) = terminal_status {
-                                                let is_success = msg.contains("completed");
-                                                toast_message.set(Some((msg.clone(), is_success)));
-                                                cve_scan_status_text.set(Some(msg));
-                                            }
-                                        }
-                                        Err(ApiClientError::Status { code: 409, body }) if body.contains("scan_ineligible") => {
-                                            let msg = "CVE scanning is not available on this node (vulnix not installed).".to_string();
-                                            toast_message.set(Some((msg.clone(), false)));
-                                            cve_scan_status_text.set(Some(msg));
-                                        }
-                                        Err(err) => {
-                                            let msg = format!("Failed to trigger CVE scan: {}", err);
-                                            toast_message.set(Some((msg.clone(), false)));
-                                            cve_scan_status_text.set(Some(msg));
-                                        }
-                                    }
-
-                                    cve_scan_in_progress.set(false);
-                                });
-                            }
-                        },
-
-                        if *cve_scan_in_progress.read() {
-                            "Scanning..."
-                        } else if !can_mutate {
-                            "Run CVE Scan (Operator/Admin required)"
-                        } else {
-                            "Run CVE Scan"
-                        }
-                    }
-                    button {
-                        class: "inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING} transition-colors disabled:opacity-60 disabled:cursor-not-allowed",
-                        disabled: *hardening_scan_in_progress.read() || !can_mutate || !hardening_scan_eligible,
-                        title: if !hardening_scan_eligible {
-                            Some(hardening_scan_blocked_reason.as_str())
-                        } else if !can_mutate {
-                            Some("Operator or Admin role required to run scans")
-                        } else {
-                            Some("Run hardening scan immediately for this system configuration")
-                        },
-                        onclick: {
-                            let system_id = system.id;
-                            move |_| {
-                                if !can_mutate || !hardening_scan_eligible {
-                                    return;
-                                }
-
-                                hardening_scan_in_progress.set(true);
-                                hardening_scan_status_text.set(Some("Hardening scan queued...".to_string()));
-
-                                spawn(async move {
-                                    let trigger_result = trigger_system_hardening_scan(&system_id).await;
-                                    match trigger_result {
-                                        Ok(triggered) => {
-                                            hardening_scan_status_text
-                                                .set(Some("Hardening scan running...".to_string()));
-                                            let mut terminal_status: Option<String> = None;
-
-                                            for _ in 0..25 {
-                                                match fetch_hardening_scan_status(&triggered.scan_id).await {
-                                                    Ok(status) => {
-                                                        let normalized = status.status.to_lowercase();
-                                                        if normalized == "completed" {
-                                                            terminal_status = Some(format!(
-                                                                "Hardening scan completed: {} services, score {}",
-                                                                status.total_services,
-                                                                status.overall_score
-                                                                    .map(|v| v.to_string())
-                                                                    .unwrap_or_else(|| "n/a".to_string())
-                                                            ));
-                                                            break;
-                                                        }
-
-                                                        if normalized == "failed" {
-                                                            terminal_status = Some(match status.error_message {
-                                                                Some(message) if !message.is_empty() => {
-                                                                    format!("Hardening scan failed: {}", message)
-                                                                }
-                                                                _ => "Hardening scan failed. Check server logs for details."
-                                                                    .to_string(),
-                                                            });
-                                                            break;
-                                                        }
-                                                    }
-                                                    Err(_) => {
-                                                        terminal_status = Some(
-                                                            "Unable to poll hardening scan status.".to_string(),
-                                                        );
-                                                        break;
-                                                    }
-                                                }
-
-                                                use gloo_timers::future::TimeoutFuture;
-                                                TimeoutFuture::new(1500).await;
-                                            }
-
-                                            if let Some(msg) = terminal_status {
-                                                let is_success = msg.contains("completed");
-                                                toast_message.set(Some((msg.clone(), is_success)));
-                                                hardening_scan_status_text.set(Some(msg));
-                                                hardening_results_resource.restart();
-                                            }
-                                        }
-                                        Err(err) => {
-                                            let msg = format!("Failed to trigger hardening scan: {}", err);
-                                            toast_message.set(Some((msg.clone(), false)));
-                                            hardening_scan_status_text.set(Some(msg));
-                                        }
-                                    }
-
-                                    hardening_scan_in_progress.set(false);
-                                });
-                            }
-                        },
-
-                        svg {
-                            class: "w-4 h-4",
-                            fill: "none",
-                            stroke: "currentColor",
-                            stroke_width: "2",
-                            view_box: "0 0 24 24",
-                            path {
-                                stroke_linecap: "round",
-                                stroke_linejoin: "round",
-                                d: "M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z"
-                            }
-                        }
-                        if *hardening_scan_in_progress.read() {
-                            "Scanning..."
-                        } else if !can_mutate {
-                            "Run Hardening Scan (Operator/Admin required)"
-                        } else if !hardening_scan_eligible {
-                            "Run Hardening Scan (unavailable)"
-                        } else {
-                            "Run Hardening Scan"
-                        }
-                    }
-                    button {
-                        class: "inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::SUCCESS_BTN} {theme::interactive::FOCUS_RING} transition-colors disabled:opacity-60 disabled:cursor-not-allowed",
-                        disabled: *sync_in_progress.read() || !can_mutate,
-                        onclick: move |_| show_sync_dialog.set(true),
-
-                        if *sync_in_progress.read() {
-                            svg {
-                                class: "w-4 h-4 animate-spin",
-                                fill: "none",
-                                view_box: "0 0 24 24",
-                                circle {
-                                    class: "opacity-25",
-                                    cx: "12",
-                                    cy: "12",
-                                    r: "10",
-                                    stroke: "currentColor",
-                                    stroke_width: "4"
-                                }
-                                path {
-                                    class: "opacity-75",
-                                    fill: "currentColor",
-                                    d: "M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                                }
-                            }
-                            "Syncing..."
-                        } else if !can_mutate {
-                            "Sync (Operator/Admin required)"
-                        } else {
-                            svg {
-                                class: "w-4 h-4",
-                                fill: "none",
-                                stroke: "currentColor",
-                                view_box: "0 0 24 24",
-                                path {
-                                    stroke_linecap: "round",
-                                    stroke_linejoin: "round",
-                                    stroke_width: "2",
-                                    d: "M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
-                                }
-                            }
-                            "Sync Now"
-                        }
-                    }
                     }
                 }
                 if let Some(scan_status) = cve_scan_status_text() {
@@ -907,7 +662,7 @@ pub fn SystemDetailView(id: String) -> Element {
                 "data-testid": "system-detail-tabs",
                 class: "sd-tabs",
                 role: "tablist",
-                for tab in [Tab::Overview, Tab::Deploy, Tab::History, Tab::Cves, Tab::Hardening, Tab::Logs, Tab::Config] {
+                for tab in DETAIL_TAB_ORDER {
                     {
                         let is_active = *active_tab.read() == tab;
                         let tab_class = if is_active {
@@ -932,6 +687,7 @@ pub fn SystemDetailView(id: String) -> Element {
                                     Tab::Hardening => rsx!(Icon { name: IconName::Key, size: 13 }),
                                     Tab::Logs => rsx!(Icon { name: IconName::Terminal, size: 13 }),
                                     Tab::Config => rsx!(Icon { name: IconName::File, size: 13 }),
+                                    Tab::Compliance => rsx!(Icon { name: IconName::Shield, size: 13 }),
                                 }
                                 "{tab.label()}"
                                 if tab == Tab::Cves && system.cve_counts.critical > 0 {
@@ -941,6 +697,26 @@ pub fn SystemDetailView(id: String) -> Element {
                                     }
                                 }
                             }
+                        }
+                    }
+                }
+                {
+                    let is_active = *active_tab.read() == Tab::Compliance;
+                    let tab_class = if is_active {
+                        "sd-tab focus-ring active"
+                    } else {
+                        "sd-tab focus-ring"
+                    };
+                    let compliance_key = "Compliance".to_string();
+                    rsx! {
+                        button {
+                            key: "{compliance_key}",
+                            class: "{tab_class}",
+                            role: "tab",
+                            "aria-selected": "{is_active}",
+                            onclick: move |_| active_tab.set(Tab::Compliance),
+                            Icon { name: IconName::Shield, size: 13 }
+                            "Compliance"
                         }
                     }
                 }
@@ -1076,6 +852,25 @@ pub fn SystemDetailView(id: String) -> Element {
                     Tab::Config => rsx! {
                         ConfigTab { system: system.clone() }
                     },
+                    Tab::Compliance => rsx! {
+                        section {
+                            class: "card sd-card",
+                            div {
+                                class: "sd-card-head",
+                                h2 { "Compliance" }
+                                span { class: "sd-card-meta", "temporary parity placeholder" }
+                            }
+                            div {
+                                class: "sd-callout sd-callout-info",
+                                style: "margin: 18px;",
+                                Icon { name: IconName::Shield, size: 13 }
+                                div {
+                                    strong { "Compliance surface is not fully wired yet." }
+                                    " This tab is present to match the design structure while the real compliance detail experience is completed under TASK-353."
+                                }
+                            }
+                        }
+                    },
                 }
             }
 
@@ -1123,6 +918,13 @@ pub fn SystemDetailView(id: String) -> Element {
                         }
                     });
                 }
+            }
+        }
+
+        if *show_ssh_modal.read() {
+            SshConnectModal {
+                system: system.clone(),
+                on_close: move |_| show_ssh_modal.set(false),
             }
         }
 
@@ -1227,6 +1029,94 @@ pub fn SystemDetailView(id: String) -> Element {
 // ─────────────────────────────────────────────────────────────────────────────
 // Tab Components
 // ─────────────────────────────────────────────────────────────────────────────
+
+#[component]
+fn SshConnectModal(system: SystemDetail, on_close: EventHandler<()>) -> Element {
+    let environment_text = system
+        .environment
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let target = system
+        .network
+        .primary_ip
+        .clone()
+        .filter(|ip| !ip.is_empty())
+        .unwrap_or_else(|| derived_fqdn(&system.hostname, system.environment.as_deref()));
+    let fqdn = derived_fqdn(&system.hostname, system.environment.as_deref());
+    let jump_domain = fqdn.split('.').skip(1).collect::<Vec<_>>().join(".");
+    let jump_domain = if jump_domain.is_empty() {
+        "example.com".to_string()
+    } else {
+        jump_domain
+    };
+
+    let ssh_cmd = format!("ssh root@{target}");
+    let bastion_cmd = format!("ssh -J bastion.{jump_domain} root@{target}");
+    let journal_cmd = format!("ssh root@{target} journalctl -fu crystal-forge-agent");
+
+    rsx! {
+        div {
+            class: "modal-backdrop",
+            onclick: move |_| on_close.call(()),
+
+            div {
+                class: "modal",
+                style: "width:min(560px,96vw);",
+                onclick: move |e| e.stop_propagation(),
+
+                div {
+                    class: "modal-head",
+                    h2 {
+                        Icon { name: IconName::Terminal, size: 14 }
+                        span { style: "margin-left: 6px;", "Connect to {system.hostname}" }
+                    }
+                    p { "In-app terminal isn't available yet — connect directly over SSH for now." }
+                }
+
+                div {
+                    class: "modal-body",
+                    style: "overflow-y:auto;",
+
+                    div {
+                        class: "sd-callout sd-callout-warn",
+                        style: "margin-bottom: 14px;",
+                        Icon { name: IconName::Warn, size: 13 }
+                        div { style: "font-size: 12px;", "Browser-based SSH is on the roadmap. These commands run from your own workstation." }
+                    }
+
+                    div { class: "field", label { "Connect" } }
+                    div { class: "ssh-cmd", code { class: "mono", "{ssh_cmd}" } }
+
+                    div { class: "field", style: "margin-top: 16px;", label { "Via bastion" } }
+                    div { class: "ssh-cmd", code { class: "mono", "{bastion_cmd}" } }
+
+                    div { class: "field", style: "margin-top: 16px;", label { "Tail the system journal" } }
+                    div { class: "ssh-cmd", code { class: "mono", "{journal_cmd}" } }
+
+                    dl {
+                        class: "kv-grid",
+                        style: "margin-top: 16px;",
+                        dt { "Target" }
+                        dd { class: "mono", "{target}" }
+                        dt { "Environment" }
+                        dd { "{environment_text}" }
+                        dt { "FQDN" }
+                        dd { class: "mono", "{fqdn}" }
+                    }
+                }
+
+                div {
+                    class: "modal-foot",
+                    button {
+                        class: "btn btn-primary focus-ring",
+                        onclick: move |_| on_close.call(()),
+                        "Close"
+                    }
+                }
+            }
+        }
+    }
+}
 
 #[component]
 fn OverviewTab(
