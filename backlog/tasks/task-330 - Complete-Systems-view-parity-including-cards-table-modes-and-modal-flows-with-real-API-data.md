@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@gpt-5.4'
 created_date: '2026-05-31 15:56'
-updated_date: '2026-06-12 13:24'
+updated_date: '2026-06-13 03:33'
 labels:
   - design-parity
   - systems
@@ -72,4 +72,6 @@ Scope details:
 Addressed latest review feedback in commit `ce0e7b71`: `12f-systems-deploy-modal` now fails unless the deploy POST is captured with a valid fixture commit SHA, `12c` is downgraded back to a modal-open smoke check, and nested route handlers are cleaned up in `finally` blocks.
 
 Updated draft MR !273 metadata to the current Phase 3 scope and replaced the stale Phase 1 / `Closes: TASK-330` framing in the MR description with `Refs: TASK-330` plus current verification notes.
+
+2026-06-12: Phase 2.5 visual alignment pass — updated deploy modal (added flake/branch selects), expanded edit modal (two-column layout, FQDN, flake assignment section, segmented deployment mode buttons, pinned commit picker, danger zone), verified compilation (389 warnings, no errors). Commit: 22dcb14d
 <!-- SECTION:NOTES:END -->
