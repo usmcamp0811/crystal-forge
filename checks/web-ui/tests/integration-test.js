@@ -3201,6 +3201,62 @@ const steps = [
     },
   },
   {
+    name: "12k-system-detail-tab-icons",
+    description: "System detail tab rail renders shared Icon SVGs for every tab (design parity)",
+    action: async (page) => {
+      await routeSystemsWarningData(page);
+      try {
+        await page.goto(`${baseUrl}/systems/00000000-0000-0000-0000-0000000000a1`, {
+          timeout: LOAD_TIMEOUT,
+        });
+        await page.waitForTimeout(1800);
+
+        const tabs = page.locator('[data-testid="system-detail-tabs"]').first();
+        await assertVisible(tabs, "Expected system detail tab rail to render", 15000);
+
+        // Every tab button must render exactly one inline SVG icon (no missing icons).
+        const expectedTabs = [
+          "Overview",
+          "Deploy",
+          "History",
+          "CVEs",
+          "Hardening",
+          "Logs",
+          "Config",
+        ];
+        const tabButtons = tabs.locator("button.sd-tab");
+        const tabCount = await tabButtons.count();
+        if (tabCount !== expectedTabs.length) {
+          throw new Error(
+            `Expected ${expectedTabs.length} system-detail tabs, found ${tabCount}`,
+          );
+        }
+
+        for (let i = 0; i < expectedTabs.length; i++) {
+          const label = expectedTabs[i];
+          const tabButton = tabs.locator("button.sd-tab", { hasText: label }).first();
+          await assertVisible(tabButton, `Expected '${label}' tab to render`, 10000);
+          const svgCount = await tabButton.locator("svg").count();
+          if (svgCount < 1) {
+            throw new Error(`Expected '${label}' tab to render an icon SVG, found none`);
+          }
+          // Tab icons are sized 13x13 per the design contract.
+          const iconSize = await tabButton
+            .locator("svg")
+            .first()
+            .evaluate((el) => el.getAttribute("width"));
+          if (iconSize !== "13") {
+            throw new Error(
+              `Expected '${label}' tab icon width=13, got: ${iconSize}`,
+            );
+          }
+        }
+      } finally {
+        await unrouteSystemsWarningData(page);
+      }
+    },
+  },
+  {
     name: "12h-system-detail-cves-grouped-justification",
     description: "System detail CVEs tab grouped list, filters, details link, and justification save",
     action: async (page) => {
