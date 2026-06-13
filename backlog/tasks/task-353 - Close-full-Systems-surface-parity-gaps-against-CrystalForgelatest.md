@@ -4,7 +4,7 @@ title: Close full Systems surface parity gaps against CrystalForgelatest
 status: Review
 assignee: []
 created_date: '2026-06-13 14:53'
-updated_date: '2026-06-13 20:28'
+updated_date: '2026-06-13 20:37'
 labels:
   - design-parity
   - systems
@@ -37,8 +37,11 @@ modified_files:
   - packages/default/src/handlers/api/systems.rs
   - packages/default/src/queries/systems.rs
   - packages/default/src/services/systems.rs
+  - packages/default/.sqlx
   - packages/web-ui/src/api/models.rs
+  - packages/web-ui/src/systems/adapter.rs
   - packages/web-ui/src/views/system_detail.rs
+  - packages/web-ui/src/views/systems_mock_data.rs
   - checks/web-ui/tests/integration-test.js
 priority: high
 ordinal: 1695
@@ -115,5 +118,5 @@ This task covers the **full Systems surface**:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Mocked data introduced under explicit maintainer authorization: System Detail Compliance tab bundle rollups only (`mocked_compliance_bundles()` in `packages/web-ui/src/views/system_detail.rs`). Mocked fields: applicable bundle names, framework/version labels, owner, control counts, score percentage, pass/warn/fail/waiver counts, and placeholder View evidence action. Follow-ups created: TASK-355 replaces mock bundle rollups with real backend API data; TASK-356 wires View evidence to real per-control evidence UI. Reachability is not mocked: added persisted `systems.reachability` DB field projected through `view_system_detail` and API/Web UI models.
+Implemented reachability + authorized Compliance mock parity in commit c06aaf6a and pushed to MR !275. Added `systems.reachability` (`direct`/`pull`) via migration 0135, projected it through `view_system_detail`, backend API models, Web UI models, Overview Host card, and SSH modal. Replaced Compliance placeholder with explicitly-commented maintainer-authorized mock bundle rollups. Uploaded updated 12k screenshot to MR description. Verification: web-ui cargo fmt/check passed, default crate cargo check passed with local DB/OpenSSL pkg-config, migration 0135 applied to isolated local process-compose DB at 127.0.0.1:3042/crystal_forge, `cargo sqlx prepare` and `cargo sqlx prepare --check` completed, `nix build .#checks.x86_64-linux.web-ui` exit 0 with 12e and 12k passing. Note: default crate fmt check reports pre-existing unrelated formatting diffs; not applied.
 <!-- SECTION:NOTES:END -->
