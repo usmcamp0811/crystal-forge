@@ -34,6 +34,7 @@ use crate::api::models::{
 };
 use crate::components::cve::CvesTab;
 use crate::components::diff::DiffViewer;
+use crate::components::icon::{Icon, IconName};
 use crate::components::layout::Card;
 use crate::components::modals::{RollbackConfirmDialog, SyncConfirmDialog};
 use crate::components::notifications::Toast;
@@ -921,71 +922,16 @@ pub fn SystemDetailView(id: String) -> Element {
                                 role: "tab",
                                 "aria-selected": "{is_active}",
                                 onclick: move |_| active_tab.set(tab),
+                                // Tab icons use the shared Icon component at size 13,
+                                // matching the CrystalForgelatest design icon contract.
                                 match tab {
-                                    Tab::Overview => rsx!(
-                                        svg {
-                                            class: "w-3.5 h-3.5",
-                                            fill: "none",
-                                            stroke: "currentColor",
-                                            view_box: "0 0 24 24",
-                                            path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" }
-                                        }
-                                    ),
-                                    Tab::Deploy => rsx!(
-                                        svg {
-                                            class: "w-3.5 h-3.5",
-                                            fill: "none",
-                                            stroke: "currentColor",
-                                            view_box: "0 0 24 24",
-                                            path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" }
-                                        }
-                                    ),
-                                    Tab::History => rsx!(
-                                        svg {
-                                            class: "w-3.5 h-3.5",
-                                            fill: "none",
-                                            stroke: "currentColor",
-                                            view_box: "0 0 24 24",
-                                            path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" }
-                                        }
-                                    ),
-                                    Tab::Cves => rsx!(
-                                        svg {
-                                            class: "w-3.5 h-3.5",
-                                            fill: "none",
-                                            stroke: "currentColor",
-                                            view_box: "0 0 24 24",
-                                            path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M12 3l8 4v5c0 5-3.5 9.5-8 11-4.5-1.5-8-6-8-11V7l8-4z" }
-                                        }
-                                    ),
-                                    Tab::Hardening => rsx!(
-                                        svg {
-                                            class: "w-3.5 h-3.5",
-                                            fill: "none",
-                                            stroke: "currentColor",
-                                            view_box: "0 0 24 24",
-                                            path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M12 3l8 4v5c0 5-3 8-8 9-5-1-8-4-8-9V7l8-4z" }
-                                            path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M9 12h6" }
-                                        }
-                                    ),
-                                    Tab::Logs => rsx!(
-                                        svg {
-                                            class: "w-3.5 h-3.5",
-                                            fill: "none",
-                                            stroke: "currentColor",
-                                            view_box: "0 0 24 24",
-                                            path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M8 9l3 3-3 3m5 0h3M5 4h14a2 2 0 012 2v12a2 2 0 01-2 2H5a2 2 0 01-2-2V6a2 2 0 012-2z" }
-                                        }
-                                    ),
-                                    Tab::Config => rsx!(
-                                        svg {
-                                            class: "w-3.5 h-3.5",
-                                            fill: "none",
-                                            stroke: "currentColor",
-                                            view_box: "0 0 24 24",
-                                            path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M9 12h6m-6 4h6M7 8h10M5 6h14a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2z" }
-                                        }
-                                    ),
+                                    Tab::Overview => rsx!(Icon { name: IconName::Dashboard, size: 13 }),
+                                    Tab::Deploy => rsx!(Icon { name: IconName::Deploy, size: 13 }),
+                                    Tab::History => rsx!(Icon { name: IconName::History, size: 13 }),
+                                    Tab::Cves => rsx!(Icon { name: IconName::Shield, size: 13 }),
+                                    Tab::Hardening => rsx!(Icon { name: IconName::Key, size: 13 }),
+                                    Tab::Logs => rsx!(Icon { name: IconName::Terminal, size: 13 }),
+                                    Tab::Config => rsx!(Icon { name: IconName::File, size: 13 }),
                                 }
                                 "{tab.label()}"
                                 if tab == Tab::Cves && system.cve_counts.critical > 0 {
