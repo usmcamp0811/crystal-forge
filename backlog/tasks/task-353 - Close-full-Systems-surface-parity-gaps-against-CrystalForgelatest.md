@@ -4,7 +4,7 @@ title: Close full Systems surface parity gaps against CrystalForgelatest
 status: Review
 assignee: []
 created_date: '2026-06-13 14:53'
-updated_date: '2026-06-13 16:28'
+updated_date: '2026-06-13 19:36'
 labels:
   - design-parity
   - systems
@@ -151,4 +151,6 @@ Why high:
 LOCK: opencode-agent on reckless in ~/code/crystal-forge/TASK-353-full-systems-surface-parity
 
 MR: !275 (draft) — https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/275
+
+Parity pass (commit 4517d91c): added SSH modal copy buttons (SshCmd), consolidated Compliance into the 8-tab rail loop, fixed 12e regression (removed obsolete 'Run CVE Scan' assertion), and added a deterministic 12k web-ui test (8-tab rail + Compliance + header cluster) to the CI-fast profile. Verified: cargo check (0 errors), cargo fmt clean, node --check clean, nix web-ui check builds with 12e + 12k passing and 12k screenshot captured (12k-system-detail-tab-icons.png). Discovered pre-existing web-ui flakiness + 12f/12h failures (unrelated code paths) -> tracked in TASK-354. Note: screenshot could not be uploaded to MR !275 because the glab token was expired.
 <!-- SECTION:NOTES:END -->
