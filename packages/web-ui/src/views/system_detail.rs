@@ -130,7 +130,7 @@ fn derived_fqdn(hostname: &str, environment: Option<&str>) -> String {
     format!("{hostname}.{env}.cf.internal")
 }
 
-const DETAIL_TAB_ORDER: [Tab; 7] = [
+const DETAIL_TAB_ORDER: [Tab; 8] = [
     Tab::Overview,
     Tab::Deploy,
     Tab::History,
@@ -138,6 +138,7 @@ const DETAIL_TAB_ORDER: [Tab; 7] = [
     Tab::Config,
     Tab::Cves,
     Tab::Hardening,
+    Tab::Compliance,
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -700,26 +701,6 @@ pub fn SystemDetailView(id: String) -> Element {
                         }
                     }
                 }
-                {
-                    let is_active = *active_tab.read() == Tab::Compliance;
-                    let tab_class = if is_active {
-                        "sd-tab focus-ring active"
-                    } else {
-                        "sd-tab focus-ring"
-                    };
-                    let compliance_key = "Compliance".to_string();
-                    rsx! {
-                        button {
-                            key: "{compliance_key}",
-                            class: "{tab_class}",
-                            role: "tab",
-                            "aria-selected": "{is_active}",
-                            onclick: move |_| active_tab.set(Tab::Compliance),
-                            Icon { name: IconName::Shield, size: 13 }
-                            "Compliance"
-                        }
-                    }
-                }
             }
 
             // Tab content
@@ -1085,13 +1066,13 @@ fn SshConnectModal(system: SystemDetail, on_close: EventHandler<()>) -> Element 
                     }
 
                     div { class: "field", label { "Connect" } }
-                    div { class: "ssh-cmd", code { class: "mono", "{ssh_cmd}" } }
+                    SshCmd { command: ssh_cmd.clone() }
 
                     div { class: "field", style: "margin-top: 16px;", label { "Via bastion" } }
-                    div { class: "ssh-cmd", code { class: "mono", "{bastion_cmd}" } }
+                    SshCmd { command: bastion_cmd.clone() }
 
                     div { class: "field", style: "margin-top: 16px;", label { "Tail the system journal" } }
-                    div { class: "ssh-cmd", code { class: "mono", "{journal_cmd}" } }
+                    SshCmd { command: journal_cmd.clone() }
 
                     dl {
                         class: "kv-grid",
@@ -1115,6 +1096,68 @@ fn SshConnectModal(system: SystemDetail, on_close: EventHandler<()>) -> Element 
                 }
             }
         }
+    }
+}
+
+/// A single SSH command row with a copy-to-clipboard button, mirroring the
+/// CrystalForgelatest `Cmd` helper used inside the SSH connect modal.
+#[component]
+fn SshCmd(command: String) -> Element {
+    let mut copied = use_signal(|| false);
+
+    rsx! {
+        div {
+            class: "ssh-cmd",
+            code { class: "mono", "{command}" }
+            button {
+                class: "btn btn-ghost xs focus-ring",
+                onclick: {
+                    let command = command.clone();
+                    move |_| {
+                        copy_to_clipboard(&command);
+                        copied.set(true);
+                        spawn(async move {
+                            gloo_timers::future::TimeoutFuture::new(1500).await;
+                            copied.set(false);
+                        });
+                    }
+                },
+                if *copied.read() {
+                    Icon { name: IconName::Check, size: 11 }
+                    "Copied"
+                } else {
+                    Icon { name: IconName::File, size: 11 }
+                    "Copy"
+                }
+            }
+        }
+    }
+}
+
+/// Copy text to the browser clipboard. No-op on non-wasm targets.
+fn copy_to_clipboard(text: &str) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        if let Some(win) = web_sys::window() {
+            let win_ref: &JsValue = win.as_ref();
+            if let Ok(navigator) = js_sys::Reflect::get(win_ref, &JsValue::from_str("navigator")) {
+                if let Ok(clipboard) =
+                    js_sys::Reflect::get(&navigator, &JsValue::from_str("clipboard"))
+                {
+                    if let Ok(write_text) =
+                        js_sys::Reflect::get(&clipboard, &JsValue::from_str("writeText"))
+                    {
+                        if let Ok(function) = write_text.dyn_into::<js_sys::Function>() {
+                            let _ = function.call1(&clipboard, &JsValue::from_str(text));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = text;
     }
 }
 

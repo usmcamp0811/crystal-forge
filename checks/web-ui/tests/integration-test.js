@@ -2954,11 +2954,15 @@ const steps = [
         timeout: LOAD_TIMEOUT,
       });
       await page.waitForTimeout(1200);
-      await assertVisible(
-        page.locator("button:has-text('Run CVE Scan')").first(),
-        "Expected Run CVE Scan action to be visible on system detail",
-        12000,
-      );
+      // Header action cluster matches CrystalForgelatest: Rollback / SSH / Edit / Deploy.
+      // (Per-config CVE/Hardening scans now live on their tab surfaces, not the header.)
+      for (const action of ["Rollback", "SSH", "Edit", "Deploy"]) {
+        await assertVisible(
+          page.locator(".sd-head-actions button", { hasText: action }).first(),
+          `Expected '${action}' header action to be visible on system detail`,
+          12000,
+        );
+      }
 
         await page.unroute(
           "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cve-scan-eligibility*",
@@ -3215,14 +3219,16 @@ const steps = [
         await assertVisible(tabs, "Expected system detail tab rail to render", 15000);
 
         // Every tab button must render exactly one inline SVG icon (no missing icons).
+        // Order and membership mirror the CrystalForgelatest SystemDetail tab rail.
         const expectedTabs = [
           "Overview",
           "Deploy",
           "History",
-          "CVEs",
-          "Hardening",
           "Logs",
           "Config",
+          "CVEs",
+          "Hardening",
+          "Compliance",
         ];
         const tabButtons = tabs.locator("button.sd-tab");
         const tabCount = await tabButtons.count();
@@ -3251,6 +3257,34 @@ const steps = [
             );
           }
         }
+
+        // Compliance tab renders its placeholder surface (design parity entry).
+        await tabs
+          .locator("button.sd-tab", { hasText: "Compliance" })
+          .first()
+          .click({ force: true });
+        await assertVisible(
+          page.getByText("Compliance surface is not fully wired yet.").first(),
+          "Expected Compliance tab placeholder content to render",
+          10000,
+        );
+
+        // Header action cluster matches CrystalForgelatest: Rollback / SSH / Edit / Deploy.
+        for (const action of ["Rollback", "SSH", "Edit", "Deploy"]) {
+          await assertVisible(
+            page.locator(".sd-head-actions button", { hasText: action }).first(),
+            `Expected '${action}' header action to render`,
+            10000,
+          );
+        }
+
+        // Return to the Overview tab so the captured screenshot shows the
+        // full 8-tab rail in its default state.
+        await tabs
+          .locator("button.sd-tab", { hasText: "Overview" })
+          .first()
+          .click({ force: true });
+        await page.waitForTimeout(300);
       } finally {
         await unrouteSystemsWarningData(page);
       }
@@ -5601,6 +5635,7 @@ const CI_FAST_STEP_NAMES = new Set([
   "12h-system-detail-cves-grouped-justification",
   "12i-system-detail-generation-metric",
   "12j-system-detail-deploy-generation-list",
+  "12k-system-detail-tab-icons",
   "12d-systems-api-error-no-mock-fallback",
   "12g-systems-warning-clears-after-link",
   "13d-flakes-stress-dataset",
