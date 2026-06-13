@@ -352,7 +352,7 @@ pub fn EditSystemModal(
                                 disabled: "true",
                                 placeholder: "e.g. builder, stig-enforced (requires backend)",
                             }
-                            p { class: "text-xs {theme::text::SECONDARY} mt-1", "Free-form labels for grouping &amp; filtering." }
+                            p { class: "text-xs {theme::text::SECONDARY} mt-1", "Free-form labels for grouping & filtering." }
                         }
                     }
 
