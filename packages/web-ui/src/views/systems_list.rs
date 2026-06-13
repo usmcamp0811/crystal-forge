@@ -719,6 +719,15 @@ pub fn SystemsListView() -> Element {
                             }
                         }
                     }
+                    // Tag select placeholder (design: "All tags" — requires backend tag support)
+                    select {
+                        class: "input filter-select focus-ring",
+                        style: "width: auto; opacity: 0.5;",
+                        "aria-label": "Filter by tag",
+                        title: "Tag filters are not yet available (requires backend tag support)",
+                        disabled: "true",
+                        option { value: "all", "All tags" }
+                    }
                     div {
                         class: "seg",
                         role: "tablist",

@@ -306,6 +306,72 @@ pub fn EditSystemModal(
                         }
                     }
 
+                    // Reachability section placeholder (design: Direct/LAN vs Agent pull-only)
+                    // Requires backend support for reachability_mode, server_address fields.
+                    div {
+                        style: "margin-top: 8px; padding: 14px; border: 1px solid var(--cf-divider); border-radius: 10px; background: color-mix(in oklab, var(--cf-page-bg) 50%, var(--cf-card-bg)); opacity: 0.55;",
+                        "data-testid": "reachability-placeholder",
+                        title: "Reachability settings require backend support (coming soon)",
+                        div {
+                            style: "display: flex; align-items: center; gap: 6px; margin-bottom: 10px; font-size: 13px; font-weight: 600;",
+                            "Reachability"
+                        }
+                        div {
+                            class: "field",
+                            label { class: "label", "How the server reaches this system" }
+                            div {
+                                class: "seg",
+                                style: "width: fit-content;",
+                                button { class: "active", disabled: "true", "Direct / LAN" }
+                                button { disabled: "true", "Agent pull-only" }
+                            }
+                            p { class: "text-xs {theme::text::SECONDARY} mt-1", "Server can open connections to the agent (same LAN / routable / VPN). Enables server-initiated deploys and live log tail." }
+                        }
+                    }
+
+                    // Two-column: Heartbeat interval + Tags (design placeholders)
+                    div {
+                        style: "display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 8px; opacity: 0.55;",
+                        "data-testid": "heartbeat-tags-placeholder",
+                        title: "Heartbeat interval and tags require backend support (coming soon)",
+                        div {
+                            class: "field",
+                            label { class: "label", "Heartbeat interval" }
+                            select {
+                                class: "input focus-ring",
+                                disabled: "true",
+                                option { "60 seconds" }
+                            }
+                            p { class: "text-xs {theme::text::SECONDARY} mt-1", "Agent heartbeat cadence (backend field coming soon)." }
+                        }
+                        div {
+                            class: "field",
+                            label { class: "label", "Tags" }
+                            input {
+                                class: "input focus-ring",
+                                disabled: "true",
+                                placeholder: "e.g. builder, stig-enforced (requires backend)",
+                            }
+                            p { class: "text-xs {theme::text::SECONDARY} mt-1", "Free-form labels for grouping &amp; filtering." }
+                        }
+                    }
+
+                    // Description / notes placeholder
+                    div {
+                        class: "field",
+                        style: "opacity: 0.55;",
+                        "data-testid": "description-placeholder",
+                        title: "System description requires backend support (coming soon)",
+                        label { class: "label", "Description / notes" }
+                        textarea {
+                            class: "input focus-ring",
+                            rows: "2",
+                            disabled: "true",
+                            placeholder: "Optional context for operators (requires backend support)",
+                            style: "resize: vertical;",
+                        }
+                    }
+
                     // Danger zone (design: remove system)
                     div {
                         style: "margin-top: 10px; padding-top: 14px; border-top: 1px solid var(--cf-divider);",
