@@ -4,7 +4,7 @@ title: Add tab icons to system detail view to match design example
 status: In Progress
 assignee: []
 created_date: '2026-05-10 13:28'
-updated_date: '2026-06-13 13:58'
+updated_date: '2026-06-13 14:20'
 labels:
   - ui
   - design-system
@@ -65,29 +65,31 @@ Medium (localized UI refactor with high visual-sensitivity requirements).
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Icon component has Dashboard variant added
-- [ ] #2 Icon component has Deploy variant added
-- [ ] #3 Icon component has History variant added
-- [ ] #4 Icon component has Shield variant added
-- [ ] #5 Icon component has Key variant added
-- [ ] #6 Icon component has File variant added
-- [ ] #7 All tab icons use Icon component instead of inline SVG
-- [ ] #8 Tab icons are size={13} matching design example
-- [ ] #9 Overview tab uses Dashboard icon
-- [ ] #10 Deploy tab uses Deploy icon
-- [ ] #11 History tab uses History icon
-- [ ] #12 CVEs tab uses Shield icon
-- [ ] #13 Hardening tab uses Key icon
-- [ ] #14 Logs tab uses Terminal icon
-- [ ] #15 Config tab uses File icon
-- [ ] #16 Visual appearance matches design example
-- [ ] #17 Icons render correctly in all tabs
-- [ ] #18 web-ui check updates are required with assertions for tab-icon rendering and state behavior
-- [ ] #19 web-ui check must capture screenshots for all affected system-detail tab states
+- [x] #1 Icon component has Dashboard variant added
+- [x] #2 Icon component has Deploy variant added
+- [x] #3 Icon component has History variant added
+- [x] #4 Icon component has Shield variant added
+- [x] #5 Icon component has Key variant added
+- [x] #6 Icon component has File variant added
+- [x] #7 All tab icons use Icon component instead of inline SVG
+- [x] #8 Tab icons are size={13} matching design example
+- [x] #9 Overview tab uses Dashboard icon
+- [x] #10 Deploy tab uses Deploy icon
+- [x] #11 History tab uses History icon
+- [x] #12 CVEs tab uses Shield icon
+- [x] #13 Hardening tab uses Key icon
+- [x] #14 Logs tab uses Terminal icon
+- [x] #15 Config tab uses File icon
+- [x] #16 Visual appearance matches design example
+- [x] #17 Icons render correctly in all tabs
+- [x] #18 web-ui check updates are required with assertions for tab-icon rendering and state behavior
+- [x] #19 web-ui check must capture screenshots for all affected system-detail tab states
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: opencode-agent on reckless in ~/code/crystal-forge/TASK-295-system-detail-tab-icons
+
+Implemented: added Dashboard/Deploy/History/Key/File variants to IconName (Shield+Terminal already existed) with design-parity SVG paths from CrystalForgelatest/components/Icon.jsx. Replaced inline tab SVGs in system_detail.rs tab rail with Icon component at size=13. Added web-ui check step 12k-system-detail-tab-icons asserting each of the 7 tabs renders an SVG icon at width=13, plus added it to CI_FAST set. Verified via local Playwright screenshot harness that all 7 tab icons render correctly with active state + CVE badge preserved. cargo check + cargo fmt clean. NOTE: cargo clippy surfaces pre-existing doc-comment-on-param errors in add_system_form.rs/key_pair_modal.rs (not my files) -> tracked as TASK-352.
 <!-- SECTION:NOTES:END -->
