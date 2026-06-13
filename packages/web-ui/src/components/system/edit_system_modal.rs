@@ -1,21 +1,45 @@
 //! Modal for editing system configuration.
+//!
+//! Matches the design EditSystemModal layout: two-column hostname+environment,
+//! flake assignment section, segmented deployment mode, pinned commit picker.
 
-use crate::api::models::{SystemDetail, UpdateSystemRequest};
+use crate::api::models::{CommitInfo, SystemDetail, UpdateSystemRequest};
 use crate::theme;
 use dioxus::prelude::*;
+
+/// Branch options for the flake branch field.
+const BRANCHES: &[&str] = &["main", "staging", "dev"];
+
+/// Derived FQDN from hostname and environment.
+fn derived_fqdn(hostname: &str, environment: Option<&str>) -> String {
+    let env = environment.unwrap_or("unknown").to_lowercase();
+    format!("{hostname}.{env}.cf.internal")
+}
+
+/// Derived branch from environment.
+fn derived_branch(environment: Option<&str>) -> &'static str {
+    match environment.unwrap_or("dev").to_lowercase().as_str() {
+        "production" | "prod" => "main",
+        "staging" | "stage" => "staging",
+        _ => "dev",
+    }
+}
 
 #[component]
 pub fn EditSystemModal(
     system: SystemDetail,
     flake_names: Vec<String>,
+    #[props(default)] environments: Vec<String>,
+    #[props(default)] recent_commits: Vec<CommitInfo>,
     #[props(default)] error_message: Option<String>,
     on_close: EventHandler<()>,
     on_save: EventHandler<UpdateSystemRequest>,
 ) -> Element {
     let mut hostname = use_signal(|| system.hostname.clone());
+    let mut environment = use_signal(|| system.environment.clone().unwrap_or_default());
+    let mut fqdn = use_signal(|| derived_fqdn(&system.hostname, system.environment.as_deref()));
     let mut system_configuration_name =
         use_signal(|| system.system_configuration_name.clone().unwrap_or_default());
-    let mut environment = use_signal(|| system.environment.clone().unwrap_or_default());
     let mut deployment_policy = use_signal(|| system.deployment_policy.clone());
     let mut flake_name = use_signal(|| {
         system
@@ -24,7 +48,22 @@ pub fn EditSystemModal(
             .map(|flake| flake.name.clone())
             .unwrap_or_default()
     });
+    let mut flake_branch = use_signal(|| derived_branch(system.environment.as_deref()).to_string());
     let mut is_saving = use_signal(|| false);
+    let mut show_danger = use_signal(|| false);
+
+    // Sync FQDN when hostname or environment changes
+    {
+        let hostname_clone = hostname.clone();
+        let environment_clone = environment.clone();
+        let mut fqdn_clone = fqdn.clone();
+        use_effect(move || {
+            let h = hostname_clone.read().clone();
+            let e = environment_clone.read().clone();
+            let env_opt = if e.is_empty() { None } else { Some(e.as_str()) };
+            fqdn_clone.set(derived_fqdn(&h, env_opt));
+        });
+    }
 
     {
         let error_message = error_message.clone();
@@ -85,57 +124,64 @@ pub fn EditSystemModal(
                     class: "modal-body",
                     style: "overflow-y:auto;",
 
-                    // Hostname
+                    // Two-column: Hostname + Environment (design layout)
                     div {
-                        label {
-                            class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
-                            "Hostname"
-                        }
-                        input {
-                            r#type: "text",
-                            class: "input focus-ring mono",
-                            value: "{hostname}",
-                            oninput: move |e| hostname.set(e.value().clone()),
-                        }
-                    }
-
-                    // Flake Name
-                    div {
-                        label {
-                            class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
-                            "Flake"
-                        }
-                        select {
-                            class: "input focus-ring",
-                            onchange: move |e| flake_name.set(e.value().clone()),
-                            option {
-                                value: "",
-                                selected: flake_name.read().is_empty(),
-                                "— none —"
+                        style: "display: grid; grid-template-columns: 1fr 1fr; gap: 14px;",
+                        div {
+                            class: "field",
+                            label { class: "label", "Hostname" }
+                            input {
+                                r#type: "text",
+                                class: "input focus-ring mono",
+                                value: "{hostname}",
+                                oninput: move |e| hostname.set(e.value().clone()),
                             }
-                            for name in flake_names {
-                                option {
-                                    value: "{name}",
-                                    selected: *flake_name.read() == name,
-                                    "{name}"
+                        }
+                        div {
+                            class: "field",
+                            label { class: "label", "Environment" }
+                            if !environments.is_empty() {
+                                select {
+                                    class: "input focus-ring",
+                                    value: "{environment}",
+                                    onchange: move |e| environment.set(e.value().clone()),
+                                    option { value: "", "— none —" }
+                                    for env_name in &environments {
+                                        option {
+                                            value: "{env_name}",
+                                            selected: *environment.read() == *env_name,
+                                            "{env_name}"
+                                        }
+                                    }
+                                }
+                            } else {
+                                input {
+                                    r#type: "text",
+                                    class: "input focus-ring",
+                                    value: "{environment}",
+                                    placeholder: "e.g., production, staging",
+                                    oninput: move |e| environment.set(e.value().clone()),
                                 }
                             }
                         }
-                        if flake_name.read().is_empty() {
-                            p {
-                                class: "text-xs text-amber-400 mt-1",
-                                "⚠ No flake linked — this system won't be included in evaluations."
-                            }
+                    }
+
+                    // FQDN field (design: below hostname+environment)
+                    div {
+                        class: "field",
+                        label { class: "label", "FQDN" }
+                        input {
+                            r#type: "text",
+                            class: "input focus-ring mono",
+                            value: "{fqdn}",
+                            oninput: move |e| fqdn.set(e.value().clone()),
                         }
                     }
 
                     // System Configuration Name
                     div {
-                        label {
-                            class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
-                            "System Configuration Name"
-                            span { class: "text-gray-500 text-xs ml-2", "(optional)" }
-                        }
+                        class: "field",
+                        label { class: "label", "System Configuration Name" }
                         input {
                             r#type: "text",
                             class: "input focus-ring mono",
@@ -145,57 +191,150 @@ pub fn EditSystemModal(
                         }
                     }
 
-                    // Environment
+                    // Flake assignment section (design: grouped in a bordered box)
                     div {
-                        label {
-                            class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
-                            "Environment"
-                            span { class: "text-gray-500 text-xs ml-2", "(optional)" }
+                        style: "margin-top: 8px; padding: 14px; border: 1px solid var(--cf-divider); border-radius: 10px; background: color-mix(in oklab, var(--cf-page-bg) 50%, var(--cf-card-bg));",
+                        div {
+                            style: "display: flex; align-items: center; gap: 6px; margin-bottom: 10px; font-size: 13px; font-weight: 600;",
+                            "Flake assignment"
                         }
-                        input {
-                            r#type: "text",
-                            class: "input focus-ring",
-                            value: "{environment}",
-                            placeholder: "e.g., production, staging",
-                            oninput: move |e| environment.set(e.value().clone()),
+                        div {
+                            style: "display: grid; grid-template-columns: 1fr 1fr; gap: 14px;",
+                            div {
+                                class: "field",
+                                label { class: "label", "Flake" }
+                                select {
+                                    class: "input focus-ring",
+                                    value: "{flake_name}",
+                                    onchange: move |e| flake_name.set(e.value().clone()),
+                                    option {
+                                        value: "",
+                                        selected: flake_name.read().is_empty(),
+                                        "— none —"
+                                    }
+                                    for name in &flake_names {
+                                        option {
+                                            value: "{name}",
+                                            selected: *flake_name.read() == *name,
+                                            "{name}"
+                                        }
+                                    }
+                                }
+                                if flake_name.read().is_empty() {
+                                    p {
+                                        class: "text-xs text-amber-400 mt-1",
+                                        "⚠ No flake linked — won't be included in evaluations."
+                                    }
+                                }
+                            }
+                            div {
+                                class: "field",
+                                label { class: "label", "Branch" }
+                                select {
+                                    class: "input focus-ring",
+                                    value: "{flake_branch}",
+                                    onchange: move |e| flake_branch.set(e.value().clone()),
+                                    for b in BRANCHES {
+                                        option {
+                                            value: "{b}",
+                                            selected: *flake_branch.read() == *b,
+                                            "{b}"
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
 
-                    // Deployment Policy
+                    // Deployment mode (design: segmented buttons)
                     div {
-                        label {
-                            class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
-                            "Deployment Policy"
-                        }
-                        select {
-                            class: "input focus-ring",
-                            onchange: move |e| deployment_policy.set(e.value().clone()),
-                            option {
-                                value: "auto_latest",
-                                selected: *deployment_policy.read() == "auto_latest",
-                                "Auto Latest"
-                            }
-                            option {
-                                value: "manual",
-                                selected: *deployment_policy.read() == "manual",
+                        class: "field",
+                        label { class: "label", "Deployment mode" }
+                        div {
+                            class: "seg",
+                            style: "width: fit-content; flex-wrap: wrap;",
+                            button {
+                                class: if *deployment_policy.read() == "manual" { "active" } else { "" },
+                                onclick: move |_| deployment_policy.set("manual".to_string()),
                                 "Manual"
                             }
-                            option {
-                                value: "pinned",
-                                selected: *deployment_policy.read() == "pinned",
+                            button {
+                                class: if *deployment_policy.read() == "auto_latest" { "active" } else { "" },
+                                onclick: move |_| deployment_policy.set("auto_latest".to_string()),
+                                "Auto Latest"
+                            }
+                            button {
+                                class: if *deployment_policy.read() == "pinned" { "active" } else { "" },
+                                onclick: move |_| deployment_policy.set("pinned".to_string()),
                                 "Pinned"
                             }
                         }
                         p {
                             class: "text-xs {theme::text::SECONDARY} mt-1",
                             match deployment_policy.read().as_str() {
-                                "auto_latest" => "Automatically deploy the latest commit",
-                                "manual" => "Require manual deployment approval",
-                                "pinned" => "Deploy only specific pinned commits",
+                                "manual" => "Operator must explicitly approve every deploy.",
+                                "auto_latest" => "Automatically deploy the latest commit.",
+                                "pinned" => "Deploy only specific pinned commits.",
                                 _ => ""
                             }
                         }
                     }
+
+                    // Pinned commit picker (design: only shown when mode is "pinned")
+                    if *deployment_policy.read() == "pinned" && !recent_commits.is_empty() {
+                        div {
+                            class: "field",
+                            label { class: "label", "Pinned commit" }
+                            div {
+                                class: "sd-commit-list",
+                                style: "max-height: 200px;",
+                                for commit in &recent_commits {
+                                    button {
+                                        class: "sd-commit-item focus-ring",
+                                        onclick: move |_| {},
+                                        div { class: "sd-commit-sha", "{commit.short_sha}" }
+                                        div { class: "sd-commit-msg", "{commit.message}" }
+                                        div { class: "sd-commit-meta mono", "{commit.author}" }
+                                        div { class: "sd-commit-meta", "{commit.timestamp}" }
+                                    }
+                                }
+                            }
+                            p {
+                                class: "text-xs {theme::text::SECONDARY} mt-1",
+                                "System will not auto-advance off this commit."
+                            }
+                        }
+                    }
+
+                    // Danger zone (design: remove system)
+                    div {
+                        style: "margin-top: 10px; padding-top: 14px; border-top: 1px solid var(--cf-divider);",
+                        if show_danger() {
+                            div {
+                                style: "display: flex; align-items: center; gap: 8px;",
+                                span {
+                                    style: "font-size: 12px; color: var(--cf-text-secondary);",
+                                    "Remove "
+                                    span { class: "mono", style: "color: #fecaca; font-weight: 700;", "{hostname}" }
+                                    " from the registry?"
+                                }
+                                button {
+                                    class: "btn btn-ghost focus-ring",
+                                    style: "color: #f87171; border-color: rgba(248,113,113,0.3); font-size: 12px;",
+                                    onclick: move |_| show_danger.set(false),
+                                    "Cancel"
+                                }
+                            }
+                        } else {
+                            button {
+                                class: "btn btn-ghost focus-ring",
+                                style: "color: #f87171; border-color: rgba(248,113,113,0.3); font-size: 12px;",
+                                onclick: move |_| show_danger.set(true),
+                                "Remove system from registry"
+                            }
+                        }
+                    }
+
                     if let Some(message) = &error_message {
                         div {
                             class: "rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200",

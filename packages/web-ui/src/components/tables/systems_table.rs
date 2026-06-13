@@ -355,7 +355,11 @@ fn ip_label(system: &SystemSummary) -> String {
 }
 
 fn derived_fqdn(system: &SystemSummary) -> String {
-    let env = system.environment.as_deref().unwrap_or("unknown").to_lowercase();
+    let env = system
+        .environment
+        .as_deref()
+        .unwrap_or("unknown")
+        .to_lowercase();
     format!("{}.{}.cf.internal", system.hostname, env)
 }
 

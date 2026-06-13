@@ -237,7 +237,12 @@ mod tests {
             Some("infrastructure"),
             Some("a1b2c3d4")
         ));
-        assert!(!matches_search(&system, "nomatch", Some("infra"), Some("ff")));
+        assert!(!matches_search(
+            &system,
+            "nomatch",
+            Some("infra"),
+            Some("ff")
+        ));
     }
 
     #[test]

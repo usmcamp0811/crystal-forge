@@ -1005,6 +1005,7 @@ pub fn SystemsListView() -> Element {
                 EditSystemModal {
                     system: detail.clone(),
                     flake_names: registered_flakes.clone(),
+                    environments: dropdown_environments.clone(),
                     error_message: edit_modal_error.read().clone(),
                     on_close: move |_| {
                         edit_modal_error.set(None);
@@ -1050,6 +1051,9 @@ pub fn SystemsListView() -> Element {
                     system_id: detail.id.to_string(),
                     hostname: detail.hostname.clone(),
                     deployment_policy: detail.deployment_policy.clone(),
+                    flake_name: detail.flake.as_ref().map(|f| f.name.clone()).unwrap_or_default(),
+                    flake_branch: derived_branch_for_environment(detail.environment.as_deref()).to_string(),
+                    flake_names: registered_flakes.clone(),
                     commits: commits.clone(),
                     current_commit: current_commit.clone(),
                     error_message: deploy_error.read().clone(),
