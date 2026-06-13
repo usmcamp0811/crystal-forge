@@ -1,13 +1,13 @@
 ---
 id: TASK-330
 title: >-
-  Complete Systems view parity including cards-table modes and modal flows with
+  Complete Systems view parity including cards/table modes and modal flows with
   real API data
 status: In Progress
 assignee:
   - '@gpt-5.4'
 created_date: '2026-05-31 15:56'
-updated_date: '2026-06-13 03:33'
+updated_date: '2026-06-13 14:10'
 labels:
   - design-parity
   - systems
@@ -64,14 +64,13 @@ Scope details:
 4. Phase 2: align the Systems header, stat strip, filter bar, cards/table density, selected-state treatment, and shown-count behavior to the CrystalForgelatest reference using real API-backed values.
 5. Phase 3: align the side panel plus deploy/edit/add modal visuals and interactions, keeping API-backed submit flows and extending screenshot/assertion coverage for panel and modal states.
 6. Run scoped verification after each phase and keep TASK-330 notes updated with progress, blockers, and MR context.
+7. Review-fix pass for MR !273: drop unrelated backlog/task changes from the branch, make unsupported edit modal controls read-only or disabled, and ensure the danger-zone remove action is either wired to the existing remove flow or visibly non-actionable before rerunning targeted web-ui verification.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Addressed latest review feedback in commit `ce0e7b71`: `12f-systems-deploy-modal` now fails unless the deploy POST is captured with a valid fixture commit SHA, `12c` is downgraded back to a modal-open smoke check, and nested route handlers are cleaned up in `finally` blocks.
+LOCK: gpt-5.4 on reckless in /home/mcamp/code/crystal-forge/TASK-330-systems-view-parity
 
-Updated draft MR !273 metadata to the current Phase 3 scope and replaced the stale Phase 1 / `Closes: TASK-330` framing in the MR description with `Refs: TASK-330` plus current verification notes.
-
-2026-06-12: Phase 2.5 visual alignment pass — updated deploy modal (added flake/branch selects), expanded edit modal (two-column layout, FQDN, flake assignment section, segmented deployment mode buttons, pinned commit picker, danger zone), verified compilation (389 warnings, no errors). Commit: 22dcb14d
+2026-06-13: Resuming TASK-330 to address MR !273 review blockers: remove unrelated TASK-342.2/TASK-351 scope from branch, make non-persisted edit-modal fields non-actionable, and wire or disable misleading remove-system danger action.
 <!-- SECTION:NOTES:END -->
