@@ -1,10 +1,10 @@
 ---
 id: TASK-353
 title: Close full Systems surface parity gaps against CrystalForgelatest
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-06-13 14:53'
-updated_date: '2026-06-13 15:20'
+updated_date: '2026-06-13 16:28'
 labels:
   - design-parity
   - systems
@@ -149,4 +149,6 @@ Why high:
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: opencode-agent on reckless in ~/code/crystal-forge/TASK-353-full-systems-surface-parity
+
+MR: !275 (draft) — https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/275
 <!-- SECTION:NOTES:END -->
