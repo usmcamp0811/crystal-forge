@@ -1,10 +1,10 @@
 ---
 id: TASK-353
 title: Close full Systems surface parity gaps against CrystalForgelatest
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-06-13 14:53'
-updated_date: '2026-06-13 15:18'
+updated_date: '2026-06-13 15:20'
 labels:
   - design-parity
   - systems
@@ -131,16 +131,15 @@ Why high:
 - May absorb or close residual scope currently tracked in TASK-330 and TASK-338 once implementation is complete and reviewed
 
 ## Acceptance Criteria
-<!-- AC:BEGIN -->
-- [ ] #1 Systems list header, stat strip, filters, cards mode, and table mode materially match CrystalForgelatest on desktop
-- [ ] #2 Systems list side panel and add/edit/deploy modal flows materially match CrystalForgelatest on desktop
-- [ ] #3 Systems list loading, empty, error, and populated states are styled and behaved per the reference with no production-path mock fallback rendering
-- [ ] #4 System detail header, metric strip, badges/chips, and action cluster materially match CrystalForgelatest on desktop
-- [ ] #5 System detail tab rail matches the reference in structure, ordering, iconography, active states, and badge treatment
-- [ ] #6 System detail Overview, Deploy, History, Logs, Config, CVEs, and Hardening surfaces materially match the reference for core states
-- [ ] #7 All displayed Systems list and Systems detail values are sourced from authoritative backend APIs in production paths unless explicitly tracked as backend follow-up gaps
-- [ ] #8 `checks/web-ui` captures screenshot evidence and behavior assertions for the full Systems surface, including both `/systems` and `/systems/{id}`
-- [ ] #9 A human reviewer can compare the implemented Systems surface against the CrystalForgelatest reference and find no remaining material parity gaps
+- [ ] Systems list header, stat strip, filters, cards mode, and table mode materially match CrystalForgelatest on desktop
+- [ ] Systems list side panel and add/edit/deploy modal flows materially match CrystalForgelatest on desktop
+- [ ] Systems list loading, empty, error, and populated states are styled and behaved per the reference with no production-path mock fallback rendering
+- [ ] System detail header, metric strip, badges/chips, and action cluster materially match CrystalForgelatest on desktop
+- [ ] System detail tab rail matches the reference in structure, ordering, iconography, active states, and badge treatment
+- [ ] System detail Overview, Deploy, History, Logs, Config, CVEs, and Hardening surfaces materially match the reference for core states
+- [ ] All displayed Systems list and Systems detail values are sourced from authoritative backend APIs in production paths unless explicitly tracked as backend follow-up gaps
+- [ ] `checks/web-ui` captures screenshot evidence and behavior assertions for the full Systems surface, including both `/systems` and `/systems/{id}`
+- [ ] A human reviewer can compare the implemented Systems surface against the CrystalForgelatest reference and find no remaining material parity gaps
 <!-- SECTION:DESCRIPTION:END -->
 
 <!-- AC:END -->
@@ -149,5 +148,5 @@ Why high:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Moved to To Do by explicit human instruction after TASK-295 and TASK-330 were merged into dev.
+LOCK: opencode-agent on reckless in ~/code/crystal-forge/TASK-353-full-systems-surface-parity
 <!-- SECTION:NOTES:END -->
