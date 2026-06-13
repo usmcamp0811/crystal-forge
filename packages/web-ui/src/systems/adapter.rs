@@ -64,9 +64,11 @@ pub struct FlakeNamesLoadResult {
 }
 
 /// Result of loading flake context for system list/card display.
+///
+/// Each tuple is `(flake_id, name, branch, latest_commit)`.
 #[derive(Debug, Clone)]
 pub struct FlakeContextLoadResult {
-    pub flakes: Vec<(i32, String, Option<String>)>,
+    pub flakes: Vec<(i32, String, String, Option<String>)>,
     pub notice: Option<String>,
     pub redirect_to_login: bool,
 }
@@ -202,7 +204,7 @@ pub async fn load_flake_context_with_fallback() -> FlakeContextLoadResult {
                 .into_iter()
                 .map(|f: FlakeRegistryItem| {
                     let latest = timeline_hashes.get(&f.id).cloned().flatten();
-                    (f.id, f.name, latest)
+                    (f.id, f.name, f.branch, latest)
                 })
                 .collect();
 

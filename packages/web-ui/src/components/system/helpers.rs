@@ -2,6 +2,23 @@
 //!
 //! Provides utility functions for formatting system data.
 
+use crate::api::models::DeploymentStatus;
+
+/// Design-parity deployment state label (CrystalForgelatest `DeploymentChip`).
+///
+/// The design renders lowercase state labels ("up to date", "behind", ...)
+/// inside deployment chips on cards, table rows, and the side panel.
+pub fn deployment_state_label(status: &DeploymentStatus) -> &'static str {
+    match status {
+        DeploymentStatus::UpToDate => "up to date",
+        DeploymentStatus::Behind => "behind",
+        DeploymentStatus::Ahead => "ahead",
+        DeploymentStatus::NeverDeployed => "never deployed",
+        DeploymentStatus::NoCommitsAvailable => "no commits",
+        DeploymentStatus::Unknown => "unknown",
+    }
+}
+
 /// Format memory size in GB, converting to TB if >= 1000 GB.
 pub fn format_memory(gb: f64) -> String {
     if gb >= 1000.0 {

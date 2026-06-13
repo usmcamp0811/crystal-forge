@@ -54,32 +54,62 @@ pub fn normalize_policy(value: &str) -> String {
     }
 }
 
-pub fn matches_environment(system: &SystemSummary, filters: &[String]) -> bool {
-    if filters.is_empty() {
+/// Single-select environment filter matching the design's "All environments" select.
+pub fn matches_environment(system: &SystemSummary, filter: &str) -> bool {
+    if filter == "all" {
         return true;
     }
     system
         .environment
         .as_deref()
-        .is_some_and(|env| filters.iter().any(|f| env.eq_ignore_ascii_case(f)))
+        .is_some_and(|env| env.eq_ignore_ascii_case(filter))
 }
 
-pub fn matches_health(system: &SystemSummary, filters: &[HealthStatus]) -> bool {
-    filters.is_empty() || filters.contains(&system.health_status)
+/// Single-select status filter matching the design's "All statuses" select.
+///
+/// Design semantics (CrystalForgelatest `SystemsView`):
+/// - `online`: anything that is not offline
+/// - `warning`: warning / drift
+/// - `critical`: critical
+/// - `offline`: offline
+pub fn matches_status(system: &SystemSummary, filter: &str) -> bool {
+    match filter {
+        "all" => true,
+        "online" => system.health_status != HealthStatus::Offline,
+        "warning" => system.health_status == HealthStatus::Warning,
+        "critical" => system.health_status == HealthStatus::Critical,
+        "offline" => system.health_status == HealthStatus::Offline,
+        _ => true,
+    }
 }
 
-pub fn matches_deployment(system: &SystemSummary, filters: &[DeploymentStatus]) -> bool {
-    filters.is_empty() || filters.contains(&system.deployment_status)
-}
-
-pub fn matches_search(system: &SystemSummary, search: &str) -> bool {
-    if search.is_empty() {
+/// Single-select flake filter matching the design's "All flakes" select.
+pub fn matches_flake(flake_name: Option<&str>, filter: &str) -> bool {
+    if filter == "all" {
         return true;
     }
-    system
-        .hostname
-        .to_lowercase()
-        .contains(&search.to_lowercase())
+    flake_name.is_some_and(|name| name.eq_ignore_ascii_case(filter))
+}
+
+/// Search across hostname, flake name, and commit, matching the design's
+/// "Filter by hostname, commit, or flake…" placeholder behavior.
+pub fn matches_search(
+    system: &SystemSummary,
+    search: &str,
+    flake_name: Option<&str>,
+    commit: Option<&str>,
+) -> bool {
+    let query = search.trim().to_lowercase();
+    if query.is_empty() {
+        return true;
+    }
+    if system.hostname.to_lowercase().contains(&query) {
+        return true;
+    }
+    if flake_name.is_some_and(|name| name.to_lowercase().contains(&query)) {
+        return true;
+    }
+    commit.is_some_and(|hash| hash.to_lowercase().contains(&query))
 }
 
 pub fn unique_environments(systems: &[SystemSummary]) -> Vec<String> {
@@ -138,28 +168,76 @@ mod tests {
     }
 
     #[test]
-    fn matches_environment_allows_when_filters_empty() {
+    fn matches_environment_allows_all_filter() {
         let system = sample_system(Some("production"));
-        assert!(matches_environment(&system, &[]));
+        assert!(matches_environment(&system, "all"));
     }
 
     #[test]
     fn matches_environment_is_case_insensitive() {
         let system = sample_system(Some("Production"));
-        assert!(matches_environment(&system, &["production".to_string()]));
-        assert!(matches_environment(&system, &["PRODUCTION".to_string()]));
+        assert!(matches_environment(&system, "production"));
+        assert!(matches_environment(&system, "PRODUCTION"));
     }
 
     #[test]
     fn matches_environment_rejects_non_member_environment() {
         let system = sample_system(Some("staging"));
-        assert!(!matches_environment(&system, &["production".to_string()]));
+        assert!(!matches_environment(&system, "production"));
     }
 
     #[test]
     fn matches_environment_rejects_unscoped_system_when_filtering() {
         let system = sample_system(None);
-        assert!(!matches_environment(&system, &["production".to_string()]));
+        assert!(!matches_environment(&system, "production"));
+    }
+
+    #[test]
+    fn matches_status_follows_design_buckets() {
+        let mut system = sample_system(Some("production"));
+        assert!(matches_status(&system, "all"));
+        assert!(matches_status(&system, "online"));
+        assert!(!matches_status(&system, "warning"));
+
+        system.health_status = HealthStatus::Warning;
+        assert!(matches_status(&system, "warning"));
+        assert!(matches_status(&system, "online"));
+
+        system.health_status = HealthStatus::Critical;
+        assert!(matches_status(&system, "critical"));
+        assert!(matches_status(&system, "online"));
+
+        system.health_status = HealthStatus::Offline;
+        assert!(matches_status(&system, "offline"));
+        assert!(!matches_status(&system, "online"));
+    }
+
+    #[test]
+    fn matches_flake_uses_resolved_flake_name() {
+        assert!(matches_flake(Some("infrastructure"), "all"));
+        assert!(matches_flake(Some("Infrastructure"), "infrastructure"));
+        assert!(!matches_flake(Some("web-services"), "infrastructure"));
+        assert!(!matches_flake(None, "infrastructure"));
+    }
+
+    #[test]
+    fn matches_search_covers_hostname_flake_and_commit() {
+        let system = sample_system(Some("production"));
+        assert!(matches_search(&system, "", None, None));
+        assert!(matches_search(&system, "sample", None, None));
+        assert!(matches_search(
+            &system,
+            "infra",
+            Some("infrastructure"),
+            None
+        ));
+        assert!(matches_search(
+            &system,
+            "a1b2",
+            Some("infrastructure"),
+            Some("a1b2c3d4")
+        ));
+        assert!(!matches_search(&system, "nomatch", Some("infra"), Some("ff")));
     }
 
     #[test]

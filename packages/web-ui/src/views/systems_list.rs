@@ -2,26 +2,22 @@
 
 use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
-use std::rc::Rc;
-use wasm_bindgen::JsCast;
-use wasm_bindgen::prelude::Closure;
-use web_sys::{Node, window};
 
 use crate::api::client::set_setup_wizard_agent_acknowledged;
 use crate::api::models::{
     DeploymentStatus, HealthStatus, SystemDetail, SystemSummary, SystemsListParams,
 };
 use crate::components::environments::{normalize_color_hex, with_alpha};
-use crate::components::filters::{
-    DeploymentFilterDropdown, EnvironmentFilterDropdown, HealthFilterDropdown, ViewMode,
-};
+use crate::components::filters::ViewMode;
 use crate::components::forms::{AddSystemForm, NewSystemDraft, validate_new_system};
 use crate::components::heartbeat_spinner::HeartbeatSpinner;
 use crate::components::modals::{
     GeneratedKeyPair, KeyPairModal, RemoveSystemDialog, UpdatePublicKeyModal, generate_key_pair,
 };
 use crate::components::notifications::{AlertBanner, AlertSeverity};
-use crate::components::system::{DeploySystemModal, EditSystemModal, SystemCardV2};
+use crate::components::system::{
+    DeploySystemModal, EditSystemModal, SystemCardV2, deployment_state_label,
+};
 use crate::components::systems_stat_strip::SystemsStatStrip;
 use crate::components::tables::SystemsTable;
 use crate::components::{Chip, ChipVariant, EnvBadge};
@@ -56,7 +52,7 @@ fn came_from_setup() -> bool {
 #[path = "systems_list_helpers.rs"]
 mod systems_list_helpers;
 use systems_list_helpers::{
-    matches_deployment, matches_environment, matches_health, matches_search, normalize_optional,
+    matches_environment, matches_flake, matches_search, matches_status, normalize_optional,
     normalize_policy, prefers_view_from_query, remove_system_by_id, systems_missing_flake_count,
     systems_missing_heartbeat_count, unique_environments, update_key_for_system,
 };
@@ -85,9 +81,7 @@ pub fn SystemsListView() -> Element {
     let mut view_mode = use_signal(|| ViewMode::from_storage(stored_view));
     let query_view = prefers_view_from_query();
     let mut is_compact = use_signal(load_density);
-    let open_dropdown = use_signal(|| None::<String>);
     let container_id = use_memo(|| format!("systems-filters-{}", uuid::Uuid::new_v4()));
-    let container_id_value = Rc::new(container_id.read().clone());
 
     use_effect(move || {
         if let Some(mode) = query_view {
@@ -109,48 +103,12 @@ pub fn SystemsListView() -> Element {
         });
     });
 
-    // Close dropdown on outside click
-    {
-        let mut open_dropdown = open_dropdown.clone();
-        let container_id_value = container_id_value.clone();
-        use_effect(move || {
-            let Some(window) = window() else { return };
-            let Some(document) = window.document() else {
-                return;
-            };
-            let document_for_listener = document.clone();
-            let container_id_value = container_id_value.clone();
-            let handler = Closure::<dyn FnMut(_)>::new(move |event: web_sys::Event| {
-                if open_dropdown.read().is_none() {
-                    return;
-                }
-                let target = match event.target() {
-                    Some(t) => t,
-                    None => return,
-                };
-                let node: Node = match target.dyn_into() {
-                    Ok(n) => n,
-                    Err(_) => return,
-                };
-                if let Some(container) =
-                    document_for_listener.get_element_by_id(container_id_value.as_str())
-                {
-                    if !container.contains(Some(&node)) {
-                        open_dropdown.set(None);
-                    }
-                }
-            });
-            let _ = document
-                .add_event_listener_with_callback("mousedown", handler.as_ref().unchecked_ref());
-            handler.forget();
-        });
-    }
-
-    // Filter state
+    // Filter state — single-select values matching the design's filter bar
+    // ("all" mirrors the design's "All environments/statuses/flakes" options).
     let mut search = use_signal(String::new);
-    let mut environment_filter = use_signal(Vec::<String>::new);
-    let mut health_filter = use_signal(Vec::<HealthStatus>::new);
-    let mut deployment_filter = use_signal(Vec::<DeploymentStatus>::new);
+    let mut environment_filter = use_signal(|| "all".to_string());
+    let mut status_filter = use_signal(|| "all".to_string());
+    let mut flake_filter = use_signal(|| "all".to_string());
 
     // Load real data from the backend using use_resource to prevent repeated fetches.
     // Note: Currently loads all systems; filters applied client-side.
@@ -275,16 +233,24 @@ pub fn SystemsListView() -> Element {
 
     let filtered_systems: Vec<SystemSummary> = current_systems
         .iter()
+        .filter(|system| {
+            let flake_info = system
+                .flake_id
+                .and_then(|id| flake_context.iter().find(|(flake_id, ..)| *flake_id == id));
+            let flake_name = flake_info.map(|(_, name, _, _)| name.as_str());
+            let flake_commit = flake_info.and_then(|(_, _, _, commit)| commit.as_deref());
+
+            matches_environment(system, &environment_filter.read())
+                && matches_status(system, &status_filter.read())
+                && matches_flake(flake_name, &flake_filter.read())
+                && matches_search(system, &search.read(), flake_name, flake_commit)
+        })
         .cloned()
-        .filter(|system| matches_environment(system, &environment_filter.read()))
-        .filter(|system| matches_health(system, &health_filter.read()))
-        .filter(|system| matches_deployment(system, &deployment_filter.read()))
-        .filter(|system| matches_search(system, &search.read()))
         .collect();
     let has_active_filters = !search.read().trim().is_empty()
-        || !environment_filter.read().is_empty()
-        || !health_filter.read().is_empty()
-        || !deployment_filter.read().is_empty();
+        || *environment_filter.read() != "all"
+        || *status_filter.read() != "all"
+        || *flake_filter.read() != "all";
     let systems_subtitle = if *loading.read() {
         "Loading systems…".to_string()
     } else if load_error.read().is_some() {
@@ -708,18 +674,50 @@ pub fn SystemsListView() -> Element {
                             oninput: move |evt| search.set(evt.value()),
                         }
                     }
-                    EnvironmentFilterDropdown {
-                        environments: environments.clone(),
-                        selected: environment_filter,
-                        open_dropdown: open_dropdown,
+                    // Environment select (design: "All environments")
+                    select {
+                        class: "input filter-select focus-ring",
+                        style: "width: auto;",
+                        "aria-label": "Filter by environment",
+                        value: "{environment_filter.read()}",
+                        onchange: move |evt| environment_filter.set(evt.value()),
+                        option { value: "all", "All environments" }
+                        for env in dropdown_environments.clone() {
+                            option {
+                                value: "{env}",
+                                selected: *environment_filter.read() == env,
+                                "{env}"
+                            }
+                        }
                     }
-                    HealthFilterDropdown {
-                        selected: health_filter,
-                        open_dropdown: open_dropdown,
+                    // Status select (design: "All statuses")
+                    select {
+                        class: "input filter-select focus-ring",
+                        style: "width: auto;",
+                        "aria-label": "Filter by status",
+                        value: "{status_filter.read()}",
+                        onchange: move |evt| status_filter.set(evt.value()),
+                        option { value: "all", "All statuses" }
+                        option { value: "online", "Online" }
+                        option { value: "warning", "Warning / drift" }
+                        option { value: "critical", "Critical" }
+                        option { value: "offline", "Offline" }
                     }
-                    DeploymentFilterDropdown {
-                        selected: deployment_filter,
-                        open_dropdown: open_dropdown,
+                    // Flake select (design: "All flakes")
+                    select {
+                        class: "input filter-select focus-ring",
+                        style: "width: auto;",
+                        "aria-label": "Filter by flake",
+                        value: "{flake_filter.read()}",
+                        onchange: move |evt| flake_filter.set(evt.value()),
+                        option { value: "all", "All flakes" }
+                        for flake in registered_flakes.clone() {
+                            option {
+                                value: "{flake}",
+                                selected: *flake_filter.read() == flake,
+                                "{flake}"
+                            }
+                        }
                     }
                     div {
                         class: "seg",
@@ -811,6 +809,7 @@ pub fn SystemsListView() -> Element {
                         SystemCardV2 {
                             system: system.clone(),
                             compact: *is_compact.read(),
+                            selected: selected_preview_id == Some(system.id),
                             environment_colors: environment_color_pairs.clone(),
                             flake_context: flake_context.clone(),
                             on_open: move |_| {
@@ -1128,6 +1127,7 @@ fn SystemPreviewPanel(
         .as_ref()
         .map(|f| f.name.clone())
         .unwrap_or_else(|| "unknown".to_string());
+    let flake_branch = derived_branch_for_environment(detail.environment.as_deref());
     let flake_commit = detail
         .flake
         .as_ref()
@@ -1216,7 +1216,7 @@ fn SystemPreviewPanel(
                             "{detail.health_status.label()}"
                         }
                     }
-                    span { class: "fqdn", "{detail.hostname}.local" }
+                    span { class: "fqdn", "{derived_fqdn(&detail.hostname, detail.environment.as_deref())}" }
                 }
                 button {
                     class: "btn-icon focus-ring",
@@ -1248,7 +1248,7 @@ fn SystemPreviewPanel(
                         Chip {
                             variant: deploy_variant,
                             show_dot: false,
-                            "{detail.deployment_status.label()}"
+                            "{deployment_state_label(&detail.deployment_status)}"
                         }
                         Chip {
                             variant: ChipVariant::Unknown,
@@ -1264,6 +1264,7 @@ fn SystemPreviewPanel(
                     dl {
                         class: "kv-grid",
                         dt { "Flake" } dd { "{flake_name}" }
+                        dt { "Branch" } dd { "{flake_branch}" }
                         dt { "Generation" } dd { "#{detail.generation.unwrap_or_default()}" }
                         dt { "Commit" } dd { "{flake_commit}" }
                         dt { "NixOS" } dd { "{nixos_version}" }
@@ -1395,6 +1396,19 @@ fn format_relative_time_from(
         format!("{}h ago", diff.num_hours().max(0))
     } else {
         format!("{}d ago", diff.num_days().max(0))
+    }
+}
+
+fn derived_fqdn(hostname: &str, environment: Option<&str>) -> String {
+    let env = environment.unwrap_or("unknown").to_lowercase();
+    format!("{hostname}.{env}.cf.internal")
+}
+
+fn derived_branch_for_environment(environment: Option<&str>) -> &'static str {
+    match environment.unwrap_or("dev").to_lowercase().as_str() {
+        "production" | "prod" => "main",
+        "staging" | "stage" => "staging",
+        _ => "dev",
     }
 }
 

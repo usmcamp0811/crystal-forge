@@ -13,6 +13,7 @@ use crate::api::models::{HealthStatus, SystemSummary};
 use crate::components::chips::{Chip, ChipVariant, EnvBadge, StatusDot};
 use crate::components::environments::{normalize_color_hex, with_alpha};
 use crate::components::heartbeat_spinner::HeartbeatSpinner;
+use crate::components::system::helpers::deployment_state_label;
 
 /// Environment color configuration for badges and styling.
 struct EnvColors {
@@ -99,13 +100,18 @@ fn deployment_chip_variant(status: &crate::api::models::DeploymentStatus) -> Chi
     }
 }
 
+fn derived_fqdn(hostname: &str, environment: &str) -> String {
+    format!("{}.{}.cf.internal", hostname, environment.to_lowercase())
+}
+
 /// Redesigned system card with modern styling and layout.
 #[component]
 pub fn SystemCardV2(
     system: SystemSummary,
     #[props(default = false)] compact: bool,
+    #[props(default = false)] selected: bool,
     #[props(default)] environment_colors: Vec<(String, String)>,
-    #[props(default)] flake_context: Vec<(i32, String, Option<String>)>,
+    #[props(default)] flake_context: Vec<(i32, String, String, Option<String>)>,
     on_open: EventHandler<()>,
     on_remove: EventHandler<()>,
     on_update_key: EventHandler<()>,
@@ -121,15 +127,18 @@ pub fn SystemCardV2(
     let status_col = status_color(&system.health_status);
 
     // Get flake info from loaded flake context.
-    let (flake_name, flake_commit) = system
+    let (flake_name, flake_branch, flake_commit) = system
         .flake_id
         .and_then(|id| {
             flake_context
                 .iter()
-                .find(|(flake_id, _, _)| *flake_id == id)
-                .map(|(_, name, latest_commit)| (name.clone(), latest_commit.clone()))
+                .find(|(flake_id, ..)| *flake_id == id)
+                .map(|(_, name, branch, latest_commit)| {
+                    (name.clone(), branch.clone(), latest_commit.clone())
+                })
         })
-        .unwrap_or_else(|| ("—".to_string(), None));
+        .unwrap_or_else(|| ("—".to_string(), "—".to_string(), None));
+    let flake_with_branch = format!("{flake_name} · {flake_branch}");
     let flake_commit_short = flake_commit
         .as_deref()
         .map(|hash| hash.chars().take(8).collect::<String>())
@@ -163,10 +172,11 @@ pub fn SystemCardV2(
         .unwrap_or(0.0);
 
     let compact_class = if compact { " compact" } else { "" };
+    let selected_class = if selected { " selected" } else { "" };
 
     rsx! {
         div {
-            class: "sys-card{compact_class}",
+            class: "sys-card{compact_class}{selected_class}",
             onclick: move |_| {
                 on_open.call(());
             },
@@ -192,7 +202,7 @@ pub fn SystemCardV2(
                     }
                     div {
                         class: "sys-fqdn",
-                        "{system.hostname}.local"
+                        "{derived_fqdn(&system.hostname, &environment)}"
                     }
                 }
                 EnvBadge {
@@ -209,8 +219,8 @@ pub fn SystemCardV2(
                     class: "sys-card-body",
                     // Flake · branch
                     div {
-                        div { class: "sys-kv-key", "Flake" }
-                        div { class: "sys-kv-val", "{flake_name}" }
+                        div { class: "sys-kv-key", "Flake · branch" }
+                        div { class: "sys-kv-val", "{flake_with_branch}" }
                     }
                     // Commit
                     div {
@@ -253,7 +263,7 @@ pub fn SystemCardV2(
                         style: "color: var(--cf-text-primary);",
                         "{flake_name}"
                     }
-                    span { class: "mono", "{flake_commit_short}" }
+                    span { class: "mono", "{flake_commit_short} · {flake_branch}" }
                     span { "{last_seen}" }
                 }
             }
@@ -269,11 +279,11 @@ pub fn SystemCardV2(
                         show_dot: true,
                         "{system.health_status.label()}"
                     }
-                    // Deployment chip
+                    // Deployment chip (design lowercase state labels)
                     Chip {
                         variant: deployment_chip_variant(&system.deployment_status),
                         show_dot: false,
-                        "{system.deployment_status.label()}"
+                        "{deployment_state_label(&system.deployment_status)}"
                     }
                     // CVE chips: crit/high when present, otherwise a clean chip
                     if system.cve_counts.critical > 0 {

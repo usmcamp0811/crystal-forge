@@ -7,6 +7,7 @@ use crate::api::models::{DeploymentStatus, HealthStatus, SystemSummary};
 use crate::components::chips::{Chip, ChipVariant, EnvBadge, StatusDot};
 use crate::components::environments::{normalize_color_hex, with_alpha};
 use crate::components::heartbeat_spinner::HeartbeatSpinner;
+use crate::components::system::helpers::deployment_state_label;
 use crate::components::tables::{SortDirection, SortableHeader};
 
 /// Column that can be sorted in the systems table.
@@ -48,9 +49,9 @@ pub fn SystemsTable(
     /// Optional environment name -> color hex mappings from environments API
     #[props(default)]
     environment_colors: Vec<(String, String)>,
-    /// Optional flake context tuples (flake_id, name, latest_commit)
+    /// Optional flake context tuples (flake_id, name, branch, latest_commit)
     #[props(default)]
-    flake_context: Vec<(i32, String, Option<String>)>,
+    flake_context: Vec<(i32, String, String, Option<String>)>,
 ) -> Element {
     let mut sort_column = use_signal(|| None::<SystemsSortColumn>);
     let mut sort_direction = use_signal(|| SortDirection::Asc);
@@ -162,7 +163,7 @@ pub fn SystemsTable(
                                             }
                                             div {
                                                 class: "fqdn truncate",
-                                                "{system.hostname}.local"
+                                                "{derived_fqdn(&system)}"
                                             }
                                         }
                                     }
@@ -190,20 +191,20 @@ pub fn SystemsTable(
                                         "{system.health_status.label()}"
                                     }
                                 }
-                                // Flake · commit
+                                // Flake · commit (design sub-line: "{commit} · {branch}")
                                 td {
                                     {
-                                        let (flake_name, flake_commit) = system
+                                        let (flake_name, flake_branch, flake_commit) = system
                                             .flake_id
                                             .and_then(|id| {
                                                 flake_context
                                                     .iter()
-                                                    .find(|(flake_id, _, _)| *flake_id == id)
-                                                    .map(|(_, name, latest_commit)| {
-                                                        (name.clone(), latest_commit.clone())
+                                                    .find(|(flake_id, ..)| *flake_id == id)
+                                                    .map(|(_, name, branch, latest_commit)| {
+                                                        (name.clone(), branch.clone(), latest_commit.clone())
                                                     })
                                             })
-                                            .unwrap_or_else(|| ("—".to_string(), None));
+                                            .unwrap_or_else(|| ("—".to_string(), "—".to_string(), None));
                                         let flake_commit_short = flake_commit
                                             .as_deref()
                                             .map(|hash| hash.chars().take(8).collect::<String>())
@@ -219,21 +220,21 @@ pub fn SystemsTable(
                                                 span {
                                                     class: "mono",
                                                     style: "font-size: 11px; color: var(--cf-text-muted)",
-                                                    "{flake_commit_short}"
+                                                    "{flake_commit_short} · {flake_branch}"
                                                 }
                                             }
                                         }
                                     }
                                 }
-                                // Deploy
+                                // Deploy (design lowercase state labels)
                                 td {
                                     Chip {
                                         variant: deployment_chip_variant(&system.deployment_status),
                                         show_dot: false,
-                                        "{system.deployment_status.label()}"
+                                        "{deployment_state_label(&system.deployment_status)}"
                                     }
                                 }
-                                // CVEs
+                                // CVEs (design: crit / high / med-when-comfortable / clean)
                                 td {
                                     div {
                                         style: "display: flex; gap: 6px; flex-wrap: wrap;",
@@ -243,7 +244,13 @@ pub fn SystemsTable(
                                         if system.cve_counts.high > 0 {
                                             span { class: "chip chip-warning", "{system.cve_counts.high} high" }
                                         }
-                                        if system.cve_counts.critical == 0 && system.cve_counts.high == 0 {
+                                        if !compact && system.cve_counts.medium > 0 {
+                                            span { class: "chip chip-unknown", "{system.cve_counts.medium} med" }
+                                        }
+                                        if system.cve_counts.critical == 0
+                                            && system.cve_counts.high == 0
+                                            && (compact || system.cve_counts.medium == 0)
+                                        {
                                             span { class: "chip chip-healthy", "✓ clean" }
                                         }
                                     }
@@ -345,6 +352,11 @@ pub fn SystemsTable(
 /// Get IP label for a system (or "-" if not set).
 fn ip_label(system: &SystemSummary) -> String {
     system.primary_ip.clone().unwrap_or_else(|| "-".to_string())
+}
+
+fn derived_fqdn(system: &SystemSummary) -> String {
+    let env = system.environment.as_deref().unwrap_or("unknown").to_lowercase();
+    format!("{}.{}.cf.internal", system.hostname, env)
 }
 
 /// Get environment label for a system (or "Unknown" if not set).
