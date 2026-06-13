@@ -1,10 +1,10 @@
 ---
 id: TASK-295
 title: Add tab icons to system detail view to match design example
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-05-10 13:28'
-updated_date: '2026-06-10 02:53'
+updated_date: '2026-06-13 13:58'
 labels:
   - ui
   - design-system
@@ -85,3 +85,9 @@ Medium (localized UI refactor with high visual-sensitivity requirements).
 - [ ] #18 web-ui check updates are required with assertions for tab-icon rendering and state behavior
 - [ ] #19 web-ui check must capture screenshots for all affected system-detail tab states
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: opencode-agent on reckless in ~/code/crystal-forge/TASK-295-system-detail-tab-icons
+<!-- SECTION:NOTES:END -->
