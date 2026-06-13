@@ -7,6 +7,7 @@ use crate::api::models::{DeploymentStatus, HealthStatus, SystemSummary};
 use crate::components::chips::{Chip, ChipVariant, EnvBadge, StatusDot};
 use crate::components::environments::{normalize_color_hex, with_alpha};
 use crate::components::heartbeat_spinner::HeartbeatSpinner;
+use crate::components::system::helpers::deployment_state_label;
 use crate::components::tables::{SortDirection, SortableHeader};
 
 /// Column that can be sorted in the systems table.
@@ -48,9 +49,9 @@ pub fn SystemsTable(
     /// Optional environment name -> color hex mappings from environments API
     #[props(default)]
     environment_colors: Vec<(String, String)>,
-    /// Optional flake context tuples (flake_id, name, latest_commit)
+    /// Optional flake context tuples (flake_id, name, branch, latest_commit)
     #[props(default)]
-    flake_context: Vec<(i32, String, Option<String>)>,
+    flake_context: Vec<(i32, String, String, Option<String>)>,
 ) -> Element {
     let mut sort_column = use_signal(|| None::<SystemsSortColumn>);
     let mut sort_direction = use_signal(|| SortDirection::Asc);
@@ -162,7 +163,7 @@ pub fn SystemsTable(
                                             }
                                             div {
                                                 class: "fqdn truncate",
-                                                "{system.hostname}.local"
+                                                "{derived_fqdn(&system)}"
                                             }
                                         }
                                     }
@@ -171,15 +172,6 @@ pub fn SystemsTable(
                                 td {
                                     {
                                         let env = environment_label(&system);
-
-                                        // Debug: log environment value to console
-                                        #[cfg(debug_assertions)]
-                                        {
-                                            let msg = format!("SystemsTable: hostname={}, environment='{}' (raw: {:?})",
-                                                system.hostname, env, system.environment);
-                                            web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&msg));
-                                        }
-
                                         let colors = env_colors(&env, &environment_colors);
                                         rsx! {
                                             EnvBadge {
@@ -199,20 +191,20 @@ pub fn SystemsTable(
                                         "{system.health_status.label()}"
                                     }
                                 }
-                                // Flake · commit
+                                // Flake · commit (design sub-line: "{commit} · {branch}")
                                 td {
                                     {
-                                        let (flake_name, flake_commit) = system
+                                        let (flake_name, flake_branch, flake_commit) = system
                                             .flake_id
                                             .and_then(|id| {
                                                 flake_context
                                                     .iter()
-                                                    .find(|(flake_id, _, _)| *flake_id == id)
-                                                    .map(|(_, name, latest_commit)| {
-                                                        (name.clone(), latest_commit.clone())
+                                                    .find(|(flake_id, ..)| *flake_id == id)
+                                                    .map(|(_, name, branch, latest_commit)| {
+                                                        (name.clone(), branch.clone(), latest_commit.clone())
                                                     })
                                             })
-                                            .unwrap_or_else(|| ("—".to_string(), None));
+                                            .unwrap_or_else(|| ("—".to_string(), "—".to_string(), None));
                                         let flake_commit_short = flake_commit
                                             .as_deref()
                                             .map(|hash| hash.chars().take(8).collect::<String>())
@@ -228,21 +220,21 @@ pub fn SystemsTable(
                                                 span {
                                                     class: "mono",
                                                     style: "font-size: 11px; color: var(--cf-text-muted)",
-                                                    "{flake_commit_short}"
+                                                    "{flake_commit_short} · {flake_branch}"
                                                 }
                                             }
                                         }
                                     }
                                 }
-                                // Deploy
+                                // Deploy (design lowercase state labels)
                                 td {
                                     Chip {
                                         variant: deployment_chip_variant(&system.deployment_status),
                                         show_dot: false,
-                                        "{system.deployment_status.label()}"
+                                        "{deployment_state_label(&system.deployment_status)}"
                                     }
                                 }
-                                // CVEs
+                                // CVEs (design: crit / high / med-when-comfortable / clean)
                                 td {
                                     div {
                                         style: "display: flex; gap: 6px; flex-wrap: wrap;",
@@ -252,7 +244,13 @@ pub fn SystemsTable(
                                         if system.cve_counts.high > 0 {
                                             span { class: "chip chip-warning", "{system.cve_counts.high} high" }
                                         }
-                                        if system.cve_counts.critical == 0 && system.cve_counts.high == 0 {
+                                        if !compact && system.cve_counts.medium > 0 {
+                                            span { class: "chip chip-unknown", "{system.cve_counts.medium} med" }
+                                        }
+                                        if system.cve_counts.critical == 0
+                                            && system.cve_counts.high == 0
+                                            && (compact || system.cve_counts.medium == 0)
+                                        {
                                             span { class: "chip chip-healthy", "✓ clean" }
                                         }
                                     }
@@ -299,7 +297,7 @@ pub fn SystemsTable(
                                         }
                                     }
                                 }
-                                // Row actions: Deploy | Evaluate | More (matching design)
+                                // Row actions: Deploy | Edit (matching design SystemRow)
                                 td {
                                     div {
                                         class: "row-actions",
@@ -307,6 +305,7 @@ pub fn SystemsTable(
                                         button {
                                             class: "btn-icon focus-ring",
                                             title: "Deploy",
+                                            "aria-label": "Deploy",
                                             onclick: move |evt| {
                                                 evt.stop_propagation();
                                                 on_deploy.call(system.id);
@@ -320,12 +319,14 @@ pub fn SystemsTable(
                                                 path { d: "M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" }
                                             }
                                         }
-                                        // Evaluate
+                                        // Edit
                                         button {
                                             class: "btn-icon focus-ring",
-                                            title: "Evaluate",
+                                            title: "Edit",
+                                            "aria-label": "Edit",
                                             onclick: move |evt| {
                                                 evt.stop_propagation();
+                                                on_edit.call(system.id);
                                             },
                                             svg {
                                                 class: "w-3.5 h-3.5",
@@ -333,23 +334,8 @@ pub fn SystemsTable(
                                                 stroke: "currentColor",
                                                 stroke_width: "2",
                                                 view_box: "0 0 24 24",
-                                                path { d: "M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" }
-                                            }
-                                        }
-                                        // More
-                                        button {
-                                            class: "btn-icon focus-ring",
-                                            title: "More",
-                                            onclick: move |evt| {
-                                                evt.stop_propagation();
-                                            },
-                                            svg {
-                                                class: "w-3.5 h-3.5",
-                                                fill: "currentColor",
-                                                view_box: "0 0 24 24",
-                                                circle { cx: "5", cy: "12", r: "2" }
-                                                circle { cx: "12", cy: "12", r: "2" }
-                                                circle { cx: "19", cy: "12", r: "2" }
+                                                path { d: "M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" }
+                                                path { d: "M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" }
                                             }
                                         }
                                     }
@@ -366,6 +352,15 @@ pub fn SystemsTable(
 /// Get IP label for a system (or "-" if not set).
 fn ip_label(system: &SystemSummary) -> String {
     system.primary_ip.clone().unwrap_or_else(|| "-".to_string())
+}
+
+fn derived_fqdn(system: &SystemSummary) -> String {
+    let env = system
+        .environment
+        .as_deref()
+        .unwrap_or("unknown")
+        .to_lowercase();
+    format!("{}.{}.cf.internal", system.hostname, env)
 }
 
 /// Get environment label for a system (or "Unknown" if not set).
