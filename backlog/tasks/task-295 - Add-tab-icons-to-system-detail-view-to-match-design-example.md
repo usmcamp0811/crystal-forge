@@ -1,10 +1,10 @@
 ---
 id: TASK-295
 title: Add tab icons to system detail view to match design example
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-05-10 13:28'
-updated_date: '2026-06-13 14:20'
+updated_date: '2026-06-13 14:22'
 labels:
   - ui
   - design-system
@@ -92,4 +92,6 @@ Medium (localized UI refactor with high visual-sensitivity requirements).
 LOCK: opencode-agent on reckless in ~/code/crystal-forge/TASK-295-system-detail-tab-icons
 
 Implemented: added Dashboard/Deploy/History/Key/File variants to IconName (Shield+Terminal already existed) with design-parity SVG paths from CrystalForgelatest/components/Icon.jsx. Replaced inline tab SVGs in system_detail.rs tab rail with Icon component at size=13. Added web-ui check step 12k-system-detail-tab-icons asserting each of the 7 tabs renders an SVG icon at width=13, plus added it to CI_FAST set. Verified via local Playwright screenshot harness that all 7 tab icons render correctly with active state + CVE badge preserved. cargo check + cargo fmt clean. NOTE: cargo clippy surfaces pre-existing doc-comment-on-param errors in add_system_form.rs/key_pair_modal.rs (not my files) -> tracked as TASK-352.
+
+MR opened: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/274 (TASK-295-system-detail-tab-icons -> dev). Moved to Review.
 <!-- SECTION:NOTES:END -->
