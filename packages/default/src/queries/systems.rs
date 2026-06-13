@@ -475,6 +475,7 @@ pub struct SystemDetailRow {
     pub primary_ip_address: Option<String>,
     pub primary_mac_address: Option<String>,
     pub gateway_ip: Option<String>,
+    pub reachability: String,
     // Security
     pub tpm_present: Option<bool>,
     pub secure_boot_enabled: Option<bool>,

@@ -543,6 +543,7 @@ pub fn fallback_system_detail() -> SystemDetail {
             primary_ip: None,
             primary_mac: None,
             gateway_ip: None,
+            reachability: "direct".to_string(),
         },
         security: SystemSecurityInfo {
             tpm_present: None,

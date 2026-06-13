@@ -795,6 +795,7 @@ async function routeSystemsWarningData(page) {
       primary_ip: "10.10.0.10",
       primary_mac: null,
       gateway_ip: null,
+      reachability: "direct",
     },
     hardware: {
       cpu_brand: null,
@@ -2904,7 +2905,7 @@ const steps = [
             generation: 74,
             generation_matches_current_store_path: null,
             hardware: { cpu_brand: null, cpu_cores: null, memory_gb: null, uptime_secs: null, board_serial: null, bios_version: null },
-            network: { primary_ip: "10.10.0.10", primary_mac: null, gateway_ip: null },
+            network: { primary_ip: "10.10.0.10", primary_mac: null, gateway_ip: null, reachability: "direct" },
             security: { tpm_present: false, secure_boot_enabled: false, fips_mode: false, selinux_status: null },
             cve_counts: { critical: 0, high: 0, medium: 1, low: 2 },
             flake: capturedEditPayload.flake_name
@@ -3258,14 +3259,30 @@ const steps = [
           }
         }
 
+        await assertVisible(
+          page.getByText("direct / LAN").first(),
+          "Expected API-backed reachability label to render in Host card",
+          10000,
+        );
+
         // Compliance tab renders its placeholder surface (design parity entry).
         await tabs
           .locator("button.sd-tab", { hasText: "Compliance" })
           .first()
           .click({ force: true });
         await assertVisible(
-          page.getByText("Compliance surface is not fully wired yet.").first(),
-          "Expected Compliance tab placeholder content to render",
+          page.getByText("Temporary Compliance preview.").first(),
+          "Expected Compliance tab mock preview callout to render",
+          10000,
+        );
+        await assertVisible(
+          page.getByText("Production baseline").first(),
+          "Expected mocked Compliance bundle card to render",
+          10000,
+        );
+        await assertVisible(
+          page.getByText("86%").first(),
+          "Expected mocked Compliance bundle score to render",
           10000,
         );
 
@@ -3630,7 +3647,7 @@ const steps = [
               generation: 74,
               generation_matches_current_store_path: null,
               hardware: { cpu_brand: null, cpu_cores: null, memory_gb: null, uptime_secs: null, board_serial: null, bios_version: null },
-              network: { primary_ip: "10.10.0.10", primary_mac: null, gateway_ip: null },
+              network: { primary_ip: "10.10.0.10", primary_mac: null, gateway_ip: null, reachability: "direct" },
               security: { tpm_present: false, secure_boot_enabled: false, fips_mode: false, selinux_status: null },
               cve_counts: { critical: 0, high: 0, medium: 1, low: 2 },
               flake: { id: 41, name: "platform-core", repo_url: "https://gitlab.com/crystal-forge/platform-core.git", latest_commit: null },

@@ -130,6 +130,18 @@ fn derived_fqdn(hostname: &str, environment: Option<&str>) -> String {
     format!("{hostname}.{env}.cf.internal")
 }
 
+fn is_pull_reachability(reachability: &str) -> bool {
+    reachability.eq_ignore_ascii_case("pull")
+}
+
+fn reachability_label(reachability: &str) -> &'static str {
+    if is_pull_reachability(reachability) {
+        "Agent pull-only"
+    } else {
+        "Direct / LAN"
+    }
+}
+
 const DETAIL_TAB_ORDER: [Tab; 8] = [
     Tab::Overview,
     Tab::Deploy,
@@ -834,23 +846,7 @@ pub fn SystemDetailView(id: String) -> Element {
                         ConfigTab { system: system.clone() }
                     },
                     Tab::Compliance => rsx! {
-                        section {
-                            class: "card sd-card",
-                            div {
-                                class: "sd-card-head",
-                                h2 { "Compliance" }
-                                span { class: "sd-card-meta", "temporary parity placeholder" }
-                            }
-                            div {
-                                class: "sd-callout sd-callout-info",
-                                style: "margin: 18px;",
-                                Icon { name: IconName::Shield, size: 13 }
-                                div {
-                                    strong { "Compliance surface is not fully wired yet." }
-                                    " This tab is present to match the design structure while the real compliance detail experience is completed under TASK-353."
-                                }
-                            }
-                        }
+                        ComplianceTab { system: system.clone() }
                     },
                 }
             }
@@ -1010,6 +1006,182 @@ pub fn SystemDetailView(id: String) -> Element {
 // ─────────────────────────────────────────────────────────────────────────────
 // Tab Components
 // ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Clone)]
+struct ComplianceMockBundle {
+    name: &'static str,
+    framework: &'static str,
+    version: &'static str,
+    owner: &'static str,
+    controls: u32,
+    score: u8,
+    pass: u32,
+    warn: u32,
+    fail: u32,
+    waiver: u32,
+}
+
+/// Temporary parity data for the System Detail Compliance tab.
+///
+/// IMPORTANT: This is intentionally mocked by maintainer authorization on
+/// TASK-353 because the real Compliance view/backend plumbing does not exist
+/// yet. Keep this isolated so TASK-355 can replace it with API-backed bundle
+/// rollups and per-control evidence without changing the view structure.
+fn mocked_compliance_bundles(system: &SystemDetail) -> Vec<ComplianceMockBundle> {
+    let production = system
+        .environment
+        .as_deref()
+        .map(|env| env.eq_ignore_ascii_case("production"))
+        .unwrap_or(false);
+
+    if production {
+        vec![
+            ComplianceMockBundle {
+                name: "Production baseline",
+                framework: "CIS",
+                version: "v2.0",
+                owner: "security-platform",
+                controls: 42,
+                score: 86,
+                pass: 34,
+                warn: 5,
+                fail: 2,
+                waiver: 1,
+            },
+            ComplianceMockBundle {
+                name: "STIG NixOS overlay",
+                framework: "DISA STIG",
+                version: "draft",
+                owner: "platform-secops",
+                controls: 28,
+                score: 92,
+                pass: 25,
+                warn: 2,
+                fail: 0,
+                waiver: 1,
+            },
+        ]
+    } else {
+        vec![ComplianceMockBundle {
+            name: "General fleet baseline",
+            framework: "Internal",
+            version: "2026.1",
+            owner: "platform",
+            controls: 24,
+            score: 94,
+            pass: 22,
+            warn: 1,
+            fail: 0,
+            waiver: 1,
+        }]
+    }
+}
+
+fn compliance_score_color(score: u8) -> &'static str {
+    if score >= 90 {
+        "#34d399"
+    } else if score >= 70 {
+        "#fbbf24"
+    } else {
+        "#f87171"
+    }
+}
+
+#[component]
+fn ComplianceTab(system: SystemDetail) -> Element {
+    let bundles = mocked_compliance_bundles(&system);
+
+    rsx! {
+        div {
+            style: "display:flex;flex-direction:column;gap:14px;",
+
+            div {
+                class: "sd-callout sd-callout-info",
+                Icon { name: IconName::Shield, size: 13 }
+                div {
+                    style: "font-size:12px;",
+                    strong { "Temporary Compliance preview. " }
+                    "Mock bundle rollups are shown for design parity while real compliance evidence APIs are implemented."
+                }
+            }
+
+            for bundle in bundles {
+                {
+                    let score_color = compliance_score_color(bundle.score);
+                    let score_width = format!("width:{}%;height:100%;background:{};", bundle.score, score_color);
+                    rsx! {
+                        div {
+                            class: "card",
+                            style: "padding:16px;",
+
+                            div {
+                                style: "display:flex;align-items:flex-start;justify-content:space-between;gap:14px;flex-wrap:wrap;",
+                                div {
+                                    style: "min-width:0;",
+                                    div {
+                                        style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
+                                        span { style: "font-size:15px;font-weight:650;", "{bundle.name}" }
+                                        span { class: "chip chip-info", style: "font-size:10px;", "{bundle.framework}" }
+                                        span { class: "chip chip-unknown", style: "font-size:10px;", "{bundle.version}" }
+                                        if bundle.fail == 0 {
+                                            span {
+                                                class: "chip chip-healthy",
+                                                style: "font-size:10px;",
+                                                Icon { name: IconName::Check, size: 9 }
+                                                " Compliant"
+                                            }
+                                        } else {
+                                            span {
+                                                class: "chip chip-critical",
+                                                style: "font-size:10px;",
+                                                Icon { name: IconName::Warn, size: 9 }
+                                                " {bundle.fail} failing"
+                                            }
+                                        }
+                                    }
+                                    div {
+                                        style: "font-size:12px;color:var(--cf-text-muted);margin-top:4px;",
+                                        "{bundle.controls} controls · owned by "
+                                        span { class: "mono", "{bundle.owner}" }
+                                    }
+                                }
+                                button {
+                                    class: "btn btn-primary focus-ring",
+                                    title: "Temporary placeholder until Compliance evidence drawer is wired",
+                                    Icon { name: IconName::File, size: 13 }
+                                    "View evidence"
+                                }
+                            }
+
+                            div {
+                                style: "display:flex;align-items:center;gap:16px;margin-top:14px;flex-wrap:wrap;",
+                                div {
+                                    style: "display:flex;align-items:center;gap:10px;",
+                                    div {
+                                        style: "width:120px;height:8px;background:var(--cf-subtle-bg);border-radius:99px;overflow:hidden;",
+                                        div { style: "{score_width}" }
+                                    }
+                                    span {
+                                        class: "mono",
+                                        style: "font-size:14px;font-weight:700;color:{score_color};",
+                                        "{bundle.score}%"
+                                    }
+                                }
+                                div {
+                                    style: "display:flex;gap:14px;font-size:12px;",
+                                    span { span { class: "mono", style: "font-weight:700;color:#34d399;", "{bundle.pass}" } " pass" }
+                                    span { span { class: "mono", style: "font-weight:700;color:#fbbf24;", "{bundle.warn}" } " warn" }
+                                    span { span { class: "mono", style: "font-weight:700;color:#f87171;", "{bundle.fail}" } " fail" }
+                                    span { span { class: "mono", style: "font-weight:700;color:#a78bfa;", "{bundle.waiver}" } " waiver" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 
 #[component]
 fn SshConnectModal(system: SystemDetail, on_close: EventHandler<()>) -> Element {
@@ -1218,6 +1390,22 @@ fn OverviewTab(
         .clone()
         .unwrap_or_else(|| "-".to_string());
     let ipv6_text = "—".to_string();
+    let reachability_is_pull = is_pull_reachability(&system.network.reachability);
+    let reachability_chip_class = if reachability_is_pull {
+        "chip chip-warning"
+    } else {
+        "chip chip-healthy"
+    };
+    let reachability_chip_label = if reachability_is_pull {
+        "pull-only"
+    } else {
+        "direct / LAN"
+    };
+    let reachability_title = if reachability_is_pull {
+        "Behind NAT/firewall — agent checks in; no inbound from server"
+    } else {
+        "Server can reach the agent directly (LAN/routable/VPN)"
+    };
     let branch_text = "main".to_string();
     let generation_text = system
         .generation
@@ -1323,6 +1511,14 @@ fn OverviewTab(
                     dt { "Memory" } dd { "{memory_text}" }
                     dt { "IPv4" } dd { class: "mono", "{ipv4_text}" }
                     dt { "IPv6" } dd { class: "mono", "{ipv6_text}" }
+                    dt { "Reachability" }
+                    dd {
+                        span {
+                            class: "{reachability_chip_class}",
+                            title: "{reachability_title}",
+                            "{reachability_chip_label}"
+                        }
+                    }
                 }
                 div {
                     class: "hb-panel",

@@ -1260,6 +1260,7 @@ fn detail_row_to_api_model(row: SystemDetailRow) -> SystemDetail {
             primary_ip: row.primary_ip_address,
             primary_mac: row.primary_mac_address,
             gateway_ip: row.gateway_ip,
+            reachability: row.reachability,
         },
         security: SystemSecurityInfo {
             tpm_present: row.tpm_present,

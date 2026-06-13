@@ -403,6 +403,7 @@ pub(super) fn build_system_detail(
             primary_ip: Some(primary_ip.to_string()),
             primary_mac: Some(primary_mac.to_string()),
             gateway_ip: Some(gateway_ip.to_string()),
+            reachability: "direct".to_string(),
         },
         security: SystemSecurityInfo {
             tpm_present: Some(tpm_present),

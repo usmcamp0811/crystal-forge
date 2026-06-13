@@ -617,6 +617,12 @@ pub struct SystemNetworkInfo {
     pub primary_ip: Option<String>,
     pub primary_mac: Option<String>,
     pub gateway_ip: Option<String>,
+    #[serde(default = "default_system_reachability")]
+    pub reachability: String,
+}
+
+fn default_system_reachability() -> String {
+    "direct".to_string()
 }
 
 /// Security posture subset for system detail.
