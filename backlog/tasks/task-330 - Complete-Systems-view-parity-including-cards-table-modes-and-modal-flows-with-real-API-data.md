@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@gpt-5.4'
 created_date: '2026-05-31 15:56'
-updated_date: '2026-06-13 14:10'
+updated_date: '2026-06-13 14:36'
 labels:
   - design-parity
   - systems
@@ -19,10 +19,12 @@ dependencies:
 references:
   - /home/mcamp/code/crystal-forge/CrystalForgelatest/app.jsx
 modified_files:
+  - checks/web-ui/tests/integration-test.js
+  - packages/web-ui/src/components/dashboard/build_summary.rs
+  - packages/web-ui/src/components/dashboard/cve_summary.rs
+  - packages/web-ui/src/components/dashboard/mod.rs
+  - packages/web-ui/src/components/system/edit_system_modal.rs
   - packages/web-ui/src/views/systems_list.rs
-  - packages/web-ui/src/components/system
-  - packages/web-ui/src/systems/adapter.rs
-  - packages/web-ui/src/api/models.rs
 priority: high
 ordinal: 1620
 ---
@@ -70,7 +72,9 @@ Scope details:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-LOCK: gpt-5.4 on reckless in /home/mcamp/code/crystal-forge/TASK-330-systems-view-parity
+2026-06-13: Review-fix pass updated EditSystemModal so derived FQDN/branch fields are disabled display-only values, pinned commit UI is explicitly non-actionable until backend support exists, and the danger-zone action now routes into the existing Systems-list removal confirmation flow.
 
-2026-06-13: Resuming TASK-330 to address MR !273 review blockers: remove unrelated TASK-342.2/TASK-351 scope from branch, make non-persisted edit-modal fields non-actionable, and wire or disable misleading remove-system danger action.
+2026-06-13: Removed unrelated dashboard parity step from the systems integration test and restored dashboard widget component files back to dev so TASK-330 can ship without TASK-342.2 scope pollution.
+
+2026-06-13 verification: `nix develop -c node --check checks/web-ui/tests/integration-test.js` passed; `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` passed; `nix develop -c cargo fmt --manifest-path packages/web-ui/Cargo.toml --all -- --check` ran successfully; `nix build .#checks.x86_64-linux.web-ui` was started and produced no error output before command completion, but I did not capture an explicit final success line beyond the build output stream.
 <!-- SECTION:NOTES:END -->
