@@ -510,9 +510,8 @@ pub async fn get_system_detail_by_id(
     system_id: Uuid,
 ) -> Result<Option<SystemDetailRow>> {
     let row = sqlx::query_as::<_, SystemDetailRow>(
-        "SELECT vsd.*, s.system_configuration_name
+        "SELECT vsd.*
          FROM view_system_detail vsd
-         JOIN systems s ON s.id = vsd.id
          WHERE vsd.id = $1",
     )
     .bind(system_id)
@@ -1501,8 +1500,8 @@ mod tests {
         .concat();
 
         assert!(
-            source.contains("SELECT vsd.*, s.system_configuration_name"),
-            "system detail query should source generation from view_system_detail"
+            source.contains("SELECT vsd.*\n         FROM view_system_detail vsd"),
+            "system detail query should source all detail fields from view_system_detail"
         );
         assert!(
             !source.contains(&legacy_regex_expr),
@@ -1540,6 +1539,39 @@ mod tests {
             migration.contains("ld.expected_store_path,\n    lss.generation,\n    lss.generation_matches_current_store_path"),
             "migration must append generation columns after existing view columns"
         );
+    }
+
+    #[test]
+    fn view_system_detail_exposes_config_name_reachability_and_fqdn() {
+        let migration = include_str!(
+            "../../migrations/0138_add_system_configuration_name_to_view_system_detail.sql"
+        );
+
+        assert!(
+            migration.contains("CREATE OR REPLACE VIEW public.view_system_detail AS"),
+            "migration must rebuild view_system_detail"
+        );
+        // Identity field that 0135/0136 dropped from the view must be restored.
+        assert!(
+            migration.contains("s.system_configuration_name"),
+            "view must project system_configuration_name"
+        );
+        // New fields introduced by prior migrations must be preserved.
+        assert!(
+            migration.contains("s.reachability"),
+            "view must keep reachability projection"
+        );
+        assert!(
+            migration.contains("s.fqdn"),
+            "view must keep fqdn projection"
+        );
+        // Core identity fields must not be dropped.
+        for required in ["s.id", "s.hostname", "e.name AS environment"] {
+            assert!(
+                migration.contains(required),
+                "view must keep identity field: {required}"
+            );
+        }
     }
 
     #[tokio::test]

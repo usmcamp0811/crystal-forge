@@ -4,7 +4,7 @@ title: Close full Systems surface parity gaps against CrystalForgelatest
 status: In Progress
 assignee: []
 created_date: '2026-06-13 14:53'
-updated_date: '2026-06-13 15:20'
+updated_date: '2026-06-14 18:25'
 labels:
   - design-parity
   - systems
@@ -25,15 +25,19 @@ references:
   - TASK-338
   - TASK-295
   - TASK-281
+  - TASK-355
+  - TASK-356
+  - TASK-353.1
+  - TASK-353.2
+  - TASK-279
 documentation:
   - /home/mcamp/code/crystal-forge/CrystalForgelatest/components/Systems.jsx
   - >-
     /home/mcamp/code/crystal-forge/CrystalForgelatest/components/SystemDetail.jsx
 modified_files:
-  - packages/web-ui/src/views/systems_list.rs
+  - packages/web-ui/assets/app.css
+  - packages/web-ui/src/components/cve/mod.rs
   - packages/web-ui/src/views/system_detail.rs
-  - packages/web-ui/src/components/system
-  - checks/web-ui/tests/integration-test.js
 priority: high
 ordinal: 1695
 ---
@@ -57,7 +61,10 @@ References:
 - New product workflows that do not exist in the design example
 - Unrelated backend refactors outside parity-driven API/data needs
 - Mobile-first redesign beyond responsive behavior already implied by the reference
-- Replacing authoritative backend data with mock-only UI shortcuts in production paths
+- Replacing authoritative backend data with mock-only UI shortcuts in production paths, except where explicitly authorized below
+
+## Explicit Mock/Placeholder Authorization
+On 2026-06-13, the maintainer explicitly authorized temporary mock/placeholder data for System Detail parity gaps that do not currently have backend support, specifically to complete the Compliance tab surface while the real Compliance view/backend plumbing is deferred. Any such mock data must be clearly commented in code, documented in task notes, and tracked by follow-up Backlog tasks to replace with real backend data.
 
 ## Scope
 This task covers the **full Systems surface**:
@@ -80,73 +87,30 @@ This task covers the **full Systems surface**:
 - CVEs tab parity
 - Hardening tab parity
 - Compliance-tab entry/placement parity if present in the reference for this surface
+- Reachability field persisted and surfaced for SSH modal/host details
 
 ### C. Data + verification parity
-- Ensure displayed values come from authoritative backend APIs in production paths
+- Ensure displayed values come from authoritative backend APIs in production paths unless explicitly covered by the temporary mock authorization above
 - Add/expand screenshot and assertion coverage so the Systems list and Systems detail surfaces are both provably covered by `checks/web-ui`
-
-## Architectural Constraints
-- Keep business logic out of views; views compose existing components and adapters
-- Reuse shared primitives (Icon, Chip, modal shells, table/list patterns) instead of view-local one-off SVGs or styling hacks
-- Preserve clear separation between list-surface concerns and detail-surface concerns even if both are delivered under one umbrella task
-- Any backend-dependent placeholder UI must either be fully wired to real data or be explicitly labeled as a temporary placeholder with follow-up tracking
-- No hidden global state or route-coupled side effects beyond established patterns in `packages/web-ui/src/views/**`
-
-## Verification Plan
-Minimum required verification for acceptance:
-- `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown`
-- `nix develop -c cargo fmt --manifest-path packages/web-ui/Cargo.toml -- --check`
-- `nix build .#checks.x86_64-linux.web-ui`
-- Capture updated screenshot evidence for both `/systems` and `/systems/{id}` core states
-- Extend `checks/web-ui/tests/integration-test.js` with assertions covering:
-  - list view cards + table modes
-  - side panel open state
-  - edit/deploy modal presence and core controls
-  - system detail tab rail
-  - overview/deploy/history/logs/config/cves/hardening core render states
-
-## Impact Areas
-- `packages/web-ui/src/views/systems_list.rs`
-- `packages/web-ui/src/views/system_detail.rs`
-- `packages/web-ui/src/components/system/**`
-- `packages/web-ui/src/components/tables/systems_table.rs`
-- `packages/web-ui/src/components/systems_stat_strip.rs`
-- `packages/web-ui/src/components/icon.rs`
-- `packages/web-ui/src/systems/adapter.rs`
-- `checks/web-ui/tests/integration-test.js`
-- Design/parity backlog tasks that should be closed or linked as work completes
-
-## Risk Level
-High
-
-Why high:
-- The surface spans two large user-facing routes with many states
-- Visual parity is highly review-sensitive
-- Some remaining gaps may require coordinated backend data exposure or careful placeholder handling
-
-## Dependencies
-- TASK-328 (parity spec/foundation)
-- TASK-329 (shared shell/foundation parity)
-- TASK-333 (strict parity verification harness)
-- May absorb or close residual scope currently tracked in TASK-330 and TASK-338 once implementation is complete and reviewed
-
-## Acceptance Criteria
-- [ ] Systems list header, stat strip, filters, cards mode, and table mode materially match CrystalForgelatest on desktop
-- [ ] Systems list side panel and add/edit/deploy modal flows materially match CrystalForgelatest on desktop
-- [ ] Systems list loading, empty, error, and populated states are styled and behaved per the reference with no production-path mock fallback rendering
-- [ ] System detail header, metric strip, badges/chips, and action cluster materially match CrystalForgelatest on desktop
-- [ ] System detail tab rail matches the reference in structure, ordering, iconography, active states, and badge treatment
-- [ ] System detail Overview, Deploy, History, Logs, Config, CVEs, and Hardening surfaces materially match the reference for core states
-- [ ] All displayed Systems list and Systems detail values are sourced from authoritative backend APIs in production paths unless explicitly tracked as backend follow-up gaps
-- [ ] `checks/web-ui` captures screenshot evidence and behavior assertions for the full Systems surface, including both `/systems` and `/systems/{id}`
-- [ ] A human reviewer can compare the implemented Systems surface against the CrystalForgelatest reference and find no remaining material parity gaps
 <!-- SECTION:DESCRIPTION:END -->
 
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 Systems list header, stat strip, filters, cards mode, and table mode materially match CrystalForgelatest on desktop
+- [ ] #2 Systems list side panel and add/edit/deploy modal flows materially match CrystalForgelatest on desktop
+- [ ] #3 Systems list loading, empty, error, and populated states are styled and behaved per the reference with no production-path mock fallback rendering
+- [ ] #4 System detail header, metric strip, badges/chips, and action cluster materially match CrystalForgelatest on desktop
+- [ ] #5 System detail tab rail matches the reference in structure, ordering, iconography, active states, and badge treatment
+- [ ] #6 System detail Overview, Deploy, History, Logs, Config, CVEs, and Hardening surfaces materially match the reference for core states
+- [ ] #7 All displayed Systems list and Systems detail values are sourced from authoritative backend APIs in production paths unless explicitly tracked as backend follow-up gaps or authorized temporary Compliance placeholder data
+- [ ] #8 checks/web-ui captures screenshot evidence and behavior assertions for the full Systems surface, including both /systems and /systems/{id}
+- [ ] #9 A human reviewer can compare the implemented Systems surface against the CrystalForgelatest reference and find no remaining material parity gaps
 <!-- AC:END -->
-<!-- AC:END -->
+
+
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-LOCK: opencode-agent on reckless in ~/code/crystal-forge/TASK-353-full-systems-surface-parity
+Resuming implementation from Review to add real backend support for editable system FQDN from the Edit System modal. This must use a NEW migration file only because the dev server has prior migrations applied. LOCK: opencode-agent on this host in ~/code/crystal-forge/TASK-353-full-systems-surface-parity
 <!-- SECTION:NOTES:END -->

@@ -3807,7 +3807,7 @@ fn HardeningTab(
                     }
                 }
             } else {
-                div { class: "{theme::presets::CARD} overflow-hidden",
+                div { class: "card", style: "overflow: hidden;",
                     div { class: "overflow-x-auto",
                     table { class: "sys-table",
                         thead {

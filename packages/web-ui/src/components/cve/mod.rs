@@ -319,7 +319,8 @@ pub fn CvesTab(
                                                                                     span { class: "chip chip-healthy", style: "font-size: 10px;", "justified" }
                                                                                 } else {
                                                                                     svg {
-                                                                                        class: "w-3.5 h-3.5",
+                                                                                        width: "14",
+                                                                                        height: "14",
                                                                                         fill: "none",
                                                                                         stroke: "currentColor",
                                                                                         stroke_width: "2",
@@ -335,7 +336,8 @@ pub fn CvesTab(
                                                                                 target: "_blank",
                                                                                 rel: "noopener noreferrer",
                                                                                 svg {
-                                                                                    class: "w-3.5 h-3.5",
+                                                                                    width: "14",
+                                                                                    height: "14",
                                                                                     fill: "none",
                                                                                     stroke: "currentColor",
                                                                                     stroke_width: "2",
