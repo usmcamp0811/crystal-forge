@@ -7,6 +7,7 @@ use crate::api::models::{DeploymentStatus, HealthStatus, SystemSummary};
 use crate::components::chips::{Chip, ChipVariant, EnvBadge, StatusDot};
 use crate::components::environments::{normalize_color_hex, with_alpha};
 use crate::components::heartbeat_spinner::HeartbeatSpinner;
+use crate::components::icon::{Icon, IconName};
 use crate::components::system::helpers::deployment_state_label;
 use crate::components::tables::{SortDirection, SortableHeader};
 
@@ -38,6 +39,8 @@ pub fn SystemsTable(
     on_edit: EventHandler<Uuid>,
     /// Called when user clicks deploy on a system
     on_deploy: EventHandler<Uuid>,
+    /// Called when user clicks export on a system
+    on_export: EventHandler<Uuid>,
     /// Called when user clicks a row/open action
     on_open: EventHandler<Uuid>,
     /// Currently selected row (for preview drawer highlight)
@@ -297,10 +300,21 @@ pub fn SystemsTable(
                                         }
                                     }
                                 }
-                                // Row actions: Deploy | Edit (matching design SystemRow)
+                                // Row actions: Export | Deploy | Edit (matching design SystemRow plus per-row export)
                                 td {
                                     div {
                                         class: "row-actions",
+                                        // Export
+                                        button {
+                                            class: "btn-icon focus-ring",
+                                            title: "Export",
+                                            "aria-label": "Export",
+                                            onclick: move |evt| {
+                                                evt.stop_propagation();
+                                                on_export.call(system.id);
+                                            },
+                                            Icon { name: IconName::Download, size: 14 }
+                                        }
                                         // Deploy
                                         button {
                                             class: "btn-icon focus-ring",
@@ -310,14 +324,7 @@ pub fn SystemsTable(
                                                 evt.stop_propagation();
                                                 on_deploy.call(system.id);
                                             },
-                                            svg {
-                                                class: "w-3.5 h-3.5",
-                                                fill: "none",
-                                                stroke: "currentColor",
-                                                stroke_width: "2",
-                                                view_box: "0 0 24 24",
-                                                path { d: "M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" }
-                                            }
+                                            Icon { name: IconName::Deploy, size: 14 }
                                         }
                                         // Edit
                                         button {
@@ -328,15 +335,7 @@ pub fn SystemsTable(
                                                 evt.stop_propagation();
                                                 on_edit.call(system.id);
                                             },
-                                            svg {
-                                                class: "w-3.5 h-3.5",
-                                                fill: "none",
-                                                stroke: "currentColor",
-                                                stroke_width: "2",
-                                                view_box: "0 0 24 24",
-                                                path { d: "M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" }
-                                                path { d: "M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" }
-                                            }
+                                            Icon { name: IconName::Gear, size: 14 }
                                         }
                                     }
                                 }
