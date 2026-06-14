@@ -559,6 +559,7 @@ impl SystemSummaryBuilder {
             nixos_version: self.nixos_version.clone(),
             last_seen: self.last_seen,
             deployment_policy: self.deployment_policy.clone(),
+            fqdn: None,
         }
     }
 }
