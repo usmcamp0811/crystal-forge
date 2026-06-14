@@ -427,14 +427,7 @@ pub fn SystemsListView() -> Element {
                                 export_systems_oscal(&systems_snapshot);
                             }
                         },
-                        svg {
-                            class: "w-3.5 h-3.5",
-                            fill: "none",
-                            stroke: "currentColor",
-                            stroke_width: "2",
-                            view_box: "0 0 24 24",
-                            path { d: "M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" }
-                        }
+                        Icon { name: IconName::Download, size: 14 }
                         "Export"
                     }
                     // Add system (primary) — keeps existing functionality
@@ -455,14 +448,7 @@ pub fn SystemsListView() -> Element {
                                     dismiss_add_target_callout.set(true);
                                 }
                             },
-                            svg {
-                                class: "w-3.5 h-3.5",
-                                fill: "none",
-                                stroke: "currentColor",
-                                stroke_width: "2",
-                                view_box: "0 0 24 24",
-                                path { d: "M12 4v16m8-8H4" }
-                            }
+                            Icon { name: IconName::Plus, size: 14 }
                             if *show_add_form.read() { "Close" } else { "Add system" }
                         }
                         if from_setup() && !*show_add_form.read() && !dismiss_add_target_callout() {
