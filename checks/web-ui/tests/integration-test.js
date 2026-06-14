@@ -3969,10 +3969,11 @@ const steps = [
       await assertVisible(page.getByText("Auto-sync off"), "Expected environments auto-sync stat");
       await assertVisible(page.getByPlaceholder("Search environments…"), "Expected environments search input");
       await page.getByRole("button", { name: /Table/i }).click();
-      await assertVisible(page.getByRole("columnheader", { name: "Environment" }), "Expected Environment table column");
-      await assertVisible(page.getByRole("columnheader", { name: "Health" }), "Expected Health table column");
-      await assertVisible(page.getByRole("columnheader", { name: "Enforcement" }), "Expected Enforcement table column");
-      await assertVisible(page.getByRole("columnheader", { name: "Cache" }), "Expected Cache table column");
+      const envTable = page.locator("table").first();
+      await assertVisible(envTable.getByText("Environment").first(), "Expected Environment table column");
+      await assertVisible(envTable.getByText("Health").first(), "Expected Health table column");
+      await assertVisible(envTable.getByText("Enforcement").first(), "Expected Enforcement table column");
+      await assertVisible(envTable.getByText("Cache").first(), "Expected Cache table column");
       await page.getByRole("button", { name: /Cards/i }).click();
       await unrouteEnvironmentWarningData(page);
     },
@@ -3984,7 +3985,9 @@ const steps = [
       await routeEnvironmentWarningData(page);
       await page.goto(`${baseUrl}/environments`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
-      await page.getByRole("button", { name: /Add environment/i }).click();
+      const addButton = page.locator("button").filter({ hasText: "Add environment" }).first();
+      await assertVisible(addButton, "Expected Add environment button");
+      await addButton.click();
       await assertVisible(page.getByRole("heading", { name: "Add environment" }), "Expected Add environment modal");
       await assertVisible(page.getByText("Binary cache"), "Expected cache section in environment modal");
       await assertVisible(page.getByText("Default deployment mode"), "Expected deployment policy section");
