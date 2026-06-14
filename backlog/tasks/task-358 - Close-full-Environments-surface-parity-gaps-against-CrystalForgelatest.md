@@ -1,10 +1,10 @@
 ---
 id: TASK-358
 title: Close full Environments surface parity gaps against CrystalForgelatest
-status: Done
+status: In Progress
 assignee: []
 created_date: '2026-06-14 18:56'
-updated_date: '2026-06-15 01:13'
+updated_date: '2026-06-14 19:07'
 labels:
   - design-parity
   - environments
@@ -12,27 +12,6 @@ labels:
   - umbrella
 milestone: 'm-19: Design Parity Existing Surfaces'
 dependencies: []
-references:
-  - >-
-    /home/mcamp/code/crystal-forge/CrystalForgelatest/components/EnvironmentsView.jsx
-  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/276'
-documentation:
-  - >-
-    /home/mcamp/code/crystal-forge/CrystalForgelatest/components/EnvironmentsView.jsx
-modified_files:
-  - packages/default/migrations/0139_add_view_environment_rollups.sql
-  - packages/default/src/api/models.rs
-  - packages/default/src/queries/environments.rs
-  - packages/default/src/handlers/api/environments.rs
-  - packages/web-ui/src/views/environments_list.rs
-  - packages/web-ui/src/components/environments/environment_card.rs
-  - packages/web-ui/src/components/environments/environment_form_modal.rs
-  - packages/web-ui/src/components/environments/remove_environment_dialog.rs
-  - packages/web-ui/src/components/environments/mod.rs
-  - packages/web-ui/src/environments/adapter.rs
-  - packages/web-ui/src/api/models.rs
-  - packages/web-ui/assets/app.css
-  - checks/web-ui/tests/integration-test.js
 priority: high
 ordinal: 301000
 ---
@@ -53,18 +32,17 @@ Bring the full Environments surface into parity with the CrystalForgelatest refe
 - Replacing authoritative backend data with mock-only UI shortcuts in production paths, except temporary mock/placeholder data explicitly authorized for parity gaps without current backend support; any such mocks must be tracked by follow-up Backlog tasks
 
 ## Acceptance Criteria
-<!-- AC:BEGIN -->
-- [x] #1 Environments list header, subtitle (tiers, systems, caches count), and "Add environment" button materially match CrystalForgelatest on desktop
-- [x] #2 Stat strip displays 5 metrics (Total tiers, Systems, Caches, Manual policy, Auto-sync off) with colored accent rails per the reference
-- [x] #3 Filter bar with search, cards/table view toggle, and count text matches the reference
-- [x] #4 Cards mode: env card with color rail, name/title with PROD badge, description, systems stat, flake chips, health bar (colored segments), health legend (with CVE count), KV grid (Deploy, Enforcement, Cache, Auto-sync, Approval), footer (role assignments, Edit button) — all materially match the reference
-- [x] #5 Table mode columns (Environment, Systems, Health bar, Deploy, Enforcement, Cache, Auto-sync, Approval, row actions) match the design layout, typography, and spacing
-- [x] #6 Add/Edit environment modal (name, color picker with presets and custom, description, cache assignment with dropdown and detail display, deployment mode selector, gate policy picker with search/multi-select, compliance bundle selector, production toggle, auto-sync/approval toggles, danger zone) functionally matches the reference
-- [x] #7 Delete environment confirmation with type-to-confirm and systems guard matches the reference
-- [x] #8 Loading, empty, error, and populated states are styled and behaved per the reference with no production-path mock fallback rendering (except authorized temporary placeholders)
-- [x] #9 All displayed values are sourced from authoritative backend APIs in production paths unless explicitly tracked as backend follow-up gaps
-- [x] #10 checks/web-ui captures screenshot evidence and behavior assertions for the full Environments surface (/environments)
-- [x] #11 A human reviewer can compare the implemented Environments surface against the CrystalForgelatest reference and find no remaining material parity gaps
+- [ ] Environments list header, subtitle (tiers, systems, caches count), and "Add environment" button materially match CrystalForgelatest on desktop
+- [ ] Stat strip displays 5 metrics (Total tiers, Systems, Caches, Manual policy, Auto-sync off) with colored accent rails per the reference
+- [ ] Filter bar with search, cards/table view toggle, and count text matches the reference
+- [ ] Cards mode: env card with color rail, name/title with PROD badge, description, systems stat, flake chips, health bar (colored segments), health legend (with CVE count), KV grid (Deploy, Enforcement, Cache, Auto-sync, Approval), footer (role assignments, Edit button) — all materially match the reference
+- [ ] Table mode columns (Environment, Systems, Health bar, Deploy, Enforcement, Cache, Auto-sync, Approval, row actions) match the design layout, typography, and spacing
+- [ ] Add/Edit environment modal (name, color picker with presets and custom, description, cache assignment with dropdown and detail display, deployment mode selector, gate policy picker with search/multi-select, compliance bundle selector, production toggle, auto-sync/approval toggles, danger zone) functionally matches the reference
+- [ ] Delete environment confirmation with type-to-confirm and systems guard matches the reference
+- [ ] Loading, empty, error, and populated states are styled and behaved per the reference with no production-path mock fallback rendering (except authorized temporary placeholders)
+- [ ] All displayed values are sourced from authoritative backend APIs in production paths unless explicitly tracked as backend follow-up gaps
+- [ ] checks/web-ui captures screenshot evidence and behavior assertions for the full Environments surface (/environments)
+- [ ] A human reviewer can compare the implemented Environments surface against the CrystalForgelatest reference and find no remaining material parity gaps
 
 ## Architectural Constraints
 - No business logic in UI views
@@ -99,44 +77,8 @@ Medium — primarily UI component work; backend changes moderate if cache/policy
 - CrystalForgelatest reference: /home/mcamp/code/crystal-forge/CrystalForgelatest/components/EnvironmentsView.jsx
 <!-- SECTION:DESCRIPTION:END -->
 
-<!-- AC:END -->
-
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-MR !276 is merged. Latest pipeline 2600716097 reports success. Completed worktree cleanup with `git worktree remove ../TASK-358-environments-surface-parity` and `git worktree prune`.
+LOCK: opencode-agent on reckless in ~/code/crystal-forge/TASK-358-environments-surface-parity
 <!-- SECTION:NOTES:END -->
-
-## Final Summary
-
-<!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Implemented full Environments surface parity for the core desktop `/environments` flows and merged MR !276 into `dev`.
-
-Summary:
-- Added authoritative environment rollup data for active-system health, CRITICAL/HIGH CVE totals, and flake names while preserving `system_count` as all assigned systems.
-- Reworked the Environments list UI to match the CrystalForgelatest reference: header/subtitle, 5-metric stat strip, filter/search bar, cards/table toggle, cards, table, unified Add/Edit modal, and guarded remove dialog.
-- Rendered unsupported operational fields as read-only/not persisted instead of fabricating backend state.
-- Added web-ui screenshot/behavior coverage for the Environments surface and modal warning state.
-- Fixed MR review blockers, including preserving migration immutability by restoring 0139 and adding forward migration 0140 for `active_system_count`.
-
-Verification:
-- `cargo check --manifest-path packages/web-ui/Cargo.toml --all-targets` — passed
-- `cargo check --manifest-path packages/default/Cargo.toml --all-targets` — passed
-- `cargo test --manifest-path packages/default/Cargo.toml --lib queries::environments::tests::environment_summary_from_row_maps_rollup_fields` — passed
-- `cargo test --manifest-path packages/web-ui/Cargo.toml --bin crystal-forge-ui environments::adapter::tests::api_to_environment_item_maps_known_names` — passed
-- `cargo test --manifest-path packages/web-ui/Cargo.toml --bin crystal-forge-ui views::environments_list::tests` — passed
-- `cargo sqlx prepare --check` — passed
-- `node --check checks/web-ui/tests/integration-test.js` — passed
-- `nix build .#checks.x86_64-linux.web-ui` — passed and produced screenshots
-- GitLab pipeline 2600716097 — success for merged MR !276
-
-Follow-ups created:
-- TASK-359 — Persist per-environment deployment policy and production flag
-- TASK-360 — Add per-environment binary cache assignment backend and API
-- TASK-361 — Add per-environment gate policies and compliance bundle enforcement backend
-- TASK-362 — Add per-environment auto-sync, approval, and RBAC role assignment backend
-- TASK-358.1 — Split oversized environments query module
-
-MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/276
-Worktree cleanup: `/home/mcamp/code/crystal-forge/TASK-358-environments-surface-parity` removed and pruned.
-<!-- SECTION:FINAL_SUMMARY:END -->
