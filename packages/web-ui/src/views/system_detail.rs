@@ -3593,6 +3593,7 @@ fn HardeningTab(
     let mut justification_error = use_signal(|| None::<String>);
     let mut justification_notice = use_signal(|| None::<String>);
     let mut is_saving_justification = use_signal(|| false);
+    let mut active_waiver_directive: Signal<Option<String>> = use_signal(|| None);
     let mut modal_tab = use_signal(|| "overview".to_string());
     let mut search_query = use_signal(String::new);
     let mut severity_filter = use_signal(|| "all".to_string());
@@ -4021,16 +4022,22 @@ fn HardeningTab(
                                     span { class: "font-semibold", style: "color: {risk_level_color(&service.risk_level)};", "{service.hardening_score}%" }
                                     " · "
                                     "{service.missing_directives_count} missing directives"
-                                    " · user: "
-                                    span { class: "font-mono", "{service_user_label(&service)}" }
-                                }
+                                            " · user: "
+                                            span { class: "font-mono", "{service_user_label(&service)}" }
+                                            if !justifications_for(&service.service_name).is_empty() {
+                                                " · "
+                                                span { style: "color:#fbbf24;font-weight:700;", "{justifications_for(&service.service_name).len()} waived" }
+                                            }
+                                        }
                             }
                             button {
                                 class: "btn-icon focus-ring",
                                 autofocus: "true",
                                 onclick: move |_| {
                                     if confirm_discard_unsaved_justification(!reason.read().trim().is_empty()) {
-                                        selected_service.set(None);
+                                            active_waiver_directive.set(None);
+                                            reason.set(String::new());
+                                            selected_service.set(None);
                                     }
                                 },
                                 aria_label: "Close service hardening modal",
@@ -4051,7 +4058,7 @@ fn HardeningTab(
                     }
 
                     div { class: "sd-tabs", style: "padding:0 22px; margin-top:0;",
-                        for (key, label) in [("overview", "Directives"), ("nix", "NixOS config"), ("all", "All checks"), ("justification", "Justification")] {
+                        for (key, label) in [("overview", "Directives"), ("nix", "NixOS config"), ("all", "All checks")] {
                             {
                                 let tab_class = if *modal_tab.read() == key {
                                     "sd-tab focus-ring active"
@@ -4074,28 +4081,242 @@ fn HardeningTab(
 
                     div { class: "modal-body", style: "padding:16px 22px; max-height:60vh; overflow-y:auto;",
                         if *modal_tab.read() == "overview" {
-                            section { class: "space-y-3",
-                                div { class: "grid gap-2", style: "grid-template-columns: 1fr 1fr;",
+                            section { style: "display:flex;flex-direction:column;gap:14px;",
+                                div { class: "sd-callout sd-callout-info", style: "margin:0;display:flex;align-items:flex-start;gap:12px;padding:12px 14px;",
+                                    svg {
+                                        class: "shrink-0",
+                                        width: "15",
+                                        height: "15",
+                                        fill: "none",
+                                        stroke: "currentColor",
+                                        stroke_width: "2",
+                                        view_box: "0 0 24 24",
+                                        path {
+                                            stroke_linecap: "round",
+                                            stroke_linejoin: "round",
+                                            d: "M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8zm0 0v6h6"
+                                        }
+                                    }
+                                    div { style: "font-size:13px;line-height:1.5;color:var(--cf-text-secondary);",
+                                        "Directives that aren’t enforced can be "
+                                        strong { style: "color:var(--cf-text-primary);font-weight:800;", "justified with a waiver" }
+                                        " (e.g. compensating control, not applicable). Waivers flow into the compliance evidence export."
+                                    }
+                                }
+
+                                if let Some(message) = justification_error() {
+                                    div { class: "sd-callout sd-callout-danger", style: "margin:0;display:flex;align-items:flex-start;gap:8px;",
+                                        svg {
+                                            class: "shrink-0",
+                                            width: "13",
+                                            height: "13",
+                                            fill: "none",
+                                            stroke: "currentColor",
+                                            stroke_width: "2",
+                                            view_box: "0 0 24 24",
+                                            path {
+                                                stroke_linecap: "round",
+                                                stroke_linejoin: "round",
+                                                d: "M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                                            }
+                                        }
+                                        div { style: "font-size:12px;color:var(--cf-critical);", "{message}" }
+                                    }
+                                }
+
+                                if let Some(message) = justification_notice() {
+                                    div { class: "sd-callout sd-callout-success", style: "margin:0;display:flex;align-items:flex-start;gap:8px;",
+                                        svg {
+                                            class: "shrink-0",
+                                            width: "13",
+                                            height: "13",
+                                            fill: "none",
+                                            stroke: "currentColor",
+                                            stroke_width: "2",
+                                            view_box: "0 0 24 24",
+                                            path {
+                                                stroke_linecap: "round",
+                                                stroke_linejoin: "round",
+                                                d: "M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
+                                            }
+                                        }
+                                        div { style: "font-size:12px;color:var(--cf-healthy);", "{message}" }
+                                    }
+                                }
+
+                                div { style: "display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 12px;",
                                     for directive in directive_cells(&service) {
                                         {
-                                            let tile_class = if directive.enabled {
-                                                "bg-emerald-500/10 border-emerald-500/30"
+                                            let directive_name = directive.name.clone();
+                                            let waiver = justifications.iter().find(|item| {
+                                                item.service_name == service.service_name
+                                                    && item.directive_name.as_deref() == Some(directive.name.as_str())
+                                            });
+                                            let is_waived = waiver.is_some();
+                                            let is_editing = active_waiver_directive.read().as_deref() == Some(directive.name.as_str());
+                                            let tile_style = if directive.enabled {
+                                                "display:flex;align-items:flex-start;gap:12px;padding:12px 14px;border-radius:10px;border:1px solid rgba(52,211,153,0.22);background:rgba(52,211,153,0.07);min-height:72px;"
+                                            } else if is_waived {
+                                                "display:flex;align-items:flex-start;gap:12px;padding:12px 14px;border-radius:10px;border:1px solid rgba(251,191,36,0.28);background:rgba(251,191,36,0.08);min-height:72px;"
                                             } else {
-                                                "bg-red-500/10 border-red-500/30"
+                                                "display:flex;align-items:flex-start;gap:12px;padding:12px 14px;border-radius:10px;border:1px solid rgba(248,113,113,0.22);background:rgba(248,113,113,0.07);min-height:72px;"
+                                            };
+                                            let status_text = if directive.enabled {
+                                                "enforced".to_string()
+                                            } else if is_waived {
+                                                "not set · waived".to_string()
+                                            } else {
+                                                "not set".to_string()
+                                            };
+                                            let status_color = if directive.enabled {
+                                                "#34d399"
+                                            } else if is_waived {
+                                                "#fbbf24"
+                                            } else {
+                                                "var(--cf-text-muted)"
                                             };
                                             rsx! {
-                                                div { class: "flex items-center gap-2 px-3 py-2 rounded-lg border {tile_class}",
-                                                    span { class: "text-base", if directive.enabled { "✅" } else { "❌" } }
-                                                    div {
-                                                        div { class: "font-mono text-[12px] font-semibold {theme::text::PRIMARY}", "{directive.name}" }
-                                                        div { class: "text-[10px] {theme::text::MUTED}",
-                                                            if directive.enabled { "enforced" } else { "not set" }
+                                                div { style: "{tile_style}",
+                                                    div { style: "font-size:20px;line-height:1;margin-top:2px;",
+                                                        if directive.enabled {
+                                                            "✅"
+                                                        } else if is_waived {
+                                                            "⚠️"
+                                                        } else {
+                                                            "❌"
+                                                        }
+                                                    }
+                                                    div { style: "min-width:0;flex:1;display:flex;flex-direction:column;gap:6px;",
+                                                        div { style: "display:flex;align-items:flex-start;justify-content:space-between;gap:10px;",
+                                                            div { style: "min-width:0;",
+                                                                div { class: "mono", style: "font-size:13px;font-weight:800;color:var(--cf-text-primary);", "{directive.name}" }
+                                                                div { style: "font-size:11px;color:{status_color};", "{status_text}" }
+                                                            }
+                                                            if !directive.enabled && allow_mutations {
+                                                                button {
+                                                                    class: "btn btn-ghost focus-ring xs",
+                                                                    style: "white-space:nowrap;",
+                                                                    disabled: is_saving_justification(),
+                                                                    onclick: {
+                                                                        let directive_name = directive_name.clone();
+                                                                        let existing_reason = waiver.map(|item| item.reason.clone()).unwrap_or_default();
+                                                                        move |_| {
+                                                                            active_waiver_directive.set(Some(directive_name.clone()));
+                                                                            reason.set(existing_reason.clone());
+                                                                            justification_error.set(None);
+                                                                            justification_notice.set(None);
+                                                                        }
+                                                                    },
+                                                                    if is_waived {
+                                                                        svg {
+                                                                            class: "w-3 h-3 inline-block",
+                                                                            fill: "none",
+                                                                            stroke: "currentColor",
+                                                                            stroke_width: "2",
+                                                                            view_box: "0 0 24 24",
+                                                                            path {
+                                                                                stroke_linecap: "round",
+                                                                                stroke_linejoin: "round",
+                                                                                d: "M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8zm0 0v6h6"
+                                                                            }
+                                                                        }
+                                                                        "Edit"
+                                                                    } else {
+                                                                        "+ Justify"
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+
+                                                        if let Some(item) = waiver {
+                                                            p { style: "margin:8px 0 2px;font-size:13px;line-height:1.45;color:var(--cf-text-primary);", "{item.reason}" }
+                                                            div { style: "display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:11px;color:var(--cf-text-muted);",
+                                                                span { "mreyes · {relative_time(item.created_at)}" }
+                                                                button {
+                                                                    class: "focus-ring",
+                                                                    style: "all:unset;cursor:not-allowed;color:#f87171;opacity:0.65;",
+                                                                    disabled: true,
+                                                                    title: "Removing hardening waivers needs a backend delete endpoint.",
+                                                                    "Remove"
+                                                                }
+                                                            }
+                                                        }
+
+                                                        if is_editing {
+                                                            div { style: "display:flex;flex-direction:column;gap:8px;margin-top:6px;",
+                                                                textarea {
+                                                                    class: "input focus-ring",
+                                                                    style: "width:100%;min-height:76px;resize:vertical;font-size:13px;line-height:1.45;padding:9px 10px;",
+                                                                    placeholder: "Why is this directive not applicable or otherwise acceptable?",
+                                                                    value: "{reason}",
+                                                                    oninput: move |evt| {
+                                                                        reason.set(evt.value());
+                                                                        justification_error.set(None);
+                                                                        justification_notice.set(None);
+                                                                    },
+                                                                }
+                                                                div { style: "display:flex;align-items:center;justify-content:flex-end;gap:8px;",
+                                                                    button {
+                                                                        class: "btn btn-ghost focus-ring xs",
+                                                                        disabled: is_saving_justification(),
+                                                                        onclick: move |_| {
+                                                                            active_waiver_directive.set(None);
+                                                                            reason.set(String::new());
+                                                                            justification_error.set(None);
+                                                                        },
+                                                                        "Cancel"
+                                                                    }
+                                                                    button {
+                                                                        class: "btn btn-primary focus-ring xs",
+                                                                        disabled: is_saving_justification() || reason.read().trim().is_empty(),
+                                                                        onclick: {
+                                                                            let service_name = service.service_name.clone();
+                                                                            let directive_name = directive_name.clone();
+                                                                            let on_saved = on_saved.clone();
+                                                                            move |_| {
+                                                                                let reason_value = reason();
+                                                                                if reason_value.trim().is_empty() {
+                                                                                    justification_error.set(Some("Justification is required.".to_string()));
+                                                                                    return;
+                                                                                }
+
+                                                                                is_saving_justification.set(true);
+                                                                                justification_error.set(None);
+                                                                                justification_notice.set(None);
+
+                                                                                let request = SaveHardeningJustificationRequest {
+                                                                                    directive_name: Some(directive_name.clone()),
+                                                                                    category: Some("security".to_string()),
+                                                                                    reason: reason_value,
+                                                                                };
+                                                                                let service_name_for_request = service_name.clone();
+
+                                                                                spawn(async move {
+                                                                                    if save_system_hardening_justification(&system_id, &service_name_for_request, &request)
+                                                                                        .await
+                                                                                        .is_ok()
+                                                                                    {
+                                                                                        reason.set(String::new());
+                                                                                        active_waiver_directive.set(None);
+                                                                                        justification_notice.set(Some("Waiver saved.".to_string()));
+                                                                                        on_saved.call(());
+                                                                                    } else {
+                                                                                        justification_error.set(Some("Failed to save waiver.".to_string()));
+                                                                                    }
+                                                                                    is_saving_justification.set(false);
+                                                                                });
+                                                                            }
+                                                                        },
+                                                                        if is_saving_justification() { "Saving…" } else { "Save waiver" }
+                                                                    }
+                                                                }
+                                                            }
                                                         }
                                                     }
                                                 }
                                             }
                                         }
-                                    }
+                                        }
                                 }
                             }
                         } else if *modal_tab.read() == "nix" {
@@ -4152,170 +4373,6 @@ fn HardeningTab(
                                                             }
                                                         }
                                                     }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        } else {
-                            // Justification tab
-                            section { style: "display:flex;flex-direction:column;gap:14px;",
-                                if allow_mutations {
-                                    div { style: "display:flex;flex-direction:column;gap:12px;",
-                                        div { class: "sd-callout sd-callout-info", style: "margin:0;display:flex;align-items:flex-start;gap:8px;",
-                                            svg {
-                                                class: "shrink-0",
-                                                width: "13",
-                                                height: "13",
-                                                fill: "none",
-                                                stroke: "currentColor",
-                                                stroke_width: "2",
-                                                view_box: "0 0 24 24",
-                                                path {
-                                                    stroke_linecap: "round",
-                                                    stroke_linejoin: "round",
-                                                    d: "M12 9v4m0 4h.01M10.29 3.86l-7.4 12.82A2 2 0 004.61 20h14.78a2 2 0 001.72-3.32l-7.4-12.82a2 2 0 00-3.42 0z"
-                                                }
-                                            }
-                                            div { style: "font-size:12px;line-height:1.45;color:var(--cf-text-secondary);",
-                                                "Document why this service posture is acceptable. Justifications are recorded as audit evidence for accepted service-hardening risk."
-                                            }
-                                        }
-                                        div { style: "display:flex;align-items:center;justify-content:space-between;gap:12px;",
-                                            label { class: "mono", style: "font-size:12px;font-weight:700;color:var(--cf-text-primary);", "Justification" }
-                                            span { style: "font-size:11px;color:var(--cf-text-muted);", "Required for accepted risk" }
-                                        }
-                                        textarea {
-                                            class: "input focus-ring",
-                                            style: "width:100%;min-height:112px;max-height:240px;resize:vertical;font-size:13px;line-height:1.55;padding:10px 12px;",
-                                            placeholder: "Example: This service runs in an isolated container with read-only filesystem and network restrictions enforced by podman security policies…",
-                                            value: "{reason}",
-                                            oninput: move |evt| {
-                                                reason.set(evt.value());
-                                                justification_error.set(None);
-                                                justification_notice.set(None);
-                                            },
-                                        }
-                                        if let Some(message) = justification_error() {
-                                            div { class: "sd-callout sd-callout-danger", style: "margin:0;display:flex;align-items:flex-start;gap:8px;",
-                                                svg {
-                                                    class: "shrink-0",
-                                                    width: "13",
-                                                    height: "13",
-                                                    fill: "none",
-                                                    stroke: "currentColor",
-                                                    stroke_width: "2",
-                                                    view_box: "0 0 24 24",
-                                                    path {
-                                                        stroke_linecap: "round",
-                                                        stroke_linejoin: "round",
-                                                        d: "M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-                                                    }
-                                                }
-                                                div { style: "font-size:12px;color:var(--cf-critical);", "{message}" }
-                                            }
-                                        }
-                                        if let Some(message) = justification_notice() {
-                                            div { class: "sd-callout sd-callout-success", style: "margin:0;display:flex;align-items:flex-start;gap:8px;",
-                                                svg {
-                                                    class: "shrink-0",
-                                                    width: "13",
-                                                    height: "13",
-                                                    fill: "none",
-                                                    stroke: "currentColor",
-                                                    stroke_width: "2",
-                                                    view_box: "0 0 24 24",
-                                                    path {
-                                                        stroke_linecap: "round",
-                                                        stroke_linejoin: "round",
-                                                        d: "M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
-                                                    }
-                                                }
-                                                div { style: "font-size:12px;color:var(--cf-healthy);", "{message}" }
-                                            }
-                                        }
-                                        div { style: "display:flex;align-items:center;justify-content:space-between;gap:12px;",
-                                            p { style: "font-size:11px;line-height:1.45;color:var(--cf-text-muted);", "Recorded against this service and included in future audit evidence." }
-                                            button {
-                                                class: "btn btn-primary focus-ring",
-                                                disabled: is_saving_justification() || reason.read().trim().is_empty(),
-                                                onclick: {
-                                                    let service_name = service.service_name.clone();
-                                                    let on_saved = on_saved.clone();
-                                                    move |_| {
-                                                        let reason_value = reason();
-                                                        if reason_value.trim().is_empty() {
-                                                            justification_error.set(Some("Justification is required.".to_string()));
-                                                            return;
-                                                        }
-
-                                                        is_saving_justification.set(true);
-                                                        justification_error.set(None);
-                                                        justification_notice.set(None);
-
-                                                        let request = SaveHardeningJustificationRequest {
-                                                            directive_name: None,
-                                                            category: None,
-                                                            reason: reason_value,
-                                                        };
-                                                        let service_name_for_request = service_name.clone();
-
-                                                        spawn(async move {
-                                                            if save_system_hardening_justification(&system_id, &service_name_for_request, &request)
-                                                                .await
-                                                                .is_ok()
-                                                            {
-                                                                reason.set(String::new());
-                                                                justification_notice.set(Some("Justification saved.".to_string()));
-                                                                on_saved.call(());
-                                                            } else {
-                                                                justification_error.set(Some("Failed to save justification.".to_string()));
-                                                            }
-                                                            is_saving_justification.set(false);
-                                                        });
-                                                    }
-                                                },
-                                                if is_saving_justification() {
-                                                    "Saving…"
-                                                } else {
-                                                    "Save justification"
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-
-                                div { style: "display:flex;flex-direction:column;gap:10px;border-top:1px solid var(--cf-card-border);padding-top:14px;",
-                                    div { style: "display:flex;align-items:flex-start;justify-content:space-between;gap:12px;",
-                                        div {
-                                            h4 { style: "margin:0;font-size:14px;font-weight:700;color:var(--cf-text-primary);", "Justification history" }
-                                            p { style: "margin:4px 0 0;font-size:12px;line-height:1.45;color:var(--cf-text-muted);", "Audit trail of accepted risk documentation for this service." }
-                                        }
-                                        span { class: "chip chip-info", style: "font-size:10px;", "{justifications_for(&service.service_name).len()} recorded" }
-                                    }
-                                    if justifications.iter().all(|j| j.service_name != service.service_name) {
-                                        div { class: "empty", style: "margin:0;padding:18px;",
-                                            h3 { "No justifications recorded" }
-                                            div { "Add one above to document accepted risks." }
-                                        }
-                                    } else {
-                                        div { style: "display:flex;flex-direction:column;gap:10px;max-height:280px;overflow-y:auto;padding-right:4px;",
-                                            for item in justifications.iter().filter(|j| j.service_name == service.service_name) {
-                                                div { class: "card", style: "padding:12px 14px;display:flex;flex-direction:column;gap:8px;",
-                                                    div { style: "display:flex;align-items:center;justify-content:space-between;gap:10px;",
-                                                        div { style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
-                                                            span {
-                                                                class: "chip chip-unknown",
-                                                                style: "font-size:10px;",
-                                                                "{item.category.clone().unwrap_or_else(|| \"service\".to_string())}"
-                                                            }
-                                                            if let Some(directive) = item.directive_name.clone() {
-                                                                span { class: "mono", style: "font-size:11px;color:var(--cf-text-muted);", "{directive}" }
-                                                            }
-                                                        }
-                                                    }
-                                                    p { style: "margin:0;font-size:13px;line-height:1.5;color:var(--cf-text-primary);", "{item.reason}" }
                                                 }
                                             }
                                         }
