@@ -7,6 +7,7 @@ use crate::api::models::{DeploymentStatus, HealthStatus, SystemSummary};
 use crate::components::chips::{Chip, ChipVariant, EnvBadge, StatusDot};
 use crate::components::environments::{normalize_color_hex, with_alpha};
 use crate::components::heartbeat_spinner::HeartbeatSpinner;
+use crate::components::icon::{Icon, IconName};
 use crate::components::system::helpers::deployment_state_label;
 use crate::components::tables::{SortDirection, SortableHeader};
 
@@ -310,14 +311,7 @@ pub fn SystemsTable(
                                                 evt.stop_propagation();
                                                 on_deploy.call(system.id);
                                             },
-                                            svg {
-                                                class: "w-3.5 h-3.5",
-                                                fill: "none",
-                                                stroke: "currentColor",
-                                                stroke_width: "2",
-                                                view_box: "0 0 24 24",
-                                                path { d: "M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" }
-                                            }
+                                            Icon { name: IconName::Deploy, size: 14 }
                                         }
                                         // Edit
                                         button {
@@ -328,15 +322,7 @@ pub fn SystemsTable(
                                                 evt.stop_propagation();
                                                 on_edit.call(system.id);
                                             },
-                                            svg {
-                                                class: "w-3.5 h-3.5",
-                                                fill: "none",
-                                                stroke: "currentColor",
-                                                stroke_width: "2",
-                                                view_box: "0 0 24 24",
-                                                path { d: "M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" }
-                                                path { d: "M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" }
-                                            }
+                                            Icon { name: IconName::Gear, size: 14 }
                                         }
                                     }
                                 }
@@ -355,6 +341,12 @@ fn ip_label(system: &SystemSummary) -> String {
 }
 
 fn derived_fqdn(system: &SystemSummary) -> String {
+    // Prefer the persisted operator-managed FQDN when set.
+    if let Some(ref fqdn) = system.fqdn {
+        if !fqdn.trim().is_empty() {
+            return fqdn.clone();
+        }
+    }
     let env = system
         .environment
         .as_deref()

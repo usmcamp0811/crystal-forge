@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::api::client::save_system_cve_justification;
 use crate::api::models::{
-    CveSeverity, CveSummary, HealthStatus, SaveSystemCveJustificationRequest, SystemVulnerability,
+    CveSeverity, CveSummary, SaveSystemCveJustificationRequest, SystemVulnerability,
 };
 use crate::theme;
 
@@ -23,6 +23,38 @@ struct GroupedCve {
     justification_category: Option<String>,
     justification_reason: Option<String>,
     justification_updated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// A single CVE entry within a package group (design "package-first" view).
+#[derive(Clone)]
+struct PackageCve {
+    cve_id: String,
+    severity: CveSeverity,
+    cvss_score: Option<f32>,
+    description: String,
+    published_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Whether a fix is available for this package instance.
+    has_fix: bool,
+    justification_category: Option<String>,
+    justification_reason: Option<String>,
+    justification_updated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// A package and the (deduplicated) CVEs affecting it, mirroring the design's
+/// package-first grouping.
+#[derive(Clone)]
+struct PackageGroup {
+    package_name: String,
+    version: String,
+    cves: Vec<PackageCve>,
+    critical: usize,
+    high: usize,
+    medium: usize,
+    low: usize,
+    fixable: usize,
+    max_cvss: f32,
+    /// Severity-weighted sort score (higher = more severe).
+    sort_weight: i64,
 }
 
 const JUSTIFICATION_PRESETS: [(&str, &str); 5] = [
@@ -50,11 +82,15 @@ pub fn CvesTab(
     vulnerabilities: Vec<SystemVulnerability>,
     allow_mutations: bool,
     on_saved: EventHandler<()>,
+    /// True while the vulnerabilities resource is still loading.
+    #[props(default = false)]
+    loading: bool,
+    /// Error message when the vulnerabilities load failed. When set, the tab
+    /// renders an error state instead of (mock) data — security data must never
+    /// silently fall back to fake CVEs in production paths.
+    #[props(default = None)]
+    error: Option<String>,
 ) -> Element {
-    let mut severity_filter = use_signal(|| "all".to_string());
-    let mut cve_search = use_signal(String::new);
-    let mut package_search = use_signal(String::new);
-    let mut description_search = use_signal(String::new);
     let mut expanded_cve: Signal<Option<String>> = use_signal(|| None);
 
     let mut editing_cve: Signal<Option<String>> = use_signal(|| None);
@@ -63,54 +99,15 @@ pub fn CvesTab(
     let mut save_status: Signal<Option<String>> = use_signal(|| None);
     let mut save_in_progress = use_signal(|| false);
 
-    let grouped = group_vulnerabilities_by_cve(&vulnerabilities);
+    // Package-first grouping matching the design reference. The System Detail CVE
+    // example does not include a filter/search bar; filtering remains available on the
+    // dedicated CVE surface, while this tab focuses on the per-system package rollup.
+    let filtered_groups = group_vulnerabilities_by_package(&vulnerabilities);
 
-    let filtered = grouped
-        .into_iter()
-        .filter(|group| {
-            let severity_ok = match severity_filter.read().as_str() {
-                "critical" => group.severity == CveSeverity::Critical,
-                "high" => group.severity == CveSeverity::High,
-                "medium" => group.severity == CveSeverity::Medium,
-                "low" => group.severity == CveSeverity::Low,
-                _ => true,
-            };
-
-            if !severity_ok {
-                return false;
-            }
-
-            let cve_query = cve_search.read().trim().to_lowercase();
-            if !cve_query.is_empty() && !group.cve_id.to_lowercase().contains(&cve_query) {
-                return false;
-            }
-
-            let package_query = package_search.read().trim().to_lowercase();
-            if !package_query.is_empty()
-                && !group.package_instances.iter().any(|item| {
-                    item.package_name.to_lowercase().contains(&package_query)
-                        || item
-                            .installed_version
-                            .to_lowercase()
-                            .contains(&package_query)
-                })
-            {
-                return false;
-            }
-
-            let desc_query = description_search.read().trim().to_lowercase();
-            if !desc_query.is_empty() && !group.description.to_lowercase().contains(&desc_query) {
-                return false;
-            }
-
-            true
-        })
-        .collect::<Vec<_>>();
-
-    let has_active_filters = !cve_search.read().trim().is_empty()
-        || !package_search.read().trim().is_empty()
-        || !description_search.read().trim().is_empty()
-        || severity_filter.read().as_str() != "all";
+    let shown_cve_count: usize = filtered_groups.iter().map(|group| group.cves.len()).sum();
+    let shown_package_count = filtered_groups.len();
+    let shown_package_suffix = if shown_package_count == 1 { "" } else { "s" };
+    let total_cves = cve_counts.total();
 
     let status_is_error = save_status
         .read()
@@ -118,93 +115,37 @@ pub fn CvesTab(
         .map(|message| message.starts_with("Failed") || message.contains("required"))
         .unwrap_or(false);
 
+    // Loading state — show a spinner instead of an empty/fake list while the
+    // vulnerabilities resource is still in flight.
+    if loading {
+        return rsx! {
+            div {
+                class: "empty",
+                "data-testid": "system-cves-loading",
+                crate::components::loading::DashboardLoadingSpinner {
+                    label: "Loading vulnerabilities".to_string(),
+                    size: 36,
+                }
+                div { "Fetching the latest CVE scan results." }
+            }
+        };
+    }
+
+    // Error state — never render mock CVEs on API failure (security data).
+    if let Some(message) = error {
+        return rsx! {
+            div {
+                class: "empty",
+                "data-testid": "system-cves-error",
+                h3 { "Unable to load vulnerabilities" }
+                div { "{message}" }
+            }
+        };
+    }
+
     rsx! {
             div {
-                class: "pt-6 space-y-5",
-
-            div {
-                class: "{theme::presets::CARD}",
-
-                div { class: "flex flex-wrap items-end justify-between gap-4",
-                    div {
-                        class: "space-y-1",
-                        div { class: "{theme::typography::TABLE_HEADER}", "System CVE review" }
-                        div { class: "flex items-baseline gap-3",
-                            span {
-                                class: "{theme::typography::STAT_VALUE} {theme::text::PRIMARY}",
-                                "{cve_counts.total()}"
-                            }
-                            span {
-                                class: "{theme::text::SECONDARY}",
-                                "known vulnerabilities"
-                            }
-                        }
-                    }
-
-                    div { class: "flex items-center gap-1.5 flex-wrap",
-                        span {
-                            class: "text-[11px] px-2 py-0.5 rounded-md border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} {theme::text::SECONDARY}",
-                            "{format_count(filtered.len() as i64)} grouped CVEs"
-                        }
-                        span { class: "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium {CveSeverity::Critical.color_class()} {CveSeverity::Critical.bg_class()}", "Critical {format_count(cve_counts.critical)}" }
-                        span { class: "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium {CveSeverity::High.color_class()} {CveSeverity::High.bg_class()}", "High {format_count(cve_counts.high)}" }
-                        span { class: "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium {CveSeverity::Medium.color_class()} {CveSeverity::Medium.bg_class()}", "Medium {format_count(cve_counts.medium)}" }
-                        span { class: "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium {CveSeverity::Low.color_class()} {CveSeverity::Low.bg_class()}", "Low {format_count(cve_counts.low)}" }
-                    }
-                }
-            }
-
-            // Filters
-            div {
-                class: "{theme::presets::CARD} space-y-3",
-
-                div { class: "flex items-center justify-between gap-3 flex-wrap",
-                    div { class: "{theme::typography::TABLE_HEADER}", "Filters" }
-                    button {
-                        class: "px-3 py-1.5 rounded-md border {theme::surface::CARD_BORDER} text-xs font-medium {theme::text::SECONDARY} {theme::interactive::HOVER_BG} transition-colors disabled:opacity-40 {theme::interactive::FOCUS_RING}",
-                        disabled: !has_active_filters,
-                        onclick: move |_| {
-                            cve_search.set(String::new());
-                            package_search.set(String::new());
-                            description_search.set(String::new());
-                            severity_filter.set("all".to_string());
-                        },
-                        "Reset filters"
-                    }
-                }
-
-                div {
-                    class: "grid grid-cols-1 md:grid-cols-4 gap-3",
-                    input {
-                        class: "{theme::interactive::INPUT} h-10",
-                        placeholder: "Search CVE ID (e.g. CVE-2025)",
-                        value: cve_search.read().clone(),
-                        oninput: move |evt| cve_search.set(evt.value()),
-                    }
-                    input {
-                        class: "{theme::interactive::INPUT} h-10",
-                        placeholder: "Filter package/version",
-                        value: package_search.read().clone(),
-                        oninput: move |evt| package_search.set(evt.value()),
-                    }
-                    input {
-                        class: "{theme::interactive::INPUT} h-10",
-                        placeholder: "Search description",
-                        value: description_search.read().clone(),
-                        oninput: move |evt| description_search.set(evt.value()),
-                    }
-                    select {
-                        class: "{theme::interactive::INPUT} h-10",
-                        value: severity_filter.read().clone(),
-                        onchange: move |evt| severity_filter.set(evt.value()),
-                        option { value: "all", "All severities" }
-                        option { value: "critical", "Critical" }
-                        option { value: "high", "High" }
-                        option { value: "medium", "Medium" }
-                        option { value: "low", "Low" }
-                    }
-                }
-            }
+                style: "display:flex;flex-direction:column;gap:14px;",
 
             if let Some(message) = save_status() {
                 div {
@@ -217,268 +158,304 @@ pub fn CvesTab(
                 }
             }
 
-            if filtered.is_empty() {
+            // Results: package-first grouping matching the design reference.
+            section {
+                class: "card",
+                style: "overflow: hidden;",
+
                 div {
-                    class: "{theme::presets::CARD} text-sm {theme::text::MUTED}",
-                    "No CVEs match current filters."
+                    class: "sd-card-head",
+                    style: "padding: 14px 18px;",
+                    h2 { "Vulnerabilities" }
+                    span {
+                        class: "sd-card-meta",
+                        "{format_count(shown_cve_count as i64)} of {format_count(total_cves)} shown · {format_count(shown_package_count as i64)} package{shown_package_suffix}"
+                    }
                 }
-            } else {
-                div {
-                    class: "space-y-3",
-                    for group in filtered {
-                        {
-                            let is_expanded = *expanded_cve.read() == Some(group.cve_id.clone());
-                            let has_justification = group
-                                .justification_reason
-                                .as_ref()
-                                .map(|value| !value.trim().is_empty())
-                                .unwrap_or(false);
-                            let is_editing = *editing_cve.read() == Some(group.cve_id.clone());
-                            let cve_id = group.cve_id.clone();
-                            let package_label = format!(
-                                "{} package{}",
-                                group.package_instances.len(),
-                                if group.package_instances.len() == 1 {
-                                    ""
+
+                if filtered_groups.is_empty() {
+                    div {
+                        class: "empty",
+                        h3 { "No vulnerabilities detected" }
+                        div { "Last scan data did not report any package-level CVEs for this host." }
+                    }
+                } else {
+                    div {
+                        style: "display: flex; flex-direction: column; gap: 10px; padding: 14px;",
+                        for group in filtered_groups {
+                            {
+                                let is_open = *expanded_cve.read() == Some(group.package_name.clone());
+                                let sev_color = package_group_color(&group);
+                                let package_name = group.package_name.clone();
+                                let pending = group.cves.len().saturating_sub(group.fixable);
+                                let cve_suffix = if group.cves.len() == 1 { "" } else { "s" };
+                                let head_bg = if is_open {
+                                    "color-mix(in oklab, var(--cf-brand-purple) 6%, var(--cf-card-bg))"
                                 } else {
-                                    "s"
-                                }
-                            );
-                            let published_label = group
-                                .published_at
-                                .map(|published_at| published_at.format("%Y-%m-%d").to_string());
-                            let justification_updated_label = group
-                                .justification_updated_at
-                                .map(|updated_at| updated_at.format("%Y-%m-%d %H:%M").to_string());
-                            let chevron_class = if is_expanded { "rotate-180" } else { "" };
+                                    "transparent"
+                                };
+                                let chevron_d = if is_open { "M19 9l-7 7-7-7" } else { "M9 5l7 7-7 7" };
 
-                            rsx! {
-                                div {
-                                    key: "{group.cve_id}",
-                                    class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} overflow-hidden",
+                                rsx! {
+                                    div {
+                                        key: "{group.package_name}",
+                                        class: "card",
+                                        style: "overflow: hidden;",
 
-                                    button {
-                                        class: "w-full p-3 text-left {theme::interactive::HOVER_BG} transition-colors {theme::interactive::FOCUS_RING}",
-                                        onclick: move |_| {
-                                            let current = expanded_cve.read().clone();
-                                            if current == Some(cve_id.clone()) {
-                                                expanded_cve.set(None);
-                                            } else {
-                                                expanded_cve.set(Some(cve_id.clone()));
+                                        button {
+                                            class: "focus-ring",
+                                            style: "all: unset; display: grid; grid-template-columns: 24px 1fr auto; align-items: center; gap: 14px; padding: 12px 16px; cursor: pointer; width: 100%; box-sizing: border-box; border-left: 3px solid {sev_color}; background: {head_bg};",
+                                            onclick: move |_| {
+                                                let current = expanded_cve.read().clone();
+                                                if current == Some(package_name.clone()) {
+                                                    expanded_cve.set(None);
+                                                } else {
+                                                    expanded_cve.set(Some(package_name.clone()));
+                                                }
+                                            },
+
+                                            svg {
+                                                width: "14",
+                                                height: "14",
+                                                fill: "none",
+                                                stroke: "currentColor",
+                                                stroke_width: "2",
+                                                view_box: "0 0 24 24",
+                                                style: "color: var(--cf-text-muted);",
+                                                path { stroke_linecap: "round", stroke_linejoin: "round", d: "{chevron_d}" }
                                             }
-                                        },
 
-                                        div { class: "flex items-start justify-between gap-3",
-                                            div { class: "min-w-0",
-                                                div { class: "flex items-center gap-2 flex-wrap",
-                                                    span { class: "{theme::typography::MONO} font-semibold {theme::text::PRIMARY} tracking-wide", "{group.cve_id}" }
-                                                    span {
-                                                        class: "text-xs px-2 py-0.5 rounded-md border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} {theme::text::SECONDARY}",
-                                                        "{package_label}"
-                                                    }
-                                                    span {
-                                                        class: "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium {group.severity.color_class()} {group.severity.bg_class()}",
-                                                        "{group.severity.label()}"
-                                                    }
-                                                    if has_justification {
-                                                        span {
-                                                            class: "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium {HealthStatus::Healthy.color_class()} {HealthStatus::Healthy.bg_class()} border border-emerald-500/35",
-                                                            "Justified"
-                                                        }
+                                            div { style: "min-width: 0;",
+                                                div { style: "display: flex; align-items: center; gap: 10px; flex-wrap: wrap;",
+                                                    span { class: "mono", style: "font-size: 14px; font-weight: 700;", "{group.package_name}" }
+                                                    span { class: "mono", style: "font-size: 11px; color: var(--cf-text-muted);", "{group.version}" }
+                                                    span { style: "font-size: 12px; color: var(--cf-text-muted);",
+                                                        "{group.cves.len()} CVE{cve_suffix}"
                                                     }
                                                 }
-
-                                                p { class: "mt-1 text-sm {theme::text::SECONDARY} line-clamp-1", "{group.description}" }
-
-                                                if let Some(ref reason) = group.justification_reason {
-                                                    p {
-                                                        class: "mt-1 text-xs text-emerald-300/90 line-clamp-1",
-                                                        "Justification: {reason}"
-                                                    }
+                                                div { style: "font-size: 11px; color: var(--cf-text-secondary); margin-top: 2px;",
+                                                    "max CVSS {group.max_cvss:.1} · {group.fixable} patchable · {pending} pending"
                                                 }
                                             }
 
-                                            div { class: "text-right shrink-0 space-y-1",
-                                                if let Some(score) = group.cvss_score {
-                                                    div { class: "text-base font-bold {group.severity.color_class()}", "{score:.1}" }
-                                                    div { class: "text-xs {theme::text::MUTED}", "CVSS" }
+                                            div { style: "display: flex; gap: 5px; flex-wrap: wrap; justify-content: flex-end;",
+                                                if group.critical > 0 {
+                                                    span { class: "chip chip-critical", style: "font-size: 10px;", "{group.critical} crit" }
                                                 }
-                                                div {
-                                                    class: "{theme::text::MUTED}",
-                                                    svg {
-                                                        class: "w-4 h-4 inline-block transition-transform {chevron_class}",
-                                                        fill: "none",
-                                                        stroke: "currentColor",
-                                                        view_box: "0 0 24 24",
-                                                        path {
-                                                            stroke_linecap: "round",
-                                                            stroke_linejoin: "round",
-                                                            stroke_width: "2",
-                                                            d: "M19 9l-7 7-7-7"
-                                                        }
-                                                    }
+                                                if group.high > 0 {
+                                                    span { class: "chip chip-warning", style: "font-size: 10px;", "{group.high} high" }
+                                                }
+                                                if group.medium > 0 {
+                                                    span { class: "chip chip-unknown", style: "font-size: 10px;", "{group.medium} med" }
                                                 }
                                             }
                                         }
-                                    }
 
-                                    div { class: "px-3 pb-2 text-xs {theme::text::MUTED}", "{status_label(&group.status)}" }
-
-                                    if is_expanded {
-                                        div {
-                                            class: "border-t {theme::surface::DIVIDER} p-3 space-y-3 {theme::surface::SUBTLE_BG}",
-
-                                            div {
-                                                class: "flex items-center gap-3 flex-wrap text-sm",
-                                                a {
-                                                    class: "text-blue-400 hover:text-blue-300 underline underline-offset-2 {theme::interactive::FOCUS_RING}",
-                                                    href: "https://nvd.nist.gov/vuln/detail/{group.cve_id}",
-                                                    target: "_blank",
-                                                    rel: "noopener noreferrer",
-                                                    "View on NVD"
-                                                }
-                                                if let Some(ref published_label) = published_label {
-                                                    span { class: "{theme::text::MUTED}", "Published: {published_label}" }
-                                                }
-                                                span { class: "{theme::text::MUTED}", "Status: {status_label(&group.status)}" }
-                                            }
-
-                                            div {
-                                                class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-3 space-y-2",
-                                                div { class: "flex items-center justify-between gap-3",
-                                                    h4 { class: "text-sm font-semibold {theme::text::PRIMARY}", "Justification" }
-                                                    if let Some(ref justification_updated_label) = justification_updated_label {
-                                                        span { class: "text-xs {theme::text::MUTED}", "Updated {justification_updated_label}" }
+                                        if is_open {
+                                            table { class: "sys-table",
+                                                thead {
+                                                    tr {
+                                                        th { "CVE" }
+                                                        th { "Severity" }
+                                                        th { "CVSS" }
+                                                        th { "Fix" }
+                                                        th { style: "text-align: right;", " " }
                                                     }
                                                 }
+                                                tbody {
+                                                    for cve in group.cves.iter() {
+                                                        {
+                                                            let cve_id = cve.cve_id.clone();
+                                                            let is_editing = *editing_cve.read() == Some(cve.cve_id.clone());
+                                                            let has_justification = cve
+                                                                .justification_reason
+                                                                .as_ref()
+                                                                .map(|value| !value.trim().is_empty())
+                                                                .unwrap_or(false);
+                                                            let cvss_label = cve
+                                                                .cvss_score
+                                                                .map(|score| format!("{score:.1}"))
+                                                                .unwrap_or_else(|| "—".to_string());
+                                                            let justification_updated_label = cve
+                                                                .justification_updated_at
+                                                                .map(|updated_at| updated_at.format("%Y-%m-%d %H:%M").to_string());
 
-                                                if !is_editing {
-                                                    if let Some(ref reason) = group.justification_reason {
-                                                        div { class: "text-sm {theme::text::SECONDARY} leading-relaxed", "{reason}" }
-                                                        if let Some(ref category) = group.justification_category {
-                                                            span {
-                                                                class: "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium {justification_category_class(category)}",
-                                                                "Category: {humanize_category(category)}"
-                                                            }
-                                                        }
-                                                    } else {
-                                                        div { class: "text-sm {theme::text::MUTED}", "No justification saved yet." }
-                                                    }
-
-                                                    button {
-                                                        class: "px-3 py-2 rounded-md border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} {theme::interactive::HOVER_BG} text-sm font-medium {theme::text::PRIMARY} transition-colors disabled:opacity-50 {theme::interactive::FOCUS_RING}",
-                                                        disabled: !allow_mutations,
-                                                        onclick: {
-                                                            let cve_id = group.cve_id.clone();
-                                                            let existing_category = group.justification_category.clone();
-                                                            let existing_reason = group.justification_reason.clone().unwrap_or_default();
-                                                            move |_| {
-                                                                editing_cve.set(Some(cve_id.clone()));
-                                                                draft_category.set(existing_category.clone());
-                                                                draft_reason.set(existing_reason.clone());
-                                                                save_status.set(None);
-                                                            }
-                                                        },
-                                                        if allow_mutations { "Edit justification" } else { "Operator/Admin required" }
-                                                    }
-                                                } else {
-                                                    div { class: "space-y-2",
-                                                        select {
-                                                            class: "{theme::interactive::INPUT} w-full",
-                                                            value: draft_category.read().clone().unwrap_or_else(|| "".to_string()),
-                                                            onchange: move |evt| {
-                                                                let value = evt.value();
-                                                                if value.trim().is_empty() {
-                                                                    draft_category.set(None);
-                                                                    return;
-                                                                }
-                                                                draft_category.set(Some(value.clone()));
-                                                                if let Some((_, default_reason)) = JUSTIFICATION_PRESETS
-                                                                    .iter()
-                                                                    .find(|(key, _)| *key == value)
-                                                                {
-                                                                    if draft_reason.read().trim().is_empty() {
-                                                                        draft_reason.set((*default_reason).to_string());
+                                                            rsx! {
+                                                                tr {
+                                                                    key: "{group.package_name}-{cve.cve_id}",
+                                                                    td { class: "mono", style: "color: var(--cf-text-primary);", "{cve.cve_id}" }
+                                                                    td {
+                                                                        span { class: "{severity_chip_class(&cve.severity)}", "{cve.severity.label()}" }
                                                                     }
-                                                                }
-                                                            },
-                                                            option { value: "", "Select category (optional)" }
-                                                            for (value, label) in JUSTIFICATION_PRESETS {
-                                                                option { value: "{value}", "{label}" }
-                                                            }
-                                                        }
-
-                                                        textarea {
-                                                            class: "{theme::interactive::INPUT} w-full min-h-[100px]",
-                                                            placeholder: "Document risk acceptance / mitigation rationale",
-                                                            value: draft_reason.read().clone(),
-                                                            oninput: move |evt| draft_reason.set(evt.value()),
-                                                        }
-
-                                                        div { class: "text-xs {theme::text::MUTED}", "This note is persisted per system + CVE for audit review." }
-
-                                                        div { class: "flex items-center gap-2",
-                                                            button {
-                                                                class: "px-3 py-2 rounded-md {theme::interactive::PRIMARY_BTN} text-sm font-semibold text-white transition-colors disabled:opacity-50 {theme::interactive::FOCUS_RING}",
-                                                                disabled: *save_in_progress.read(),
-                                                                onclick: {
-                                                                    let cve_id = group.cve_id.clone();
-                                                                    move |_| {
-                                                                        let reason = draft_reason.read().trim().to_string();
-                                                                        if reason.is_empty() {
-                                                                            save_status.set(Some("Justification reason is required".to_string()));
-                                                                            return;
+                                                                    td { class: "mono", "{cvss_label}" }
+                                                                    td {
+                                                                        if cve.has_fix {
+                                                                            span { class: "chip chip-healthy", "available" }
+                                                                        } else {
+                                                                            span { class: "chip chip-unknown", "pending" }
                                                                         }
-
-                                                                        let category = draft_category.read().clone();
-                                                                        let cve_id_for_request = cve_id.clone();
-                                                                        save_in_progress.set(true);
-                                                                        save_status.set(None);
-
-                                                                        spawn(async move {
-                                                                            let result = save_system_cve_justification(
-                                                                                &system_id,
-                                                                                &cve_id_for_request,
-                                                                                &SaveSystemCveJustificationRequest { category, reason },
-                                                                            ).await;
-
-                                                                            save_in_progress.set(false);
-                                                                            match result {
-                                                                                Ok(_) => {
-                                                                                    save_status.set(Some("Justification saved".to_string()));
-                                                                                    editing_cve.set(None);
-                                                                                    on_saved.call(());
-                                                                                }
-                                                                                Err(err) => {
-                                                                                    save_status.set(Some(format!("Failed to save justification: {err}")));
+                                                                    }
+                                                                    td {
+                                                                        div { class: "row-actions",
+                                                                            button {
+                                                                                class: "btn-icon focus-ring",
+                                                                                title: if has_justification { "Edit justification" } else { "Justify" },
+                                                                                onclick: {
+                                                                                    let cve_id = cve.cve_id.clone();
+                                                                                    let existing_category = cve.justification_category.clone();
+                                                                                    let existing_reason = cve.justification_reason.clone().unwrap_or_default();
+                                                                                    move |_| {
+                                                                                        if *editing_cve.read() == Some(cve_id.clone()) {
+                                                                                            editing_cve.set(None);
+                                                                                        } else {
+                                                                                            editing_cve.set(Some(cve_id.clone()));
+                                                                                            draft_category.set(existing_category.clone());
+                                                                                            draft_reason.set(existing_reason.clone());
+                                                                                            save_status.set(None);
+                                                                                        }
+                                                                                    }
+                                                                                },
+                                                                                if has_justification {
+                                                                                    span { class: "chip chip-healthy", style: "font-size: 10px;", "justified" }
+                                                                                } else {
+                                                                                    svg {
+                                                                                        width: "14",
+                                                                                        height: "14",
+                                                                                        fill: "none",
+                                                                                        stroke: "currentColor",
+                                                                                        stroke_width: "2",
+                                                                                        view_box: "0 0 24 24",
+                                                                                        path { stroke_linecap: "round", stroke_linejoin: "round", d: "M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" }
+                                                                                    }
                                                                                 }
                                                                             }
-                                                                        });
+                                                                            a {
+                                                                                class: "btn-icon focus-ring",
+                                                                                title: "Open advisory",
+                                                                                href: "https://nvd.nist.gov/vuln/detail/{cve.cve_id}",
+                                                                                target: "_blank",
+                                                                                rel: "noopener noreferrer",
+                                                                                svg {
+                                                                                    width: "14",
+                                                                                    height: "14",
+                                                                                    fill: "none",
+                                                                                    stroke: "currentColor",
+                                                                                    stroke_width: "2",
+                                                                                    view_box: "0 0 24 24",
+                                                                                    path { stroke_linecap: "round", stroke_linejoin: "round", d: "M13.828 10.172a4 4 0 010 5.656l-3 3a4 4 0 01-5.656-5.656l1.5-1.5m9.656-1.328l1.5-1.5a4 4 0 00-5.656-5.656l-3 3a4 4 0 000 5.656" }
+                                                                                }
+                                                                            }
+                                                                        }
                                                                     }
-                                                                },
-                                                                if *save_in_progress.read() { "Saving..." } else { "Save" }
-                                                            }
-                                                            button {
-                                                                class: "px-3 py-2 rounded-md border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} {theme::interactive::HOVER_BG} text-sm {theme::text::PRIMARY} transition-colors {theme::interactive::FOCUS_RING}",
-                                                                onclick: move |_| editing_cve.set(None),
-                                                                "Cancel"
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
+                                                                }
 
-                                            div {
-                                                class: "space-y-2",
-                                                h4 { class: "{theme::typography::TABLE_HEADER}", "Affected packages" }
-                                                for item in group.package_instances.iter() {
-                                                    div {
-                                                        key: "{group.cve_id}-{item.package_name}-{item.installed_version}",
-                                                        class: "text-sm {theme::text::SECONDARY} flex items-center gap-2.5 flex-wrap rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-2.5 py-1.5",
-                                                        span { class: "font-medium {theme::text::PRIMARY}", "{item.package_name}" }
-                                                        span { class: "{theme::text::MUTED}", "Installed: {item.installed_version}" }
-                                                        if let Some(ref fixed) = item.fixed_version {
-                                                            span { class: "text-emerald-400", "Fix: {fixed}" }
+                                                                if is_editing {
+                                                                    tr {
+                                                                        key: "{group.package_name}-{cve.cve_id}-justify",
+                                                                        td {
+                                                                            colspan: "5",
+                                                                            style: "background: var(--cf-subtle-bg);",
+                                                                            div {
+                                                                                class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-3 space-y-2",
+                                                                                div { class: "flex items-center justify-between gap-3",
+                                                                                    h4 { class: "text-sm font-semibold {theme::text::PRIMARY}", "Justification — {cve.cve_id}" }
+                                                                                    if let Some(ref justification_updated_label) = justification_updated_label {
+                                                                                        span { class: "text-xs {theme::text::MUTED}", "Updated {justification_updated_label}" }
+                                                                                    }
+                                                                                }
+
+                                                                                select {
+                                                                                    class: "{theme::interactive::INPUT} w-full",
+                                                                                    value: draft_category.read().clone().unwrap_or_else(|| "".to_string()),
+                                                                                    onchange: move |evt| {
+                                                                                        let value = evt.value();
+                                                                                        if value.trim().is_empty() {
+                                                                                            draft_category.set(None);
+                                                                                            return;
+                                                                                        }
+                                                                                        draft_category.set(Some(value.clone()));
+                                                                                        if let Some((_, default_reason)) = JUSTIFICATION_PRESETS
+                                                                                            .iter()
+                                                                                            .find(|(key, _)| *key == value)
+                                                                                        {
+                                                                                            if draft_reason.read().trim().is_empty() {
+                                                                                                draft_reason.set((*default_reason).to_string());
+                                                                                            }
+                                                                                        }
+                                                                                    },
+                                                                                    option { value: "", "Select category (optional)" }
+                                                                                    for (value, label) in JUSTIFICATION_PRESETS {
+                                                                                        option { value: "{value}", "{label}" }
+                                                                                    }
+                                                                                }
+
+                                                                                textarea {
+                                                                                    class: "{theme::interactive::INPUT} w-full min-h-[100px]",
+                                                                                    placeholder: "Document risk acceptance / mitigation rationale",
+                                                                                    value: draft_reason.read().clone(),
+                                                                                    oninput: move |evt| draft_reason.set(evt.value()),
+                                                                                }
+
+                                                                                div { class: "text-xs {theme::text::MUTED}", "This note is persisted per system + CVE for audit review." }
+
+                                                                                div { class: "flex items-center gap-2",
+                                                                                    button {
+                                                                                        class: "px-3 py-2 rounded-md {theme::interactive::PRIMARY_BTN} text-sm font-semibold text-white transition-colors disabled:opacity-50 {theme::interactive::FOCUS_RING}",
+                                                                                        disabled: *save_in_progress.read() || !allow_mutations,
+                                                                                        onclick: {
+                                                                                            let cve_id = cve_id.clone();
+                                                                                            move |_| {
+                                                                                                let reason = draft_reason.read().trim().to_string();
+                                                                                                if reason.is_empty() {
+                                                                                                    save_status.set(Some("Justification reason is required".to_string()));
+                                                                                                    return;
+                                                                                                }
+
+                                                                                                let category = draft_category.read().clone();
+                                                                                                let cve_id_for_request = cve_id.clone();
+                                                                                                save_in_progress.set(true);
+                                                                                                save_status.set(None);
+
+                                                                                                spawn(async move {
+                                                                                                    let result = save_system_cve_justification(
+                                                                                                        &system_id,
+                                                                                                        &cve_id_for_request,
+                                                                                                        &SaveSystemCveJustificationRequest { category, reason },
+                                                                                                    ).await;
+
+                                                                                                    save_in_progress.set(false);
+                                                                                                    match result {
+                                                                                                        Ok(_) => {
+                                                                                                            save_status.set(Some("Justification saved".to_string()));
+                                                                                                            editing_cve.set(None);
+                                                                                                            on_saved.call(());
+                                                                                                        }
+                                                                                                        Err(err) => {
+                                                                                                            save_status.set(Some(format!("Failed to save justification: {err}")));
+                                                                                                        }
+                                                                                                    }
+                                                                                                });
+                                                                                            }
+                                                                                        },
+                                                                                        if !allow_mutations {
+                                                                                            "Operator/Admin required"
+                                                                                        } else if *save_in_progress.read() {
+                                                                                            "Saving..."
+                                                                                        } else {
+                                                                                            "Save"
+                                                                                        }
+                                                                                    }
+                                                                                    button {
+                                                                                        class: "px-3 py-2 rounded-md border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} {theme::interactive::HOVER_BG} text-sm {theme::text::PRIMARY} transition-colors {theme::interactive::FOCUS_RING}",
+                                                                                        onclick: move |_| editing_cve.set(None),
+                                                                                        "Cancel"
+                                                                                    }
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
                                                         }
                                                     }
                                                 }
@@ -557,6 +534,130 @@ fn group_vulnerabilities_by_cve(vulnerabilities: &[SystemVulnerability]) -> Vec<
             .then_with(|| a.cve_id.cmp(&b.cve_id))
     });
     groups
+}
+
+/// Group vulnerabilities by package name (inverse of `group_vulnerabilities_by_cve`).
+/// Within each package, CVEs are deduplicated by CVE id and the worst severity /
+/// highest CVSS / available-fix flag is retained.
+fn group_vulnerabilities_by_package(vulnerabilities: &[SystemVulnerability]) -> Vec<PackageGroup> {
+    let mut packages: BTreeMap<String, PackageGroup> = BTreeMap::new();
+
+    for vuln in vulnerabilities {
+        let group = packages
+            .entry(vuln.package_name.clone())
+            .or_insert_with(|| PackageGroup {
+                package_name: vuln.package_name.clone(),
+                version: vuln.installed_version.clone(),
+                cves: Vec::new(),
+                critical: 0,
+                high: 0,
+                medium: 0,
+                low: 0,
+                fixable: 0,
+                max_cvss: 0.0,
+                sort_weight: 0,
+            });
+
+        let has_fix = vuln.fixed_version.is_some();
+
+        if let Some(existing) = group.cves.iter_mut().find(|c| c.cve_id == vuln.cve_id) {
+            // Merge into the existing CVE entry, keeping the worst observed values.
+            if severity_rank(&vuln.severity) > severity_rank(&existing.severity) {
+                existing.severity = vuln.severity.clone();
+            }
+            if existing.cvss_score.unwrap_or_default() < vuln.cvss_score.unwrap_or_default() {
+                existing.cvss_score = vuln.cvss_score;
+            }
+            existing.has_fix = existing.has_fix || has_fix;
+            if existing.justification_reason.is_none() && vuln.justification_reason.is_some() {
+                existing.justification_reason = vuln.justification_reason.clone();
+                existing.justification_category = vuln.justification_category.clone();
+                existing.justification_updated_at = vuln.justification_updated_at;
+            }
+        } else {
+            group.cves.push(PackageCve {
+                cve_id: vuln.cve_id.clone(),
+                severity: vuln.severity.clone(),
+                cvss_score: vuln.cvss_score,
+                description: vuln.description.clone(),
+                published_at: vuln.published_at,
+                has_fix,
+                justification_category: vuln.justification_category.clone(),
+                justification_reason: vuln.justification_reason.clone(),
+                justification_updated_at: vuln.justification_updated_at,
+            });
+        }
+    }
+
+    let sev_weight = |severity: &CveSeverity| -> i64 {
+        match severity {
+            CveSeverity::Critical => 1000,
+            CveSeverity::High => 100,
+            CveSeverity::Medium => 10,
+            CveSeverity::Low => 1,
+        }
+    };
+
+    let mut groups = packages.into_values().collect::<Vec<_>>();
+    for group in &mut groups {
+        group.cves.sort_by(|a, b| {
+            severity_rank(&b.severity)
+                .cmp(&severity_rank(&a.severity))
+                .then_with(|| {
+                    b.cvss_score
+                        .partial_cmp(&a.cvss_score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| a.cve_id.cmp(&b.cve_id))
+        });
+
+        for cve in &group.cves {
+            match cve.severity {
+                CveSeverity::Critical => group.critical += 1,
+                CveSeverity::High => group.high += 1,
+                CveSeverity::Medium => group.medium += 1,
+                CveSeverity::Low => group.low += 1,
+            }
+            if cve.has_fix {
+                group.fixable += 1;
+            }
+            let score = cve.cvss_score.unwrap_or_default();
+            if score > group.max_cvss {
+                group.max_cvss = score;
+            }
+            group.sort_weight += sev_weight(&cve.severity);
+        }
+    }
+
+    groups.sort_by(|a, b| {
+        b.sort_weight
+            .cmp(&a.sort_weight)
+            .then_with(|| a.package_name.cmp(&b.package_name))
+    });
+    groups
+}
+
+/// Left-border / accent color for a package group based on its worst severity,
+/// matching the design reference palette.
+fn package_group_color(group: &PackageGroup) -> &'static str {
+    if group.critical > 0 {
+        "#f87171"
+    } else if group.high > 0 {
+        "#fbbf24"
+    } else if group.medium > 0 {
+        "#60a5fa"
+    } else {
+        "#9ca3af"
+    }
+}
+
+fn severity_chip_class(severity: &CveSeverity) -> &'static str {
+    match severity {
+        CveSeverity::Critical => "chip chip-critical",
+        CveSeverity::High => "chip chip-warning",
+        CveSeverity::Medium => "chip chip-unknown",
+        CveSeverity::Low => "chip chip-unknown",
+    }
 }
 
 fn severity_rank(severity: &CveSeverity) -> i32 {

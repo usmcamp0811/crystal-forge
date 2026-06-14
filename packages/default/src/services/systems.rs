@@ -301,6 +301,7 @@ fn list_row_to_summary(row: queries::SystemListRow) -> SystemSummary {
         nixos_version: row.nixos_version,
         last_seen: row.last_seen,
         deployment_policy: row.deployment_policy,
+        fqdn: row.fqdn,
     }
 }
 
@@ -312,6 +313,7 @@ fn detail_row_to_api_model(row: queries::SystemDetailRow) -> SystemDetail {
     SystemDetail {
         id: row.id,
         hostname: row.hostname,
+        fqdn: row.fqdn,
         system_configuration_name: row.system_configuration_name,
         environment: row.environment,
         is_active: row.is_active,
@@ -337,6 +339,7 @@ fn detail_row_to_api_model(row: queries::SystemDetailRow) -> SystemDetail {
             primary_ip: row.primary_ip_address,
             primary_mac: row.primary_mac_address,
             gateway_ip: row.gateway_ip,
+            reachability: row.reachability,
         },
         security: SystemSecurityInfo {
             tpm_present: row.tpm_present,

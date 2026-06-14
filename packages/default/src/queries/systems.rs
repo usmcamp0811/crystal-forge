@@ -59,33 +59,82 @@ pub async fn update_public_key(pool: &PgPool, system_id: Uuid, new_public_key: &
     Ok(())
 }
 
+/// How an update should treat the `fqdn` column.
+///
+/// This preserves PATCH semantics: when the client omits `fqdn` the stored
+/// value must be left untouched, which a plain `Option<&str>` cannot express.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FqdnUpdate<'a> {
+    /// Leave the existing `fqdn` value unchanged.
+    Keep,
+    /// Set `fqdn` to NULL.
+    Clear,
+    /// Set `fqdn` to the provided value.
+    Set(&'a str),
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn update_system_metadata(
     pool: &PgPool,
     system_id: Uuid,
     hostname: &str,
+    fqdn: FqdnUpdate<'_>,
     environment_id: Option<Uuid>,
     flake_id: Option<i32>,
     system_configuration_name: Option<&str>,
     deployment_policy: &str,
 ) -> Result<()> {
-    sqlx::query(
-        "UPDATE systems
-         SET hostname = $1,
-             environment_id = $2,
-             flake_id = $3,
-             system_configuration_name = $4,
-             deployment_policy = $5,
-             updated_at = NOW()
-         WHERE id = $6",
-    )
-    .bind(hostname)
-    .bind(environment_id)
-    .bind(flake_id)
-    .bind(system_configuration_name)
-    .bind(deployment_policy)
-    .bind(system_id)
-    .execute(pool)
-    .await?;
+    // `fqdn` is updated only when the caller explicitly sets or clears it.
+    // `COALESCE($2, systems.fqdn)` would be wrong for the Clear case, so we
+    // branch the SQL on whether the column should be touched at all.
+    match fqdn {
+        FqdnUpdate::Keep => {
+            sqlx::query(
+                "UPDATE systems
+                 SET hostname = $1,
+                     environment_id = $2,
+                     flake_id = $3,
+                     system_configuration_name = $4,
+                     deployment_policy = $5,
+                     updated_at = NOW()
+                  WHERE id = $6",
+            )
+            .bind(hostname)
+            .bind(environment_id)
+            .bind(flake_id)
+            .bind(system_configuration_name)
+            .bind(deployment_policy)
+            .bind(system_id)
+            .execute(pool)
+            .await?;
+        }
+        FqdnUpdate::Clear | FqdnUpdate::Set(_) => {
+            let fqdn_value = match fqdn {
+                FqdnUpdate::Set(value) => Some(value),
+                _ => None,
+            };
+            sqlx::query(
+                "UPDATE systems
+                 SET hostname = $1,
+                     fqdn = $2,
+                     environment_id = $3,
+                     flake_id = $4,
+                     system_configuration_name = $5,
+                     deployment_policy = $6,
+                     updated_at = NOW()
+                  WHERE id = $7",
+            )
+            .bind(hostname)
+            .bind(fqdn_value)
+            .bind(environment_id)
+            .bind(flake_id)
+            .bind(system_configuration_name)
+            .bind(deployment_policy)
+            .bind(system_id)
+            .execute(pool)
+            .await?;
+        }
+    }
     Ok(())
 }
 
@@ -451,6 +500,7 @@ pub async fn get_user_environment_membership_ids(
 pub struct SystemDetailRow {
     pub id: Uuid,
     pub hostname: String,
+    pub fqdn: Option<String>,
     pub system_configuration_name: Option<String>,
     pub environment: Option<String>,
     pub is_active: bool,
@@ -475,6 +525,7 @@ pub struct SystemDetailRow {
     pub primary_ip_address: Option<String>,
     pub primary_mac_address: Option<String>,
     pub gateway_ip: Option<String>,
+    pub reachability: String,
     // Security
     pub tpm_present: Option<bool>,
     pub secure_boot_enabled: Option<bool>,
@@ -505,9 +556,8 @@ pub async fn get_system_detail_by_id(
     system_id: Uuid,
 ) -> Result<Option<SystemDetailRow>> {
     let row = sqlx::query_as::<_, SystemDetailRow>(
-        "SELECT vsd.*, s.system_configuration_name
+        "SELECT vsd.*
          FROM view_system_detail vsd
-         JOIN systems s ON s.id = vsd.id
          WHERE vsd.id = $1",
     )
     .bind(system_id)
@@ -535,6 +585,7 @@ pub struct SystemListRow {
     pub nixos_version: Option<String>,
     pub last_seen: Option<DateTime<Utc>>,
     pub deployment_policy: String,
+    pub fqdn: Option<String>,
 }
 
 /// Fetch all active systems from view_system_list
@@ -1495,8 +1546,8 @@ mod tests {
         .concat();
 
         assert!(
-            source.contains("SELECT vsd.*, s.system_configuration_name"),
-            "system detail query should source generation from view_system_detail"
+            source.contains("SELECT vsd.*\n         FROM view_system_detail vsd"),
+            "system detail query should source all detail fields from view_system_detail"
         );
         assert!(
             !source.contains(&legacy_regex_expr),
@@ -1534,6 +1585,146 @@ mod tests {
             migration.contains("ld.expected_store_path,\n    lss.generation,\n    lss.generation_matches_current_store_path"),
             "migration must append generation columns after existing view columns"
         );
+    }
+
+    #[test]
+    fn view_system_detail_exposes_config_name_reachability_and_fqdn() {
+        let migration = include_str!(
+            "../../migrations/0138_add_system_configuration_name_to_view_system_detail.sql"
+        );
+
+        assert!(
+            migration.contains("CREATE OR REPLACE VIEW public.view_system_detail AS"),
+            "migration must rebuild view_system_detail"
+        );
+        // Identity field that 0135/0136 dropped from the view must be restored.
+        assert!(
+            migration.contains("s.system_configuration_name"),
+            "view must project system_configuration_name"
+        );
+        // New fields introduced by prior migrations must be preserved.
+        assert!(
+            migration.contains("s.reachability"),
+            "view must keep reachability projection"
+        );
+        assert!(
+            migration.contains("s.fqdn"),
+            "view must keep fqdn projection"
+        );
+        // Core identity fields must not be dropped.
+        for required in ["s.id", "s.hostname", "e.name AS environment"] {
+            assert!(
+                migration.contains(required),
+                "view must keep identity field: {required}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn update_system_metadata_keep_preserves_existing_fqdn() {
+        let pool = test_pool_from_env().await;
+        let hostname = format!("task353-fqdn-keep-{}", Uuid::new_v4());
+        let system = make_test_system(&pool, &hostname).await;
+
+        // Seed an explicit FQDN.
+        update_system_metadata(
+            &pool,
+            system.id,
+            &hostname,
+            FqdnUpdate::Set("seed.prod.cf.internal"),
+            None,
+            None,
+            None,
+            "manual",
+        )
+        .await
+        .expect("seed fqdn should succeed");
+
+        // A later update that omits fqdn (FqdnUpdate::Keep) must NOT wipe it.
+        update_system_metadata(
+            &pool,
+            system.id,
+            &hostname,
+            FqdnUpdate::Keep,
+            None,
+            None,
+            None,
+            "auto_latest",
+        )
+        .await
+        .expect("keep update should succeed");
+
+        let detail = get_system_detail_by_id(&pool, system.id)
+            .await
+            .expect("detail query should succeed")
+            .expect("system detail should exist");
+
+        assert_eq!(
+            detail.fqdn.as_deref(),
+            Some("seed.prod.cf.internal"),
+            "omitting fqdn must preserve the persisted value"
+        );
+        assert_eq!(
+            detail.deployment_policy, "auto_latest",
+            "other fields should still update while fqdn is preserved"
+        );
+
+        sqlx::query("DELETE FROM systems WHERE id = $1")
+            .bind(system.id)
+            .execute(&pool)
+            .await
+            .ok();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn update_system_metadata_clear_nulls_fqdn() {
+        let pool = test_pool_from_env().await;
+        let hostname = format!("task353-fqdn-clear-{}", Uuid::new_v4());
+        let system = make_test_system(&pool, &hostname).await;
+
+        update_system_metadata(
+            &pool,
+            system.id,
+            &hostname,
+            FqdnUpdate::Set("seed.prod.cf.internal"),
+            None,
+            None,
+            None,
+            "manual",
+        )
+        .await
+        .expect("seed fqdn should succeed");
+
+        update_system_metadata(
+            &pool,
+            system.id,
+            &hostname,
+            FqdnUpdate::Clear,
+            None,
+            None,
+            None,
+            "manual",
+        )
+        .await
+        .expect("clear update should succeed");
+
+        let detail = get_system_detail_by_id(&pool, system.id)
+            .await
+            .expect("detail query should succeed")
+            .expect("system detail should exist");
+
+        assert_eq!(
+            detail.fqdn, None,
+            "explicit clear must null the persisted fqdn"
+        );
+
+        sqlx::query("DELETE FROM systems WHERE id = $1")
+            .bind(system.id)
+            .execute(&pool)
+            .await
+            .ok();
     }
 
     #[tokio::test]
