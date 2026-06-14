@@ -3190,7 +3190,9 @@ mod task_221_integration_tests {
     #[ignore = "requires live database connection"]
     async fn test_update_system_metadata_persists_config_name() {
         let pool = get_test_pool().await;
-        use crate::queries::systems::{get_system_detail_by_id, update_system_metadata};
+        use crate::queries::systems::{
+            get_system_detail_by_id, update_system_metadata, FqdnUpdate,
+        };
         let flake = make_flake(&pool, "test-sysmeta", "cf_systems_only").await;
         let system = make_system(&pool, "host-meta", Some(flake.id), None).await;
 
@@ -3198,7 +3200,7 @@ mod task_221_integration_tests {
             &pool,
             system.id,
             "host-meta",
-            None,
+            FqdnUpdate::Keep,
             None,
             Some(flake.id),
             Some("new-config-name"),
@@ -3227,7 +3229,7 @@ mod task_221_integration_tests {
         // the DB). The 400 validation for "unknown flake name" happens in update_system_handler
         // before metadata is written. This test verifies the query layer correctly persists a
         // known flake_id and that passing an invalid FK gets a DB error (not a silent NULL).
-        use crate::queries::systems::update_system_metadata;
+        use crate::queries::systems::{update_system_metadata, FqdnUpdate};
         let flake = make_flake(&pool, "test-sysmeta-fk", "cf_systems_only").await;
         let system = make_system(&pool, "host-fk", Some(flake.id), None).await;
 
@@ -3235,7 +3237,7 @@ mod task_221_integration_tests {
             &pool,
             system.id,
             "host-fk",
-            None,
+            FqdnUpdate::Keep,
             None,
             Some(999999), // non-existent flake_id → FK violation
             None,

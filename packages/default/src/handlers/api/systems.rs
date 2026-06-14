@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 use uuid::Uuid;
 
 use crate::api::models::{
-    ApiError, AuditAction, CommitInfo, CreateSystemRequest, CveScanEligibilityResponse,
+    ApiError, AuditAction, CommitInfo, CreateSystemRequest, CveScanEligibilityResponse, FieldUpdate,
     CveScanStatusResponse, CveScanTriggerResponse, CveSummary, DeploySystemRequest,
     DeploymentStatus, PipelineStage, SaveSystemCveJustificationRequest, SortOrder,
     SystemAgentEvent, SystemCommitsResponse, SystemDetail, SystemGeneration,
@@ -29,7 +29,7 @@ use crate::queries::system_states::{
     fetch_system_generations, find_generation_store_path_last_seen,
 };
 use crate::queries::systems::{
-    SystemAccessRow, SystemDetailRow, SystemListRow, commit_belongs_to_system_flake,
+    FqdnUpdate, SystemAccessRow, SystemDetailRow, SystemListRow, commit_belongs_to_system_flake,
     deactivate_system, find_system_access_row, get_system_detail_by_id,
     get_user_environment_membership_ids, list_recent_commits_for_system, list_system_access_rows,
     list_system_agent_event_rows, list_system_history_rows, touch_system_updated_at,
@@ -743,11 +743,21 @@ pub async fn update_system_handler(
     if hostname.is_empty() {
         return bad_request("Hostname is required");
     }
-    let fqdn = payload
-        .fqdn
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
+    // PATCH semantics for FQDN: an omitted key preserves the persisted value,
+    // an explicit null (or empty string) clears it, a value sets it. This
+    // prevents older/partial clients that don't send `fqdn` from wiping it.
+    let fqdn = match &payload.fqdn {
+        FieldUpdate::Unset => FqdnUpdate::Keep,
+        FieldUpdate::Clear => FqdnUpdate::Clear,
+        FieldUpdate::Set(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                FqdnUpdate::Clear
+            } else {
+                FqdnUpdate::Set(trimmed)
+            }
+        }
+    };
     if !matches!(
         payload.deployment_policy.as_str(),
         "manual" | "auto_latest" | "pinned"
