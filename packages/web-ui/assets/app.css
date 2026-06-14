@@ -4310,3 +4310,62 @@ tr.kbd-focused > td {
 }
 
 .help { font-size: 11px; color: var(--cf-text-muted); }
+
+/* ─── Form field layout (design parity: EditSystemModal / SshConnectModal) ─── */
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field label { font-size: 12px; color: var(--cf-text-secondary); }
+.field .help { font-size: 11px; color: var(--cf-text-muted); }
+
+/* ─── SSH connect modal command rows ─── */
+.ssh-cmd {
+  display: flex; align-items: center; gap: 8px;
+  background: #05070d; border: 1px solid var(--cf-divider); border-radius: 8px;
+  padding: 9px 10px 9px 12px; margin-top: 2px;
+}
+.ssh-cmd code { flex: 1; min-width: 0; font-size: 12.5px; color: #7dd3fc; overflow-x: auto; white-space: nowrap; }
+.ssh-cmd .btn { flex-shrink: 0; }
+
+/* ─── Logs tab: day dividers ─── */
+.sd-log-day {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex; align-items: center; gap: 10px;
+  margin: 0 0 4px; padding: 6px 2px 5px;
+  user-select: none;
+  background: #0a0f1c;
+}
+html[data-theme="light"] .sd-log-day { background: #0f172a; }
+.sd-log-day::before, .sd-log-day::after {
+  content: ""; flex: 1; height: 1px;
+  background: var(--cf-divider);
+}
+.sd-log-day-label {
+  font-family: var(--font-sans);
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase;
+  color: #94a3b8;
+  padding: 2px 10px; border-radius: 999px;
+  background: rgba(148,163,184,0.16);
+  white-space: nowrap;
+}
+
+/* ─── Overview tab: removable tag chips + editable tag input ─── */
+.sd-tag-chip { padding: 0; overflow: hidden; }
+.sd-tag-label {
+  background: transparent; border: none; font: inherit;
+  color: var(--cf-text-secondary); padding: 3px 4px 3px 8px;
+  font-family: var(--font-mono); font-size: 11px;
+}
+.sd-tag-label:hover { color: var(--cf-brand-purple); }
+.sd-tag-x {
+  cursor: pointer; background: transparent; border: none;
+  display: inline-flex; align-items: center; padding: 3px 6px 3px 2px;
+  color: var(--cf-text-muted);
+}
+.sd-tag-x:hover { color: #f87171; }
+.sd-tag-input-wrap { display: inline-flex; }
+.sd-tag-input {
+  width: 96px; font-size: 11px; padding: 2px 8px; border-radius: 6px;
+  background: var(--cf-card-bg); border: 1px solid var(--cf-brand-purple);
+  color: var(--cf-text-primary); font-family: var(--font-mono);
+}

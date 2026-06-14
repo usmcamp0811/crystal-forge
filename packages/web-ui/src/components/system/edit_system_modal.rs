@@ -4,7 +4,6 @@
 //! flake assignment section, segmented deployment mode, pinned commit picker.
 
 use crate::api::models::{CommitInfo, SystemDetail, UpdateSystemRequest};
-use crate::theme;
 use dioxus::prelude::*;
 
 /// Branch options for the flake branch field.
@@ -51,6 +50,27 @@ pub fn EditSystemModal(
     let mut flake_branch = use_signal(|| derived_branch(system.environment.as_deref()).to_string());
     let mut is_saving = use_signal(|| false);
     let mut show_danger = use_signal(|| false);
+
+    // Pinned commit selection. Seeds from the system's latest known commit so the picker
+    // highlights the active pin. Wired to the real `/systems/:id/commits` data passed in
+    // via `recent_commits`.
+    let current_commit_sha = system
+        .flake
+        .as_ref()
+        .and_then(|flake| flake.latest_commit.clone());
+    let mut pinned_commit = use_signal(|| {
+        current_commit_sha
+            .clone()
+            .or_else(|| recent_commits.first().map(|commit| commit.sha.clone()))
+            .unwrap_or_default()
+    });
+
+    // Heartbeat interval and tags are NOT yet persisted server-side (no systems.tags or
+    // systems.heartbeat_interval column exists — see TASK-357/TASK-358 follow-ups). These
+    // signals provide design-parity local editing only; the help text marks them as not
+    // saved so operators are not misled. Wire to real persistence once the backend lands.
+    let mut heartbeat_interval_sec = use_signal(|| 60_i32);
+    let mut tags_draft = use_signal(String::new);
 
     // Sync FQDN when hostname or environment changes
     {
@@ -129,7 +149,7 @@ pub fn EditSystemModal(
                         style: "display: grid; grid-template-columns: 1fr 1fr; gap: 14px;",
                         div {
                             class: "field",
-                            label { class: "label", "Hostname" }
+                            label { "Hostname" }
                             input {
                                 r#type: "text",
                                 class: "input focus-ring mono",
@@ -139,7 +159,7 @@ pub fn EditSystemModal(
                         }
                         div {
                             class: "field",
-                            label { class: "label", "Environment" }
+                            label { "Environment" }
                             if !environments.is_empty() {
                                 select {
                                     class: "input focus-ring",
@@ -169,7 +189,7 @@ pub fn EditSystemModal(
                     // FQDN field (design: below hostname+environment)
                     div {
                         class: "field",
-                        label { class: "label", "FQDN" }
+                        label { "FQDN" }
                         input {
                             r#type: "text",
                             class: "input focus-ring mono",
@@ -181,7 +201,7 @@ pub fn EditSystemModal(
                     // System Configuration Name
                     div {
                         class: "field",
-                        label { class: "label", "System Configuration Name" }
+                        label { "System Configuration Name" }
                         input {
                             r#type: "text",
                             class: "input focus-ring mono",
@@ -202,7 +222,7 @@ pub fn EditSystemModal(
                             style: "display: grid; grid-template-columns: 1fr 1fr; gap: 14px;",
                             div {
                                 class: "field",
-                                label { class: "label", "Flake" }
+                                label { "Flake" }
                                 select {
                                     class: "input focus-ring",
                                     value: "{flake_name}",
@@ -229,7 +249,7 @@ pub fn EditSystemModal(
                             }
                             div {
                                 class: "field",
-                                label { class: "label", "Branch" }
+                                label { "Branch" }
                                 select {
                                     class: "input focus-ring",
                                     value: "{flake_branch}",
@@ -249,7 +269,7 @@ pub fn EditSystemModal(
                     // Deployment mode (design: segmented buttons)
                     div {
                         class: "field",
-                        label { class: "label", "Deployment mode" }
+                        label { "Deployment mode" }
                         div {
                             class: "seg",
                             style: "width: fit-content; flex-wrap: wrap;",
@@ -270,7 +290,7 @@ pub fn EditSystemModal(
                             }
                         }
                         p {
-                            class: "text-xs {theme::text::SECONDARY} mt-1",
+                            class: "help",
                             match deployment_policy.read().as_str() {
                                 "manual" => "Operator must explicitly approve every deploy.",
                                 "auto_latest" => "Automatically deploy the latest commit.",
@@ -284,24 +304,37 @@ pub fn EditSystemModal(
                     if *deployment_policy.read() == "pinned" && !recent_commits.is_empty() {
                         div {
                             class: "field",
-                            label { class: "label", "Pinned commit" }
+                            label { "Pinned commit" }
                             div {
                                 class: "sd-commit-list",
                                 style: "max-height: 200px;",
-                                for commit in &recent_commits {
-                                    button {
-                                        class: "sd-commit-item focus-ring",
-                                        onclick: move |_| {},
-                                        div { class: "sd-commit-sha", "{commit.short_sha}" }
-                                        div { class: "sd-commit-msg", "{commit.message}" }
-                                        div { class: "sd-commit-meta mono", "{commit.author}" }
-                                        div { class: "sd-commit-meta", "{commit.timestamp}" }
+                                for commit in recent_commits.iter().cloned() {
+                                    {
+                                        let is_selected = *pinned_commit.read() == commit.sha;
+                                        let is_current = current_commit_sha
+                                            .as_deref()
+                                            .map(|sha| sha == commit.sha)
+                                            .unwrap_or(false);
+                                        let sha = commit.sha.clone();
+                                        rsx! {
+                                            button {
+                                                class: if is_selected { "sd-commit-item focus-ring selected" } else { "sd-commit-item focus-ring" },
+                                                onclick: move |_| pinned_commit.set(sha.clone()),
+                                                span { class: "mono sd-commit-sha", "{commit.short_sha}" }
+                                                span { class: "sd-commit-msg", "{commit.message}" }
+                                                span { class: "sd-commit-meta mono", "{commit.author}" }
+                                                span { class: "sd-commit-meta", "{commit.timestamp}" }
+                                                if is_current {
+                                                    span { class: "chip chip-info", style: "font-size:10px;", "current" }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
                             p {
-                                class: "text-xs {theme::text::SECONDARY} mt-1",
-                                "System will not auto-advance off this commit."
+                                class: "help",
+                                "System will not auto-advance off this commit. Operators can change the pin or temporarily deploy a different commit from System Detail."
                             }
                         }
                     }
@@ -318,58 +351,73 @@ pub fn EditSystemModal(
                         }
                         div {
                             class: "field",
-                            label { class: "label", "How the server reaches this system" }
+                            label { "How the server reaches this system" }
                             div {
                                 class: "seg",
                                 style: "width: fit-content;",
                                 button { class: "active", disabled: "true", "Direct / LAN" }
                                 button { disabled: "true", "Agent pull-only" }
                             }
-                            p { class: "text-xs {theme::text::SECONDARY} mt-1", "Server can open connections to the agent (same LAN / routable / VPN). Enables server-initiated deploys and live log tail." }
+                            p { class: "help", "Server can open connections to the agent (same LAN / routable / VPN). Enables server-initiated deploys and live log tail." }
                         }
                     }
 
-                    // Two-column: Heartbeat interval + Tags (design placeholders)
+                    // Two-column: Heartbeat interval + Tags.
+                    // NOTE: These are editable for design parity but are NOT yet persisted —
+                    // there is no systems.heartbeat_interval or systems.tags column. The help
+                    // text marks them as not-saved so operators are not misled. Follow-ups
+                    // TASK-357 (tags) and TASK-358 (heartbeat interval) wire real persistence.
                     div {
-                        style: "display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 8px; opacity: 0.55;",
-                        "data-testid": "heartbeat-tags-placeholder",
-                        title: "Heartbeat interval and tags require backend support (coming soon)",
+                        style: "display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 8px;",
+                        "data-testid": "heartbeat-tags-fields",
                         div {
                             class: "field",
-                            label { class: "label", "Heartbeat interval" }
+                            label { "Heartbeat interval" }
                             select {
                                 class: "input focus-ring",
-                                disabled: "true",
-                                option { "60 seconds" }
+                                value: "{heartbeat_interval_sec}",
+                                onchange: move |e| {
+                                    if let Ok(value) = e.value().parse::<i32>() {
+                                        heartbeat_interval_sec.set(value);
+                                    }
+                                },
+                                option { value: "30", selected: *heartbeat_interval_sec.read() == 30, "30 seconds" }
+                                option { value: "60", selected: *heartbeat_interval_sec.read() == 60, "1 minute" }
+                                option { value: "90", selected: *heartbeat_interval_sec.read() == 90, "90 seconds" }
+                                option { value: "120", selected: *heartbeat_interval_sec.read() == 120, "2 minutes" }
+                                option { value: "300", selected: *heartbeat_interval_sec.read() == 300, "5 minutes" }
                             }
-                            p { class: "text-xs {theme::text::SECONDARY} mt-1", "Agent heartbeat cadence (backend field coming soon)." }
+                            p { class: "help", "Agent heartbeat cadence. Not saved yet — backend field coming soon." }
                         }
                         div {
                             class: "field",
-                            label { class: "label", "Tags" }
-                            input {
-                                class: "input focus-ring",
-                                disabled: "true",
-                                placeholder: "e.g. builder, stig-enforced (requires backend)",
+                            label {
+                                "Tags "
+                                span { style: "color: var(--cf-text-muted); font-weight: 400;", "· free-form labels for grouping & filtering" }
                             }
-                            p { class: "text-xs {theme::text::SECONDARY} mt-1", "Free-form labels for grouping & filtering." }
+                            input {
+                                r#type: "text",
+                                class: "input focus-ring",
+                                value: "{tags_draft}",
+                                placeholder: "e.g. builder, stig-enforced",
+                                oninput: move |e| tags_draft.set(e.value().clone()),
+                            }
+                            p { class: "help", "Not saved yet — tag persistence is coming soon." }
                         }
                     }
 
-                    // Description / notes placeholder
+                    // Description / notes (local-only; no systems.description column yet).
                     div {
                         class: "field",
-                        style: "opacity: 0.55;",
-                        "data-testid": "description-placeholder",
-                        title: "System description requires backend support (coming soon)",
-                        label { class: "label", "Description / notes" }
+                        "data-testid": "description-field",
+                        label { "Description / notes" }
                         textarea {
                             class: "input focus-ring",
                             rows: "2",
-                            disabled: "true",
-                            placeholder: "Optional context for operators (requires backend support)",
+                            placeholder: "Optional context for operators…",
                             style: "resize: vertical;",
                         }
+                        p { class: "help", "Not saved yet — description persistence is coming soon." }
                     }
 
                     // Danger zone (design: remove system)

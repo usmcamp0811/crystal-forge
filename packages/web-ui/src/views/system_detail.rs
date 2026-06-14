@@ -134,6 +134,17 @@ fn is_pull_reachability(reachability: &str) -> bool {
     reachability.eq_ignore_ascii_case("pull")
 }
 
+/// Normalize a free-form tag input to the design's slug form: trim, drop a leading `#`,
+/// collapse whitespace to single hyphens, and lowercase. Mirrors the reference's `addTag`.
+fn normalize_tag(raw: &str) -> String {
+    let trimmed = raw.trim().trim_start_matches('#');
+    trimmed
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("-")
+        .to_lowercase()
+}
+
 fn reachability_label(reachability: &str) -> &'static str {
     if is_pull_reachability(reachability) {
         "Agent pull-only"
@@ -319,7 +330,10 @@ pub fn SystemDetailView(id: String) -> Element {
         }
     });
 
-    // Derive state from resource result
+    // Derive state from resource result. `detail_loading` is true while the primary
+    // system-detail fetch is still in-flight so we can show a real loading spinner (design
+    // parity) instead of silently rendering fallback/mock data.
+    let detail_loading = detail_resource.read_unchecked().is_none();
     let (system, api_notice, redirect_to_login, not_found) =
         match &*detail_resource.read_unchecked() {
             Some(result) => (
@@ -330,6 +344,24 @@ pub fn SystemDetailView(id: String) -> Element {
             ),
             None => (fallback_system_detail(), None, false, false),
         };
+
+    // Loading state — design reference shows a centered spinner while the system loads.
+    if detail_loading {
+        return rsx! {
+            div {
+                class: "sd-root",
+                "data-testid": "system-detail-loading",
+                "data-screen-label": "SystemDetail",
+                div {
+                    class: "flex items-center justify-center py-16",
+                    crate::components::loading::DashboardLoadingSpinner {
+                        label: "Loading system…".to_string(),
+                        size: 48,
+                    }
+                }
+            }
+        };
+    }
 
     // Redirect to login (early return matching dashboard pattern).
     if redirect_to_login {
@@ -380,6 +412,15 @@ pub fn SystemDetailView(id: String) -> Element {
         .find(|commit| commit.is_current)
         .cloned()
         .or_else(|| deploy_commit_history.first().cloned());
+    // Raw commit list for the Edit modal's pinned-commit picker. This comes from the
+    // real `/systems/:id/commits` endpoint when available, so the pinned picker is wired
+    // to authoritative data rather than mocked.
+    let edit_recent_commits = commits_resource
+        .read_unchecked()
+        .clone()
+        .flatten()
+        .map(|response| response.commits)
+        .unwrap_or_default();
     let generations_result = generations_resource
         .read_unchecked()
         .clone()
@@ -548,7 +589,19 @@ pub fn SystemDetailView(id: String) -> Element {
                         button {
                             class: "btn btn-ghost focus-ring",
                             disabled: !can_mutate,
-                            onclick: move |_| show_rollback_dialog.set(true),
+                            onclick: {
+                                // The header Rollback action seeds the confirmation dialog with the
+                                // currently deployed commit (falling back to the most recent known
+                                // commit) so the dialog actually renders. Without a rollback_target
+                                // the dialog's `if let Some(..)` guard short-circuits and nothing
+                                // appears. Operators can pick a specific generation from the Deploy
+                                // tab; this header shortcut confirms a rollback of the active commit.
+                                let seed = overview_current_commit.clone();
+                                move |_| {
+                                    rollback_target.set(seed.clone());
+                                    show_rollback_dialog.set(true);
+                                }
+                            },
                             Icon { name: IconName::Rollback, size: 14 }
                             "Rollback"
                         }
@@ -794,7 +847,8 @@ pub fn SystemDetailView(id: String) -> Element {
                             on_rollback: move |commit| {
                                 rollback_target.set(Some(commit));
                                 show_rollback_dialog.set(true);
-                            }
+                            },
+                            on_view_logs: move |_| active_tab.set(Tab::Logs),
                         }
                     },
                     Tab::Cves => rsx! {
@@ -870,6 +924,7 @@ pub fn SystemDetailView(id: String) -> Element {
                     .as_ref()
                     .map(|flake| vec![flake.name.clone()])
                     .unwrap_or_default(),
+                recent_commits: edit_recent_commits.clone(),
                 on_close: move |_| edit_modal_open.set(false),
                 on_save: move |request: crate::api::models::UpdateSystemRequest| {
                     let system_id = system.id;
@@ -1007,7 +1062,7 @@ pub fn SystemDetailView(id: String) -> Element {
 // Tab Components
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct ComplianceMockBundle {
     name: &'static str,
     framework: &'static str,
@@ -1090,6 +1145,12 @@ fn compliance_score_color(score: u8) -> &'static str {
 #[component]
 fn ComplianceTab(system: SystemDetail) -> Element {
     let bundles = mocked_compliance_bundles(&system);
+    // Selected bundle for the placeholder evidence drawer. The real per-control evidence
+    // drawer (config output, systemd unit state, audit results, waivers) is tracked by
+    // TASK-356; this placeholder shows the design-example layout with sample evidence so the
+    // "View evidence" action is no longer a dead button.
+    let mut selected_bundle: Signal<Option<ComplianceMockBundle>> = use_signal(|| None);
+    let system_hostname = system.hostname.clone();
 
     rsx! {
         div {
@@ -1109,6 +1170,7 @@ fn ComplianceTab(system: SystemDetail) -> Element {
                 {
                     let score_color = compliance_score_color(bundle.score);
                     let score_width = format!("width:{}%;height:100%;background:{};", bundle.score, score_color);
+                    let bundle_for_drawer = bundle.clone();
                     rsx! {
                         div {
                             class: "card",
@@ -1147,7 +1209,8 @@ fn ComplianceTab(system: SystemDetail) -> Element {
                                 }
                                 button {
                                     class: "btn btn-primary focus-ring",
-                                    title: "Temporary placeholder until Compliance evidence drawer is wired",
+                                    title: "Preview the evidence drawer layout (real per-control evidence is tracked by TASK-356)",
+                                    onclick: move |_| selected_bundle.set(Some(bundle_for_drawer.clone())),
                                     Icon { name: IconName::File, size: 13 }
                                     "View evidence"
                                 }
@@ -1179,6 +1242,120 @@ fn ComplianceTab(system: SystemDetail) -> Element {
                     }
                 }
             }
+
+            // Placeholder evidence drawer (TASK-356 will replace with real per-control evidence).
+            if let Some(bundle) = selected_bundle.read().clone() {
+                ComplianceEvidenceDrawer {
+                    bundle,
+                    hostname: system_hostname.clone(),
+                    on_close: move |_| selected_bundle.set(None),
+                }
+            }
+        }
+    }
+}
+
+/// Placeholder "evidence drawer" for the Compliance tab.
+///
+/// IMPORTANT: This is a maintainer-authorized placeholder (TASK-353). It mirrors the design
+/// reference's evidence drawer layout with representative sample controls so the "View
+/// evidence" action demonstrates the intended UX. TASK-356 replaces this with real,
+/// per-control evidence (config output, systemd unit state, audit results, waivers).
+#[component]
+fn ComplianceEvidenceDrawer(
+    bundle: ComplianceMockBundle,
+    hostname: String,
+    on_close: EventHandler<()>,
+) -> Element {
+    // Representative sample controls for the placeholder drawer.
+    let sample_controls: [(&str, &str, &str); 4] = [
+        (
+            "CIS-1.1.1",
+            "pass",
+            "Ensure mounting of cramfs filesystems is disabled",
+        ),
+        ("CIS-1.4.1", "pass", "Ensure bootloader password is set"),
+        ("CIS-5.2.5", "warn", "Ensure SSH LogLevel is appropriate"),
+        (
+            "CIS-5.3.1",
+            "fail",
+            "Ensure password creation requirements are configured",
+        ),
+    ];
+
+    rsx! {
+        div {
+            class: "modal-backdrop",
+            onclick: move |_| on_close.call(()),
+            div {
+                class: "modal",
+                style: "width:min(640px,96vw);max-height:92vh;",
+                onclick: move |e| e.stop_propagation(),
+
+                div {
+                    class: "modal-head",
+                    h2 {
+                        Icon { name: IconName::File, size: 14 }
+                        span { style: "margin-left:6px;", "Evidence · {bundle.name}" }
+                    }
+                    p {
+                        "Per-control evidence for "
+                        span { class: "mono", "{hostname}" }
+                        " · {bundle.framework} {bundle.version}"
+                    }
+                }
+
+                div {
+                    class: "modal-body",
+                    style: "overflow-y:auto;",
+
+                    div {
+                        class: "sd-callout sd-callout-info",
+                        style: "margin-bottom:14px;",
+                        Icon { name: IconName::Shield, size: 13 }
+                        div {
+                            style: "font-size:12px;",
+                            strong { "Preview only. " }
+                            "Representative controls are shown. Real collected evidence (config output, systemd unit state, audit results, waivers) is tracked by TASK-356."
+                        }
+                    }
+
+                    table {
+                        class: "sys-table",
+                        thead {
+                            tr {
+                                th { "Control" }
+                                th { "Status" }
+                                th { "Description" }
+                            }
+                        }
+                        tbody {
+                            for (id, status, desc) in sample_controls {
+                                tr {
+                                    td { class: "mono", "{id}" }
+                                    td {
+                                        match status {
+                                            "pass" => rsx!(span { class: "chip chip-healthy", "pass" }),
+                                            "warn" => rsx!(span { class: "chip chip-warning", "warn" }),
+                                            _ => rsx!(span { class: "chip chip-critical", "fail" }),
+                                        }
+                                    }
+                                    td { style: "font-size:13px;", "{desc}" }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                div {
+                    class: "modal-foot",
+                    button {
+                        class: "btn btn-primary focus-ring",
+                        onclick: move |_| on_close.call(()),
+                        "Close"
+                    }
+                }
+            }
         }
     }
 }
@@ -1206,6 +1383,12 @@ fn SshConnectModal(system: SystemDetail, on_close: EventHandler<()>) -> Element 
     let ssh_cmd = format!("ssh root@{target}");
     let bastion_cmd = format!("ssh -J bastion.{jump_domain} root@{target}");
     let journal_cmd = format!("ssh root@{target} journalctl -fu crystal-forge-agent");
+    let is_pull = is_pull_reachability(&system.network.reachability);
+    let reachability_text = if is_pull {
+        "Agent pull-only"
+    } else {
+        "Direct / LAN"
+    };
 
     rsx! {
         div {
@@ -1240,6 +1423,17 @@ fn SshConnectModal(system: SystemDetail, on_close: EventHandler<()>) -> Element 
                     div { class: "field", label { "Connect" } }
                     SshCmd { command: ssh_cmd.clone() }
 
+                    if is_pull {
+                        div {
+                            class: "help",
+                            style: "margin-top: 8px;",
+                            Icon { name: IconName::Warn, size: 11 }
+                            " This host is "
+                            strong { "pull-only" }
+                            " (behind NAT/firewall). It may only be reachable from inside its network or via a bastion."
+                        }
+                    }
+
                     div { class: "field", style: "margin-top: 16px;", label { "Via bastion" } }
                     SshCmd { command: bastion_cmd.clone() }
 
@@ -1253,8 +1447,8 @@ fn SshConnectModal(system: SystemDetail, on_close: EventHandler<()>) -> Element 
                         dd { class: "mono", "{target}" }
                         dt { "Environment" }
                         dd { "{environment_text}" }
-                        dt { "FQDN" }
-                        dd { class: "mono", "{fqdn}" }
+                        dt { "Reachability" }
+                        dd { "{reachability_text}" }
                     }
                 }
 
@@ -1350,6 +1544,20 @@ fn OverviewTab(
         .kernel
         .clone()
         .unwrap_or_else(|| "unknown".to_string());
+
+    // Editable tag chips (design parity). Seeded from the system's environment/flake so the
+    // section is never empty, plus any operator-added tags. NOTE: tags are NOT yet persisted
+    // server-side (no systems.tags column) — see follow-up TASK-357. This is local UI state
+    // only; the help text marks it as not saved so operators are not misled.
+    let mut tags = use_signal(|| {
+        let mut seed = vec![format!("env:{}", environment.to_lowercase())];
+        if let Some(flake) = system.flake.as_ref() {
+            seed.push(format!("flake:{}", flake.name));
+        }
+        seed
+    });
+    let mut tag_adding = use_signal(|| false);
+    let mut tag_draft = use_signal(String::new);
     let heartbeat_next_in_sec = system
         .last_seen
         .map(|dt| 60.0 - now.signed_duration_since(dt).num_seconds() as f64)
@@ -1631,20 +1839,88 @@ fn OverviewTab(
                 }
                 div {
                     class: "sd-tag-row",
-                    span { class: "sd-tag mono", "env:{environment.to_lowercase()}" }
-                    span { class: "sd-tag mono", "flake:{flake_name}" }
-                    button {
-                        class: "sd-tag sd-tag-add focus-ring",
-                        svg {
-                            class: "w-2.5 h-2.5",
-                            fill: "none",
-                            stroke: "currentColor",
-                            stroke_width: "2",
-                            view_box: "0 0 24 24",
-                            path { d: "M12 5v14M5 12h14" }
-                        }
-                        "add"
+                    if tags.read().is_empty() && !*tag_adding.read() {
+                        span { style: "color: var(--cf-text-muted); font-size: 13px;", "No tags yet" }
                     }
+                    for tag in tags.read().clone() {
+                        {
+                            let tag_to_remove = tag.clone();
+                            rsx! {
+                                span {
+                                    class: "sd-tag mono sd-tag-chip",
+                                    span { class: "sd-tag-label", "#{tag}" }
+                                    button {
+                                        class: "sd-tag-x focus-ring",
+                                        title: "Remove tag",
+                                        onclick: move |_| {
+                                            tags.with_mut(|list| list.retain(|item| *item != tag_to_remove));
+                                        },
+                                        svg {
+                                            class: "w-2 h-2",
+                                            fill: "none",
+                                            stroke: "currentColor",
+                                            stroke_width: "2.5",
+                                            view_box: "0 0 24 24",
+                                            path { d: "M6 6l12 12M18 6L6 18" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if *tag_adding.read() {
+                        span {
+                            class: "sd-tag-input-wrap",
+                            input {
+                                class: "sd-tag-input mono focus-ring",
+                                autofocus: true,
+                                placeholder: "tag…",
+                                value: "{tag_draft}",
+                                oninput: move |e| tag_draft.set(e.value().clone()),
+                                onkeydown: move |e| {
+                                    let key = e.key().to_string();
+                                    if key == "Enter" {
+                                        let value = normalize_tag(&tag_draft.read());
+                                        if !value.is_empty() && !tags.read().contains(&value) {
+                                            tags.with_mut(|list| list.push(value));
+                                        }
+                                        tag_draft.set(String::new());
+                                        tag_adding.set(false);
+                                    } else if key == "Escape" {
+                                        tag_draft.set(String::new());
+                                        tag_adding.set(false);
+                                    }
+                                },
+                                onblur: move |_| {
+                                    let value = normalize_tag(&tag_draft.read());
+                                    if !value.is_empty() && !tags.read().contains(&value) {
+                                        tags.with_mut(|list| list.push(value));
+                                    }
+                                    tag_draft.set(String::new());
+                                    tag_adding.set(false);
+                                },
+                            }
+                        }
+                    } else {
+                        button {
+                            class: "sd-tag sd-tag-add focus-ring",
+                            onclick: move |_| tag_adding.set(true),
+                            svg {
+                                class: "w-2.5 h-2.5",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                view_box: "0 0 24 24",
+                                path { d: "M12 5v14M5 12h14" }
+                            }
+                            "add"
+                        }
+                    }
+                }
+                p {
+                    class: "help",
+                    style: "margin-top: 8px;",
+                    "Free-form labels for your own grouping & filtering. Not saved yet — tag persistence is coming soon."
                 }
             }
         }
@@ -2205,6 +2481,34 @@ fn LogsTabStyled(logs: Vec<DeploymentLogEntry>) -> Element {
         .collect();
     let displayed_logs: Vec<&DeploymentLogEntry> = if cleared() { vec![] } else { filtered_logs };
 
+    // Precompute a day-break label for each line: shown when the calendar day changes from
+    // the previous visible line (design parity — sticky "Today"/"Yesterday"/date dividers).
+    let today = chrono::Utc::now().date_naive();
+    let yesterday = today.pred_opt().unwrap_or(today);
+    let log_rows: Vec<(Option<String>, &DeploymentLogEntry)> = {
+        let mut previous_day: Option<chrono::NaiveDate> = None;
+        displayed_logs
+            .into_iter()
+            .map(|entry| {
+                let day = entry.timestamp.date_naive();
+                let show = previous_day != Some(day);
+                previous_day = Some(day);
+                let label = if show {
+                    Some(if day == today {
+                        "Today".to_string()
+                    } else if day == yesterday {
+                        "Yesterday".to_string()
+                    } else {
+                        day.format("%a, %b %-d, %Y").to_string()
+                    })
+                } else {
+                    None
+                };
+                (label, entry)
+            })
+            .collect()
+    };
+
     rsx! {
         section {
             class: "card sd-logs-card",
@@ -2259,7 +2563,7 @@ fn LogsTabStyled(logs: Vec<DeploymentLogEntry>) -> Element {
             }
             pre {
                 class: "sd-log-stream",
-                for entry in displayed_logs {
+                for (day_label, entry) in log_rows {
                     {
                         let level_class = match entry.level {
                             LogLevel::Info => "sd-log-line sd-log-info",
@@ -2275,6 +2579,13 @@ fn LogsTabStyled(logs: Vec<DeploymentLogEntry>) -> Element {
                             LogLevel::Debug => "DEBUG",
                         };
                         rsx! {
+                            if let Some(label) = day_label {
+                                div {
+                                    class: "sd-log-day",
+                                    role: "separator",
+                                    span { class: "sd-log-day-label", "{label}" }
+                                }
+                            }
                             div {
                                 class: "{level_class}",
                                 span { class: "sd-log-t", "{ts}" }
@@ -2371,6 +2682,7 @@ fn HistoryTab(
     deployment_policy: String,
     allow_mutations: bool,
     on_rollback: EventHandler<SystemCommitHistory>,
+    on_view_logs: EventHandler<()>,
 ) -> Element {
     let rows = commits;
     let committed_timestamps: Vec<chrono::DateTime<chrono::Utc>> =
@@ -2467,6 +2779,7 @@ fn HistoryTab(
                                             button {
                                                 class: "btn-icon focus-ring",
                                                 title: "View logs",
+                                                onclick: move |_| on_view_logs.call(()),
                                                 svg {
                                                     class: "w-3.5 h-3.5",
                                                     fill: "none",
@@ -2486,18 +2799,6 @@ fn HistoryTab(
                                                     stroke: "currentColor",
                                                     view_box: "0 0 24 24",
                                                     path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M9 14l-4-4 4-4M5 10h7a4 4 0 014 4v1" }
-                                                }
-                                            }
-                                            button {
-                                                class: "btn-icon focus-ring",
-                                                title: "More",
-                                                svg {
-                                                    class: "w-3.5 h-3.5",
-                                                    fill: "currentColor",
-                                                    view_box: "0 0 24 24",
-                                                    circle { cx: "5", cy: "12", r: "2" }
-                                                    circle { cx: "12", cy: "12", r: "2" }
-                                                    circle { cx: "19", cy: "12", r: "2" }
                                                 }
                                             }
                                         }
