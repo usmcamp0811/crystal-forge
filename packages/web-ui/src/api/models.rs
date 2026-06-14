@@ -567,6 +567,8 @@ pub struct SystemSummary {
     pub nixos_version: Option<String>,
     pub last_seen: Option<DateTime<Utc>>,
     pub deployment_policy: String,
+    #[serde(default)]
+    pub fqdn: Option<String>,
 }
 
 /// Full system representation for the detail view.
@@ -574,6 +576,8 @@ pub struct SystemSummary {
 pub struct SystemDetail {
     pub id: Uuid,
     pub hostname: String,
+    #[serde(default)]
+    pub fqdn: Option<String>,
     #[serde(default)]
     pub system_configuration_name: Option<String>,
     pub environment: Option<String>,
@@ -617,6 +621,12 @@ pub struct SystemNetworkInfo {
     pub primary_ip: Option<String>,
     pub primary_mac: Option<String>,
     pub gateway_ip: Option<String>,
+    #[serde(default = "default_system_reachability")]
+    pub reachability: String,
+}
+
+fn default_system_reachability() -> String {
+    "direct".to_string()
 }
 
 /// Security posture subset for system detail.
@@ -1402,6 +1412,8 @@ pub struct CreateSystemRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateSystemRequest {
     pub hostname: String,
+    #[serde(default)]
+    pub fqdn: Option<String>,
     pub system_configuration_name: Option<String>,
     pub environment: Option<String>,
     pub flake_name: Option<String>,

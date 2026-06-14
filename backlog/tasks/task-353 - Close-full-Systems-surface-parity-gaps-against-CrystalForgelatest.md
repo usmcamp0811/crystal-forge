@@ -94,9 +94,6 @@ This task covers the **full Systems surface**:
 - Add/expand screenshot and assertion coverage so the Systems list and Systems detail surfaces are both provably covered by `checks/web-ui`
 <!-- SECTION:DESCRIPTION:END -->
 
-<!-- AC:END -->
-<!-- AC:END -->
-
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 Systems list header, stat strip, filters, cards mode, and table mode materially match CrystalForgelatest on desktop

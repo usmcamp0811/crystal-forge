@@ -11,6 +11,7 @@ use crate::components::environments::{normalize_color_hex, with_alpha};
 use crate::components::filters::ViewMode;
 use crate::components::forms::{AddSystemForm, NewSystemDraft, validate_new_system};
 use crate::components::heartbeat_spinner::HeartbeatSpinner;
+use crate::components::icon::{Icon, IconName};
 use crate::components::modals::{
     GeneratedKeyPair, KeyPairModal, RemoveSystemDialog, UpdatePublicKeyModal, generate_key_pair,
 };
@@ -188,7 +189,6 @@ pub fn SystemsListView() -> Element {
     let mut draft = use_signal(NewSystemDraft::new);
     let mut pending_remove = use_signal(|| None::<SystemSummary>);
     let mut pending_update_key = use_signal(|| None::<SystemSummary>);
-    let mut editing_system = use_signal(|| None::<uuid::Uuid>);
     let mut show_key_modal = use_signal(|| false);
     let mut generated_keys = use_signal(|| None::<GeneratedKeyPair>);
     let mut update_key_error = use_signal(|| None::<String>);
@@ -427,14 +427,7 @@ pub fn SystemsListView() -> Element {
                                 export_systems_oscal(&systems_snapshot);
                             }
                         },
-                        svg {
-                            class: "w-3.5 h-3.5",
-                            fill: "none",
-                            stroke: "currentColor",
-                            stroke_width: "2",
-                            view_box: "0 0 24 24",
-                            path { d: "M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" }
-                        }
+                        Icon { name: IconName::Download, size: 14 }
                         "Export"
                     }
                     // Add system (primary) — keeps existing functionality
@@ -455,14 +448,7 @@ pub fn SystemsListView() -> Element {
                                     dismiss_add_target_callout.set(true);
                                 }
                             },
-                            svg {
-                                class: "w-3.5 h-3.5",
-                                fill: "none",
-                                stroke: "currentColor",
-                                stroke_width: "2",
-                                view_box: "0 0 24 24",
-                                path { d: "M12 4v16m8-8H4" }
-                            }
+                            Icon { name: IconName::Plus, size: 14 }
                             if *show_add_form.read() { "Close" } else { "Add system" }
                         }
                         if from_setup() && !*show_add_form.read() && !dismiss_add_target_callout() {
@@ -534,6 +520,7 @@ pub fn SystemsListView() -> Element {
                                         nixos_version: detail.nixos_version,
                                         last_seen: detail.last_seen,
                                         deployment_policy: detail.deployment_policy,
+                                        fqdn: detail.fqdn,
                                     };
 
                                     let mut values = local_systems.read().clone();
@@ -564,73 +551,6 @@ pub fn SystemsListView() -> Element {
                     flake_names: registered_flakes.clone(),
                     title: "Register System".to_string(),
                     submit_label: "Save System".to_string(),
-                }
-            }
-
-            if let Some(system_id) = *editing_system.read() {
-                AddSystemForm {
-                    draft: draft,
-                    error: add_error,
-                    show_onboarding_callouts: false,
-                    key_modal_open: *show_key_modal.read(),
-                    on_cancel: move |_| {
-                        draft.set(NewSystemDraft::new());
-                        add_error.set(None);
-                        editing_system.set(None);
-                    },
-                    on_submit: move |_| {
-                        let next = draft.read().clone();
-                        if next.hostname.trim().is_empty() {
-                            add_error.set(Some("Hostname is required.".to_string()));
-                            return;
-                        }
-                        spawn(async move {
-                            match update_system_via_api(
-                                system_id,
-                                next.hostname.trim().to_string(),
-                                normalize_optional(&next.system_configuration_name),
-                                normalize_optional(&next.environment),
-                                normalize_optional(&next.flake_name),
-                                normalize_policy(&next.deployment_policy),
-                            ).await {
-                                Ok(detail) => {
-                                    let updated = SystemSummary {
-                                        id: detail.id,
-                                        hostname: detail.hostname,
-                                        system_configuration_name: detail.system_configuration_name,
-                                        environment: detail.environment,
-                                        flake_id: detail.flake.as_ref().map(|flake| flake.id),
-                                        primary_ip: detail.network.primary_ip,
-                                        health_status: detail.health_status,
-                                        deployment_status: detail.deployment_status,
-                                        pipeline_stage: detail.pipeline_stage,
-                                        cve_counts: detail.cve_counts,
-                                        nixos_version: detail.nixos_version,
-                                        last_seen: detail.last_seen,
-                                        deployment_policy: detail.deployment_policy,
-                                    };
-                                    let mut values = local_systems.read().clone();
-                                    if let Some(item) = values.iter_mut().find(|item| item.id == system_id) {
-                                        *item = updated;
-                                    }
-                                    values.sort_by(|a, b| a.hostname.to_lowercase().cmp(&b.hostname.to_lowercase()));
-                                    local_systems.set(values);
-                                    draft.set(NewSystemDraft::new());
-                                    add_error.set(None);
-                                    editing_system.set(None);
-                                }
-                                Err(error_message) => add_error.set(Some(error_message)),
-                            }
-                        });
-                    },
-                    on_generate_keys: move |_| {
-                        generated_keys.set(Some(generate_key_pair()));
-                        show_key_modal.set(true);
-                    },
-                    environments: dropdown_environments.clone(),
-                    flake_names: registered_flakes.clone(),
-                    title: "Edit System".to_string(),
-                    submit_label: "Save Changes".to_string(),
                 }
             }
 
@@ -783,10 +703,10 @@ pub fn SystemsListView() -> Element {
                     class: "empty",
                     style: "margin: 24px;",
                     "data-testid": "systems-loading-state",
-                    div {
-                        class: "mx-auto mb-3 animate-spin rounded-full h-8 w-8 border-b-2 border-blue-400"
+                    crate::components::loading::DashboardLoadingSpinner {
+                        label: "Loading systems".to_string(),
+                        size: 36,
                     }
-                    h3 { "Loading systems" }
                     div { "Fetching fleet data from the API." }
                 }
             } else if let Some(error_message) = load_error.read().clone() {
@@ -1026,6 +946,7 @@ pub fn SystemsListView() -> Element {
                             match update_system_via_api(
                                 system_id,
                                 request.hostname,
+                                request.fqdn,
                                 request.system_configuration_name,
                                 request.environment,
                                 request.flake_name,
@@ -1229,7 +1150,10 @@ fn SystemPreviewPanel(
                             "{detail.health_status.label()}"
                         }
                     }
-                    span { class: "fqdn", "{derived_fqdn(&detail.hostname, detail.environment.as_deref())}" }
+                    span {
+                        class: "fqdn",
+                        "{detail.fqdn.clone().filter(|value| !value.trim().is_empty()).unwrap_or_else(|| derived_fqdn(&detail.hostname, detail.environment.as_deref()))}"
+                    }
                 }
                 button {
                     class: "btn-icon focus-ring",
@@ -1365,16 +1289,19 @@ fn SystemPreviewPanel(
                 button {
                     class: "btn btn-ghost focus-ring",
                     onclick: move |_| on_open_detail.call(()),
+                    Icon { name: IconName::ArrowRight, size: 12 }
                     "Open full detail"
                 }
                 button {
                     class: "btn btn-ghost focus-ring",
                     onclick: move |_| on_edit.call(()),
+                    Icon { name: IconName::Gear, size: 12 }
                     "Edit"
                 }
                 button {
                     class: "btn btn-primary focus-ring",
                     onclick: move |_| on_deploy.call(()),
+                    Icon { name: IconName::Deploy, size: 12 }
                     "Deploy"
                 }
             }

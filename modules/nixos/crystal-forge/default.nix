@@ -1,161 +1,204 @@
-{ config, lib, pkgs, ... }:
-let
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}: let
   cfg = config.services.crystal-forge;
-  tomlFormat = pkgs.formats.toml { };
+  tomlFormat = pkgs.formats.toml {};
   postgres_pkg = config.services.postgresql.package;
 
   # Recursively remove any null values so TOML generation won’t choke.
   stripNulls = v:
-    if builtins.isAttrs v then
-      lib.filterAttrs (_: vv: vv != null) (lib.mapAttrs (_: stripNulls) v)
-    else if builtins.isList v then
-      lib.filter (x: x != null) (map stripNulls v)
-    else
-      v;
+    if builtins.isAttrs v
+    then lib.filterAttrs (_: vv: vv != null) (lib.mapAttrs (_: stripNulls) v)
+    else if builtins.isList v
+    then lib.filter (x: x != null) (map stripNulls v)
+    else v;
 
   # Build the raw config first (your existing baseConfig logic, unchanged)
-  baseConfigRaw = {
-    database = {
-      host = cfg.database.host;
-      port = cfg.database.port;
-      user = cfg.database.user;
-      password = if cfg.database.passwordFile != null then
-        "__PLACEHOLDER_PASSWORD__"
-      else
-        cfg.database.password;
-      name = cfg.database.name;
-    };
-  } // lib.optionalAttrs cfg.server.enable {
-    server = {
-      host = cfg.server.host;
-      port = cfg.server.port;
-      eval_workers = cfg.server.eval_workers;
-      eval_max_memory_mb = cfg.server.eval_max_memory_mb;
-      eval_check_cache = cfg.server.eval_check_cache;
-      allow_private_cache_test_targets =
-        cfg.server.allow_private_cache_test_targets;
-    } // lib.optionalAttrs (cfg.server.role_mapping != { }) {
-      role_mapping = cfg.server.role_mapping;
-    };
-  } // lib.optionalAttrs cfg.client.enable {
-    client = {
-      server_host = cfg.client.server_host;
-      server_port = cfg.client.server_port;
-      private_key = toString cfg.client.private_key;
-    };
-  } // lib.optionalAttrs (cfg.deployment.cache_url != null
-    || cfg.deployment.max_deployment_age_minutes != 30
-    || !cfg.deployment.dry_run_first || cfg.deployment.fallback_to_local_build
-    || cfg.deployment.deployment_timeout_minutes != 60
-    || cfg.deployment.deployment_poll_interval != "15m") {
-      deployment = {
-        max_deployment_age_minutes = cfg.deployment.max_deployment_age_minutes;
-        dry_run_first = cfg.deployment.dry_run_first;
-        fallback_to_local_build = cfg.deployment.fallback_to_local_build;
-        deployment_timeout_minutes = cfg.deployment.deployment_timeout_minutes;
-        deployment_poll_interval = cfg.deployment.deployment_poll_interval;
-        require_sigs = cfg.deployment.require_sigs;
-        strategy = cfg.deployment.deployment_strategy;
-      } // lib.optionalAttrs (cfg.deployment.cache_url != null) {
-        cache_url = cfg.deployment.cache_url;
-        cache_public_key = cfg.deployment.cache_public_key;
+  baseConfigRaw =
+    {
+      database = {
+        host = cfg.database.host;
+        port = cfg.database.port;
+        user = cfg.database.user;
+        password =
+          if cfg.database.passwordFile != null
+          then "__PLACEHOLDER_PASSWORD__"
+          else cfg.database.password;
+        name = cfg.database.name;
       };
-    } // lib.optionalAttrs (cfg.systems != [ ]) {
+    }
+    // lib.optionalAttrs cfg.server.enable {
+      server =
+        {
+          host = cfg.server.host;
+          port = cfg.server.port;
+          eval_workers = cfg.server.eval_workers;
+          eval_max_memory_mb = cfg.server.eval_max_memory_mb;
+          eval_check_cache = cfg.server.eval_check_cache;
+          allow_private_cache_test_targets =
+            cfg.server.allow_private_cache_test_targets;
+        }
+        // lib.optionalAttrs (cfg.server.role_mapping != {}) {
+          role_mapping = cfg.server.role_mapping;
+        };
+    }
+    // lib.optionalAttrs cfg.client.enable {
+      client = {
+        server_host = cfg.client.server_host;
+        server_port = cfg.client.server_port;
+        private_key = toString cfg.client.private_key;
+      };
+    }
+    // lib.optionalAttrs (cfg.deployment.cache_url
+      != null
+      || cfg.deployment.max_deployment_age_minutes != 30
+      || !cfg.deployment.dry_run_first
+      || cfg.deployment.fallback_to_local_build
+      || cfg.deployment.deployment_timeout_minutes != 60
+      || cfg.deployment.deployment_poll_interval != "15m") {
+      deployment =
+        {
+          max_deployment_age_minutes = cfg.deployment.max_deployment_age_minutes;
+          dry_run_first = cfg.deployment.dry_run_first;
+          fallback_to_local_build = cfg.deployment.fallback_to_local_build;
+          deployment_timeout_minutes = cfg.deployment.deployment_timeout_minutes;
+          deployment_poll_interval = cfg.deployment.deployment_poll_interval;
+          require_sigs = cfg.deployment.require_sigs;
+          strategy = cfg.deployment.deployment_strategy;
+        }
+        // lib.optionalAttrs (cfg.deployment.cache_url != null) {
+          cache_url = cfg.deployment.cache_url;
+          cache_public_key = cfg.deployment.cache_public_key;
+        };
+    }
+    // lib.optionalAttrs (cfg.systems != []) {
       # NOTE: systems’ items can include null fields by default (e.g., flake_name, desired_target, server_public_key)
       # We’ll strip them globally via stripNulls below.
       systems = cfg.systems;
-    } // lib.optionalAttrs cfg.server.enable {
+    }
+    // lib.optionalAttrs cfg.server.enable {
       flakes = {
         watched = cfg.flakes.watched;
         flake_polling_interval = cfg.flakes.flake_polling_interval;
         commit_evaluation_interval = cfg.flakes.commit_evaluation_interval;
         build_processing_interval = cfg.flakes.build_processing_interval;
       };
-    } // lib.optionalAttrs (cfg.environments != [ ]) {
+    }
+    // lib.optionalAttrs (cfg.environments != []) {
       environments = cfg.environments;
-    } // lib.optionalAttrs cfg.build.enable {
-      build = {
-        # New concurrency control
-        max_concurrent_derivations = cfg.build.max_concurrent_derivations;
-        max_jobs = cfg.build.max_jobs;
-        cores_per_job = cfg.build.cores_per_job;
+    }
+    // lib.optionalAttrs cfg.build.enable {
+      build =
+        {
+          # New concurrency control
+          max_concurrent_derivations = cfg.build.max_concurrent_derivations;
+          max_jobs = cfg.build.max_jobs;
+          cores_per_job = cfg.build.cores_per_job;
 
-        # Binary cache and network
-        use_substitutes = cfg.build.use_substitutes;
-        offline = cfg.build.offline;
+          # Binary cache and network
+          use_substitutes = cfg.build.use_substitutes;
+          offline = cfg.build.offline;
 
-        # Timing
-        poll_interval = cfg.build.poll_interval;
-        max_silent_time = cfg.build.max_silent_time;
-        timeout = cfg.build.timeout;
+          # Timing
+          poll_interval = cfg.build.poll_interval;
+          max_silent_time = cfg.build.max_silent_time;
+          timeout = cfg.build.timeout;
 
-        # Security
-        sandbox = cfg.build.sandbox;
+          # Security
+          sandbox = cfg.build.sandbox;
 
-        # Systemd isolation
-        use_systemd_scope = cfg.build.use_systemd_scope;
-      } // lib.optionalAttrs (cfg.build.systemd_memory_max != null) {
-        systemd_memory_max = cfg.build.systemd_memory_max;
-      } // lib.optionalAttrs (cfg.build.systemd_cpu_quota != null) {
-        systemd_cpu_quota = cfg.build.systemd_cpu_quota;
-      } // lib.optionalAttrs (cfg.build.systemd_timeout_stop_sec != null) {
-        systemd_timeout_stop_sec = cfg.build.systemd_timeout_stop_sec;
-      } // lib.optionalAttrs (cfg.build.systemd_properties != [ ]) {
-        systemd_properties = cfg.build.systemd_properties;
-      };
-    } // lib.optionalAttrs (cfg.auth.ssh_key_path != null || cfg.auth.netrc_path
-      != null || cfg.auth.ssh_known_hosts_path != null
+          # Systemd isolation
+          use_systemd_scope = cfg.build.use_systemd_scope;
+        }
+        // lib.optionalAttrs (cfg.build.systemd_memory_max != null) {
+          systemd_memory_max = cfg.build.systemd_memory_max;
+        }
+        // lib.optionalAttrs (cfg.build.systemd_cpu_quota != null) {
+          systemd_cpu_quota = cfg.build.systemd_cpu_quota;
+        }
+        // lib.optionalAttrs (cfg.build.systemd_timeout_stop_sec != null) {
+          systemd_timeout_stop_sec = cfg.build.systemd_timeout_stop_sec;
+        }
+        // lib.optionalAttrs (cfg.build.systemd_properties != []) {
+          systemd_properties = cfg.build.systemd_properties;
+        };
+    }
+    // lib.optionalAttrs (cfg.auth.ssh_key_path
+      != null
+      || cfg.auth.netrc_path
+      != null
+      || cfg.auth.ssh_known_hosts_path != null
       || cfg.auth.ssh_disable_strict_host_checking) {
-        auth = lib.optionalAttrs (cfg.auth.ssh_key_path != null) {
+      auth =
+        lib.optionalAttrs (cfg.auth.ssh_key_path != null) {
           ssh_key_path = toString cfg.auth.ssh_key_path;
-        } // lib.optionalAttrs (cfg.auth.ssh_known_hosts_path != null) {
+        }
+        // lib.optionalAttrs (cfg.auth.ssh_known_hosts_path != null) {
           ssh_known_hosts_path = toString cfg.auth.ssh_known_hosts_path;
-        } // lib.optionalAttrs (cfg.auth.netrc_path != null) {
+        }
+        // lib.optionalAttrs (cfg.auth.netrc_path != null) {
           netrc_path = toString cfg.auth.netrc_path;
-        } // lib.optionalAttrs cfg.auth.ssh_disable_strict_host_checking {
+        }
+        // lib.optionalAttrs cfg.auth.ssh_disable_strict_host_checking {
           ssh_disable_strict_host_checking =
             cfg.auth.ssh_disable_strict_host_checking;
         };
-      } // {
-        vulnix = {
+    }
+    // {
+      vulnix =
+        {
           timeout = cfg.vulnix.timeout;
           max_retries = cfg.vulnix.max_retries;
           enable_whitelist = cfg.vulnix.enable_whitelist;
           extra_args = cfg.vulnix.extra_args;
           poll_interval = cfg.vulnix.poll_interval;
-        } // lib.optionalAttrs (cfg.vulnix.whitelist_path != null) {
+        }
+        // lib.optionalAttrs (cfg.vulnix.whitelist_path != null) {
           whitelist_path = toString cfg.vulnix.whitelist_path;
         };
-      } // lib.optionalAttrs
+    }
+    // lib.optionalAttrs
     (cfg.cache.push_to != null || cfg.cache.cache_type != "Nix") {
-      cache = {
-        cache_type = cfg.cache.cache_type;
-        push_after_build = cfg.cache.push_after_build;
-        parallel_uploads = cfg.cache.parallel_uploads;
-        max_retries = cfg.cache.max_retries;
-        retry_delay_seconds = cfg.cache.retry_delay_seconds;
-        force_repush = cfg.cache.force_repush;
-        require_sigs = cfg.deployment.require_sigs;
-        attic_ignore_upstream_cache_filter =
-          cfg.cache.attic_ignore_upstream_cache_filter;
-        attic_jobs = cfg.cache.attic_jobs;
-      } // lib.optionalAttrs (cfg.cache.push_to != null) {
-        push_to = cfg.cache.push_to;
-      } // lib.optionalAttrs (cfg.cache.signing_key != null) {
-        signing_key = toString cfg.cache.signing_key;
-      } // lib.optionalAttrs (cfg.cache.compression != null) {
-        compression = cfg.cache.compression;
-      } // lib.optionalAttrs (cfg.cache.push_filter != null) {
-        push_filter = cfg.cache.push_filter;
-      } // lib.optionalAttrs (cfg.cache.s3_region != null) {
-        s3_region = cfg.cache.s3_region;
-      } // lib.optionalAttrs (cfg.cache.s3_profile != null) {
-        s3_profile = cfg.cache.s3_profile;
-      } // lib.optionalAttrs (cfg.cache.attic_token != null) {
-        attic_token = cfg.cache.attic_token;
-      } // lib.optionalAttrs (cfg.cache.attic_cache_name != null) {
-        attic_cache_name = cfg.cache.attic_cache_name;
-      };
+      cache =
+        {
+          cache_type = cfg.cache.cache_type;
+          push_after_build = cfg.cache.push_after_build;
+          parallel_uploads = cfg.cache.parallel_uploads;
+          max_retries = cfg.cache.max_retries;
+          retry_delay_seconds = cfg.cache.retry_delay_seconds;
+          force_repush = cfg.cache.force_repush;
+          require_sigs = cfg.deployment.require_sigs;
+          attic_ignore_upstream_cache_filter =
+            cfg.cache.attic_ignore_upstream_cache_filter;
+          attic_jobs = cfg.cache.attic_jobs;
+        }
+        // lib.optionalAttrs (cfg.cache.push_to != null) {
+          push_to = cfg.cache.push_to;
+        }
+        // lib.optionalAttrs (cfg.cache.signing_key != null) {
+          signing_key = toString cfg.cache.signing_key;
+        }
+        // lib.optionalAttrs (cfg.cache.compression != null) {
+          compression = cfg.cache.compression;
+        }
+        // lib.optionalAttrs (cfg.cache.push_filter != null) {
+          push_filter = cfg.cache.push_filter;
+        }
+        // lib.optionalAttrs (cfg.cache.s3_region != null) {
+          s3_region = cfg.cache.s3_region;
+        }
+        // lib.optionalAttrs (cfg.cache.s3_profile != null) {
+          s3_profile = cfg.cache.s3_profile;
+        }
+        // lib.optionalAttrs (cfg.cache.attic_token != null) {
+          attic_token = cfg.cache.attic_token;
+        }
+        // lib.optionalAttrs (cfg.cache.attic_cache_name != null) {
+          attic_cache_name = cfg.cache.attic_cache_name;
+        };
     };
 
   # Now sanitize away any nulls before TOML generation
@@ -166,9 +209,13 @@ let
   serverConfigPath = "/var/lib/crystal-forge/config.toml";
   agentConfigPath = "/var/lib/crystal-forge-agent/config.toml";
 
-  makeConfigScript = destPath:
+  makeConfigScript = {
+    destPath,
+    includeServerStateSetup ? false,
+    includeBuilderApiKeySetup ? false,
+  }:
     pkgs.writeShellScript "generate-crystal-forge-config-${
-      lib.replaceStrings [ "/" "." ] [ "-" "-" ] destPath
+      lib.replaceStrings ["/" "."] ["-" "-"] destPath
     }" ''
       set -euo pipefail
       generatedConfigPath="${destPath}"
@@ -207,66 +254,76 @@ let
         fi
       ''}
 
-      ${lib.optionalString (cfg.auth.ssh_key_path == null
+      ${lib.optionalString (includeServerStateSetup
+        && cfg.auth.ssh_key_path == null
         && (cfg.build.enable || cfg.server.enable)) ''
-          SSH_KEY_PATH="/var/lib/crystal-forge/.ssh/id_ed25519"
+        SSH_KEY_PATH="/var/lib/crystal-forge/.ssh/id_ed25519"
 
-          # Fix SSH key permissions before any operations (if key exists)
-          if [ -f "$SSH_KEY_PATH" ]; then
-            if [ -w "$SSH_KEY_PATH" ]; then
-              chmod 600 "$SSH_KEY_PATH"
-            else
-              echo "Skipping SSH key permission fix for read-only key: $SSH_KEY_PATH"
-            fi
-          fi
-          
-          if [ ! -f "$SSH_KEY_PATH" ]; then
-            echo "Generating SSH key for Crystal Forge Git authentication..."
-            ${pkgs.openssh}/bin/ssh-keygen -t ed25519 -f "$SSH_KEY_PATH" -N "" -C "crystal-forge@$(${pkgs.nettools}/bin/hostname)"
-            chown crystal-forge:crystal-forge "$SSH_KEY_PATH" "$SSH_KEY_PATH.pub"
+        # Fix SSH key permissions before any operations (if key exists)
+        if [ -f "$SSH_KEY_PATH" ]; then
+          if [ -w "$SSH_KEY_PATH" ]; then
             chmod 600 "$SSH_KEY_PATH"
-            chmod 644 "$SSH_KEY_PATH.pub"
-            echo "SSH key generated at $SSH_KEY_PATH"
-            echo "Public key for Git repository setup:"
-            cat "$SSH_KEY_PATH.pub"
+          else
+            echo "Skipping SSH key permission fix for read-only key: $SSH_KEY_PATH"
           fi
+        fi
 
-          ${pkgs.gnused}/bin/sed -i '/\[auth\]/a ssh_key_path = "/var/lib/crystal-forge/.ssh/id_ed25519"' "$generatedConfigPath"
-        ''}
+        if [ ! -f "$SSH_KEY_PATH" ]; then
+          echo "Generating SSH key for Crystal Forge Git authentication..."
+          ${pkgs.openssh}/bin/ssh-keygen -t ed25519 -f "$SSH_KEY_PATH" -N "" -C "crystal-forge@$(${pkgs.nettools}/bin/hostname)"
+          chown crystal-forge:crystal-forge "$SSH_KEY_PATH" "$SSH_KEY_PATH.pub"
+          chmod 600 "$SSH_KEY_PATH"
+          chmod 644 "$SSH_KEY_PATH.pub"
+          echo "SSH key generated at $SSH_KEY_PATH"
+          echo "Public key for Git repository setup:"
+          cat "$SSH_KEY_PATH.pub"
+        fi
 
-      ${lib.optionalString (cfg.build.enable && cfg.build.api_mode && cfg.build.api_key_file == null) ''
-          BUILDER_API_KEY_PATH="/var/lib/crystal-forge/builder-api.key"
-          
-          if [ ! -f "$BUILDER_API_KEY_PATH" ]; then
-            echo "Generating builder API key for Crystal Forge API mode..."
-            ${pkgs.crystal-forge.default.server}/bin/cf-keygen -y -f "$BUILDER_API_KEY_PATH"
-            echo "Builder API key generated at $BUILDER_API_KEY_PATH"
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            echo "📋 BUILDER REGISTRATION REQUIRED"
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            echo ""
-            echo "Register this builder in the Crystal Forge UI with the following public key:"
-            echo ""
-            cat "$BUILDER_API_KEY_PATH.pub"
-            echo ""
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          fi
-          
-          # Always normalize permissions (even if key already existed)
-          chown crystal-forge:crystal-forge "$BUILDER_API_KEY_PATH"
-          chmod 600 "$BUILDER_API_KEY_PATH"
-          
-          if [ -f "$BUILDER_API_KEY_PATH.pub" ]; then
-            chown crystal-forge:crystal-forge "$BUILDER_API_KEY_PATH.pub"
-            chmod 644 "$BUILDER_API_KEY_PATH.pub"
-          fi
-        ''}
+        ${pkgs.gnused}/bin/sed -i '/\[auth\]/a ssh_key_path = "/var/lib/crystal-forge/.ssh/id_ed25519"' "$generatedConfigPath"
+      ''}
+
+      ${lib.optionalString (includeBuilderApiKeySetup && cfg.build.enable && cfg.build.api_mode && cfg.build.api_key_file == null) ''
+        BUILDER_API_KEY_PATH="/var/lib/crystal-forge/builder-api.key"
+
+        if [ ! -f "$BUILDER_API_KEY_PATH" ]; then
+          echo "Generating builder API key for Crystal Forge API mode..."
+          ${pkgs.crystal-forge.default.server}/bin/cf-keygen -y -f "$BUILDER_API_KEY_PATH"
+          echo "Builder API key generated at $BUILDER_API_KEY_PATH"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📋 BUILDER REGISTRATION REQUIRED"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
+          echo "Register this builder in the Crystal Forge UI with the following public key:"
+          echo ""
+          cat "$BUILDER_API_KEY_PATH.pub"
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        fi
+
+        # Always normalize permissions (even if key already existed)
+        chown crystal-forge:crystal-forge "$BUILDER_API_KEY_PATH"
+        chmod 600 "$BUILDER_API_KEY_PATH"
+
+        if [ -f "$BUILDER_API_KEY_PATH.pub" ]; then
+          chown crystal-forge:crystal-forge "$BUILDER_API_KEY_PATH.pub"
+          chmod 644 "$BUILDER_API_KEY_PATH.pub"
+        fi
+      ''}
 
       chmod 600 "$generatedConfigPath"
     '';
 
-  configScriptServer = makeConfigScript serverConfigPath;
-  configScriptAgent = makeConfigScript agentConfigPath;
+  configScriptServer = makeConfigScript {
+    destPath = serverConfigPath;
+    includeServerStateSetup = true;
+    includeBuilderApiKeySetup = true;
+  };
+
+  configScriptAgent = makeConfigScript {
+    destPath = agentConfigPath;
+    includeServerStateSetup = false;
+    includeBuilderApiKeySetup = false;
+  };
 
   serverScript = pkgs.writeShellScript "crystal-forge-server" ''
     export CRYSTAL_FORGE_CONFIG="${serverConfigPath}"
@@ -328,7 +385,7 @@ in {
     enable = lib.mkEnableOption "Crystal Forge service(s)";
 
     log_level = lib.mkOption {
-      type = lib.types.enum [ "off" "error" "warn" "info" "debug" "trace" ];
+      type = lib.types.enum ["off" "error" "warn" "info" "debug" "trace"];
       default = "info";
       description = "Log level for Crystal Forge services";
     };
@@ -398,24 +455,24 @@ in {
             branch = lib.mkOption {
               type = lib.types.nullOr lib.types.str;
               default = null;
-              description =
-                "Git branch to track (defaults to 'main' if not specified)";
+              description = "Git branch to track (defaults to 'main' if not specified)";
             };
             initial_commit_depth = lib.mkOption {
               type = lib.types.int;
               default = 5;
-              description =
-                "How many commits in the past to monitor when initializing the flake monitor";
+              description = "How many commits in the past to monitor when initializing the flake monitor";
             };
           };
         });
-        default = [ ];
+        default = [];
         description = "List of flakes to watch for changes";
-        example = [{
-          name = "dotfiles";
-          repo_url = "git+https://gitlab.com/usmcamp0811/dotfiles";
-          auto_poll = false;
-        }];
+        example = [
+          {
+            name = "dotfiles";
+            repo_url = "git+https://gitlab.com/usmcamp0811/dotfiles";
+            auto_poll = false;
+          }
+        ];
       };
       flake_polling_interval = lib.mkOption {
         type = lib.types.str;
@@ -438,20 +495,17 @@ in {
       ssh_key_path = lib.mkOption {
         type = lib.types.nullOr lib.types.path;
         default = null;
-        description =
-          "Path to SSH private key for Git authentication. If null, SSH keys will be generated automatically.";
+        description = "Path to SSH private key for Git authentication. If null, SSH keys will be generated automatically.";
       };
       ssh_known_hosts_path = lib.mkOption {
         type = lib.types.nullOr lib.types.path;
         default = null;
-        description =
-          "Path to SSH known_hosts file. If null, defaults to /var/lib/crystal-forge/.ssh/known_hosts";
+        description = "Path to SSH known_hosts file. If null, defaults to /var/lib/crystal-forge/.ssh/known_hosts";
       };
       netrc_path = lib.mkOption {
         type = lib.types.nullOr lib.types.path;
         default = null;
-        description =
-          "Path to .netrc file for HTTPS Git authentication. If null, defaults to /var/lib/crystal-forge/.netrc";
+        description = "Path to .netrc file for HTTPS Git authentication. If null, defaults to /var/lib/crystal-forge/.netrc";
       };
       ssh_disable_strict_host_checking = lib.mkOption {
         type = lib.types.bool;
@@ -526,7 +580,7 @@ in {
 
         sslMode = lib.mkOption {
           type =
-            lib.types.enum [ "disable" "require" "verify-ca" "verify-full" ];
+            lib.types.enum ["disable" "require" "verify-ca" "verify-full"];
           default = "disable";
           description = "SSL mode for PostgreSQL connection";
         };
@@ -547,8 +601,7 @@ in {
         disableDeletion = lib.mkOption {
           type = lib.types.bool;
           default = true;
-          description =
-            "Prevent deletion of provisioned dashboards from Grafana UI";
+          description = "Prevent deletion of provisioned dashboards from Grafana UI";
         };
       };
     };
@@ -865,7 +918,7 @@ in {
 
       systemd_properties = lib.mkOption {
         type = lib.types.listOf lib.types.str;
-        default = [ "MemorySwapMax=2G" "TasksMax=3000" ];
+        default = ["MemorySwapMax=2G" "TasksMax=3000"];
         description = lib.mdDoc ''
           Additional systemd properties to set for build scopes.
 
@@ -889,8 +942,7 @@ in {
           **Note**: Service-only properties (Environment, Restart,
           WorkingDirectory) are ignored for scopes.
         '';
-        example =
-          [ "MemorySwapMax=4G" "TasksMax=5000" "IOWeight=100" "CPUWeight=100" ];
+        example = ["MemorySwapMax=4G" "TasksMax=5000" "IOWeight=100" "CPUWeight=100"];
       };
 
       # === BUILDER API MODE ===
@@ -987,7 +1039,7 @@ in {
       };
       extra_args = lib.mkOption {
         type = lib.types.listOf lib.types.str;
-        default = [ ];
+        default = [];
         description = "Extra args";
       };
       whitelist_path = lib.mkOption {
@@ -1004,7 +1056,7 @@ in {
 
     cache = {
       cache_type = lib.mkOption {
-        type = lib.types.enum [ "S3" "Attic" "Http" "Nix" ];
+        type = lib.types.enum ["S3" "Attic" "Http" "Nix"];
         default = "Nix";
         description = "Type of cache to use";
       };
@@ -1052,8 +1104,7 @@ in {
       encryption_key_file = lib.mkOption {
         type = lib.types.nullOr lib.types.path;
         default = null;
-        description =
-          "Path to file containing CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY for encrypting cache credentials at rest";
+        description = "Path to file containing CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY for encrypting cache credentials at rest";
       };
       # Attic-specific options
       attic_token = lib.mkOption {
@@ -1095,16 +1146,14 @@ in {
       force_repush = lib.mkOption {
         type = lib.types.bool;
         default = false;
-        description =
-          "Force re-push to cache even if it thinks it's already there.";
+        description = "Force re-push to cache even if it thinks it's already there.";
       };
     };
     deployment = {
       max_deployment_age_minutes = lib.mkOption {
         type = lib.types.ints.unsigned;
         default = 30;
-        description =
-          "Maximum age in minutes for deployments to be considered valid";
+        description = "Maximum age in minutes for deployments to be considered valid";
       };
       dry_run_first = lib.mkOption {
         type = lib.types.bool;
@@ -1142,7 +1191,7 @@ in {
         description = "Check sigs before deployment";
       };
       deployment_strategy = lib.mkOption {
-        type = lib.types.enum [ "immediate_persist" "boot_only" ];
+        type = lib.types.enum ["immediate_persist" "boot_only"];
         default = "immediate_persist";
         description = lib.mdDoc ''
           Deployment strategy for agent deployments.
@@ -1185,22 +1234,24 @@ in {
             description = "Desired derivation hash for system";
           };
           deployment_policy = lib.mkOption {
-            type = lib.types.enum [ "manual" "auto_latest" "pinned" ];
+            type = lib.types.enum ["manual" "auto_latest" "pinned"];
             default = "manual";
             description = "Deployment policy for the system";
           };
         };
       });
-      default = [ ];
+      default = [];
       description = "Systems to register with Crystal Forge";
-      example = [{
-        hostname = "myhost";
-        public_key = "base64encodedkey";
-        environment = "production";
-        flake_name = "dotfiles";
-        desired_target = null;
-        deployment_policy = "manual";
-      }];
+      example = [
+        {
+          hostname = "myhost";
+          public_key = "base64encodedkey";
+          environment = "production";
+          flake_name = "dotfiles";
+          desired_target = null;
+          deployment_policy = "manual";
+        }
+      ];
     };
 
     environments = lib.mkOption {
@@ -1228,16 +1279,17 @@ in {
           };
         };
       });
-      default = [ ];
+      default = [];
       description = "List of environments";
-      example = [{
-        name = "dev";
-        description =
-          "Development environment for Crystal Forge agents and evaluation";
-        is_active = true;
-        risk_profile = "LOW";
-        compliance_level = "NONE";
-      }];
+      example = [
+        {
+          name = "dev";
+          description = "Development environment for Crystal Forge agents and evaluation";
+          is_active = true;
+          risk_profile = "LOW";
+          compliance_level = "NONE";
+        }
+      ];
     };
 
     server = {
@@ -1253,7 +1305,7 @@ in {
         description = "Server port";
       };
       auth_mode = lib.mkOption {
-        type = lib.types.enum [ "local" "oidc" ];
+        type = lib.types.enum ["local" "oidc"];
         default = "local";
         description = lib.mdDoc ''
           This is the type of authentication mode to use.
@@ -1319,7 +1371,7 @@ in {
 
         scopes = lib.mkOption {
           type = lib.types.listOf lib.types.str;
-          default = [ "openid" "profile" "email" ];
+          default = ["openid" "profile" "email"];
           description = lib.mdDoc ''
             OIDC scopes requested during login.
           '';
@@ -1433,7 +1485,7 @@ in {
 
       role_mapping = lib.mkOption {
         type = lib.types.attrsOf lib.types.str;
-        default = { };
+        default = {};
         example = {
           "Admins" = "admin";
           "Developers" = "user";
@@ -1474,31 +1526,30 @@ in {
   };
 
   config = lib.mkIf cfg.enable {
-    nix.settings =
-      lib.mkIf (cfg.server.enable || cfg.build.enable || cfg.client.enable) {
-        experimental-features = [ "nix-command" "flakes" ];
-        allowed-users = [ "root" "crystal-forge" ];
-        trusted-users = [ "root" "crystal-forge" ];
+    nix.settings = lib.mkIf (cfg.server.enable || cfg.build.enable || cfg.client.enable) {
+      experimental-features = ["nix-command" "flakes"];
+      allowed-users = ["root" "crystal-forge"];
+      trusted-users = ["root" "crystal-forge"];
 
-        # Add substituters based on cache configuration
-        substituters =
-          lib.mkIf (cfg.cache.push_to != null) [ cfg.cache.push_to ];
-        trusted-public-keys = lib.mkIf (cfg.deployment.cache_public_key != null)
-          [ cfg.deployment.cache_public_key ];
-      };
+      # Add substituters based on cache configuration
+      substituters =
+        lib.mkIf (cfg.cache.push_to != null) [cfg.cache.push_to];
+      trusted-public-keys =
+        lib.mkIf (cfg.deployment.cache_public_key != null)
+        [cfg.deployment.cache_public_key];
+    };
 
-    users.users.crystal-forge =
-      lib.mkIf (cfg.server.enable || cfg.build.enable) {
-        description = "Crystal Forge service user";
-        isSystemUser = true;
-        group = "crystal-forge";
-        home = "/var/lib/crystal-forge";
-        createHome = true;
-        # extraGroups is optional for daemon-style nix; keep empty unless needed.
-        # extraGroups = [ "nixbld" ];
-      };
+    users.users.crystal-forge = lib.mkIf (cfg.server.enable || cfg.build.enable) {
+      description = "Crystal Forge service user";
+      isSystemUser = true;
+      group = "crystal-forge";
+      home = "/var/lib/crystal-forge";
+      createHome = true;
+      # extraGroups is optional for daemon-style nix; keep empty unless needed.
+      # extraGroups = [ "nixbld" ];
+    };
 
-    users.groups.crystal-forge = { };
+    users.groups.crystal-forge = {};
 
     systemd.tmpfiles.rules = [
       "d /var/lib/crystal-forge 0755 crystal-forge crystal-forge -"
@@ -1522,19 +1573,22 @@ in {
       description = "Crystal Forge Build Operations";
       sliceConfig = {
         # Use build config values or sensible defaults for the slice
-        MemoryMax = lib.mkIf (cfg.build.systemd_memory_max != null)
+        MemoryMax =
+          lib.mkIf (cfg.build.systemd_memory_max != null)
           (cfg.build.systemd_memory_max + ""); # Ensure string conversion
         MemoryHigh = lib.mkIf (cfg.build.systemd_memory_max != null) (let
           # Calculate 75% of max memory for "high" threshold
           memStr = cfg.build.systemd_memory_max;
-          memVal = if lib.hasSuffix "G" memStr then
-            toString (lib.toInt (lib.removeSuffix "G" memStr) * 3 / 4) + "G"
-          else if lib.hasSuffix "M" memStr then
-            toString (lib.toInt (lib.removeSuffix "M" memStr) * 3 / 4) + "M"
-          else
-            memStr;
-        in memVal);
-        CPUQuota = lib.mkIf (cfg.build.systemd_cpu_quota != null)
+          memVal =
+            if lib.hasSuffix "G" memStr
+            then toString (lib.toInt (lib.removeSuffix "G" memStr) * 3 / 4) + "G"
+            else if lib.hasSuffix "M" memStr
+            then toString (lib.toInt (lib.removeSuffix "M" memStr) * 3 / 4) + "M"
+            else memStr;
+        in
+          memVal);
+        CPUQuota =
+          lib.mkIf (cfg.build.systemd_cpu_quota != null)
           (toString cfg.build.systemd_cpu_quota + "%");
         TasksMax = "infinity"; # Keep this as a reasonable default
       };
@@ -1545,24 +1599,27 @@ in {
       enable = lib.mkIf (cfg.server.enable || cfg.dashboards.enable) true;
 
       # Ensure database exists (only needed for server)
-      ensureDatabases = lib.mkIf cfg.server.enable [ cfg.database.name ];
+      ensureDatabases = lib.mkIf cfg.server.enable [cfg.database.name];
 
       # Ensure users exist - combine both user types
-      ensureUsers = lib.optional cfg.server.enable {
-        name = cfg.database.user;
-        ensureDBOwnership = true;
-        ensureClauses.login = true;
-      } ++ lib.optional cfg.dashboards.enable {
-        name = cfg.dashboards.datasource.user;
-        ensureDBOwnership = false;
-      };
+      ensureUsers =
+        lib.optional cfg.server.enable {
+          name = cfg.database.user;
+          ensureDBOwnership = true;
+          ensureClauses.login = true;
+        }
+        ++ lib.optional cfg.dashboards.enable {
+          name = cfg.dashboards.datasource.user;
+          ensureDBOwnership = false;
+        };
 
       # Identity map (only for server)
       identMap = lib.mkIf cfg.server.enable ''
         crystal-forge-map crystal-forge ${cfg.database.user}
       '';
 
-      initialScript = lib.mkIf cfg.dashboards.enable
+      initialScript =
+        lib.mkIf cfg.dashboards.enable
         (pkgs.writeText "init-crystal-forge-grafana.sql" ''
           -- Create users if they don't exist
           DO $$
@@ -1612,22 +1669,23 @@ in {
 
       # Authentication - combine rules for both users
       authentication = lib.mkAfter (lib.optionalString cfg.server.enable ''
-        local  ${cfg.database.name}  ${cfg.database.user}  peer map=crystal-forge-map
-        local  ${cfg.database.name}  ${cfg.database.user}  trust
-        host   ${cfg.database.name}  ${cfg.database.user}  127.0.0.1/32  trust
-        host   ${cfg.database.name}  ${cfg.database.user}  ::1/128       trust
-      '' + lib.optionalString cfg.dashboards.enable ''
-        local  ${cfg.database.name}  ${cfg.dashboards.datasource.user}  peer
-        host   ${cfg.database.name}  ${cfg.dashboards.datasource.user}  127.0.0.1/32  trust
-        host   ${cfg.database.name}  ${cfg.dashboards.datasource.user}  ::1/128       trust
-      '');
+          local  ${cfg.database.name}  ${cfg.database.user}  peer map=crystal-forge-map
+          local  ${cfg.database.name}  ${cfg.database.user}  trust
+          host   ${cfg.database.name}  ${cfg.database.user}  127.0.0.1/32  trust
+          host   ${cfg.database.name}  ${cfg.database.user}  ::1/128       trust
+        ''
+        + lib.optionalString cfg.dashboards.enable ''
+          local  ${cfg.database.name}  ${cfg.dashboards.datasource.user}  peer
+          host   ${cfg.database.name}  ${cfg.dashboards.datasource.user}  127.0.0.1/32  trust
+          host   ${cfg.database.name}  ${cfg.dashboards.datasource.user}  ::1/128       trust
+        '');
     };
 
     # Grafana dashboard configuration
     services.grafana = lib.mkIf cfg.dashboards.enable {
       enable = true;
       settings = {
-        "plugin.grafana-postgresql-datasource" = { enabled = true; };
+        "plugin.grafana-postgresql-datasource" = {enabled = true;};
       };
 
       provision = lib.mkIf cfg.dashboards.grafana.provision {
@@ -1637,26 +1695,26 @@ in {
           apiVersion = 1;
           datasources = [
             ({
-              uid = "crystal-forge-postgres";
-              name = cfg.dashboards.datasource.name;
-              type = "postgres";
-              url = "${cfg.dashboards.datasource.host}:${
+                uid = "crystal-forge-postgres";
+                name = cfg.dashboards.datasource.name;
+                type = "postgres";
+                url = "${cfg.dashboards.datasource.host}:${
                   toString cfg.dashboards.datasource.port
                 }";
-              database = cfg.dashboards.datasource.database;
-              user = cfg.dashboards.datasource.user;
-              jsonData = {
-                sslmode = cfg.dashboards.datasource.sslMode;
-                postgresVersion = 1400;
-                timescaledb = false;
-              };
-              isDefault = false;
-              editable = true;
-            } // lib.optionalAttrs
+                database = cfg.dashboards.datasource.database;
+                user = cfg.dashboards.datasource.user;
+                jsonData = {
+                  sslmode = cfg.dashboards.datasource.sslMode;
+                  postgresVersion = 1400;
+                  timescaledb = false;
+                };
+                isDefault = false;
+                editable = true;
+              }
+              // lib.optionalAttrs
               (cfg.dashboards.datasource.passwordFile != null) {
                 secureJsonData = {
-                  password =
-                    "$__file{${cfg.dashboards.datasource.passwordFile}}";
+                  password = "$__file{${cfg.dashboards.datasource.passwordFile}}";
                 };
               })
           ];
@@ -1664,124 +1722,127 @@ in {
 
         dashboards.settings = {
           apiVersion = 1;
-          providers = [{
-            name = "Crystal Forge";
-            type = "file";
-            options.path = "${pkgs.crystal-forge.dashboards}/dashboards";
-            disableDeletion = cfg.dashboards.grafana.disableDeletion;
-            updateIntervalSeconds = 60;
-          }];
+          providers = [
+            {
+              name = "Crystal Forge";
+              type = "file";
+              options.path = "${pkgs.crystal-forge.dashboards}/dashboards";
+              disableDeletion = cfg.dashboards.grafana.disableDeletion;
+              updateIntervalSeconds = 60;
+            }
+          ];
         };
       };
     };
 
-    systemd.services.crystal-forge-grafana-db-init =
-      lib.mkIf cfg.dashboards.enable {
-        description = "Initialize Crystal Forge database for Grafana";
-        after = lib.optional cfg.local-database "postgresql.service";
-        before = [ "grafana.service" ];
-        wantedBy = [ "multi-user.target" ];
+    systemd.services.crystal-forge-grafana-db-init = lib.mkIf cfg.dashboards.enable {
+      description = "Initialize Crystal Forge database for Grafana";
+      after = lib.optional cfg.local-database "postgresql.service";
+      before = ["grafana.service"];
+      wantedBy = ["multi-user.target"];
 
-        serviceConfig = {
-          Type = "oneshot";
-          RemainAfterExit = true;
-        };
-
-        environment = {
-          PGHOST = cfg.dashboards.datasource.host;
-          PGPORT = toString cfg.dashboards.datasource.port;
-          PGDATABASE = cfg.dashboards.datasource.database;
-          PGUSER =
-            cfg.dashboards.datasource.user; # Use the main CF user to grant permissions
-          AUTH_MODE = cfg.server.auth_mode;
-        };
-
-        script = let
-          psqlCmd = if cfg.local-database then
-            "${postgres_pkg}/bin/psql"
-          else
-            "${pkgs.postgresql}/bin/psql";
-        in ''
-          # Wait for database to be available
-          max_attempts=30
-          attempt=0
-          while ! ${psqlCmd} -c "SELECT 1" >/dev/null 2>&1; do
-            attempt=$((attempt + 1))
-            if [ $attempt -ge $max_attempts ]; then
-              echo "Failed to connect to database after $max_attempts attempts"
-              exit 1
-            fi
-            echo "Waiting for database... (attempt $attempt/$max_attempts)"
-            sleep 2
-          done
-
-          # Create grafana user if it doesn't exist (works for both local and remote)
-          ${psqlCmd} <<'EOF'
-          DO $$
-          BEGIN
-            IF NOT EXISTS (SELECT FROM pg_user WHERE usename = '${cfg.dashboards.datasource.user}') THEN
-              CREATE USER ${cfg.dashboards.datasource.user} LOGIN;
-            END IF;
-          END
-          $$;
-
-          -- Grant permissions
-          GRANT USAGE ON SCHEMA public TO ${cfg.dashboards.datasource.user};
-          GRANT SELECT ON ALL TABLES IN SCHEMA public TO ${cfg.dashboards.datasource.user};
-          GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO ${cfg.dashboards.datasource.user};
-
-          -- Set default privileges
-          ALTER DEFAULT PRIVILEGES FOR USER ${cfg.database.user} IN SCHEMA public
-            GRANT SELECT ON TABLES TO ${cfg.dashboards.datasource.user};
-          EOF
-        '';
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
       };
+
+      environment = {
+        PGHOST = cfg.dashboards.datasource.host;
+        PGPORT = toString cfg.dashboards.datasource.port;
+        PGDATABASE = cfg.dashboards.datasource.database;
+        PGUSER =
+          cfg.dashboards.datasource.user; # Use the main CF user to grant permissions
+        AUTH_MODE = cfg.server.auth_mode;
+      };
+
+      script = let
+        psqlCmd =
+          if cfg.local-database
+          then "${postgres_pkg}/bin/psql"
+          else "${pkgs.postgresql}/bin/psql";
+      in ''
+        # Wait for database to be available
+        max_attempts=30
+        attempt=0
+        while ! ${psqlCmd} -c "SELECT 1" >/dev/null 2>&1; do
+          attempt=$((attempt + 1))
+          if [ $attempt -ge $max_attempts ]; then
+            echo "Failed to connect to database after $max_attempts attempts"
+            exit 1
+          fi
+          echo "Waiting for database... (attempt $attempt/$max_attempts)"
+          sleep 2
+        done
+
+        # Create grafana user if it doesn't exist (works for both local and remote)
+        ${psqlCmd} <<'EOF'
+        DO $$
+        BEGIN
+          IF NOT EXISTS (SELECT FROM pg_user WHERE usename = '${cfg.dashboards.datasource.user}') THEN
+            CREATE USER ${cfg.dashboards.datasource.user} LOGIN;
+          END IF;
+        END
+        $$;
+
+        -- Grant permissions
+        GRANT USAGE ON SCHEMA public TO ${cfg.dashboards.datasource.user};
+        GRANT SELECT ON ALL TABLES IN SCHEMA public TO ${cfg.dashboards.datasource.user};
+        GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO ${cfg.dashboards.datasource.user};
+
+        -- Set default privileges
+        ALTER DEFAULT PRIVILEGES FOR USER ${cfg.database.user} IN SCHEMA public
+          GRANT SELECT ON TABLES TO ${cfg.dashboards.datasource.user};
+        EOF
+      '';
+    };
 
     systemd.services.grafana = lib.mkIf cfg.dashboards.enable {
-      after = lib.optionals cfg.local-database [ "postgresql.service" ]
-        ++ [ "crystal-forge-grafana-db-init.service" ];
-      wants = [ "crystal-forge-grafana-db-init.service" ];
-      requires = [ "crystal-forge-grafana-db-init.service" ];
+      after =
+        lib.optionals cfg.local-database ["postgresql.service"]
+        ++ ["crystal-forge-grafana-db-init.service"];
+      wants = ["crystal-forge-grafana-db-init.service"];
+      requires = ["crystal-forge-grafana-db-init.service"];
     };
-    systemd.services."crystal-forge-postgres-jobs" =
-      lib.mkIf cfg.server.enable {
-        description = "Crystal Forge Postgres Jobs";
-        after = [ "postgresql.service" ];
-        wantedBy = [ "multi-user.target" ];
+    systemd.services."crystal-forge-postgres-jobs" = lib.mkIf cfg.server.enable {
+      description = "Crystal Forge Postgres Jobs";
+      after = ["postgresql.service"];
+      wantedBy = ["multi-user.target"];
 
-        serviceConfig = {
-          Type = "oneshot";
-          User = "crystal-forge";
-          Group = "crystal-forge";
-          StateDirectory = "crystal-forge";
-          RuntimeDirectory = "crystal-forge";
-          CacheDirectory = "crystal-forge-nix";
-        };
+      serviceConfig = {
+        Type = "oneshot";
+        User = "crystal-forge";
+        Group = "crystal-forge";
+        StateDirectory = "crystal-forge";
+        RuntimeDirectory = "crystal-forge";
+        CacheDirectory = "crystal-forge-nix";
+      };
 
-        environment = {
-          DB_HOST = cfg.database.host;
-          DB_PORT = toString cfg.database.port;
-          DB_NAME = cfg.database.name;
-          DB_USER = cfg.database.user;
-          DB_PASSWORD =
-            lib.mkIf (cfg.database.passwordFile == null) cfg.database.password;
-          JOB_DIR = "${pkgs.crystal-forge.run-postgres-jobs}/jobs";
-          # disable registry and per-user nix.conf for deterministic evals
-          NIX_REGISTRY = "/dev/null";
-          NIX_CONFIG_DIR = "/dev/null";
-        };
+      environment = {
+        DB_HOST = cfg.database.host;
+        DB_PORT = toString cfg.database.port;
+        DB_NAME = cfg.database.name;
+        DB_USER = cfg.database.user;
+        DB_PASSWORD =
+          lib.mkIf (cfg.database.passwordFile == null) cfg.database.password;
+        JOB_DIR = "${pkgs.crystal-forge.run-postgres-jobs}/jobs";
+        # disable registry and per-user nix.conf for deterministic evals
+        NIX_REGISTRY = "/dev/null";
+        NIX_CONFIG_DIR = "/dev/null";
+      };
 
-        script = lib.optionalString (cfg.database.passwordFile != null) ''
+      script =
+        lib.optionalString (cfg.database.passwordFile != null) ''
           export DB_PASSWORD="$(cat ${cfg.database.passwordFile})"
           exec ${pkgs.crystal-forge.run-postgres-jobs}/bin/run-postgres-jobs
-        '' + lib.optionalString (cfg.database.passwordFile == null) ''
+        ''
+        + lib.optionalString (cfg.database.passwordFile == null) ''
           exec ${pkgs.crystal-forge.run-postgres-jobs}/bin/run-postgres-jobs
         '';
-      };
+    };
 
     systemd.timers."crystal-forge-postgres-jobs" = lib.mkIf cfg.server.enable {
       description = "Run Crystal Forge Postgres Jobs daily at midnight";
-      wantedBy = [ "timers.target" ];
+      wantedBy = ["timers.target"];
       timerConfig = {
         OnCalendar = "*-*-* 00:00:00";
         Persistent = true;
@@ -1802,33 +1863,34 @@ in {
 
     systemd.services.crystal-forge-builder = lib.mkIf cfg.build.enable (let
       # Parse cfg.build.systemd_properties (["Environment=FOO=bar" "IOWeight=100" …])
-      parsed = lib.foldl' (acc: prop:
-        let
+      parsed =
+        lib.foldl' (acc: prop: let
           kv = lib.splitString "=" prop;
           key = lib.elemAt kv 0;
           val = lib.concatStringsSep "=" (lib.drop 1 kv);
-        in if key == "Environment" then
-          acc // { env = (acc.env or [ ]) ++ [ val ]; }
-        else
-          acc // { svc = (acc.svc or { }) // { ${key} = val; }; }) {
-            env = [ ];
-            svc = { };
-          } cfg.build.systemd_properties;
+        in
+          if key == "Environment"
+          then acc // {env = (acc.env or []) ++ [val];}
+          else acc // {svc = (acc.svc or {}) // {${key} = val;};}) {
+          env = [];
+          svc = {};
+        }
+        cfg.build.systemd_properties;
 
-      envFromProps = builtins.listToAttrs (map (s:
-        let p = lib.splitString "=" s;
-        in {
-          name = lib.elemAt p 0;
-          value = lib.concatStringsSep "=" (lib.drop 1 p);
-        }) parsed.env);
+      envFromProps = builtins.listToAttrs (map (s: let
+        p = lib.splitString "=" s;
+      in {
+        name = lib.elemAt p 0;
+        value = lib.concatStringsSep "=" (lib.drop 1 p);
+      }) parsed.env);
     in {
       description = "Crystal Forge Builder";
-      wantedBy = [ "multi-user.target" ];
+      wantedBy = ["multi-user.target"];
       after = lib.optional cfg.local-database "postgresql.service";
       wants = lib.optional cfg.local-database "postgresql.service";
 
       path = with pkgs;
-        [ nix git vulnix systemd nix-fast-build nix-eval-jobs ]
+        [nix git vulnix systemd nix-fast-build nix-eval-jobs]
         ++ lib.optional (cfg.cache.cache_type == "Attic") attic-client;
 
       # Merge existing env with any Environment=… pairs from systemd_properties
@@ -1856,14 +1918,15 @@ in {
         })
         # Add Attic-specific environment variables if using Attic cache
         (lib.mkIf (cfg.cache.cache_type == "Attic") {
-          # Force these to be available even if not in envFromProps
-          ATTIC_SERVER_URL =
-            envFromProps.ATTIC_SERVER_URL or "http://atticCache:8080";
-          ATTIC_REMOTE_NAME = envFromProps.ATTIC_REMOTE_NAME or "local";
-          # Only set ATTIC_TOKEN if it's provided
-        } // lib.optionalAttrs (envFromProps ? ATTIC_TOKEN) {
-          ATTIC_TOKEN = envFromProps.ATTIC_TOKEN;
-        })
+            # Force these to be available even if not in envFromProps
+            ATTIC_SERVER_URL =
+              envFromProps.ATTIC_SERVER_URL or "http://atticCache:8080";
+            ATTIC_REMOTE_NAME = envFromProps.ATTIC_REMOTE_NAME or "local";
+            # Only set ATTIC_TOKEN if it's provided
+          }
+          // lib.optionalAttrs (envFromProps ? ATTIC_TOKEN) {
+            ATTIC_TOKEN = envFromProps.ATTIC_TOKEN;
+          })
         envFromProps
       ];
 
@@ -1904,65 +1967,68 @@ in {
       '';
 
       # Splice arbitrary unit properties (e.g., IOWeight=100, TasksMax=3000) parsed above
-      serviceConfig = ({
-        Type = "exec";
-        ExecStart = builderScript;
-        User = "crystal-forge";
-        Group = "crystal-forge";
-        Slice = "crystal-forge-builds.slice";
+      serviceConfig =
+        ({
+            Type = "exec";
+            ExecStart = builderScript;
+            User = "crystal-forge";
+            Group = "crystal-forge";
+            Slice = "crystal-forge-builds.slice";
 
-        StateDirectory = "crystal-forge";
-        StateDirectoryMode = "0750";
-        RuntimeDirectory = "crystal-forge";
-        RuntimeDirectoryMode = "0700";
-        CacheDirectory = "crystal-forge-nix";
-        CacheDirectoryMode = "0750";
-        WorkingDirectory = "/var/lib/crystal-forge/workdir";
+            StateDirectory = "crystal-forge";
+            StateDirectoryMode = "0750";
+            RuntimeDirectory = "crystal-forge";
+            RuntimeDirectoryMode = "0700";
+            CacheDirectory = "crystal-forge-nix";
+            CacheDirectoryMode = "0750";
+            WorkingDirectory = "/var/lib/crystal-forge/workdir";
 
-        # When this service stops, kill all children
-        KillMode = "control-group";
+            # When this service stops, kill all children
+            KillMode = "control-group";
 
-        # Make sure we load the environment file
-        EnvironmentFile = [
-          "-${cfg.env-file}"
-          "-/var/lib/crystal-forge/.config/crystal-forge-attic.env"
-        ];
+            # Make sure we load the environment file
+            EnvironmentFile = [
+              "-${cfg.env-file}"
+              "-/var/lib/crystal-forge/.config/crystal-forge-attic.env"
+            ];
 
-        NoNewPrivileges = true;
-        ProtectSystem = "no";
-        ProtectHome = false;
-        PrivateTmp = true;
-        ProtectKernelTunables = true;
-        ProtectKernelModules = true;
-        ProtectControlGroups = true;
+            NoNewPrivileges = true;
+            ProtectSystem = "no";
+            ProtectHome = false;
+            PrivateTmp = true;
+            ProtectKernelTunables = true;
+            ProtectKernelModules = true;
+            ProtectControlGroups = true;
 
-        TasksMax = "infinity";
-        LimitNPROC = "infinity";
-        LimitNOFILE = 1048576;
-        OOMPolicy = "continue";
+            TasksMax = "infinity";
+            LimitNPROC = "infinity";
+            LimitNOFILE = 1048576;
+            OOMPolicy = "continue";
 
-        ReadWritePaths = [
-          "/var/lib/crystal-forge"
-          "/tmp"
-          "/run/crystal-forge"
-          "/var/cache/crystal-forge-nix"
-          "/var/cache/crystal-forge"
-          "/var/lib/crystal-forge/.cache"
-          "/nix/var/nix/daemon-socket"
-        ];
-        ReadOnlyPaths = [ "/etc/nix" "/etc/ssl/certs" ];
+            ReadWritePaths = [
+              "/var/lib/crystal-forge"
+              "/tmp"
+              "/run/crystal-forge"
+              "/var/cache/crystal-forge-nix"
+              "/var/cache/crystal-forge"
+              "/var/lib/crystal-forge/.cache"
+              "/nix/var/nix/daemon-socket"
+            ];
+            ReadOnlyPaths = ["/etc/nix" "/etc/ssl/certs"];
 
-        Restart = "always";
-        RestartSec = 5;
-      } // parsed.svc) // {
-        # Ensure ExecStart is never removed by parsed.svc merge
-        ExecStart = lib.mkForce builderScript;
-      };
+            Restart = "always";
+            RestartSec = 5;
+          }
+          // parsed.svc)
+        // {
+          # Ensure ExecStart is never removed by parsed.svc merge
+          ExecStart = lib.mkForce builderScript;
+        };
     });
 
     systemd.services.crystal-forge-server = lib.mkIf cfg.server.enable {
       description = "Crystal Forge Server";
-      wantedBy = [ "multi-user.target" ];
+      wantedBy = ["multi-user.target"];
       after = lib.optional cfg.local-database "postgresql.service";
       wants = lib.optional cfg.local-database "postgresql.service";
 
@@ -1979,61 +2045,70 @@ in {
         gnugrep
       ];
 
-      environment = {
-        # Core runtime
-        RUST_LOG = cfg.log_level;
-        TZDIR = "${pkgs.tzdata}/share/zoneinfo";
-        LOCALE_ARCHIVE = "${pkgs.glibcLocales}/lib/locale/locale-archive";
+      environment =
+        {
+          # Core runtime
+          RUST_LOG = cfg.log_level;
+          TZDIR = "${pkgs.tzdata}/share/zoneinfo";
+          LOCALE_ARCHIVE = "${pkgs.glibcLocales}/lib/locale/locale-archive";
 
-        # --- Critical Nix environment for deterministic evaluation ---
-        # Use the daemon socket for evaluation
-        NIX_REMOTE = "daemon";
+          # --- Critical Nix environment for deterministic evaluation ---
+          # Use the daemon socket for evaluation
+          NIX_REMOTE = "daemon";
 
-        # Completely isolate from user registries/config
-        HOME = "/var/lib/crystal-forge";
-        XDG_CONFIG_HOME = "/var/lib/crystal-forge/.config";
-        NIX_REGISTRY = "/dev/null";
-        NIX_CONFIG_DIR = "/dev/null";
-        NIX_USER_CONF_FILES = "/dev/null";
+          # Completely isolate from user registries/config
+          HOME = "/var/lib/crystal-forge";
+          XDG_CONFIG_HOME = "/var/lib/crystal-forge/.config";
+          NIX_REGISTRY = "/dev/null";
+          NIX_CONFIG_DIR = "/dev/null";
+          NIX_USER_CONF_FILES = "/dev/null";
 
-        # Enable flakes and nix-command — exactly as in your manual test
-        NIX_CONFIG = ''
-          experimental-features = nix-command flakes
-          flake-registry =
-        '';
+          # Enable flakes and nix-command — exactly as in your manual test
+          NIX_CONFIG = ''
+            experimental-features = nix-command flakes
+            flake-registry =
+          '';
 
-        # Required to allow git+ssh or https fetches
-        GIT_SSH_COMMAND =
-          "ssh -i /var/lib/crystal-forge/.ssh/id_ed25519 -o UserKnownHostsFile=/var/lib/crystal-forge/.ssh/known_hosts -o StrictHostKeyChecking=yes";
+          # Required to allow git+ssh or https fetches
+          GIT_SSH_COMMAND = "ssh -i /var/lib/crystal-forge/.ssh/id_ed25519 -o UserKnownHostsFile=/var/lib/crystal-forge/.ssh/known_hosts -o StrictHostKeyChecking=yes";
 
-        # Optional: specify cache location for nix-eval-jobs
-        NIX_USER_CACHE_DIR = "/var/cache/crystal-forge-nix";
-      } // lib.optionalAttrs (cfg.server.auth_mode == "oidc") ({
-        AUTH_MODE = "oidc";
-        CRYSTAL_FORGE_OIDC_ISSUER_URL = cfg.server.oidc.issuerUrl;
-        CRYSTAL_FORGE_OIDC_CLIENT_ID = cfg.server.oidc.clientId;
-        CRYSTAL_FORGE_OIDC_REDIRECT_URI = cfg.server.oidc.redirectUri;
-        CRYSTAL_FORGE_OIDC_SCOPES =
-          lib.concatStringsSep "," cfg.server.oidc.scopes;
-      } // lib.optionalAttrs (cfg.server.oidc.clientSecret != null) {
-        CRYSTAL_FORGE_OIDC_CLIENT_SECRET = cfg.server.oidc.clientSecret;
-      } // lib.optionalAttrs (cfg.server.oidc.emailClaim != null) {
-        CRYSTAL_FORGE_OIDC_EMAIL_CLAIM = cfg.server.oidc.emailClaim;
-      } // lib.optionalAttrs (cfg.server.oidc.nameClaim != null) {
-        CRYSTAL_FORGE_OIDC_NAME_CLAIM = cfg.server.oidc.nameClaim;
-      } // lib.optionalAttrs (cfg.server.oidc.givenNameClaim != null) {
-        CRYSTAL_FORGE_OIDC_GIVEN_NAME_CLAIM = cfg.server.oidc.givenNameClaim;
-      } // lib.optionalAttrs (cfg.server.oidc.familyNameClaim != null) {
-        CRYSTAL_FORGE_OIDC_FAMILY_NAME_CLAIM = cfg.server.oidc.familyNameClaim;
-      } // lib.optionalAttrs (cfg.server.oidc.rolesClaim != null) {
-        CRYSTAL_FORGE_OIDC_ROLES_CLAIM = cfg.server.oidc.rolesClaim;
-      } // lib.optionalAttrs (cfg.server.oidc.preferredUsernameClaim != null) {
-        CRYSTAL_FORGE_OIDC_PREFERRED_USERNAME_CLAIM =
-          cfg.server.oidc.preferredUsernameClaim;
-      } // lib.optionalAttrs (cfg.server.oidc.bootstrapAdminGroup != null) {
-        CRYSTAL_FORGE_OIDC_BOOTSTRAP_ADMIN_GROUP =
-          cfg.server.oidc.bootstrapAdminGroup;
-      });
+          # Optional: specify cache location for nix-eval-jobs
+          NIX_USER_CACHE_DIR = "/var/cache/crystal-forge-nix";
+        }
+        // lib.optionalAttrs (cfg.server.auth_mode == "oidc") ({
+            AUTH_MODE = "oidc";
+            CRYSTAL_FORGE_OIDC_ISSUER_URL = cfg.server.oidc.issuerUrl;
+            CRYSTAL_FORGE_OIDC_CLIENT_ID = cfg.server.oidc.clientId;
+            CRYSTAL_FORGE_OIDC_REDIRECT_URI = cfg.server.oidc.redirectUri;
+            CRYSTAL_FORGE_OIDC_SCOPES =
+              lib.concatStringsSep "," cfg.server.oidc.scopes;
+          }
+          // lib.optionalAttrs (cfg.server.oidc.clientSecret != null) {
+            CRYSTAL_FORGE_OIDC_CLIENT_SECRET = cfg.server.oidc.clientSecret;
+          }
+          // lib.optionalAttrs (cfg.server.oidc.emailClaim != null) {
+            CRYSTAL_FORGE_OIDC_EMAIL_CLAIM = cfg.server.oidc.emailClaim;
+          }
+          // lib.optionalAttrs (cfg.server.oidc.nameClaim != null) {
+            CRYSTAL_FORGE_OIDC_NAME_CLAIM = cfg.server.oidc.nameClaim;
+          }
+          // lib.optionalAttrs (cfg.server.oidc.givenNameClaim != null) {
+            CRYSTAL_FORGE_OIDC_GIVEN_NAME_CLAIM = cfg.server.oidc.givenNameClaim;
+          }
+          // lib.optionalAttrs (cfg.server.oidc.familyNameClaim != null) {
+            CRYSTAL_FORGE_OIDC_FAMILY_NAME_CLAIM = cfg.server.oidc.familyNameClaim;
+          }
+          // lib.optionalAttrs (cfg.server.oidc.rolesClaim != null) {
+            CRYSTAL_FORGE_OIDC_ROLES_CLAIM = cfg.server.oidc.rolesClaim;
+          }
+          // lib.optionalAttrs (cfg.server.oidc.preferredUsernameClaim != null) {
+            CRYSTAL_FORGE_OIDC_PREFERRED_USERNAME_CLAIM =
+              cfg.server.oidc.preferredUsernameClaim;
+          }
+          // lib.optionalAttrs (cfg.server.oidc.bootstrapAdminGroup != null) {
+            CRYSTAL_FORGE_OIDC_BOOTSTRAP_ADMIN_GROUP =
+              cfg.server.oidc.bootstrapAdminGroup;
+          });
 
       preStart = ''
         mkdir -p /run/crystal-forge
@@ -2052,7 +2127,7 @@ in {
         Group = "crystal-forge";
         WorkingDirectory = "/var/lib/crystal-forge";
 
-        EnvironmentFile = [ "-${cfg.env-file}" ];
+        EnvironmentFile = ["-${cfg.env-file}"];
 
         # Filesystem permissions
         StateDirectory = "crystal-forge";
@@ -2089,7 +2164,7 @@ in {
 
     systemd.services.crystal-forge-agent = lib.mkIf cfg.client.enable {
       description = "Crystal Forge Agent";
-      wantedBy = [ "multi-user.target" ];
+      wantedBy = ["multi-user.target"];
       after = lib.optional cfg.server.enable "crystal-forge-server.service";
 
       path = with pkgs; [
@@ -2171,7 +2246,7 @@ in {
           "/run/crystal-forge-agent"
         ];
         # Also ensure read-only access to CA bundle (good practice):
-        ReadOnlyPaths = [ "/etc/ssl/certs" ];
+        ReadOnlyPaths = ["/etc/ssl/certs"];
         PrivateTmp = true;
         Restart = "always";
         RestartSec = 5;
@@ -2180,18 +2255,18 @@ in {
 
     warnings = lib.optional (cfg.build.enable && !cfg.build.api_mode) ''
       Crystal Forge builder is using legacy database mode, which is deprecated.
-      
+
       Current configuration (api_mode = false) uses direct database access:
       - Requires database credentials on builder machines
       - Has weaker security isolation
       - Does not support distributed builds across networks
-      
+
       Recommended migration to API mode:
         1. Set: services.crystal-forge.build.api_mode = true;
         2. Deploy the configuration (builder API key will be auto-generated)
         3. Check systemd logs for the builder public key
         4. Register the builder in Crystal Forge UI using the public key
-      
+
       Legacy database mode will be removed in a future release.
       For more information, see the deployment documentation.
     '';
@@ -2202,29 +2277,36 @@ in {
         message = "Crystal Forge client requires a private key file";
       }
       {
-        assertion = cfg.server.enable || cfg.client.enable || cfg.build.enable
+        assertion =
+          cfg.server.enable
+          || cfg.client.enable
+          || cfg.build.enable
           || cfg.dashboards.enable;
-        message =
-          "At least one of server, client, build, or dashboards must be enabled";
+        message = "At least one of server, client, build, or dashboards must be enabled";
       }
       {
-        assertion = cfg.dashboards.enable
+        assertion =
+          cfg.dashboards.enable
           -> (cfg.dashboards.datasource.host != null);
-        message =
-          "Crystal Forge dashboards require database.host or dashboards.datasource.host to be set";
+        message = "Crystal Forge dashboards require database.host or dashboards.datasource.host to be set";
       }
       {
-        assertion = cfg.dashboards.enable && !cfg.local-database
+        assertion =
+          cfg.dashboards.enable
+          && !cfg.local-database
           -> (cfg.dashboards.datasource.host != "/run/postgresql");
-        message =
-          "When using remote database for dashboards, dashboards.datasource.host must be a network address, not a socket path";
+        message = "When using remote database for dashboards, dashboards.datasource.host must be a network address, not a socket path";
       }
       {
-        assertion = cfg.server.auth_mode != "oidc" || (cfg.server.oidc.issuerUrl
-          != null && cfg.server.oidc.clientId != null
-          && cfg.server.oidc.redirectUri != null
-          && ((cfg.server.oidc.clientSecret != null)
-            || (cfg.server.oidc.clientSecretFile != null)));
+        assertion =
+          cfg.server.auth_mode
+          != "oidc"
+          || (cfg.server.oidc.issuerUrl
+            != null
+            && cfg.server.oidc.clientId != null
+            && cfg.server.oidc.redirectUri != null
+            && ((cfg.server.oidc.clientSecret != null)
+              || (cfg.server.oidc.clientSecretFile != null)));
         message = ''
           OIDC mode requires server.oidc.issuerUrl, server.oidc.clientId,
           server.oidc.redirectUri, and one of server.oidc.clientSecret or
@@ -2232,10 +2314,11 @@ in {
         '';
       }
       {
-        assertion = !(cfg.server.oidc.clientSecret != null
-          && cfg.server.oidc.clientSecretFile != null);
-        message =
-          "Set only one of server.oidc.clientSecret and server.oidc.clientSecretFile";
+        assertion =
+          !(cfg.server.oidc.clientSecret
+            != null
+            && cfg.server.oidc.clientSecretFile != null);
+        message = "Set only one of server.oidc.clientSecret and server.oidc.clientSecretFile";
       }
     ];
   };

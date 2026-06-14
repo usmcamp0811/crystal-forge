@@ -21,6 +21,14 @@ pub enum IconName {
     Cpu,
     Gear,
     Warn,
+    ArrowLeft,
+    Rollback,
+    /// System detail tab icons (match CrystalForgelatest Icon.jsx paths).
+    Dashboard,
+    Deploy,
+    History,
+    Key,
+    File,
 }
 
 #[component]
@@ -152,6 +160,76 @@ pub fn Icon(name: IconName, #[props(default = 16)] size: u32) -> Element {
                 stroke_linejoin: "round"
             }
             path { d: "M12 9v4M12 17h.01" }
+        },
+        IconName::ArrowLeft => rsx! {
+            path {
+                d: "M19 12H5M11 19l-7-7 7-7",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+        },
+        IconName::Rollback => rsx! {
+            path {
+                d: "M3 7h11a6 6 0 1 1 0 12H8",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+            path {
+                d: "m8 3-5 4 5 4",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+        },
+        // Dashboard: four rects laid out as a panel grid (design Icon.jsx "dashboard").
+        IconName::Dashboard => rsx! {
+            rect { x: "3", y: "3", width: "7", height: "9", rx: "1" }
+            rect { x: "14", y: "3", width: "7", height: "5", rx: "1" }
+            rect { x: "14", y: "12", width: "7", height: "9", rx: "1" }
+            rect { x: "3", y: "16", width: "7", height: "5", rx: "1" }
+        },
+        // Deploy: upward arrow over a base tray (design Icon.jsx "deploy").
+        IconName::Deploy => rsx! {
+            path {
+                d: "M12 3v12M6 9l6-6 6 6",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+            rect { x: "4", y: "17", width: "16", height: "4", rx: "1" }
+        },
+        // History: clock-with-arrow (design Icon.jsx "history").
+        IconName::History => rsx! {
+            path {
+                d: "M3 12a9 9 0 1 0 3-6.7L3 8",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+            path {
+                d: "M3 3v5h5M12 7v5l3 2",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+        },
+        // Key (design Icon.jsx "key").
+        IconName::Key => rsx! {
+            circle { cx: "8", cy: "15", r: "4" }
+            path {
+                d: "m10.8 12.2 9-9M16 7l3 3",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+        },
+        // File with folded corner (design Icon.jsx "file").
+        IconName::File => rsx! {
+            path {
+                d: "M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9l-6-6z",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+            path {
+                d: "M14 3v6h6",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
         },
     };
 

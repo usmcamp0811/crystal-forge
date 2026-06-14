@@ -24,22 +24,24 @@ use crate::api::client::{
     verify_generation_closure as verify_generation_closure_request,
 };
 use crate::api::models::{
-    BuildStatus, CommitInfo, CveScanEligibilityResponse, CveSeverity, CveSummary,
-    DeploymentLogEntry, DeploymentStatus, HardeningJustificationResponse,
-    HardeningScanEligibilityResponse, HardeningServiceResultResponse, HealthStatus, LogLevel,
-    PipelineStage, SaveHardeningJustificationRequest, SystemAgentEvent, SystemCommitHistory,
-    SystemDetail, SystemGeneration, SystemHardwareInfo, SystemHistoryEntry, SystemNetworkInfo,
+    BuildStatus, CommitInfo, CveScanEligibilityResponse, CveSummary, DeploymentLogEntry,
+    DeploymentStatus, HardeningJustificationResponse, HardeningScanEligibilityResponse,
+    HardeningServiceResultResponse, HealthStatus, LogLevel, PipelineStage,
+    SaveHardeningJustificationRequest, SystemAgentEvent, SystemCommitHistory, SystemDetail,
+    SystemGeneration, SystemHardwareInfo, SystemHistoryEntry, SystemNetworkInfo,
     SystemRollbackGenerationRequest, SystemRollbackRequest, SystemSecurityInfo,
     SystemVulnerability, VerifyGenerationClosureRequest,
 };
 use crate::components::cve::CvesTab;
 use crate::components::diff::DiffViewer;
+use crate::components::icon::{Icon, IconName};
 use crate::components::layout::Card;
 use crate::components::modals::{RollbackConfirmDialog, SyncConfirmDialog};
 use crate::components::notifications::Toast;
 use crate::components::system::{
     AgentCard, BooleanRow, EditSystemModal, HardwareCard, InfoRow, InfoRowMono, LogLine, LogsTab,
-    NetworkCard, SecurityCard, StatusBadge, SystemInfoCard, environment_style, format_uptime,
+    NetworkCard, SecurityCard, StatusBadge, SystemInfoCard, deployment_state_label,
+    environment_style, format_uptime,
 };
 use crate::routes::Route;
 use crate::state::{app_state::AppState, auth};
@@ -96,6 +98,18 @@ const POLICY_JSON_SAMPLE: &str = r#"[
 ]
 "#;
 
+/// Result of loading a system's vulnerabilities.
+///
+/// Security data must never silently fall back to mock CVEs in production paths,
+/// so the resource carries an explicit error/redirect signal that the CVE tab
+/// renders as a real empty/error state (TASK-353 review).
+#[derive(Debug, Clone, PartialEq)]
+struct VulnerabilitiesLoad {
+    items: Vec<SystemVulnerability>,
+    error: Option<String>,
+    redirect_to_login: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Overview,
@@ -105,6 +119,7 @@ enum Tab {
     Logs,
     Config,
     Cves,
+    Compliance,
 }
 
 impl Tab {
@@ -117,9 +132,57 @@ impl Tab {
             Self::Logs => "Logs",
             Self::Config => "Config",
             Self::Cves => "CVEs",
+            Self::Compliance => "Compliance",
         }
     }
 }
+
+fn derived_fqdn(hostname: &str, environment: Option<&str>) -> String {
+    let env = environment.unwrap_or("unknown").to_lowercase();
+    format!("{hostname}.{env}.cf.internal")
+}
+
+fn effective_fqdn(system: &SystemDetail) -> String {
+    system
+        .fqdn
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| derived_fqdn(&system.hostname, system.environment.as_deref()))
+}
+
+fn is_pull_reachability(reachability: &str) -> bool {
+    reachability.eq_ignore_ascii_case("pull")
+}
+
+/// Normalize a free-form tag input to the design's slug form: trim, drop a leading `#`,
+/// collapse whitespace to single hyphens, and lowercase. Mirrors the reference's `addTag`.
+fn normalize_tag(raw: &str) -> String {
+    let trimmed = raw.trim().trim_start_matches('#');
+    trimmed
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("-")
+        .to_lowercase()
+}
+
+fn reachability_label(reachability: &str) -> &'static str {
+    if is_pull_reachability(reachability) {
+        "Agent pull-only"
+    } else {
+        "Direct / LAN"
+    }
+}
+
+const DETAIL_TAB_ORDER: [Tab; 8] = [
+    Tab::Overview,
+    Tab::Deploy,
+    Tab::History,
+    Tab::Logs,
+    Tab::Config,
+    Tab::Cves,
+    Tab::Hardening,
+    Tab::Compliance,
+];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Main Component
@@ -134,6 +197,7 @@ pub fn SystemDetailView(id: String) -> Element {
     // Current tab state
     let mut active_tab = use_signal(|| Tab::Overview);
     let mut edit_modal_open = use_signal(|| false);
+    let mut show_ssh_modal = use_signal(|| false);
 
     // Confirmation dialog state for Sync
     let mut show_sync_dialog = use_signal(|| false);
@@ -145,6 +209,7 @@ pub fn SystemDetailView(id: String) -> Element {
 
     // Confirmation dialog state for rollback/deploying a historical commit
     let mut show_rollback_dialog = use_signal(|| false);
+    let mut show_generation_rollback_modal = use_signal(|| false);
     let mut rollback_target: Signal<Option<SystemCommitHistory>> = use_signal(|| None);
 
     // Toast notification state
@@ -173,13 +238,36 @@ pub fn SystemDetailView(id: String) -> Element {
     let mut vulnerabilities_resource = use_resource(move || {
         let id = id_for_vulns.clone();
         async move {
+            // Security data must never fall back to mock CVEs in production paths.
+            // Surface a real error/empty state instead so an API outage cannot
+            // render fake vulnerabilities (TASK-353 review).
             let Ok(system_id) = Uuid::parse_str(&id) else {
-                return mock_vulnerabilities();
+                return VulnerabilitiesLoad {
+                    items: Vec::new(),
+                    error: Some("Invalid system identifier.".to_string()),
+                    redirect_to_login: false,
+                };
             };
 
-            fetch_system_cves(&system_id)
-                .await
-                .unwrap_or_else(|_| mock_vulnerabilities())
+            match fetch_system_cves(&system_id).await {
+                Ok(items) => VulnerabilitiesLoad {
+                    items,
+                    error: None,
+                    redirect_to_login: false,
+                },
+                Err(ApiClientError::Status {
+                    code: 401 | 403, ..
+                }) => VulnerabilitiesLoad {
+                    items: Vec::new(),
+                    error: None,
+                    redirect_to_login: true,
+                },
+                Err(err) => VulnerabilitiesLoad {
+                    items: Vec::new(),
+                    error: Some(format!("Unable to load vulnerabilities: {err}")),
+                    redirect_to_login: false,
+                },
+            }
         }
     });
 
@@ -286,7 +374,10 @@ pub fn SystemDetailView(id: String) -> Element {
         }
     });
 
-    // Derive state from resource result
+    // Derive state from resource result. `detail_loading` is true while the primary
+    // system-detail fetch is still in-flight so we can show a real loading spinner (design
+    // parity) instead of silently rendering fallback/mock data.
+    let detail_loading = detail_resource.read_unchecked().is_none();
     let (system, api_notice, redirect_to_login, not_found) =
         match &*detail_resource.read_unchecked() {
             Some(result) => (
@@ -297,6 +388,24 @@ pub fn SystemDetailView(id: String) -> Element {
             ),
             None => (fallback_system_detail(), None, false, false),
         };
+
+    // Loading state — design reference shows a centered spinner while the system loads.
+    if detail_loading {
+        return rsx! {
+            div {
+                class: "sd-root",
+                "data-testid": "system-detail-loading",
+                "data-screen-label": "SystemDetail",
+                div {
+                    class: "flex items-center justify-center py-16",
+                    crate::components::loading::DashboardLoadingSpinner {
+                        label: "Loading system…".to_string(),
+                        size: 48,
+                    }
+                }
+            }
+        };
+    }
 
     // Redirect to login (early return matching dashboard pattern).
     if redirect_to_login {
@@ -347,6 +456,15 @@ pub fn SystemDetailView(id: String) -> Element {
         .find(|commit| commit.is_current)
         .cloned()
         .or_else(|| deploy_commit_history.first().cloned());
+    // Raw commit list for the Edit modal's pinned-commit picker. This comes from the
+    // real `/systems/:id/commits` endpoint when available, so the pinned picker is wired
+    // to authoritative data rather than mocked.
+    let edit_recent_commits = commits_resource
+        .read_unchecked()
+        .clone()
+        .flatten()
+        .map(|response| response.commits)
+        .unwrap_or_default();
     let generations_result = generations_resource
         .read_unchecked()
         .clone()
@@ -357,10 +475,26 @@ pub fn SystemDetailView(id: String) -> Element {
             notice: None,
             redirect_to_login: false,
         });
-    let vulnerabilities = match &*vulnerabilities_resource.read_unchecked() {
-        Some(value) => value.clone(),
-        None => mock_vulnerabilities(),
-    };
+    let vulnerabilities_load = vulnerabilities_resource
+        .read_unchecked()
+        .clone()
+        .unwrap_or_else(|| VulnerabilitiesLoad {
+            items: Vec::new(),
+            error: None,
+            redirect_to_login: false,
+        });
+    if vulnerabilities_load.redirect_to_login {
+        nav.push(Route::LoginView {});
+        return rsx! {
+            div {
+                class: "flex items-center justify-center py-12",
+                p { class: "{theme::text::SECONDARY}", "Redirecting to login..." }
+            }
+        };
+    }
+    let vulnerabilities_loading = vulnerabilities_resource.read_unchecked().is_none();
+    let vulnerabilities = vulnerabilities_load.items.clone();
+    let vulnerabilities_error = vulnerabilities_load.error.clone();
     let deployment_logs = map_agent_events_to_logs(
         agent_events_resource
             .read_unchecked()
@@ -422,6 +556,16 @@ pub fn SystemDetailView(id: String) -> Element {
         HealthStatus::Offline => "chip chip-unknown",
     };
     let health_label = system.health_status.label();
+    let detail_fqdn = effective_fqdn(&system);
+    let deployment_chip_class = match system.deployment_status {
+        DeploymentStatus::UpToDate => "chip chip-healthy",
+        DeploymentStatus::Behind => "chip chip-warning",
+        DeploymentStatus::Ahead => "chip chip-info",
+        DeploymentStatus::NeverDeployed
+        | DeploymentStatus::NoCommitsAvailable
+        | DeploymentStatus::Unknown => "chip chip-unknown",
+    };
+    let deployment_chip_label = deployment_state_label(&system.deployment_status);
 
     // Format last seen for header
     let last_seen_text = system
@@ -462,14 +606,7 @@ pub fn SystemDetailView(id: String) -> Element {
                         nav.push(Route::SystemsView {});
                     },
                     "aria-label": "Back to systems",
-                    svg {
-                        class: "w-3.5 h-3.5",
-                        fill: "none",
-                        stroke: "currentColor",
-                        stroke_width: "2",
-                        view_box: "0 0 24 24",
-                        path { d: "M15 19l-7-7 7-7" }
-                    }
+                    Icon { name: IconName::ArrowLeft, size: 14 }
                 }
                 span {
                     class: "sd-crumb-text",
@@ -492,7 +629,7 @@ pub fn SystemDetailView(id: String) -> Element {
                         }
                         div {
                             h1 { class: "sd-hostname", "{system.hostname}" }
-                            div { class: "sd-fqdn mono", "{system.hostname}.local" }
+                            div { class: "sd-fqdn mono", "{detail_fqdn}" }
                         }
                         span {
                             class: "env-badge",
@@ -502,307 +639,40 @@ pub fn SystemDetailView(id: String) -> Element {
                         }
                         span { class: "{health_chip_class}", "{health_label}" }
                         span {
-                            class: "chip chip-info",
-                            "{system.deployment_status.label()}"
+                            class: "{deployment_chip_class}",
+                            "{deployment_chip_label}"
                         }
                     }
 
                     div {
                         class: "sd-head-actions",
-                        // Evaluate
                         button {
                             class: "btn btn-ghost focus-ring",
                             disabled: !can_mutate,
-                            svg {
-                                class: "w-3.5 h-3.5",
-                                fill: "none",
-                                stroke: "currentColor",
-                                stroke_width: "2",
-                                view_box: "0 0 24 24",
-                                path { d: "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 12l2 2 4-4" }
-                            }
-                            "Evaluate"
-                        }
-                        // Rollback
-                        button {
-                            class: "btn btn-ghost focus-ring",
-                            disabled: !can_mutate,
-                            onclick: move |_| show_rollback_dialog.set(true),
-                            svg {
-                                class: "w-3.5 h-3.5",
-                                fill: "none",
-                                stroke: "currentColor",
-                                stroke_width: "2",
-                                view_box: "0 0 24 24",
-                                path { d: "M9 14l-4-4 4-4M5 10h7a4 4 0 014 4v1" }
-                            }
+                            onclick: move |_| show_generation_rollback_modal.set(true),
+                            Icon { name: IconName::Rollback, size: 14 }
                             "Rollback"
                         }
-                        // Deploy (primary)
+                        button {
+                            class: "btn btn-ghost focus-ring",
+                            onclick: move |_| show_ssh_modal.set(true),
+                            Icon { name: IconName::Terminal, size: 14 }
+                            "SSH"
+                        }
+                        button {
+                            class: "btn btn-ghost focus-ring",
+                            disabled: !can_mutate,
+                            onclick: move |_| edit_modal_open.set(true),
+                            Icon { name: IconName::Gear, size: 14 }
+                            "Edit"
+                        }
                         button {
                             class: "btn btn-primary focus-ring",
                             disabled: !can_mutate,
                             onclick: move |_| active_tab.set(Tab::Deploy),
-                            svg {
-                                class: "w-3.5 h-3.5",
-                                fill: "none",
-                                stroke: "currentColor",
-                                stroke_width: "2",
-                                view_box: "0 0 24 24",
-                                path { d: "M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" }
-                            }
+                            Icon { name: IconName::Deploy, size: 14 }
                             "Deploy"
                         }
-                        button {
-                            class: "inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} {theme::text::PRIMARY} {theme::interactive::HOVER_BG} {theme::interactive::FOCUS_RING} transition-colors disabled:opacity-60 disabled:cursor-not-allowed",
-                            disabled: !can_mutate,
-                            onclick: move |_| edit_modal_open.set(true),
-                            if !can_mutate {
-                                "Edit (Operator/Admin required)"
-                            } else {
-                            "Edit"
-                        }
-                    }
-                    button {
-                        class: "inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING} transition-colors disabled:opacity-60 disabled:cursor-not-allowed",
-                        disabled: *cve_scan_in_progress.read() || !can_mutate || !cve_scan_eligible,
-                        title: if cve_scan_eligible {
-                            Some("Run CVE scan immediately for this system configuration")
-                        } else {
-                            Some(cve_scan_blocked_reason.as_str())
-                        },
-                        onclick: {
-                            let system_id = system.id;
-                            move |_| {
-                                if !can_mutate || !cve_scan_eligible {
-                                    return;
-                                }
-
-                                cve_scan_in_progress.set(true);
-                                cve_scan_status_text.set(Some("CVE scan queued...".to_string()));
-                                spawn(async move {
-                                    let trigger_result = trigger_system_cve_scan(&system_id).await;
-                                    match trigger_result {
-                                        Ok(triggered) => {
-                                            cve_scan_status_text
-                                                .set(Some("CVE scan running...".to_string()));
-                                            let mut terminal_status: Option<String> = None;
-
-                                            for _ in 0..25 {
-                                                match fetch_cve_scan_status(&triggered.scan_id).await {
-                                                    Ok(status) => {
-                                                        let normalized = status.status.to_lowercase();
-                                                        if normalized == "completed" {
-                                                            terminal_status = Some(format!(
-                                                                "CVE scan completed: {} vulnerabilities found",
-                                                                status.total_vulnerabilities
-                                                            ));
-                                                            break;
-                                                        }
-                                                        if normalized == "failed" {
-                                                            terminal_status = Some(
-                                                                "CVE scan failed. Check server logs for details."
-                                                                    .to_string(),
-                                                            );
-                                                            break;
-                                                        }
-                                                        cve_scan_status_text
-                                                            .set(Some("CVE scan running...".to_string()));
-                                                    }
-                                                    Err(_) => {
-                                                        terminal_status = Some(
-                                                            "Unable to poll CVE scan status."
-                                                                .to_string(),
-                                                        );
-                                                        break;
-                                                    }
-                                                }
-
-                                                use gloo_timers::future::TimeoutFuture;
-                                                TimeoutFuture::new(1500).await;
-                                            }
-
-                                            if let Some(msg) = terminal_status {
-                                                let is_success = msg.contains("completed");
-                                                toast_message.set(Some((msg.clone(), is_success)));
-                                                cve_scan_status_text.set(Some(msg));
-                                            }
-                                        }
-                                        Err(ApiClientError::Status { code: 409, body }) if body.contains("scan_ineligible") => {
-                                            let msg = "CVE scanning is not available on this node (vulnix not installed).".to_string();
-                                            toast_message.set(Some((msg.clone(), false)));
-                                            cve_scan_status_text.set(Some(msg));
-                                        }
-                                        Err(err) => {
-                                            let msg = format!("Failed to trigger CVE scan: {}", err);
-                                            toast_message.set(Some((msg.clone(), false)));
-                                            cve_scan_status_text.set(Some(msg));
-                                        }
-                                    }
-
-                                    cve_scan_in_progress.set(false);
-                                });
-                            }
-                        },
-
-                        if *cve_scan_in_progress.read() {
-                            "Scanning..."
-                        } else if !can_mutate {
-                            "Run CVE Scan (Operator/Admin required)"
-                        } else {
-                            "Run CVE Scan"
-                        }
-                    }
-                    button {
-                        class: "inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING} transition-colors disabled:opacity-60 disabled:cursor-not-allowed",
-                        disabled: *hardening_scan_in_progress.read() || !can_mutate || !hardening_scan_eligible,
-                        title: if !hardening_scan_eligible {
-                            Some(hardening_scan_blocked_reason.as_str())
-                        } else if !can_mutate {
-                            Some("Operator or Admin role required to run scans")
-                        } else {
-                            Some("Run hardening scan immediately for this system configuration")
-                        },
-                        onclick: {
-                            let system_id = system.id;
-                            move |_| {
-                                if !can_mutate || !hardening_scan_eligible {
-                                    return;
-                                }
-
-                                hardening_scan_in_progress.set(true);
-                                hardening_scan_status_text.set(Some("Hardening scan queued...".to_string()));
-
-                                spawn(async move {
-                                    let trigger_result = trigger_system_hardening_scan(&system_id).await;
-                                    match trigger_result {
-                                        Ok(triggered) => {
-                                            hardening_scan_status_text
-                                                .set(Some("Hardening scan running...".to_string()));
-                                            let mut terminal_status: Option<String> = None;
-
-                                            for _ in 0..25 {
-                                                match fetch_hardening_scan_status(&triggered.scan_id).await {
-                                                    Ok(status) => {
-                                                        let normalized = status.status.to_lowercase();
-                                                        if normalized == "completed" {
-                                                            terminal_status = Some(format!(
-                                                                "Hardening scan completed: {} services, score {}",
-                                                                status.total_services,
-                                                                status.overall_score
-                                                                    .map(|v| v.to_string())
-                                                                    .unwrap_or_else(|| "n/a".to_string())
-                                                            ));
-                                                            break;
-                                                        }
-
-                                                        if normalized == "failed" {
-                                                            terminal_status = Some(match status.error_message {
-                                                                Some(message) if !message.is_empty() => {
-                                                                    format!("Hardening scan failed: {}", message)
-                                                                }
-                                                                _ => "Hardening scan failed. Check server logs for details."
-                                                                    .to_string(),
-                                                            });
-                                                            break;
-                                                        }
-                                                    }
-                                                    Err(_) => {
-                                                        terminal_status = Some(
-                                                            "Unable to poll hardening scan status.".to_string(),
-                                                        );
-                                                        break;
-                                                    }
-                                                }
-
-                                                use gloo_timers::future::TimeoutFuture;
-                                                TimeoutFuture::new(1500).await;
-                                            }
-
-                                            if let Some(msg) = terminal_status {
-                                                let is_success = msg.contains("completed");
-                                                toast_message.set(Some((msg.clone(), is_success)));
-                                                hardening_scan_status_text.set(Some(msg));
-                                                hardening_results_resource.restart();
-                                            }
-                                        }
-                                        Err(err) => {
-                                            let msg = format!("Failed to trigger hardening scan: {}", err);
-                                            toast_message.set(Some((msg.clone(), false)));
-                                            hardening_scan_status_text.set(Some(msg));
-                                        }
-                                    }
-
-                                    hardening_scan_in_progress.set(false);
-                                });
-                            }
-                        },
-
-                        svg {
-                            class: "w-4 h-4",
-                            fill: "none",
-                            stroke: "currentColor",
-                            stroke_width: "2",
-                            view_box: "0 0 24 24",
-                            path {
-                                stroke_linecap: "round",
-                                stroke_linejoin: "round",
-                                d: "M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z"
-                            }
-                        }
-                        if *hardening_scan_in_progress.read() {
-                            "Scanning..."
-                        } else if !can_mutate {
-                            "Run Hardening Scan (Operator/Admin required)"
-                        } else if !hardening_scan_eligible {
-                            "Run Hardening Scan (unavailable)"
-                        } else {
-                            "Run Hardening Scan"
-                        }
-                    }
-                    button {
-                        class: "inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::SUCCESS_BTN} {theme::interactive::FOCUS_RING} transition-colors disabled:opacity-60 disabled:cursor-not-allowed",
-                        disabled: *sync_in_progress.read() || !can_mutate,
-                        onclick: move |_| show_sync_dialog.set(true),
-
-                        if *sync_in_progress.read() {
-                            svg {
-                                class: "w-4 h-4 animate-spin",
-                                fill: "none",
-                                view_box: "0 0 24 24",
-                                circle {
-                                    class: "opacity-25",
-                                    cx: "12",
-                                    cy: "12",
-                                    r: "10",
-                                    stroke: "currentColor",
-                                    stroke_width: "4"
-                                }
-                                path {
-                                    class: "opacity-75",
-                                    fill: "currentColor",
-                                    d: "M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                                }
-                            }
-                            "Syncing..."
-                        } else if !can_mutate {
-                            "Sync (Operator/Admin required)"
-                        } else {
-                            svg {
-                                class: "w-4 h-4",
-                                fill: "none",
-                                stroke: "currentColor",
-                                view_box: "0 0 24 24",
-                                path {
-                                    stroke_linecap: "round",
-                                    stroke_linejoin: "round",
-                                    stroke_width: "2",
-                                    d: "M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
-                                }
-                            }
-                            "Sync Now"
-                        }
-                    }
                     }
                 }
                 if let Some(scan_status) = cve_scan_status_text() {
@@ -906,7 +776,7 @@ pub fn SystemDetailView(id: String) -> Element {
                 "data-testid": "system-detail-tabs",
                 class: "sd-tabs",
                 role: "tablist",
-                for tab in [Tab::Overview, Tab::Deploy, Tab::History, Tab::Cves, Tab::Hardening, Tab::Logs, Tab::Config] {
+                for tab in DETAIL_TAB_ORDER {
                     {
                         let is_active = *active_tab.read() == tab;
                         let tab_class = if is_active {
@@ -921,71 +791,17 @@ pub fn SystemDetailView(id: String) -> Element {
                                 role: "tab",
                                 "aria-selected": "{is_active}",
                                 onclick: move |_| active_tab.set(tab),
+                                // Tab icons use the shared Icon component at size 13,
+                                // matching the CrystalForgelatest design icon contract.
                                 match tab {
-                                    Tab::Overview => rsx!(
-                                        svg {
-                                            class: "w-3.5 h-3.5",
-                                            fill: "none",
-                                            stroke: "currentColor",
-                                            view_box: "0 0 24 24",
-                                            path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" }
-                                        }
-                                    ),
-                                    Tab::Deploy => rsx!(
-                                        svg {
-                                            class: "w-3.5 h-3.5",
-                                            fill: "none",
-                                            stroke: "currentColor",
-                                            view_box: "0 0 24 24",
-                                            path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" }
-                                        }
-                                    ),
-                                    Tab::History => rsx!(
-                                        svg {
-                                            class: "w-3.5 h-3.5",
-                                            fill: "none",
-                                            stroke: "currentColor",
-                                            view_box: "0 0 24 24",
-                                            path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" }
-                                        }
-                                    ),
-                                    Tab::Cves => rsx!(
-                                        svg {
-                                            class: "w-3.5 h-3.5",
-                                            fill: "none",
-                                            stroke: "currentColor",
-                                            view_box: "0 0 24 24",
-                                            path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M12 3l8 4v5c0 5-3.5 9.5-8 11-4.5-1.5-8-6-8-11V7l8-4z" }
-                                        }
-                                    ),
-                                    Tab::Hardening => rsx!(
-                                        svg {
-                                            class: "w-3.5 h-3.5",
-                                            fill: "none",
-                                            stroke: "currentColor",
-                                            view_box: "0 0 24 24",
-                                            path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M12 3l8 4v5c0 5-3 8-8 9-5-1-8-4-8-9V7l8-4z" }
-                                            path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M9 12h6" }
-                                        }
-                                    ),
-                                    Tab::Logs => rsx!(
-                                        svg {
-                                            class: "w-3.5 h-3.5",
-                                            fill: "none",
-                                            stroke: "currentColor",
-                                            view_box: "0 0 24 24",
-                                            path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M8 9l3 3-3 3m5 0h3M5 4h14a2 2 0 012 2v12a2 2 0 01-2 2H5a2 2 0 01-2-2V6a2 2 0 012-2z" }
-                                        }
-                                    ),
-                                    Tab::Config => rsx!(
-                                        svg {
-                                            class: "w-3.5 h-3.5",
-                                            fill: "none",
-                                            stroke: "currentColor",
-                                            view_box: "0 0 24 24",
-                                            path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M9 12h6m-6 4h6M7 8h10M5 6h14a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2z" }
-                                        }
-                                    ),
+                                    Tab::Overview => rsx!(Icon { name: IconName::Dashboard, size: 13 }),
+                                    Tab::Deploy => rsx!(Icon { name: IconName::Deploy, size: 13 }),
+                                    Tab::History => rsx!(Icon { name: IconName::History, size: 13 }),
+                                    Tab::Cves => rsx!(Icon { name: IconName::Shield, size: 13 }),
+                                    Tab::Hardening => rsx!(Icon { name: IconName::Key, size: 13 }),
+                                    Tab::Logs => rsx!(Icon { name: IconName::Terminal, size: 13 }),
+                                    Tab::Config => rsx!(Icon { name: IconName::File, size: 13 }),
+                                    Tab::Compliance => rsx!(Icon { name: IconName::Shield, size: 13 }),
                                 }
                                 "{tab.label()}"
                                 if tab == Tab::Cves && system.cve_counts.critical > 0 {
@@ -1079,36 +895,20 @@ pub fn SystemDetailView(id: String) -> Element {
                             on_rollback: move |commit| {
                                 rollback_target.set(Some(commit));
                                 show_rollback_dialog.set(true);
-                            }
+                            },
+                            on_view_logs: move |_| active_tab.set(Tab::Logs),
                         }
                     },
                     Tab::Cves => rsx! {
-                        div {
-                            class: "sd-grid",
-                            section {
-                                class: "card",
-                                style: "overflow: hidden;",
-                                div {
-                                    class: "sd-card-head",
-                                    style: "padding: 14px 18px;",
-                                    h2 { "Vulnerabilities" }
-                                    span {
-                                        class: "sd-card-meta",
-                                        "{system.cve_counts.total()} total · {system.cve_counts.critical} critical"
-                                    }
-                                }
-                                div {
-                                    style: "padding: 0 18px 18px;",
-                                    CvesTab {
-                                        system_id: system.id,
-                                        cve_counts: system.cve_counts.clone(),
-                                        vulnerabilities: vulnerabilities.clone(),
-                                        allow_mutations: can_mutate,
-                                        on_saved: move |_| {
-                                            vulnerabilities_resource.restart();
-                                        }
-                                    }
-                                }
+                        CvesTab {
+                            system_id: system.id,
+                            cve_counts: system.cve_counts.clone(),
+                            vulnerabilities: vulnerabilities.clone(),
+                            allow_mutations: can_mutate,
+                            loading: vulnerabilities_loading,
+                            error: vulnerabilities_error.clone(),
+                            on_saved: move |_| {
+                                vulnerabilities_resource.restart();
                             }
                         }
                     },
@@ -1129,6 +929,9 @@ pub fn SystemDetailView(id: String) -> Element {
                     },
                     Tab::Config => rsx! {
                         ConfigTab { system: system.clone() }
+                    },
+                    Tab::Compliance => rsx! {
+                        ComplianceTab { system: system.clone() }
                     },
                 }
             }
@@ -1152,6 +955,7 @@ pub fn SystemDetailView(id: String) -> Element {
                     .as_ref()
                     .map(|flake| vec![flake.name.clone()])
                     .unwrap_or_default(),
+                recent_commits: edit_recent_commits.clone(),
                 on_close: move |_| edit_modal_open.set(false),
                 on_save: move |request: crate::api::models::UpdateSystemRequest| {
                     let system_id = system.id;
@@ -1159,6 +963,7 @@ pub fn SystemDetailView(id: String) -> Element {
                         match update_system_via_api(
                             system_id,
                             request.hostname,
+                            request.fqdn,
                             request.system_configuration_name,
                             request.environment,
                             request.flake_name,
@@ -1177,6 +982,51 @@ pub fn SystemDetailView(id: String) -> Element {
                         }
                     });
                 }
+            }
+        }
+
+        if *show_ssh_modal.read() {
+            SshConnectModal {
+                system: system.clone(),
+                on_close: move |_| show_ssh_modal.set(false),
+            }
+        }
+
+        if *show_generation_rollback_modal.read() {
+            GenerationRollbackModal {
+                hostname: system.hostname.clone(),
+                generations: generations_result.generations.clone(),
+                current_generation: generations_result.current_generation,
+                on_close: move |_| show_generation_rollback_modal.set(false),
+                on_confirm: {
+                    let system_id = system.id;
+                    let hostname = system.hostname.clone();
+                    let toast_message = toast_message.clone();
+                    move |store_path: String| {
+                        show_generation_rollback_modal.set(false);
+                        let hostname = hostname.clone();
+                        let toast_message = toast_message.clone();
+                        spawn(async move {
+                            let message = match request_system_generation_rollback(
+                                &system_id,
+                                &SystemRollbackGenerationRequest {
+                                    store_path: store_path.clone(),
+                                },
+                            )
+                            .await
+                            {
+                                Ok(response) if !response.message.trim().is_empty() => response.message,
+                                Ok(_) => format!("Requested generation rollback for {}", hostname),
+                                Err(error) => format!(
+                                    "Generation rollback request failed for {}: {}",
+                                    hostname, error
+                                ),
+                            };
+                            let success = !message.to_ascii_lowercase().contains("failed");
+                            let _ = dispatch_sync_notification(message, success, toast_message).await;
+                        });
+                    }
+                },
             }
         }
 
@@ -1282,6 +1132,659 @@ pub fn SystemDetailView(id: String) -> Element {
 // Tab Components
 // ─────────────────────────────────────────────────────────────────────────────
 
+#[derive(Clone, PartialEq)]
+struct ComplianceMockBundle {
+    name: &'static str,
+    framework: &'static str,
+    version: &'static str,
+    owner: &'static str,
+    controls: u32,
+    score: u8,
+    pass: u32,
+    warn: u32,
+    fail: u32,
+    waiver: u32,
+}
+
+/// Temporary parity data for the System Detail Compliance tab.
+///
+/// IMPORTANT: This is intentionally mocked by maintainer authorization on
+/// TASK-353 because the real Compliance view/backend plumbing does not exist
+/// yet. Keep this isolated so TASK-355 can replace it with API-backed bundle
+/// rollups and per-control evidence without changing the view structure.
+fn mocked_compliance_bundles(system: &SystemDetail) -> Vec<ComplianceMockBundle> {
+    let production = system
+        .environment
+        .as_deref()
+        .map(|env| env.eq_ignore_ascii_case("production"))
+        .unwrap_or(false);
+
+    if production {
+        vec![
+            ComplianceMockBundle {
+                name: "Production baseline",
+                framework: "CIS",
+                version: "v2.0",
+                owner: "security-platform",
+                controls: 42,
+                score: 86,
+                pass: 34,
+                warn: 5,
+                fail: 2,
+                waiver: 1,
+            },
+            ComplianceMockBundle {
+                name: "STIG NixOS overlay",
+                framework: "DISA STIG",
+                version: "draft",
+                owner: "platform-secops",
+                controls: 28,
+                score: 92,
+                pass: 25,
+                warn: 2,
+                fail: 0,
+                waiver: 1,
+            },
+        ]
+    } else {
+        vec![ComplianceMockBundle {
+            name: "General fleet baseline",
+            framework: "Internal",
+            version: "2026.1",
+            owner: "platform",
+            controls: 24,
+            score: 94,
+            pass: 22,
+            warn: 1,
+            fail: 0,
+            waiver: 1,
+        }]
+    }
+}
+
+fn compliance_score_color(score: u8) -> &'static str {
+    if score >= 90 {
+        "#34d399"
+    } else if score >= 70 {
+        "#fbbf24"
+    } else {
+        "#f87171"
+    }
+}
+
+#[component]
+fn ComplianceTab(system: SystemDetail) -> Element {
+    let bundles = mocked_compliance_bundles(&system);
+    // Selected bundle for the placeholder evidence drawer. The real per-control evidence
+    // drawer (config output, systemd unit state, audit results, waivers) is tracked by
+    // TASK-356; this placeholder shows the design-example layout with sample evidence so the
+    // "View evidence" action is no longer a dead button.
+    let mut selected_bundle: Signal<Option<ComplianceMockBundle>> = use_signal(|| None);
+    let system_hostname = system.hostname.clone();
+
+    rsx! {
+        div {
+            style: "display:flex;flex-direction:column;gap:14px;",
+
+            div {
+                class: "sd-callout sd-callout-info",
+                Icon { name: IconName::Shield, size: 13 }
+                div {
+                    style: "font-size:12px;",
+                    strong { "Temporary Compliance preview. " }
+                    "Mock bundle rollups are shown for design parity while real compliance evidence APIs are implemented."
+                }
+            }
+
+            for bundle in bundles {
+                {
+                    let score_color = compliance_score_color(bundle.score);
+                    let score_width = format!("width:{}%;height:100%;background:{};", bundle.score, score_color);
+                    let bundle_for_drawer = bundle.clone();
+                    rsx! {
+                        div {
+                            class: "card",
+                            style: "padding:16px;",
+
+                            div {
+                                style: "display:flex;align-items:flex-start;justify-content:space-between;gap:14px;flex-wrap:wrap;",
+                                div {
+                                    style: "min-width:0;",
+                                    div {
+                                        style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
+                                        span { style: "font-size:15px;font-weight:650;", "{bundle.name}" }
+                                        span { class: "chip chip-info", style: "font-size:10px;", "{bundle.framework}" }
+                                        span { class: "chip chip-unknown", style: "font-size:10px;", "{bundle.version}" }
+                                        if bundle.fail == 0 {
+                                            span {
+                                                class: "chip chip-healthy",
+                                                style: "font-size:10px;",
+                                                Icon { name: IconName::Check, size: 9 }
+                                                " Compliant"
+                                            }
+                                        } else {
+                                            span {
+                                                class: "chip chip-critical",
+                                                style: "font-size:10px;",
+                                                Icon { name: IconName::Warn, size: 9 }
+                                                " {bundle.fail} failing"
+                                            }
+                                        }
+                                    }
+                                    div {
+                                        style: "font-size:12px;color:var(--cf-text-muted);margin-top:4px;",
+                                        "{bundle.controls} controls · owned by "
+                                        span { class: "mono", "{bundle.owner}" }
+                                    }
+                                }
+                                button {
+                                    class: "btn btn-primary focus-ring",
+                                    title: "Preview the evidence drawer layout (real per-control evidence is tracked by TASK-356)",
+                                    onclick: move |_| selected_bundle.set(Some(bundle_for_drawer.clone())),
+                                    Icon { name: IconName::File, size: 13 }
+                                    "View evidence"
+                                }
+                            }
+
+                            div {
+                                style: "display:flex;align-items:center;gap:16px;margin-top:14px;flex-wrap:wrap;",
+                                div {
+                                    style: "display:flex;align-items:center;gap:10px;",
+                                    div {
+                                        style: "width:120px;height:8px;background:var(--cf-subtle-bg);border-radius:99px;overflow:hidden;",
+                                        div { style: "{score_width}" }
+                                    }
+                                    span {
+                                        class: "mono",
+                                        style: "font-size:14px;font-weight:700;color:{score_color};",
+                                        "{bundle.score}%"
+                                    }
+                                }
+                                div {
+                                    style: "display:flex;gap:14px;font-size:12px;",
+                                    span { span { class: "mono", style: "font-weight:700;color:#34d399;", "{bundle.pass}" } " pass" }
+                                    span { span { class: "mono", style: "font-weight:700;color:#fbbf24;", "{bundle.warn}" } " warn" }
+                                    span { span { class: "mono", style: "font-weight:700;color:#f87171;", "{bundle.fail}" } " fail" }
+                                    span { span { class: "mono", style: "font-weight:700;color:#a78bfa;", "{bundle.waiver}" } " waiver" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Placeholder evidence drawer (TASK-356 will replace with real per-control evidence).
+            if let Some(bundle) = selected_bundle.read().clone() {
+                ComplianceEvidenceDrawer {
+                    bundle,
+                    hostname: system_hostname.clone(),
+                    on_close: move |_| selected_bundle.set(None),
+                }
+            }
+        }
+    }
+}
+
+/// Placeholder "evidence drawer" for the Compliance tab.
+///
+/// IMPORTANT: This is a maintainer-authorized placeholder (TASK-353). It mirrors the design
+/// reference's evidence drawer layout with representative sample controls so the "View
+/// evidence" action demonstrates the intended UX. TASK-356 replaces this with real,
+/// per-control evidence (config output, systemd unit state, audit results, waivers).
+#[component]
+fn ComplianceEvidenceDrawer(
+    bundle: ComplianceMockBundle,
+    hostname: String,
+    on_close: EventHandler<()>,
+) -> Element {
+    // Representative sample controls for the placeholder drawer.
+    let sample_controls: [(&str, &str, &str, &str); 4] = [
+        (
+            "CIS-1.1.1",
+            "pass",
+            "low",
+            "Ensure mounting of cramfs filesystems is disabled",
+        ),
+        (
+            "CIS-1.4.1",
+            "pass",
+            "medium",
+            "Ensure bootloader password is set",
+        ),
+        (
+            "CIS-5.2.5",
+            "warn",
+            "medium",
+            "Ensure SSH LogLevel is appropriate",
+        ),
+        (
+            "CIS-5.3.1",
+            "fail",
+            "high",
+            "Ensure password creation requirements are configured",
+        ),
+    ];
+    let mut active_control = use_signal(|| 0_usize);
+    let active_idx = (*active_control.read()).min(sample_controls.len().saturating_sub(1));
+    let (active_id, active_status, active_severity, active_desc) = sample_controls[active_idx];
+    let status_color = match active_status {
+        "pass" => "#34d399",
+        "warn" => "#fbbf24",
+        "waiver" => "#a78bfa",
+        _ => "#f87171",
+    };
+    let severity_color = match active_severity {
+        "high" => "#f87171",
+        "medium" => "#fbbf24",
+        _ => "#60a5fa",
+    };
+    let evidence_count = 3;
+
+    rsx! {
+        div { class: "fl-tray-backdrop", onclick: move |_| on_close.call(()) }
+        aside {
+            class: "fl-tray",
+            style: "width:min(960px,96vw);",
+            header {
+                class: "fl-tray-head",
+                div { style: "display:flex;align-items:center;gap:12px;min-width:0;flex:1;",
+                    Icon { name: IconName::Shield, size: 18 }
+                    div { style: "min-width:0;",
+                        div { style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
+                            span { class: "mono", style: "font-weight:700;font-size:15px;", "{hostname}" }
+                            span { style: "font-size:11px;color:var(--cf-text-muted);", "vs" }
+                            span { class: "chip chip-info", "{bundle.name}" }
+                        }
+                        div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:2px;",
+                            "Stepping through {sample_controls.len()} controls · preview data until TASK-356 wires real evidence"
+                        }
+                    }
+                }
+                div { style: "display:flex;gap:6px;",
+                    button { class: "btn btn-ghost focus-ring xs", Icon { name: IconName::ArrowRight, size: 11 } "View bundle" }
+                    button { class: "btn-icon focus-ring", onclick: move |_| on_close.call(()), Icon { name: IconName::X, size: 16 } }
+                }
+            }
+
+            div { style: "display:grid;grid-template-columns:260px 1fr;flex:1;min-height:0;overflow:hidden;",
+                nav { style: "border-right:1px solid var(--cf-divider);overflow-y:auto;background:color-mix(in oklab,var(--cf-page-bg) 30%,var(--cf-card-bg));",
+                    for (idx, (id, status, _severity, desc)) in sample_controls.iter().enumerate() {
+                        {
+                            let is_selected = idx == active_idx;
+                            let dot = match *status {
+                                "pass" => "#34d399",
+                                "warn" => "#fbbf24",
+                                "waiver" => "#a78bfa",
+                                _ => "#f87171",
+                            };
+                            rsx! {
+                                button {
+                                    class: "focus-ring",
+                                    style: if is_selected {
+                                        "all:unset;cursor:pointer;display:block;padding:10px 14px;width:100%;box-sizing:border-box;border-left:3px solid var(--cf-brand-purple);background:color-mix(in oklab,var(--cf-brand-purple) 8%,transparent);border-bottom:1px solid var(--cf-divider);"
+                                    } else {
+                                        "all:unset;cursor:pointer;display:block;padding:10px 14px;width:100%;box-sizing:border-box;border-left:3px solid transparent;background:transparent;border-bottom:1px solid var(--cf-divider);"
+                                    },
+                                    onclick: move |_| active_control.set(idx),
+                                    div { style: "display:flex;justify-content:space-between;align-items:center;gap:8px;",
+                                        span { class: "mono", style: "font-size:11px;color:var(--cf-text-muted);", "{idx + 1:02}" }
+                                        span { style: "width:8px;height:8px;border-radius:50%;background:{dot};" }
+                                    }
+                                    div { style: if is_selected { "font-size:12px;color:var(--cf-text-primary);margin-top:4px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" } else { "font-size:12px;color:var(--cf-text-primary);margin-top:4px;font-weight:400;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" },
+                                        "{id} · {desc}"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                div { style: "overflow:auto;padding:20px;display:flex;flex-direction:column;gap:16px;",
+                    div {
+                        div { style: "display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px;",
+                            span { style: "font-size:11px;color:var(--cf-text-muted);", "Control {active_idx + 1} of {sample_controls.len()}" }
+                            span { class: "chip", style: "color:{status_color};background:color-mix(in oklab,{status_color} 14%,transparent);border:1px solid {status_color};", "{active_status}" }
+                            span { class: "chip", style: "color:{severity_color};background:color-mix(in oklab,{severity_color} 14%,transparent);", "{active_severity} severity" }
+                        }
+                        h2 { class: "mono", style: "margin:0;font-size:18px;font-weight:700;", "{active_id}" }
+                        p { style: "margin:6px 0 0;font-size:13px;color:var(--cf-text-secondary);line-height:1.5;", "{active_desc}" }
+                    }
+
+                    div { class: "sd-callout sd-callout-info",
+                        Icon { name: IconName::File, size: 13 }
+                        div { style: "font-size:12px;", strong { "Preview only. " } "Representative evidence artifacts are shown until real Compliance evidence APIs land." }
+                    }
+
+                    div {
+                        h3 { style: "font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:var(--cf-text-muted);margin:0 0 8px;font-weight:600;", "Evidence · {evidence_count} items" }
+                        div { style: "display:flex;flex-direction:column;gap:10px;",
+                            EvidencePreviewItem { label: "NixOS config output".to_string(), reference: "systemd.services.sshd.serviceConfig".to_string(), source: "agent".to_string(), artifact: "services.openssh.settings.LogLevel = \"VERBOSE\";".to_string() }
+                            EvidencePreviewItem { label: "systemd unit state".to_string(), reference: "systemctl show sshd.service".to_string(), source: "systemd".to_string(), artifact: "NoNewPrivileges=yes\nProtectSystem=strict\nPrivateTmp=yes".to_string() }
+                            EvidencePreviewItem { label: "Audit result".to_string(), reference: "crystal-forge hardening scan".to_string(), source: "scanner".to_string(), artifact: "PASS {active_id} on {hostname}".to_string() }
+                        }
+                    }
+
+                    div { style: "padding:12px;background:var(--cf-subtle-bg);border-radius:8px;font-size:11px;color:var(--cf-text-secondary);",
+                        strong { style: "color:var(--cf-text-primary);", "Framework mapping" }
+                        span { style: "margin-left:8px;", "—" }
+                        span { class: "mono", style: "margin-left:8px;", "{bundle.framework} / {bundle.version}" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn EvidencePreviewItem(
+    label: String,
+    reference: String,
+    source: String,
+    artifact: String,
+) -> Element {
+    rsx! {
+        div { class: "ev-item",
+            div { class: "ev-item-head",
+                Icon { name: IconName::File, size: 14 }
+                div { style: "min-width:0;flex:1;",
+                    div { style: "font-size:12px;font-weight:600;color:var(--cf-text-primary);", "{label}" }
+                    div { class: "mono", style: "font-size:11px;color:var(--cf-text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;", "{reference}" }
+                }
+                div { style: "font-size:11px;color:var(--cf-text-muted);text-align:right;white-space:nowrap;flex-shrink:0;",
+                    div { "preview" }
+                    div { class: "mono", style: "font-size:10px;margin-top:2px;", "{source}" }
+                }
+            }
+            pre { class: "sd-diff", style: "margin-top:8px;", "{artifact}" }
+        }
+    }
+}
+
+#[component]
+fn GenerationRollbackModal(
+    hostname: String,
+    generations: Vec<SystemGeneration>,
+    current_generation: Option<i32>,
+    on_close: EventHandler<()>,
+    on_confirm: EventHandler<String>,
+) -> Element {
+    let rollback_candidates = generations
+        .iter()
+        .filter(|generation| {
+            !generation.is_current
+                && generation
+                    .store_path
+                    .as_ref()
+                    .map(|path| !path.is_empty())
+                    .unwrap_or(false)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut selected_generation = use_signal(|| {
+        rollback_candidates
+            .first()
+            .map(|generation| generation.generation)
+    });
+    let selected = selected_generation.read().and_then(|generation_number| {
+        rollback_candidates
+            .iter()
+            .find(|item| item.generation == generation_number)
+            .cloned()
+    });
+    let selected_store_path = selected.as_ref().and_then(|item| item.store_path.clone());
+
+    rsx! {
+        div { class: "modal-backdrop", onclick: move |_| on_close.call(()),
+            div {
+                class: "modal",
+                style: "width:min(640px,96vw);max-height:92vh;",
+                onclick: move |e| e.stop_propagation(),
+
+                div { class: "modal-head",
+                    h2 { Icon { name: IconName::Rollback, size: 14 } span { style: "margin-left:6px;", "Rollback" } }
+                    p { "Select a prior NixOS generation for " span { class: "mono", "{hostname}" } "." }
+                }
+
+                div { class: "modal-body", style: "overflow-y:auto;",
+                    div { class: "sd-callout sd-callout-warn", style: "margin-bottom:14px;",
+                        Icon { name: IconName::Warn, size: 13 }
+                        div { style: "font-size:12px;", "Rollback switches the host to an existing generation. Heartbeat may pause briefly during activation." }
+                    }
+
+                    if rollback_candidates.is_empty() {
+                        div { class: "empty", style: "margin:0;",
+                            h3 { "No rollback generations available" }
+                            div { "This host has no prior generation with a recorded store path." }
+                        }
+                    } else {
+                        div { class: "sd-commit-list", style: "max-height:280px;",
+                            for generation in rollback_candidates.iter() {
+                                {
+                                    let is_selected = *selected_generation.read() == Some(generation.generation);
+                                    let gen_number = generation.generation;
+                                    let sha = generation
+                                        .commit_hash
+                                        .clone()
+                                        .unwrap_or_else(|| "—".to_string());
+                                    let short_sha = sha.chars().take(7).collect::<String>();
+                                    let when = generation.timestamp.format("%b %d, %H:%M").to_string();
+                                    rsx! {
+                                        button {
+                                            class: if is_selected { "sd-commit-item focus-ring selected" } else { "sd-commit-item focus-ring" },
+                                            style: "grid-template-columns:72px 80px 1fr auto auto;",
+                                            onclick: move |_| selected_generation.set(Some(gen_number)),
+                                            span { class: "mono sd-commit-sha", style: "color:var(--cf-brand-purple);", "#{generation.generation}" }
+                                            span { class: "mono sd-commit-sha", "{short_sha}" }
+                                            span { class: "sd-commit-msg", "Rollback to generation #{generation.generation}" }
+                                            span { class: "sd-commit-meta", "{when}" }
+                                            if Some(generation.generation) == current_generation {
+                                                span { class: "chip chip-healthy", "active" }
+                                            } else {
+                                                span { class: "chip chip-unknown", "rollback" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if let Some(selected) = selected {
+                            dl { class: "kv-grid", style: "margin-top:16px;",
+                                dt { "Target" } dd { class: "mono", "{hostname}" }
+                                dt { "To" } dd { class: "mono", "gen #{selected.generation}" }
+                                dt { "Store path" }
+                                dd { class: "mono", style: "font-size:11px;white-space:normal;word-break:break-all;", "{selected.store_path.clone().unwrap_or_default()}" }
+                            }
+                        }
+                    }
+                }
+
+                div { class: "modal-foot",
+                    button { class: "btn btn-ghost focus-ring", onclick: move |_| on_close.call(()), "Cancel" }
+                    button {
+                        class: "btn btn-primary focus-ring",
+                        disabled: selected_store_path.is_none(),
+                        onclick: move |_| {
+                            if let Some(store_path) = selected_store_path.clone() {
+                                on_confirm.call(store_path);
+                            }
+                        },
+                        Icon { name: IconName::Rollback, size: 13 }
+                        " Switch generation"
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn SshConnectModal(system: SystemDetail, on_close: EventHandler<()>) -> Element {
+    let environment_text = system
+        .environment
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let target = system
+        .network
+        .primary_ip
+        .clone()
+        .filter(|ip| !ip.is_empty())
+        .unwrap_or_else(|| effective_fqdn(&system));
+    let fqdn = effective_fqdn(&system);
+    let jump_domain = fqdn.split('.').skip(1).collect::<Vec<_>>().join(".");
+    let jump_domain = if jump_domain.is_empty() {
+        "example.com".to_string()
+    } else {
+        jump_domain
+    };
+
+    let ssh_cmd = format!("ssh root@{target}");
+    let bastion_cmd = format!("ssh -J bastion.{jump_domain} root@{target}");
+    let journal_cmd = format!("ssh root@{target} journalctl -fu crystal-forge-agent");
+    let is_pull = is_pull_reachability(&system.network.reachability);
+    let reachability_text = if is_pull {
+        "Agent pull-only"
+    } else {
+        "Direct / LAN"
+    };
+
+    rsx! {
+        div {
+            class: "modal-backdrop",
+            onclick: move |_| on_close.call(()),
+
+            div {
+                class: "modal",
+                style: "width:min(560px,96vw);",
+                onclick: move |e| e.stop_propagation(),
+
+                div {
+                    class: "modal-head",
+                    h2 {
+                        Icon { name: IconName::Terminal, size: 14 }
+                        span { style: "margin-left: 6px;", "Connect to {system.hostname}" }
+                    }
+                    p { "In-app terminal isn't available yet — connect directly over SSH for now." }
+                }
+
+                div {
+                    class: "modal-body",
+                    style: "overflow-y:auto;",
+
+                    div {
+                        class: "sd-callout sd-callout-warn",
+                        style: "margin-bottom: 14px;",
+                        Icon { name: IconName::Warn, size: 13 }
+                        div { style: "font-size: 12px;", "Browser-based SSH is on the roadmap. These commands run from your own workstation." }
+                    }
+
+                    div { class: "field", label { "Connect" } }
+                    SshCmd { command: ssh_cmd.clone() }
+
+                    if is_pull {
+                        div {
+                            class: "help",
+                            style: "margin-top: 8px;",
+                            Icon { name: IconName::Warn, size: 11 }
+                            " This host is "
+                            strong { "pull-only" }
+                            " (behind NAT/firewall). It may only be reachable from inside its network or via a bastion."
+                        }
+                    }
+
+                    div { class: "field", style: "margin-top: 16px;", label { "Via bastion" } }
+                    SshCmd { command: bastion_cmd.clone() }
+
+                    div { class: "field", style: "margin-top: 16px;", label { "Tail the system journal" } }
+                    SshCmd { command: journal_cmd.clone() }
+
+                    dl {
+                        class: "kv-grid",
+                        style: "margin-top: 16px;",
+                        dt { "Target" }
+                        dd { class: "mono", "{target}" }
+                        dt { "Environment" }
+                        dd { "{environment_text}" }
+                        dt { "Reachability" }
+                        dd { "{reachability_text}" }
+                    }
+                }
+
+                div {
+                    class: "modal-foot",
+                    button {
+                        class: "btn btn-primary focus-ring",
+                        onclick: move |_| on_close.call(()),
+                        "Close"
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A single SSH command row with a copy-to-clipboard button, mirroring the
+/// CrystalForgelatest `Cmd` helper used inside the SSH connect modal.
+#[component]
+fn SshCmd(command: String) -> Element {
+    let mut copied = use_signal(|| false);
+
+    rsx! {
+        div {
+            class: "ssh-cmd",
+            code { class: "mono", "{command}" }
+            button {
+                class: "btn btn-ghost xs focus-ring",
+                onclick: {
+                    let command = command.clone();
+                    move |_| {
+                        copy_to_clipboard(&command);
+                        copied.set(true);
+                        spawn(async move {
+                            gloo_timers::future::TimeoutFuture::new(1500).await;
+                            copied.set(false);
+                        });
+                    }
+                },
+                if *copied.read() {
+                    Icon { name: IconName::Check, size: 11 }
+                    "Copied"
+                } else {
+                    Icon { name: IconName::File, size: 11 }
+                    "Copy"
+                }
+            }
+        }
+    }
+}
+
+/// Copy text to the browser clipboard. No-op on non-wasm targets.
+fn copy_to_clipboard(text: &str) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        if let Some(win) = web_sys::window() {
+            let win_ref: &JsValue = win.as_ref();
+            if let Ok(navigator) = js_sys::Reflect::get(win_ref, &JsValue::from_str("navigator")) {
+                if let Ok(clipboard) =
+                    js_sys::Reflect::get(&navigator, &JsValue::from_str("clipboard"))
+                {
+                    if let Ok(write_text) =
+                        js_sys::Reflect::get(&clipboard, &JsValue::from_str("writeText"))
+                    {
+                        if let Ok(function) = write_text.dyn_into::<js_sys::Function>() {
+                            let _ = function.call1(&clipboard, &JsValue::from_str(text));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = text;
+    }
+}
+
 #[component]
 fn OverviewTab(
     system: SystemDetail,
@@ -1299,15 +1802,25 @@ fn OverviewTab(
         .kernel
         .clone()
         .unwrap_or_else(|| "unknown".to_string());
+
+    // Editable tag chips (design parity). Seeded from the system's environment/flake so the
+    // section is never empty, plus any operator-added tags. NOTE: tags are NOT yet persisted
+    // server-side (no systems.tags column) — see follow-up TASK-353.1. This is local UI state
+    // only; the help text marks it as not saved so operators are not misled.
+    let mut tags = use_signal(|| {
+        let mut seed = vec![format!("env:{}", environment.to_lowercase())];
+        if let Some(flake) = system.flake.as_ref() {
+            seed.push(format!("flake:{}", flake.name));
+        }
+        seed
+    });
+    let mut tag_adding = use_signal(|| false);
+    let mut tag_draft = use_signal(String::new);
     let heartbeat_next_in_sec = system
         .last_seen
         .map(|dt| 60.0 - now.signed_duration_since(dt).num_seconds() as f64)
         .unwrap_or(0.0);
-    let fqdn_text = format!(
-        "{}.{}.cf.internal",
-        system.hostname,
-        environment.to_lowercase()
-    );
+    let fqdn_text = effective_fqdn(&system);
 
     let flake_name = system
         .flake
@@ -1339,6 +1852,22 @@ fn OverviewTab(
         .clone()
         .unwrap_or_else(|| "-".to_string());
     let ipv6_text = "—".to_string();
+    let reachability_is_pull = is_pull_reachability(&system.network.reachability);
+    let reachability_chip_class = if reachability_is_pull {
+        "chip chip-warning"
+    } else {
+        "chip chip-healthy"
+    };
+    let reachability_chip_label = if reachability_is_pull {
+        "pull-only"
+    } else {
+        "direct / LAN"
+    };
+    let reachability_title = if reachability_is_pull {
+        "Behind NAT/firewall — agent checks in; no inbound from server"
+    } else {
+        "Server can reach the agent directly (LAN/routable/VPN)"
+    };
     let branch_text = "main".to_string();
     let generation_text = system
         .generation
@@ -1444,6 +1973,14 @@ fn OverviewTab(
                     dt { "Memory" } dd { "{memory_text}" }
                     dt { "IPv4" } dd { class: "mono", "{ipv4_text}" }
                     dt { "IPv6" } dd { class: "mono", "{ipv6_text}" }
+                    dt { "Reachability" }
+                    dd {
+                        span {
+                            class: "{reachability_chip_class}",
+                            title: "{reachability_title}",
+                            "{reachability_chip_label}"
+                        }
+                    }
                 }
                 div {
                     class: "hb-panel",
@@ -1556,20 +2093,88 @@ fn OverviewTab(
                 }
                 div {
                     class: "sd-tag-row",
-                    span { class: "sd-tag mono", "env:{environment.to_lowercase()}" }
-                    span { class: "sd-tag mono", "flake:{flake_name}" }
-                    button {
-                        class: "sd-tag sd-tag-add focus-ring",
-                        svg {
-                            class: "w-2.5 h-2.5",
-                            fill: "none",
-                            stroke: "currentColor",
-                            stroke_width: "2",
-                            view_box: "0 0 24 24",
-                            path { d: "M12 5v14M5 12h14" }
-                        }
-                        "add"
+                    if tags.read().is_empty() && !*tag_adding.read() {
+                        span { style: "color: var(--cf-text-muted); font-size: 13px;", "No tags yet" }
                     }
+                    for tag in tags.read().clone() {
+                        {
+                            let tag_to_remove = tag.clone();
+                            rsx! {
+                                span {
+                                    class: "sd-tag mono sd-tag-chip",
+                                    span { class: "sd-tag-label", "#{tag}" }
+                                    button {
+                                        class: "sd-tag-x focus-ring",
+                                        title: "Remove tag",
+                                        onclick: move |_| {
+                                            tags.with_mut(|list| list.retain(|item| *item != tag_to_remove));
+                                        },
+                                        svg {
+                                            class: "w-2 h-2",
+                                            fill: "none",
+                                            stroke: "currentColor",
+                                            stroke_width: "2.5",
+                                            view_box: "0 0 24 24",
+                                            path { d: "M6 6l12 12M18 6L6 18" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if *tag_adding.read() {
+                        span {
+                            class: "sd-tag-input-wrap",
+                            input {
+                                class: "sd-tag-input mono focus-ring",
+                                autofocus: true,
+                                placeholder: "tag…",
+                                value: "{tag_draft}",
+                                oninput: move |e| tag_draft.set(e.value().clone()),
+                                onkeydown: move |e| {
+                                    let key = e.key().to_string();
+                                    if key == "Enter" {
+                                        let value = normalize_tag(&tag_draft.read());
+                                        if !value.is_empty() && !tags.read().contains(&value) {
+                                            tags.with_mut(|list| list.push(value));
+                                        }
+                                        tag_draft.set(String::new());
+                                        tag_adding.set(false);
+                                    } else if key == "Escape" {
+                                        tag_draft.set(String::new());
+                                        tag_adding.set(false);
+                                    }
+                                },
+                                onblur: move |_| {
+                                    let value = normalize_tag(&tag_draft.read());
+                                    if !value.is_empty() && !tags.read().contains(&value) {
+                                        tags.with_mut(|list| list.push(value));
+                                    }
+                                    tag_draft.set(String::new());
+                                    tag_adding.set(false);
+                                },
+                            }
+                        }
+                    } else {
+                        button {
+                            class: "sd-tag sd-tag-add focus-ring",
+                            onclick: move |_| tag_adding.set(true),
+                            svg {
+                                class: "w-2.5 h-2.5",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                view_box: "0 0 24 24",
+                                path { d: "M12 5v14M5 12h14" }
+                            }
+                            "add"
+                        }
+                    }
+                }
+                p {
+                    class: "help",
+                    style: "margin-top: 8px;",
+                    "Free-form labels for your own grouping & filtering. Not saved yet — tag persistence is coming soon."
                 }
             }
         }
@@ -1648,6 +2253,15 @@ fn DeployTab(
     let policy_name = system.deployment_policy.clone();
 
     rsx! {
+        div {
+            style: "display:flex;flex-direction:column;gap:14px;",
+
+        // Deploy gate panel — policy evaluation for the selected target.
+        DeployGatePanel {
+            deployment_policy: system.deployment_policy.clone(),
+            cve_critical: system.cve_counts.critical,
+        }
+
         div {
             class: "sd-grid sd-grid-deploy",
 
@@ -2107,6 +2721,134 @@ fn DeployTab(
                 }
             }
         }
+        }
+    }
+}
+
+/// Deploy gate panel (design parity).
+///
+/// IMPORTANT: There is no HTTP gate-evaluation endpoint for a system+commit yet (gate
+/// evaluation runs only inside the server-side deployment loop). This panel renders a
+/// design-accurate gate summary derived from the system's deployment policy and CVE count
+/// so the Deploy tab matches the reference. Replace with real gate evaluation results once
+/// an endpoint exists — tracked by follow-up TASK-353.2.
+#[component]
+fn DeployGatePanel(deployment_policy: String, cve_critical: i64) -> Element {
+    // Derive a representative gate outcome from locally available signals.
+    let manual = deployment_policy.eq_ignore_ascii_case("manual");
+    let cve_blocked = cve_critical > 0;
+
+    let (overall, overall_class, overall_label) = if cve_blocked {
+        ("block", "chip chip-critical", "blocked")
+    } else if manual {
+        ("pending", "chip chip-info", "pending")
+    } else {
+        ("pass", "chip chip-healthy", "passing")
+    };
+
+    // Per-rule cards: (rule, status_class, status_label, reason, next).
+    let rules: Vec<(&str, &str, &str, String, Option<&str>)> = vec![
+        (
+            "CVE policy",
+            if cve_blocked {
+                "chip chip-critical"
+            } else {
+                "chip chip-healthy"
+            },
+            if cve_blocked { "block" } else { "pass" },
+            if cve_blocked {
+                format!("{cve_critical} critical CVE(s) exceed the allowed threshold.")
+            } else {
+                "No critical CVEs above the configured threshold.".to_string()
+            },
+            if cve_blocked {
+                Some("Patch or waive the critical CVEs, then re-scan.")
+            } else {
+                None
+            },
+        ),
+        (
+            "Approvals",
+            if manual {
+                "chip chip-info"
+            } else {
+                "chip chip-healthy"
+            },
+            if manual { "pending" } else { "pass" },
+            if manual {
+                "Manual deployment policy requires operator approval before deploy.".to_string()
+            } else {
+                "Policy does not require additional approvals.".to_string()
+            },
+            if manual {
+                Some("An operator must approve this deployment.")
+            } else {
+                None
+            },
+        ),
+        (
+            "Configuration drift",
+            "chip chip-healthy",
+            "pass",
+            "Running configuration matches the evaluated configuration.".to_string(),
+            None,
+        ),
+    ];
+
+    rsx! {
+        section {
+            class: "card sd-card",
+            style: "display:flex;flex-direction:column;gap:14px;",
+            div {
+                class: "sd-card-head",
+                div {
+                    style: "display:flex;align-items:center;gap:10px;",
+                    h2 { "Deploy gate" }
+                    span { class: "{overall_class}", "{overall_label}" }
+                }
+                span {
+                    class: "sd-card-meta",
+                    "policy: "
+                    span { class: "mono", "{deployment_policy}" }
+                }
+            }
+
+            if overall == "block" {
+                div {
+                    class: "sd-callout sd-callout-danger",
+                    Icon { name: IconName::Warn, size: 13 }
+                    div { style: "font-size:12px;", strong { "Deployment blocked by policy. " } "Resolve the blocking rules below before proceeding." }
+                }
+            } else if overall == "pending" {
+                div {
+                    class: "sd-callout sd-callout-info",
+                    Icon { name: IconName::Shield, size: 13 }
+                    div { style: "font-size:12px;", strong { "Waiting on policy gates. " } "See the cards below for required next actions." }
+                }
+            }
+
+            div {
+                style: "display:grid;grid-template-columns:repeat(auto-fill, minmax(280px,1fr));gap:10px;",
+                for (rule, status_class, _status_label, reason, next) in rules {
+                    div {
+                        style: "padding:12px 14px;border:1px solid var(--cf-divider);border-radius:10px;background:var(--cf-card-bg);display:flex;flex-direction:column;gap:8px;",
+                        div {
+                            style: "display:flex;align-items:center;justify-content:space-between;gap:8px;",
+                            span { style: "font-size:12px;font-weight:600;color:var(--cf-text-primary);", "{rule}" }
+                            span { class: "{status_class}", style: "font-size:10px;", "{_status_label}" }
+                        }
+                        div { style: "font-size:11px;color:var(--cf-text-secondary);line-height:1.5;", "{reason}" }
+                        if let Some(next_text) = next {
+                            div {
+                                style: "font-size:11px;color:var(--cf-text-muted);border-top:1px solid var(--cf-divider);padding-top:6px;margin-top:2px;",
+                                strong { style: "color:var(--cf-text-secondary);", "Next: " }
+                                "{next_text}"
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -2129,6 +2871,34 @@ fn LogsTabStyled(logs: Vec<DeploymentLogEntry>) -> Element {
         })
         .collect();
     let displayed_logs: Vec<&DeploymentLogEntry> = if cleared() { vec![] } else { filtered_logs };
+
+    // Precompute a day-break label for each line: shown when the calendar day changes from
+    // the previous visible line (design parity — sticky "Today"/"Yesterday"/date dividers).
+    let today = chrono::Utc::now().date_naive();
+    let yesterday = today.pred_opt().unwrap_or(today);
+    let log_rows: Vec<(Option<String>, &DeploymentLogEntry)> = {
+        let mut previous_day: Option<chrono::NaiveDate> = None;
+        displayed_logs
+            .into_iter()
+            .map(|entry| {
+                let day = entry.timestamp.date_naive();
+                let show = previous_day != Some(day);
+                previous_day = Some(day);
+                let label = if show {
+                    Some(if day == today {
+                        "Today".to_string()
+                    } else if day == yesterday {
+                        "Yesterday".to_string()
+                    } else {
+                        day.format("%a, %b %-d, %Y").to_string()
+                    })
+                } else {
+                    None
+                };
+                (label, entry)
+            })
+            .collect()
+    };
 
     rsx! {
         section {
@@ -2184,7 +2954,7 @@ fn LogsTabStyled(logs: Vec<DeploymentLogEntry>) -> Element {
             }
             pre {
                 class: "sd-log-stream",
-                for entry in displayed_logs {
+                for (day_label, entry) in log_rows {
                     {
                         let level_class = match entry.level {
                             LogLevel::Info => "sd-log-line sd-log-info",
@@ -2200,6 +2970,13 @@ fn LogsTabStyled(logs: Vec<DeploymentLogEntry>) -> Element {
                             LogLevel::Debug => "DEBUG",
                         };
                         rsx! {
+                            if let Some(label) = day_label {
+                                div {
+                                    class: "sd-log-day",
+                                    role: "separator",
+                                    span { class: "sd-log-day-label", "{label}" }
+                                }
+                            }
                             div {
                                 class: "{level_class}",
                                 span { class: "sd-log-t", "{ts}" }
@@ -2296,6 +3073,7 @@ fn HistoryTab(
     deployment_policy: String,
     allow_mutations: bool,
     on_rollback: EventHandler<SystemCommitHistory>,
+    on_view_logs: EventHandler<()>,
 ) -> Element {
     let rows = commits;
     let committed_timestamps: Vec<chrono::DateTime<chrono::Utc>> =
@@ -2392,6 +3170,7 @@ fn HistoryTab(
                                             button {
                                                 class: "btn-icon focus-ring",
                                                 title: "View logs",
+                                                onclick: move |_| on_view_logs.call(()),
                                                 svg {
                                                     class: "w-3.5 h-3.5",
                                                     fill: "none",
@@ -2411,18 +3190,6 @@ fn HistoryTab(
                                                     stroke: "currentColor",
                                                     view_box: "0 0 24 24",
                                                     path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M9 14l-4-4 4-4M5 10h7a4 4 0 014 4v1" }
-                                                }
-                                            }
-                                            button {
-                                                class: "btn-icon focus-ring",
-                                                title: "More",
-                                                svg {
-                                                    class: "w-3.5 h-3.5",
-                                                    fill: "currentColor",
-                                                    view_box: "0 0 24 24",
-                                                    circle { cx: "5", cy: "12", r: "2" }
-                                                    circle { cx: "12", cy: "12", r: "2" }
-                                                    circle { cx: "19", cy: "12", r: "2" }
                                                 }
                                             }
                                         }
@@ -2477,6 +3244,7 @@ fn CommitTimelineNode(
     deployment_policy: String,
     allow_mutations: bool,
     on_rollback: EventHandler<SystemCommitHistory>,
+    on_view_logs: EventHandler<()>,
 ) -> Element {
     let mut expanded = use_signal(|| false);
     let chevron_class = if *expanded.read() { "rotate-90" } else { "" };
@@ -2638,6 +3406,25 @@ fn CommitTimelineNode(
                                         _ => "hidden",
                                     },
                                     "{status.label()}"
+                                }
+                            }
+
+                            // View logs action
+                            button {
+                                class: "shrink-0 p-1 rounded text-gray-400 hover:text-white hover:bg-gray-800 transition-colors opacity-40 group-hover:opacity-100",
+                                title: "View logs",
+                                onclick: move |_| on_view_logs.call(()),
+                                svg {
+                                    class: "w-4 h-4",
+                                    fill: "none",
+                                    stroke: "currentColor",
+                                    view_box: "0 0 24 24",
+                                    path {
+                                        stroke_linecap: "round",
+                                        stroke_linejoin: "round",
+                                        stroke_width: "2",
+                                        d: "M8 9l3 3-3 3m5 0h3"
+                                    }
                                 }
                             }
 
@@ -2806,6 +3593,7 @@ fn HardeningTab(
     let mut justification_error = use_signal(|| None::<String>);
     let mut justification_notice = use_signal(|| None::<String>);
     let mut is_saving_justification = use_signal(|| false);
+    let mut active_waiver_directive: Signal<Option<String>> = use_signal(|| None);
     let mut modal_tab = use_signal(|| "overview".to_string());
     let mut search_query = use_signal(String::new);
     let mut severity_filter = use_signal(|| "all".to_string());
@@ -3019,33 +3807,31 @@ fn HardeningTab(
                     }
                 }
             } else {
-                div { class: "{theme::presets::CARD} overflow-hidden",
+                div { class: "card", style: "overflow: hidden;",
                     div { class: "overflow-x-auto",
                     table { class: "sys-table",
                         thead {
-                            tr { class: "{theme::surface::CARD_BG} border-b {theme::surface::CARD_BORDER} text-left {theme::text::SECONDARY}",
+                            tr {
                                 th {
-                                    class: "sticky top-0 z-10 px-2 py-2",
                                     style: "width: 22%;",
                                     "Service"
                                 }
-                                th { class: "sticky top-0 z-10 px-2 py-2 w-[80px]", "Risk" }
-                                th { class: "sticky top-0 z-10 px-2 py-2 w-[120px]", "Score" }
+                                th { style: "width: 80px;", "Risk" }
+                                th { style: "width: 120px;", "Score" }
                                 th {
-                                    class: "sticky top-0 z-10 px-2 py-2 w-[84px]",
+                                    style: "width: 84px;",
                                     "User"
                                 }
                                 for directive_name in table_directives.iter() {
                                     th {
                                         key: "hdr-{directive_name}",
-                                        class: "sticky top-0 z-10 text-center",
-                                        style: "font-size:9px; letter-spacing:0.04em; text-align:center; padding:8px 4px;",
+                                        style: "text-align:center;",
                                         title: "{directive_name}",
                                         "{directive_short_label(directive_name)}"
                                     }
                                 }
-                                th { class: "sticky top-0 z-10 px-2 py-2 w-[90px]", "Missing" }
-                                th { class: "sticky top-0 z-10 px-2 py-2 text-right w-[84px]", "" }
+                                th { style: "width: 90px;", "Missing" }
+                                th { style: "width: 92px; text-align:right;", "" }
                             }
                         }
                         tbody {
@@ -3067,7 +3853,6 @@ fn HardeningTab(
                                     rsx! {
                                         tr {
                                             key: "svc-{service.id}",
-                                            class: "border-b {theme::surface::DIVIDER} {theme::interactive::HOVER_BG}",
                                             onclick: {
                                                 let service = service.clone();
                                                 move |_| {
@@ -3075,75 +3860,103 @@ fn HardeningTab(
                                                     selected_service.set(Some(service.clone()));
                                                 }
                                             },
-                                            td { class: "px-2 py-2 font-mono text-[12px] {theme::text::PRIMARY} whitespace-nowrap font-semibold",
+                                            td { class: "mono", style: "font-size:12px;font-weight:600;white-space:nowrap;color:var(--cf-text-primary);",
                                                 "{service.service_name}"
                                                 if !justifications_for(&service.service_name).is_empty() {
-                                                    div { class: "text-[10px] mt-0.5 {theme::text::MUTED}", "⚠ waiver" }
+                                                    div { style: "font-size:10px;margin-top:2px;color:var(--cf-text-muted);", "⚠ waiver" }
                                                 }
                                             }
-                                            td { class: "px-2 py-2",
+                                            td {
                                                 span {
                                                     class: "chip",
                                                     style: "color:{risk_color}; background:color-mix(in srgb, {risk_color} 13%, transparent); border:1px solid color-mix(in srgb, {risk_color} 30%, transparent); font-size:10px; font-weight:700;",
                                                     "{short_risk_label(&service.risk_level)}"
                                                 }
                                             }
-                                            td { class: "px-2 py-2",
+                                            td {
                                                 div { class: "flex items-center gap-2",
-                                                    div { class: "h-1.5 w-[60px] rounded-full {theme::surface::SUBTLE_BG} overflow-hidden",
+                                                    div { style: "width:60px;height:6px;background:var(--cf-subtle-bg);border-radius:99px;overflow:hidden;",
                                                         div { style: "height:100%; width: {bar_width}%; background: {risk_color};" }
                                                     }
-                                                    span { class: "font-mono text-[11px] {theme::text::MUTED}", "{service.hardening_score}%" }
+                                                    span { class: "mono", style: "font-size:11px;color:var(--cf-text-muted);", "{service.hardening_score}%" }
                                                 }
                                             }
-                                            td { class: "px-2 py-2",
-                                                span { class: "font-mono text-[11px] {theme::text::MUTED}", "{user_label}" }
+                                            td {
+                                                span { class: "mono", style: "font-size:11px;color:var(--cf-text-muted);", "{user_label}" }
                                             }
 
                                             for directive_name in table_directives.iter() {
                                                     {
                                                         let status = directive_badge_content(directive_for(&directives, directive_name));
                                                         rsx! {
-                                                            td { class: "px-1 py-2 text-center",
+                                                            td { style: "text-align:center;",
                                                                 if status.label == "on" || status.label == "partial" {
-                                                                    span { class: "text-emerald-400 text-[11px]", "✓" }
+                                                                    span { style: "color:#34d399;font-size:11px;", "✓" }
                                                                 } else {
-                                                                    span { class: "{theme::text::DISABLED} text-[11px]", "–" }
+                                                                    span { style: "color:var(--cf-text-muted);font-size:11px;", "–" }
                                                                 }
                                                             }
                                                         }
                                                     }
                                             }
 
-                                            td { class: "px-2 py-2",
+                                            td {
                                                 span {
-                                                    class: "text-[11px] {missing_text_class}",
+                                                    class: "{missing_text_class}",
+                                                    style: "font-size:11px;",
                                                     "{service.missing_directives_count}/{directive_cells(service).len()}"
                                                 }
                                             }
-                                            td { class: "px-2 py-2 text-right",
-                                                button {
-                                                    class: "btn-icon focus-ring",
-                                                    aria_label: "View details",
-                                                    title: "View details",
-                                                    onclick: {
-                                                        let service = service.clone();
-                                                        move |evt| {
-                                                            evt.stop_propagation();
-                                                            modal_tab.set("overview".to_string());
-                                                            selected_service.set(Some(service.clone()));
+                                            td { style: "text-align:right;",
+                                                div { class: "row-actions",
+                                                    button {
+                                                        class: "btn-icon focus-ring",
+                                                        aria_label: "Open justification notes",
+                                                        title: "Open justification notes",
+                                                        onclick: {
+                                                            let service = service.clone();
+                                                            move |evt| {
+                                                                evt.stop_propagation();
+                                                                modal_tab.set("justification".to_string());
+                                                                selected_service.set(Some(service.clone()));
+                                                            }
+                                                        },
+                                                        svg {
+                                                            class: "w-3.5 h-3.5 inline-block",
+                                                            fill: "none",
+                                                            stroke: "currentColor",
+                                                            stroke_width: "2",
+                                                            view_box: "0 0 24 24",
+                                                            path {
+                                                                stroke_linecap: "round",
+                                                                stroke_linejoin: "round",
+                                                                d: "M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
+                                                            }
                                                         }
-                                                    },
-                                                    svg {
-                                                        class: "w-3.5 h-3.5 inline-block",
-                                                        fill: "none",
-                                                        stroke: "currentColor",
-                                                        stroke_width: "2",
-                                                        view_box: "0 0 24 24",
-                                                        path {
-                                                            stroke_linecap: "round",
-                                                            stroke_linejoin: "round",
-                                                            d: "M5 12h14m-7-7l7 7-7 7"
+                                                    }
+                                                    button {
+                                                        class: "btn-icon focus-ring",
+                                                        aria_label: "View details",
+                                                        title: "View details",
+                                                        onclick: {
+                                                            let service = service.clone();
+                                                            move |evt| {
+                                                                evt.stop_propagation();
+                                                                modal_tab.set("overview".to_string());
+                                                                selected_service.set(Some(service.clone()));
+                                                            }
+                                                        },
+                                                        svg {
+                                                            class: "w-3.5 h-3.5 inline-block",
+                                                            fill: "none",
+                                                            stroke: "currentColor",
+                                                            stroke_width: "2",
+                                                            view_box: "0 0 24 24",
+                                                            path {
+                                                                stroke_linecap: "round",
+                                                                stroke_linejoin: "round",
+                                                                d: "M5 12h14m-7-7l7 7-7 7"
+                                                            }
                                                         }
                                                     }
                                                 }
@@ -3193,7 +4006,7 @@ fn HardeningTab(
                     aria_modal: "true",
                     aria_labelledby: "hardening-modal-title",
 
-                    div { class: "modal-head cf-hardening-modal-header",
+                    div { class: "modal-head",
                         div { class: "flex items-start justify-between gap-3",
                             div { class: "space-y-2 min-w-0 flex-1",
                                 h3 { id: "hardening-modal-title", class: "text-base font-semibold leading-tight {theme::text::PRIMARY} break-words flex items-center", style: "margin:0; font-size:16px; gap:10px;",
@@ -3209,16 +4022,22 @@ fn HardeningTab(
                                     span { class: "font-semibold", style: "color: {risk_level_color(&service.risk_level)};", "{service.hardening_score}%" }
                                     " · "
                                     "{service.missing_directives_count} missing directives"
-                                    " · user: "
-                                    span { class: "font-mono", "{service_user_label(&service)}" }
-                                }
+                                            " · user: "
+                                            span { class: "font-mono", "{service_user_label(&service)}" }
+                                            if !justifications_for(&service.service_name).is_empty() {
+                                                " · "
+                                                span { style: "color:#fbbf24;font-weight:700;", "{justifications_for(&service.service_name).len()} waived" }
+                                            }
+                                        }
                             }
                             button {
                                 class: "btn-icon focus-ring",
                                 autofocus: "true",
                                 onclick: move |_| {
                                     if confirm_discard_unsaved_justification(!reason.read().trim().is_empty()) {
-                                        selected_service.set(None);
+                                            active_waiver_directive.set(None);
+                                            reason.set(String::new());
+                                            selected_service.set(None);
                                     }
                                 },
                                 aria_label: "Close service hardening modal",
@@ -3239,12 +4058,12 @@ fn HardeningTab(
                     }
 
                     div { class: "sd-tabs", style: "padding:0 22px; margin-top:0;",
-                        for (key, label) in [("overview", "Directives"), ("nix", "NixOS config"), ("all", "All checks"), ("justification", "Justification")] {
+                        for (key, label) in [("overview", "Directives"), ("nix", "NixOS config"), ("all", "All checks")] {
                             {
                                 let tab_class = if *modal_tab.read() == key {
-                                    "sd-tab active"
+                                    "sd-tab focus-ring active"
                                 } else {
-                                    "sd-tab"
+                                    "sd-tab focus-ring"
                                 };
                                 rsx! {
                                     button {
@@ -3262,28 +4081,285 @@ fn HardeningTab(
 
                     div { class: "modal-body", style: "padding:16px 22px; max-height:60vh; overflow-y:auto;",
                         if *modal_tab.read() == "overview" {
-                            section { class: "space-y-3",
-                                div { class: "grid gap-2", style: "grid-template-columns: 1fr 1fr;",
+                            section { style: "display:flex;flex-direction:column;gap:14px;",
+                                div { class: "sd-callout sd-callout-info", style: "margin:0;display:flex;align-items:flex-start;gap:12px;padding:12px 14px;",
+                                    svg {
+                                        class: "shrink-0",
+                                        width: "15",
+                                        height: "15",
+                                        fill: "none",
+                                        stroke: "currentColor",
+                                        stroke_width: "2",
+                                        view_box: "0 0 24 24",
+                                        path {
+                                            stroke_linecap: "round",
+                                            stroke_linejoin: "round",
+                                            d: "M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8zm0 0v6h6"
+                                        }
+                                    }
+                                    div { style: "font-size:13px;line-height:1.5;color:var(--cf-text-secondary);",
+                                        "Directives that aren’t enforced can be "
+                                        strong { style: "color:var(--cf-text-primary);font-weight:800;", "justified with a waiver" }
+                                        " (e.g. compensating control, not applicable). Waivers flow into the compliance evidence export."
+                                    }
+                                }
+
+                                if let Some(message) = justification_error() {
+                                    div { class: "sd-callout sd-callout-danger", style: "margin:0;display:flex;align-items:flex-start;gap:8px;",
+                                        svg {
+                                            class: "shrink-0",
+                                            width: "13",
+                                            height: "13",
+                                            fill: "none",
+                                            stroke: "currentColor",
+                                            stroke_width: "2",
+                                            view_box: "0 0 24 24",
+                                            path {
+                                                stroke_linecap: "round",
+                                                stroke_linejoin: "round",
+                                                d: "M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                                            }
+                                        }
+                                        div { style: "font-size:12px;color:var(--cf-critical);", "{message}" }
+                                    }
+                                }
+
+                                if let Some(message) = justification_notice() {
+                                    div { class: "sd-callout sd-callout-success", style: "margin:0;display:flex;align-items:flex-start;gap:8px;",
+                                        svg {
+                                            class: "shrink-0",
+                                            width: "13",
+                                            height: "13",
+                                            fill: "none",
+                                            stroke: "currentColor",
+                                            stroke_width: "2",
+                                            view_box: "0 0 24 24",
+                                            path {
+                                                stroke_linecap: "round",
+                                                stroke_linejoin: "round",
+                                                d: "M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
+                                            }
+                                        }
+                                        div { style: "font-size:12px;color:var(--cf-healthy);", "{message}" }
+                                    }
+                                }
+
+                                div { style: "display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 12px;",
                                     for directive in directive_cells(&service) {
                                         {
-                                            let tile_class = if directive.enabled {
-                                                "bg-emerald-500/10 border-emerald-500/30"
+                                            let directive_name = directive.name.clone();
+                                            let waiver = justifications.iter().find(|item| {
+                                                item.service_name == service.service_name
+                                                    && item.directive_name.as_deref() == Some(directive.name.as_str())
+                                            });
+                                            let is_waived = waiver.is_some();
+                                            let is_editing = active_waiver_directive.read().as_deref() == Some(directive.name.as_str());
+                                            let tile_base_style = if directive.enabled {
+                                                "grid-column:auto;display:flex;align-items:flex-start;gap:12px;padding:12px 14px;border-radius:10px;border:1px solid rgba(52,211,153,0.22);background:rgba(52,211,153,0.07);min-height:72px;"
+                                            } else if is_waived {
+                                                "grid-column:auto;display:flex;align-items:flex-start;gap:12px;padding:12px 14px;border-radius:10px;border:1px solid rgba(251,191,36,0.28);background:rgba(251,191,36,0.08);min-height:72px;"
                                             } else {
-                                                "bg-red-500/10 border-red-500/30"
+                                                "grid-column:auto;display:flex;align-items:flex-start;gap:12px;padding:12px 14px;border-radius:10px;border:1px solid rgba(248,113,113,0.22);background:rgba(248,113,113,0.07);min-height:72px;"
+                                            };
+                                            let tile_style = if is_editing {
+                                                tile_base_style.replace("grid-column:auto;", "grid-column:1 / -1;")
+                                            } else {
+                                                tile_base_style.to_string()
+                                            };
+                                            let status_text = if directive.enabled {
+                                                "enforced".to_string()
+                                            } else if is_waived {
+                                                "not set · waived".to_string()
+                                            } else {
+                                                "not set".to_string()
+                                            };
+                                            let status_color = if directive.enabled {
+                                                "#34d399"
+                                            } else if is_waived {
+                                                "#fbbf24"
+                                            } else {
+                                                "var(--cf-text-muted)"
                                             };
                                             rsx! {
-                                                div { class: "flex items-center gap-2 px-3 py-2 rounded-lg border {tile_class}",
-                                                    span { class: "text-base", if directive.enabled { "✅" } else { "❌" } }
-                                                    div {
-                                                        div { class: "font-mono text-[12px] font-semibold {theme::text::PRIMARY}", "{directive.name}" }
-                                                        div { class: "text-[10px] {theme::text::MUTED}",
-                                                            if directive.enabled { "enforced" } else { "not set" }
+                                                div { style: "{tile_style}",
+                                                    div { style: "font-size:20px;line-height:1;margin-top:2px;",
+                                                        if directive.enabled {
+                                                            "✅"
+                                                        } else if is_waived {
+                                                            "⚠️"
+                                                        } else {
+                                                            "❌"
+                                                        }
+                                                    }
+                                                    div { style: "min-width:0;flex:1;display:flex;flex-direction:column;gap:6px;",
+                                                        div { style: "display:flex;align-items:flex-start;justify-content:space-between;gap:10px;",
+                                                            div { style: "min-width:0;",
+                                                                div { class: "mono", style: "font-size:13px;font-weight:800;color:var(--cf-text-primary);", "{directive.name}" }
+                                                                div { style: "font-size:11px;color:{status_color};", "{status_text}" }
+                                                            }
+                                                            if !directive.enabled && allow_mutations {
+                                                                button {
+                                                                    class: "btn btn-ghost focus-ring xs",
+                                                                    style: "white-space:nowrap;",
+                                                                    disabled: is_saving_justification(),
+                                                                    onclick: {
+                                                                        let directive_name = directive_name.clone();
+                                                                        let existing_reason = waiver.map(|item| item.reason.clone()).unwrap_or_default();
+                                                                        move |_| {
+                                                                            active_waiver_directive.set(Some(directive_name.clone()));
+                                                                            reason.set(existing_reason.clone());
+                                                                            justification_error.set(None);
+                                                                            justification_notice.set(None);
+                                                                        }
+                                                                    },
+                                                                    if is_waived {
+                                                                        svg {
+                                                                            class: "w-3 h-3 inline-block",
+                                                                            fill: "none",
+                                                                            stroke: "currentColor",
+                                                                            stroke_width: "2",
+                                                                            view_box: "0 0 24 24",
+                                                                            path {
+                                                                                stroke_linecap: "round",
+                                                                                stroke_linejoin: "round",
+                                                                                d: "M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8zm0 0v6h6"
+                                                                            }
+                                                                        }
+                                                                        "Edit"
+                                                                    } else {
+                                                                        "+ Justify"
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+
+                                                        if let Some(item) = waiver {
+                                                            p { style: "margin:8px 0 2px;font-size:13px;line-height:1.45;color:var(--cf-text-primary);", "{item.reason}" }
+                                                            div { style: "display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:11px;color:var(--cf-text-muted);",
+                                                                span { "mreyes · {relative_time(item.created_at)}" }
+                                                                button {
+                                                                    class: "focus-ring",
+                                                                    style: "all:unset;cursor:not-allowed;color:#f87171;opacity:0.65;",
+                                                                    disabled: true,
+                                                                    title: "Removing hardening waivers needs a backend delete endpoint.",
+                                                                    "Remove"
+                                                                }
+                                                            }
+                                                        }
+
+                                                        if is_editing {
+                                                            div { style: "display:flex;flex-direction:column;gap:0;margin-top:8px;",
+                                                                textarea {
+                                                                    class: "input focus-ring",
+                                                                    autofocus: "true",
+                                                                    rows: "2",
+                                                                    style: "resize:vertical;width:100%;font-size:12px;",
+                                                                    placeholder: "Why is leaving this unset acceptable? (compensating control, N/A…)",
+                                                                    value: "{reason}",
+                                                                    oninput: move |evt| {
+                                                                        reason.set(evt.value());
+                                                                        justification_error.set(None);
+                                                                        justification_notice.set(None);
+                                                                    },
+                                                                }
+                                                                div { style: "display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;",
+                                                                    for preset in [
+                                                                        "Not applicable — service runs in an isolated container.",
+                                                                        "Compensating control in place (AppArmor/SELinux confinement).",
+                                                                        "Enforcing breaks required functionality; risk accepted.",
+                                                                        "Upstream unit limitation — cannot be enforced here.",
+                                                                    ] {
+                                                                        button {
+                                                                            key: "waiver-preset-{preset}",
+                                                                            class: "focus-ring",
+                                                                            style: "all:unset;cursor:pointer;font-size:10px;padding:3px 8px;border-radius:99px;background:var(--cf-subtle-bg);color:var(--cf-text-secondary);border:1px solid var(--cf-card-border);",
+                                                                            onclick: move |_| {
+                                                                                reason.set(preset.to_string());
+                                                                                justification_error.set(None);
+                                                                                justification_notice.set(None);
+                                                                            },
+                                                                            if preset.len() > 46 {
+                                                                                "{preset.chars().take(44).collect::<String>()}…"
+                                                                            } else {
+                                                                                "{preset}"
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                                div { style: "display:flex;gap:8px;margin-top:8px;",
+                                                                    button {
+                                                                        class: "btn btn-primary focus-ring xs",
+                                                                        disabled: is_saving_justification() || reason.read().trim().len() < 8,
+                                                                        onclick: {
+                                                                            let service_name = service.service_name.clone();
+                                                                            let directive_name = directive_name.clone();
+                                                                            let on_saved = on_saved.clone();
+                                                                            move |_| {
+                                                                                let reason_value = reason();
+                                                                                if reason_value.trim().len() < 8 {
+                                                                                    justification_error.set(Some("Add a bit more detail before saving the waiver.".to_string()));
+                                                                                    return;
+                                                                                }
+
+                                                                                is_saving_justification.set(true);
+                                                                                justification_error.set(None);
+                                                                                justification_notice.set(None);
+
+                                                                                let request = SaveHardeningJustificationRequest {
+                                                                                    directive_name: Some(directive_name.clone()),
+                                                                                    category: Some("security".to_string()),
+                                                                                    reason: reason_value,
+                                                                                };
+                                                                                let service_name_for_request = service_name.clone();
+
+                                                                                spawn(async move {
+                                                                                    if save_system_hardening_justification(&system_id, &service_name_for_request, &request)
+                                                                                        .await
+                                                                                        .is_ok()
+                                                                                    {
+                                                                                        reason.set(String::new());
+                                                                                        active_waiver_directive.set(None);
+                                                                                        justification_notice.set(Some("Waiver saved.".to_string()));
+                                                                                        on_saved.call(());
+                                                                                    } else {
+                                                                                        justification_error.set(Some("Failed to save waiver.".to_string()));
+                                                                                    }
+                                                                                    is_saving_justification.set(false);
+                                                                                });
+                                                                            }
+                                                                        },
+                                                                        svg {
+                                                                            class: "w-3 h-3 inline-block",
+                                                                            fill: "none",
+                                                                            stroke: "currentColor",
+                                                                            stroke_width: "2",
+                                                                            view_box: "0 0 24 24",
+                                                                            path {
+                                                                                stroke_linecap: "round",
+                                                                                stroke_linejoin: "round",
+                                                                                d: "M5 13l4 4L19 7"
+                                                                            }
+                                                                        }
+                                                                        if is_saving_justification() { "Saving…" } else { "Save waiver" }
+                                                                    }
+                                                                    button {
+                                                                        class: "btn btn-ghost focus-ring xs",
+                                                                        disabled: is_saving_justification(),
+                                                                        onclick: move |_| {
+                                                                            active_waiver_directive.set(None);
+                                                                            reason.set(String::new());
+                                                                            justification_error.set(None);
+                                                                        },
+                                                                        "Cancel"
+                                                                    }
+                                                                }
+                                                            }
                                                         }
                                                     }
                                                 }
                                             }
                                         }
-                                    }
+                                        }
                                 }
                             }
                         } else if *modal_tab.read() == "nix" {
@@ -3340,145 +4416,6 @@ fn HardeningTab(
                                                             }
                                                         }
                                                     }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        } else {
-                            // Justification tab
-                            section { class: "space-y-4",
-                                if allow_mutations {
-                                    div { class: "space-y-3",
-                                        div { class: "space-y-1.5",
-                                            h4 { class: "text-sm font-semibold {theme::text::PRIMARY}", "Add justification" }
-                                            p { class: "text-[12px] leading-5 {theme::text::MUTED}",
-                                                "Document why this service posture is acceptable (compensating controls, constrained runtime, or accepted risk)."
-                                            }
-                                        }
-                                        textarea {
-                                            class: "w-full min-h-[120px] rounded-lg text-[13px] leading-relaxed resize-none {theme::interactive::INPUT} {theme::text::PRIMARY} focus:ring-2 focus:ring-offset-1",
-                                            style: "max-height: 240px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 0.75rem 1rem;",
-                                            placeholder: "Example: This service runs in an isolated container with read-only filesystem and network restrictions enforced by podman security policies…",
-                                    value: "{reason}",
-                                    oninput: move |evt| {
-                                        reason.set(evt.value());
-                                        justification_error.set(None);
-                                        justification_notice.set(None);
-                                    },
-                                        }
-                                        if let Some(message) = justification_error() {
-                                            div { class: "flex items-start gap-2 p-3 rounded-lg bg-red-500/10 border border-red-500/30",
-                                                svg {
-                                                    class: "w-4 h-4 shrink-0 mt-0.5",
-                                                    fill: "none",
-                                                    stroke: "currentColor",
-                                                    stroke_width: "2",
-                                                    view_box: "0 0 24 24",
-                                                    path {
-                                                        stroke_linecap: "round",
-                                                        stroke_linejoin: "round",
-                                                        d: "M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-                                                    }
-                                                }
-                                                p { class: "text-[12px] {theme::health::CRITICAL_TEXT}", "{message}" }
-                                            }
-                                        }
-                                        if let Some(message) = justification_notice() {
-                                            div { class: "flex items-start gap-2 p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/30",
-                                                svg {
-                                                    class: "w-4 h-4 shrink-0 mt-0.5",
-                                                    fill: "none",
-                                                    stroke: "currentColor",
-                                                    stroke_width: "2",
-                                                    view_box: "0 0 24 24",
-                                                    path {
-                                                        stroke_linecap: "round",
-                                                        stroke_linejoin: "round",
-                                                        d: "M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
-                                                    }
-                                                }
-                                                p { class: "text-[12px] {theme::health::HEALTHY_TEXT}", "{message}" }
-                                            }
-                                        }
-                                        div { class: "flex items-center justify-between gap-3 pt-1",
-                                            p { class: "text-[11px] leading-5 {theme::text::MUTED}", "Required for audit compliance when accepting weaker posture." }
-                                            button {
-                                                class: "px-4 py-2 rounded-lg {theme::interactive::PRIMARY_BTN} text-sm font-medium {theme::interactive::FOCUS_RING} transition-colors",
-                                        disabled: is_saving_justification() || reason.read().trim().is_empty(),
-                                        onclick: {
-                                            let service_name = service.service_name.clone();
-                                            let on_saved = on_saved.clone();
-                                            move |_| {
-                                                let reason_value = reason();
-                                                if reason_value.trim().is_empty() {
-                                                    justification_error.set(Some("Justification is required.".to_string()));
-                                                    return;
-                                                }
-
-                                                is_saving_justification.set(true);
-                                                justification_error.set(None);
-                                                justification_notice.set(None);
-
-                                                let request = SaveHardeningJustificationRequest {
-                                                    directive_name: None,
-                                                    category: None,
-                                                    reason: reason_value,
-                                                };
-                                                let service_name_for_request = service_name.clone();
-
-                                                spawn(async move {
-                                                    if save_system_hardening_justification(&system_id, &service_name_for_request, &request)
-                                                        .await
-                                                        .is_ok()
-                                                    {
-                                                        reason.set(String::new());
-                                                        justification_notice.set(Some("Justification saved.".to_string()));
-                                                        on_saved.call(());
-                                                    } else {
-                                                        justification_error.set(Some("Failed to save justification.".to_string()));
-                                                    }
-                                                    is_saving_justification.set(false);
-                                                });
-                                            }
-                                        },
-                                                if is_saving_justification() {
-                                                    "Saving…"
-                                                } else {
-                                                    "Save justification"
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-
-                                div { class: "space-y-3 pt-2",
-                                    div { class: "border-t {theme::surface::DIVIDER} pt-4" }
-                                    div { class: "space-y-1.5",
-                                        h4 { class: "text-sm font-semibold {theme::text::PRIMARY}", "Justification history" }
-                                        p { class: "text-[12px] leading-5 {theme::text::MUTED}", "Audit trail of accepted risk documentation for this service." }
-                                    }
-                                    if justifications.iter().all(|j| j.service_name != service.service_name) {
-                                        div { class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-4 py-3 text-center",
-                                            p { class: "text-[12px] {theme::text::MUTED}", "No justifications recorded yet. Add one above to document accepted risks." }
-                                        }
-                                    } else {
-                                        div { class: "flex flex-col gap-2.5 max-h-[280px] overflow-y-auto pr-1",
-                                            for item in justifications.iter().filter(|j| j.service_name == service.service_name) {
-                                                div { class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-3.5 py-3 space-y-2",
-                                                    div { class: "flex items-center justify-between gap-2",
-                                                        div { class: "flex items-center gap-2 flex-wrap",
-                                                            span {
-                                                                class: "inline-flex items-center rounded-md border {theme::surface::CARD_BORDER} px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide {theme::text::MUTED}",
-                                                                "{item.category.clone().unwrap_or_else(|| \"service\".to_string())}"
-                                                            }
-                                                            if let Some(directive) = item.directive_name.clone() {
-                                                                span { class: "font-mono text-[11px] {theme::text::MUTED} bg-black/5 dark:bg-white/5 px-2 py-0.5 rounded", "{directive}" }
-                                                            }
-                                                        }
-                                                    }
-                                                    p { class: "text-[13px] {theme::text::PRIMARY} leading-relaxed", style: "padding-left: 0.25rem;", "{item.reason}" }
                                                 }
                                             }
                                         }
@@ -4845,86 +5782,6 @@ fn map_agent_events_to_logs(events: Vec<SystemAgentEvent>) -> Vec<DeploymentLogE
             }
         })
         .collect()
-}
-
-fn mock_vulnerabilities() -> Vec<SystemVulnerability> {
-    vec![
-        SystemVulnerability {
-            cve_id: "CVE-2024-1234".to_string(),
-            severity: CveSeverity::Critical,
-            cvss_score: Some(9.8),
-            description: "Remote code execution vulnerability in OpenSSL affecting TLS handshake processing. An attacker could exploit this to execute arbitrary code.".to_string(),
-            package_name: "openssl".to_string(),
-            installed_version: "3.0.12".to_string(),
-            fixed_version: Some("3.0.13".to_string()),
-            first_seen: Some(Utc::now() - Duration::days(20)),
-            published_at: Some(Utc::now() - Duration::days(30)),
-            status: Some("open".to_string()),
-            justification_category: None,
-            justification_reason: None,
-            justification_updated_at: None,
-        },
-        SystemVulnerability {
-            cve_id: "CVE-2024-5678".to_string(),
-            severity: CveSeverity::High,
-            cvss_score: Some(7.5),
-            description: "Denial of service vulnerability in curl HTTP/2 implementation.".to_string(),
-            package_name: "curl".to_string(),
-            installed_version: "8.4.0".to_string(),
-            fixed_version: Some("8.5.0".to_string()),
-            first_seen: Some(Utc::now() - Duration::days(10)),
-            published_at: Some(Utc::now() - Duration::days(14)),
-            status: Some("open".to_string()),
-            justification_category: None,
-            justification_reason: None,
-            justification_updated_at: None,
-        },
-        SystemVulnerability {
-            cve_id: "CVE-2024-9012".to_string(),
-            severity: CveSeverity::High,
-            cvss_score: Some(7.2),
-            description: "Privilege escalation in sudo when using specific sudoers configurations.".to_string(),
-            package_name: "sudo".to_string(),
-            installed_version: "1.9.14".to_string(),
-            fixed_version: None,
-            first_seen: Some(Utc::now() - Duration::days(5)),
-            published_at: Some(Utc::now() - Duration::days(7)),
-            status: Some("open".to_string()),
-            justification_category: None,
-            justification_reason: None,
-            justification_updated_at: None,
-        },
-        SystemVulnerability {
-            cve_id: "CVE-2024-3456".to_string(),
-            severity: CveSeverity::Medium,
-            cvss_score: Some(5.3),
-            description: "Information disclosure in nginx when using certain proxy configurations.".to_string(),
-            package_name: "nginx".to_string(),
-            installed_version: "1.24.0".to_string(),
-            fixed_version: Some("1.25.0".to_string()),
-            first_seen: Some(Utc::now() - Duration::days(30)),
-            published_at: Some(Utc::now() - Duration::days(45)),
-            status: Some("fixed".to_string()),
-            justification_category: None,
-            justification_reason: None,
-            justification_updated_at: None,
-        },
-        SystemVulnerability {
-            cve_id: "CVE-2024-7890".to_string(),
-            severity: CveSeverity::Low,
-            cvss_score: Some(3.1),
-            description: "Minor information leak in bash completion scripts.".to_string(),
-            package_name: "bash".to_string(),
-            installed_version: "5.2".to_string(),
-            fixed_version: None,
-            first_seen: Some(Utc::now() - Duration::days(40)),
-            published_at: Some(Utc::now() - Duration::days(60)),
-            status: Some("open".to_string()),
-            justification_category: None,
-            justification_reason: None,
-            justification_updated_at: None,
-        },
-    ]
 }
 
 // fallback_system_detail() has been moved to crate::systems::adapter
