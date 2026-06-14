@@ -1,10 +1,10 @@
 ---
 id: TASK-353
 title: Close full Systems surface parity gaps against CrystalForgelatest
-status: Review
+status: In Progress
 assignee: []
 created_date: '2026-06-13 14:53'
-updated_date: '2026-06-13 20:37'
+updated_date: '2026-06-14 01:09'
 labels:
   - design-parity
   - systems
@@ -119,4 +119,6 @@ This task covers the **full Systems surface**:
 
 <!-- SECTION:NOTES:BEGIN -->
 Implemented reachability + authorized Compliance mock parity in commit c06aaf6a and pushed to MR !275. Added `systems.reachability` (`direct`/`pull`) via migration 0135, projected it through `view_system_detail`, backend API models, Web UI models, Overview Host card, and SSH modal. Replaced Compliance placeholder with explicitly-commented maintainer-authorized mock bundle rollups. Uploaded updated 12k screenshot to MR description. Verification: web-ui cargo fmt/check passed, default crate cargo check passed with local DB/OpenSSL pkg-config, migration 0135 applied to isolated local process-compose DB at 127.0.0.1:3042/crystal_forge, `cargo sqlx prepare` and `cargo sqlx prepare --check` completed, `nix build .#checks.x86_64-linux.web-ui` exit 0 with 12e and 12k passing. Note: default crate fmt check reports pre-existing unrelated formatting diffs; not applied.
+
+Resuming implementation on MR !275 to close additional System Detail parity gaps found in human review: tag section, loading spinner, pinned-deployment commit picker, editable tags + heartbeat interval in edit modal, edit-modal label fonts, deploy-tab deploy gate, history row icons/buttons, logs day breaks, CVE tab restyle, hardening fonts/missing row icon, compliance View evidence placeholder drawer, SSH modal styling, and non-functional header Rollback button. Approach (maintainer-approved): wire items with existing backend (rollback endpoints, /systems/:id/commits, logs jump, existing DashboardLoadingSpinner) to real data; match design's mock presentation for items with no backend (tags, heartbeat interval, deploy gate, compliance evidence) with non-persistent labelling and follow-up tasks. Migrations must be NEW files only — dev server is live. LOCK: opencode-agent on this host in ~/code/crystal-forge/TASK-353-full-systems-surface-parity
 <!-- SECTION:NOTES:END -->
