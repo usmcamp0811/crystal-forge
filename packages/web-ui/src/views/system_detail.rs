@@ -4255,17 +4255,30 @@ fn HardeningTab(
                                                                         justification_notice.set(None);
                                                                     },
                                                                 }
-                                                                div { style: "display:flex;align-items:center;justify-content:flex-end;gap:8px;",
-                                                                    button {
-                                                                        class: "btn btn-ghost focus-ring xs",
-                                                                        disabled: is_saving_justification(),
-                                                                        onclick: move |_| {
-                                                                            active_waiver_directive.set(None);
-                                                                            reason.set(String::new());
-                                                                            justification_error.set(None);
-                                                                        },
-                                                                        "Cancel"
+                                                                div { style: "display:flex;gap:6px;flex-wrap:wrap;",
+                                                                    for preset in [
+                                                                        "Not applicable — service runs in an isolated container.",
+                                                                        "Accepted risk with compensating controls in place.",
+                                                                        "Directive breaks required service functionality.",
+                                                                    ] {
+                                                                        button {
+                                                                            key: "waiver-preset-{preset}",
+                                                                            class: "focus-ring",
+                                                                            style: "all:unset;cursor:pointer;font-size:10px;padding:3px 8px;border-radius:99px;background:var(--cf-subtle-bg);color:var(--cf-text-secondary);border:1px solid var(--cf-divider);",
+                                                                            onclick: move |_| {
+                                                                                reason.set(preset.to_string());
+                                                                                justification_error.set(None);
+                                                                                justification_notice.set(None);
+                                                                            },
+                                                                            if preset.len() > 42 {
+                                                                                "{preset.chars().take(40).collect::<String>()}…"
+                                                                            } else {
+                                                                                "{preset}"
+                                                                            }
+                                                                        }
                                                                     }
+                                                                }
+                                                                div { style: "display:flex;align-items:center;justify-content:flex-end;gap:8px;",
                                                                     button {
                                                                         class: "btn btn-primary focus-ring xs",
                                                                         disabled: is_saving_justification() || reason.read().trim().is_empty(),
@@ -4308,6 +4321,16 @@ fn HardeningTab(
                                                                             }
                                                                         },
                                                                         if is_saving_justification() { "Saving…" } else { "Save waiver" }
+                                                                    }
+                                                                    button {
+                                                                        class: "btn btn-ghost focus-ring xs",
+                                                                        disabled: is_saving_justification(),
+                                                                        onclick: move |_| {
+                                                                            active_waiver_directive.set(None);
+                                                                            reason.set(String::new());
+                                                                            justification_error.set(None);
+                                                                        },
+                                                                        "Cancel"
                                                                     }
                                                                 }
                                                             }
