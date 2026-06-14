@@ -1277,23 +1277,6 @@ body {
   background: rgba(148, 163, 184, 0.95);
 }
 
-.cf-hardening-modal {
-  box-shadow: 0 28px 58px rgba(2, 6, 23, 0.48);
-}
-
-.cf-hardening-modal-header {
-  background-image: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--cf-subtle-bg) 94%, transparent),
-    color-mix(in srgb, var(--cf-subtle-bg) 82%, transparent)
-  );
-}
-
-.cf-hardening-justification-card {
-  border-color: color-mix(in srgb, var(--cf-brand-purple) 36%, var(--cf-card-border));
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--cf-brand-purple) 18%, transparent);
-}
-
 .cf-hardening-directives-scroll {
   position: relative;
 }

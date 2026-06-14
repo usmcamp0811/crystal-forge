@@ -4005,7 +4005,7 @@ fn HardeningTab(
                     aria_modal: "true",
                     aria_labelledby: "hardening-modal-title",
 
-                    div { class: "modal-head cf-hardening-modal-header",
+                    div { class: "modal-head",
                         div { class: "flex items-start justify-between gap-3",
                             div { class: "space-y-2 min-w-0 flex-1",
                                 h3 { id: "hardening-modal-title", class: "text-base font-semibold leading-tight {theme::text::PRIMARY} break-words flex items-center", style: "margin:0; font-size:16px; gap:10px;",
@@ -4054,9 +4054,9 @@ fn HardeningTab(
                         for (key, label) in [("overview", "Directives"), ("nix", "NixOS config"), ("all", "All checks"), ("justification", "Justification")] {
                             {
                                 let tab_class = if *modal_tab.read() == key {
-                                    "sd-tab active"
+                                    "sd-tab focus-ring active"
                                 } else {
-                                    "sd-tab"
+                                    "sd-tab focus-ring"
                                 };
                                 rsx! {
                                     button {
@@ -4160,30 +4160,49 @@ fn HardeningTab(
                             }
                         } else {
                             // Justification tab
-                            section { class: "space-y-4",
+                            section { style: "display:flex;flex-direction:column;gap:14px;",
                                 if allow_mutations {
-                                    div { class: "space-y-3",
-                                        div { class: "space-y-1.5",
-                                            h4 { class: "text-sm font-semibold {theme::text::PRIMARY}", "Add justification" }
-                                            p { class: "text-[12px] leading-5 {theme::text::MUTED}",
-                                                "Document why this service posture is acceptable (compensating controls, constrained runtime, or accepted risk)."
+                                    div { style: "display:flex;flex-direction:column;gap:12px;",
+                                        div { class: "sd-callout sd-callout-info", style: "margin:0;display:flex;align-items:flex-start;gap:8px;",
+                                            svg {
+                                                class: "shrink-0",
+                                                width: "13",
+                                                height: "13",
+                                                fill: "none",
+                                                stroke: "currentColor",
+                                                stroke_width: "2",
+                                                view_box: "0 0 24 24",
+                                                path {
+                                                    stroke_linecap: "round",
+                                                    stroke_linejoin: "round",
+                                                    d: "M12 9v4m0 4h.01M10.29 3.86l-7.4 12.82A2 2 0 004.61 20h14.78a2 2 0 001.72-3.32l-7.4-12.82a2 2 0 00-3.42 0z"
+                                                }
+                                            }
+                                            div { style: "font-size:12px;line-height:1.45;color:var(--cf-text-secondary);",
+                                                "Document why this service posture is acceptable. Justifications are recorded as audit evidence for accepted service-hardening risk."
                                             }
                                         }
+                                        div { style: "display:flex;align-items:center;justify-content:space-between;gap:12px;",
+                                            label { class: "mono", style: "font-size:12px;font-weight:700;color:var(--cf-text-primary);", "Justification" }
+                                            span { style: "font-size:11px;color:var(--cf-text-muted);", "Required for accepted risk" }
+                                        }
                                         textarea {
-                                            class: "w-full min-h-[120px] rounded-lg text-[13px] leading-relaxed resize-none {theme::interactive::INPUT} {theme::text::PRIMARY} focus:ring-2 focus:ring-offset-1",
-                                            style: "max-height: 240px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 0.75rem 1rem;",
+                                            class: "input focus-ring",
+                                            style: "width:100%;min-height:112px;max-height:240px;resize:vertical;font-size:13px;line-height:1.55;padding:10px 12px;",
                                             placeholder: "Example: This service runs in an isolated container with read-only filesystem and network restrictions enforced by podman security policies…",
-                                    value: "{reason}",
-                                    oninput: move |evt| {
-                                        reason.set(evt.value());
-                                        justification_error.set(None);
-                                        justification_notice.set(None);
-                                    },
+                                            value: "{reason}",
+                                            oninput: move |evt| {
+                                                reason.set(evt.value());
+                                                justification_error.set(None);
+                                                justification_notice.set(None);
+                                            },
                                         }
                                         if let Some(message) = justification_error() {
-                                            div { class: "flex items-start gap-2 p-3 rounded-lg bg-red-500/10 border border-red-500/30",
+                                            div { class: "sd-callout sd-callout-danger", style: "margin:0;display:flex;align-items:flex-start;gap:8px;",
                                                 svg {
-                                                    class: "w-4 h-4 shrink-0 mt-0.5",
+                                                    class: "shrink-0",
+                                                    width: "13",
+                                                    height: "13",
                                                     fill: "none",
                                                     stroke: "currentColor",
                                                     stroke_width: "2",
@@ -4194,13 +4213,15 @@ fn HardeningTab(
                                                         d: "M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
                                                     }
                                                 }
-                                                p { class: "text-[12px] {theme::health::CRITICAL_TEXT}", "{message}" }
+                                                div { style: "font-size:12px;color:var(--cf-critical);", "{message}" }
                                             }
                                         }
                                         if let Some(message) = justification_notice() {
-                                            div { class: "flex items-start gap-2 p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/30",
+                                            div { class: "sd-callout sd-callout-success", style: "margin:0;display:flex;align-items:flex-start;gap:8px;",
                                                 svg {
-                                                    class: "w-4 h-4 shrink-0 mt-0.5",
+                                                    class: "shrink-0",
+                                                    width: "13",
+                                                    height: "13",
                                                     fill: "none",
                                                     stroke: "currentColor",
                                                     stroke_width: "2",
@@ -4211,50 +4232,50 @@ fn HardeningTab(
                                                         d: "M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
                                                     }
                                                 }
-                                                p { class: "text-[12px] {theme::health::HEALTHY_TEXT}", "{message}" }
+                                                div { style: "font-size:12px;color:var(--cf-healthy);", "{message}" }
                                             }
                                         }
-                                        div { class: "flex items-center justify-between gap-3 pt-1",
-                                            p { class: "text-[11px] leading-5 {theme::text::MUTED}", "Required for audit compliance when accepting weaker posture." }
+                                        div { style: "display:flex;align-items:center;justify-content:space-between;gap:12px;",
+                                            p { style: "font-size:11px;line-height:1.45;color:var(--cf-text-muted);", "Recorded against this service and included in future audit evidence." }
                                             button {
-                                                class: "px-4 py-2 rounded-lg {theme::interactive::PRIMARY_BTN} text-sm font-medium {theme::interactive::FOCUS_RING} transition-colors",
-                                        disabled: is_saving_justification() || reason.read().trim().is_empty(),
-                                        onclick: {
-                                            let service_name = service.service_name.clone();
-                                            let on_saved = on_saved.clone();
-                                            move |_| {
-                                                let reason_value = reason();
-                                                if reason_value.trim().is_empty() {
-                                                    justification_error.set(Some("Justification is required.".to_string()));
-                                                    return;
-                                                }
+                                                class: "btn btn-primary focus-ring",
+                                                disabled: is_saving_justification() || reason.read().trim().is_empty(),
+                                                onclick: {
+                                                    let service_name = service.service_name.clone();
+                                                    let on_saved = on_saved.clone();
+                                                    move |_| {
+                                                        let reason_value = reason();
+                                                        if reason_value.trim().is_empty() {
+                                                            justification_error.set(Some("Justification is required.".to_string()));
+                                                            return;
+                                                        }
 
-                                                is_saving_justification.set(true);
-                                                justification_error.set(None);
-                                                justification_notice.set(None);
+                                                        is_saving_justification.set(true);
+                                                        justification_error.set(None);
+                                                        justification_notice.set(None);
 
-                                                let request = SaveHardeningJustificationRequest {
-                                                    directive_name: None,
-                                                    category: None,
-                                                    reason: reason_value,
-                                                };
-                                                let service_name_for_request = service_name.clone();
+                                                        let request = SaveHardeningJustificationRequest {
+                                                            directive_name: None,
+                                                            category: None,
+                                                            reason: reason_value,
+                                                        };
+                                                        let service_name_for_request = service_name.clone();
 
-                                                spawn(async move {
-                                                    if save_system_hardening_justification(&system_id, &service_name_for_request, &request)
-                                                        .await
-                                                        .is_ok()
-                                                    {
-                                                        reason.set(String::new());
-                                                        justification_notice.set(Some("Justification saved.".to_string()));
-                                                        on_saved.call(());
-                                                    } else {
-                                                        justification_error.set(Some("Failed to save justification.".to_string()));
+                                                        spawn(async move {
+                                                            if save_system_hardening_justification(&system_id, &service_name_for_request, &request)
+                                                                .await
+                                                                .is_ok()
+                                                            {
+                                                                reason.set(String::new());
+                                                                justification_notice.set(Some("Justification saved.".to_string()));
+                                                                on_saved.call(());
+                                                            } else {
+                                                                justification_error.set(Some("Failed to save justification.".to_string()));
+                                                            }
+                                                            is_saving_justification.set(false);
+                                                        });
                                                     }
-                                                    is_saving_justification.set(false);
-                                                });
-                                            }
-                                        },
+                                                },
                                                 if is_saving_justification() {
                                                     "Saving…"
                                                 } else {
@@ -4265,32 +4286,36 @@ fn HardeningTab(
                                     }
                                 }
 
-                                div { class: "space-y-3 pt-2",
-                                    div { class: "border-t {theme::surface::DIVIDER} pt-4" }
-                                    div { class: "space-y-1.5",
-                                        h4 { class: "text-sm font-semibold {theme::text::PRIMARY}", "Justification history" }
-                                        p { class: "text-[12px] leading-5 {theme::text::MUTED}", "Audit trail of accepted risk documentation for this service." }
+                                div { style: "display:flex;flex-direction:column;gap:10px;border-top:1px solid var(--cf-card-border);padding-top:14px;",
+                                    div { style: "display:flex;align-items:flex-start;justify-content:space-between;gap:12px;",
+                                        div {
+                                            h4 { style: "margin:0;font-size:14px;font-weight:700;color:var(--cf-text-primary);", "Justification history" }
+                                            p { style: "margin:4px 0 0;font-size:12px;line-height:1.45;color:var(--cf-text-muted);", "Audit trail of accepted risk documentation for this service." }
+                                        }
+                                        span { class: "chip chip-info", style: "font-size:10px;", "{justifications_for(&service.service_name).len()} recorded" }
                                     }
                                     if justifications.iter().all(|j| j.service_name != service.service_name) {
-                                        div { class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-4 py-3 text-center",
-                                            p { class: "text-[12px] {theme::text::MUTED}", "No justifications recorded yet. Add one above to document accepted risks." }
+                                        div { class: "empty", style: "margin:0;padding:18px;",
+                                            h3 { "No justifications recorded" }
+                                            div { "Add one above to document accepted risks." }
                                         }
                                     } else {
-                                        div { class: "flex flex-col gap-2.5 max-h-[280px] overflow-y-auto pr-1",
+                                        div { style: "display:flex;flex-direction:column;gap:10px;max-height:280px;overflow-y:auto;padding-right:4px;",
                                             for item in justifications.iter().filter(|j| j.service_name == service.service_name) {
-                                                div { class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} px-3.5 py-3 space-y-2",
-                                                    div { class: "flex items-center justify-between gap-2",
-                                                        div { class: "flex items-center gap-2 flex-wrap",
+                                                div { class: "card", style: "padding:12px 14px;display:flex;flex-direction:column;gap:8px;",
+                                                    div { style: "display:flex;align-items:center;justify-content:space-between;gap:10px;",
+                                                        div { style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
                                                             span {
-                                                                class: "inline-flex items-center rounded-md border {theme::surface::CARD_BORDER} px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide {theme::text::MUTED}",
+                                                                class: "chip chip-unknown",
+                                                                style: "font-size:10px;",
                                                                 "{item.category.clone().unwrap_or_else(|| \"service\".to_string())}"
                                                             }
                                                             if let Some(directive) = item.directive_name.clone() {
-                                                                span { class: "font-mono text-[11px] {theme::text::MUTED} bg-black/5 dark:bg-white/5 px-2 py-0.5 rounded", "{directive}" }
+                                                                span { class: "mono", style: "font-size:11px;color:var(--cf-text-muted);", "{directive}" }
                                                             }
                                                         }
                                                     }
-                                                    p { class: "text-[13px] {theme::text::PRIMARY} leading-relaxed", style: "padding-left: 0.25rem;", "{item.reason}" }
+                                                    p { style: "margin:0;font-size:13px;line-height:1.5;color:var(--cf-text-primary);", "{item.reason}" }
                                                 }
                                             }
                                         }
