@@ -1,10 +1,10 @@
 ---
 id: TASK-353
 title: Close full Systems surface parity gaps against CrystalForgelatest
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-06-13 14:53'
-updated_date: '2026-06-14 01:09'
+updated_date: '2026-06-14 01:51'
 labels:
   - design-parity
   - systems
@@ -27,6 +27,9 @@ references:
   - TASK-281
   - TASK-355
   - TASK-356
+  - TASK-353.1
+  - TASK-353.2
+  - TASK-279
 documentation:
   - /home/mcamp/code/crystal-forge/CrystalForgelatest/components/Systems.jsx
   - >-
@@ -42,6 +45,9 @@ modified_files:
   - packages/web-ui/src/systems/adapter.rs
   - packages/web-ui/src/views/system_detail.rs
   - packages/web-ui/src/views/systems_mock_data.rs
+  - packages/web-ui/src/components/system/edit_system_modal.rs
+  - packages/web-ui/src/components/cve/mod.rs
+  - packages/web-ui/assets/app.css
   - checks/web-ui/tests/integration-test.js
 priority: high
 ordinal: 1695
@@ -118,7 +124,5 @@ This task covers the **full Systems surface**:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Implemented reachability + authorized Compliance mock parity in commit c06aaf6a and pushed to MR !275. Added `systems.reachability` (`direct`/`pull`) via migration 0135, projected it through `view_system_detail`, backend API models, Web UI models, Overview Host card, and SSH modal. Replaced Compliance placeholder with explicitly-commented maintainer-authorized mock bundle rollups. Uploaded updated 12k screenshot to MR description. Verification: web-ui cargo fmt/check passed, default crate cargo check passed with local DB/OpenSSL pkg-config, migration 0135 applied to isolated local process-compose DB at 127.0.0.1:3042/crystal_forge, `cargo sqlx prepare` and `cargo sqlx prepare --check` completed, `nix build .#checks.x86_64-linux.web-ui` exit 0 with 12e and 12k passing. Note: default crate fmt check reports pre-existing unrelated formatting diffs; not applied.
-
-Resuming implementation on MR !275 to close additional System Detail parity gaps found in human review: tag section, loading spinner, pinned-deployment commit picker, editable tags + heartbeat interval in edit modal, edit-modal label fonts, deploy-tab deploy gate, history row icons/buttons, logs day breaks, CVE tab restyle, hardening fonts/missing row icon, compliance View evidence placeholder drawer, SSH modal styling, and non-functional header Rollback button. Approach (maintainer-approved): wire items with existing backend (rollback endpoints, /systems/:id/commits, logs jump, existing DashboardLoadingSpinner) to real data; match design's mock presentation for items with no backend (tags, heartbeat interval, deploy gate, compliance evidence) with non-persistent labelling and follow-up tasks. Migrations must be NEW files only — dev server is live. LOCK: opencode-agent on this host in ~/code/crystal-forge/TASK-353-full-systems-surface-parity
+Addressed the additional human-review System Detail discrepancies and pushed MR !275 through commit b00275e1. New commits: 4674cb80 wires header rollback dialog, edit-modal pinned commits, local/non-persistent tags + heartbeat UI, design loading spinner, history logs action, log day breaks, SSH modal CSS/reachability, and Compliance placeholder evidence drawer; 03bf3f1a adds the design-parity Deploy gate panel with derived placeholder data; b00275e1 re-architects the CVE tab to package-grouped design layout while preserving real CVE justification workflow and normalizes Hardening table typography with an added row action icon. Follow-ups created/linked for backend gaps: TASK-353.1 persistent system tags, TASK-353.2 deploy-gate evaluation API; existing TASK-279 covers server-directed heartbeat interval. Verification performed: `cargo fmt --manifest-path packages/web-ui/Cargo.toml --all -- --check` passed; `cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` passed; `node --check checks/web-ui/tests/integration-test.js` passed. I also ran `nix build .#checks.x86_64-linux.web-ui -L` once before maintainer requested avoiding it due runtime; command exited with `NIX_WEB_UI_OK`, but I am not relying on it further or rerunning it unless explicitly required.
 <!-- SECTION:NOTES:END -->
