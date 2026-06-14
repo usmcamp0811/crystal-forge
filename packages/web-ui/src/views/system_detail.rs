@@ -3191,6 +3191,7 @@ fn CommitTimelineNode(
     deployment_policy: String,
     allow_mutations: bool,
     on_rollback: EventHandler<SystemCommitHistory>,
+    on_view_logs: EventHandler<()>,
 ) -> Element {
     let mut expanded = use_signal(|| false);
     let chevron_class = if *expanded.read() { "rotate-90" } else { "" };
@@ -3352,6 +3353,25 @@ fn CommitTimelineNode(
                                         _ => "hidden",
                                     },
                                     "{status.label()}"
+                                }
+                            }
+
+                            // View logs action
+                            button {
+                                class: "shrink-0 p-1 rounded text-gray-400 hover:text-white hover:bg-gray-800 transition-colors opacity-40 group-hover:opacity-100",
+                                title: "View logs",
+                                onclick: move |_| on_view_logs.call(()),
+                                svg {
+                                    class: "w-4 h-4",
+                                    fill: "none",
+                                    stroke: "currentColor",
+                                    view_box: "0 0 24 24",
+                                    path {
+                                        stroke_linecap: "round",
+                                        stroke_linejoin: "round",
+                                        stroke_width: "2",
+                                        d: "M8 9l3 3-3 3m5 0h3"
+                                    }
                                 }
                             }
 

@@ -301,6 +301,7 @@ fn list_row_to_summary(row: queries::SystemListRow) -> SystemSummary {
         nixos_version: row.nixos_version,
         last_seen: row.last_seen,
         deployment_policy: row.deployment_policy,
+        fqdn: row.fqdn,
     }
 }
 

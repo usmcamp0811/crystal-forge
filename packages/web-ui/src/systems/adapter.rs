@@ -442,6 +442,7 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
             nixos_version: Some("24.11".to_string()),
             last_seen: Some(now - Duration::minutes(5)),
             deployment_policy: "auto_latest".to_string(),
+            fqdn: None,
         },
         SystemSummary {
             id: Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap(),
@@ -462,6 +463,7 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
             nixos_version: Some("24.11".to_string()),
             last_seen: Some(now - Duration::minutes(10)),
             deployment_policy: "manual".to_string(),
+            fqdn: None,
         },
         SystemSummary {
             id: Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap(),
@@ -482,6 +484,7 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
             nixos_version: Some("24.11".to_string()),
             last_seen: Some(now - Duration::hours(1)),
             deployment_policy: "manual".to_string(),
+            fqdn: None,
         },
         SystemSummary {
             id: Uuid::parse_str("00000000-0000-0000-0000-000000000004").unwrap(),
@@ -502,6 +505,7 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
             nixos_version: None,
             last_seen: Some(now - Duration::days(3)),
             deployment_policy: "manual".to_string(),
+            fqdn: None,
         },
     ]
 }

@@ -540,6 +540,7 @@ pub struct SystemListRow {
     pub nixos_version: Option<String>,
     pub last_seen: Option<DateTime<Utc>>,
     pub deployment_policy: String,
+    pub fqdn: Option<String>,
 }
 
 /// Fetch all active systems from view_system_list

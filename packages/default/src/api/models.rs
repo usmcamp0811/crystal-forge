@@ -711,6 +711,8 @@ pub struct SystemSummary {
     pub nixos_version: Option<String>,
     pub last_seen: Option<DateTime<Utc>>,
     pub deployment_policy: String,
+    #[serde(default)]
+    pub fqdn: Option<String>,
 }
 
 /// Full system representation for the detail view.

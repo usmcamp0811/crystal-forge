@@ -2671,10 +2671,6 @@ html[data-theme="light"] .sd-nix {
   display: flex;
   gap: 4px;
   justify-content: flex-end;
-  opacity: 0.6;
-}
-
-.sys-table tbody tr:hover .row-actions {
   opacity: 1;
 }
 

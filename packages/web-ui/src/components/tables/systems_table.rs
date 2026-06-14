@@ -355,6 +355,12 @@ fn ip_label(system: &SystemSummary) -> String {
 }
 
 fn derived_fqdn(system: &SystemSummary) -> String {
+    // Prefer the persisted operator-managed FQDN when set.
+    if let Some(ref fqdn) = system.fqdn {
+        if !fqdn.trim().is_empty() {
+            return fqdn.clone();
+        }
+    }
     let env = system
         .environment
         .as_deref()

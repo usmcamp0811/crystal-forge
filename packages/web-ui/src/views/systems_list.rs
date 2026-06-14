@@ -535,6 +535,7 @@ pub fn SystemsListView() -> Element {
                                         nixos_version: detail.nixos_version,
                                         last_seen: detail.last_seen,
                                         deployment_policy: detail.deployment_policy,
+                                        fqdn: detail.fqdn,
                                     };
 
                                     let mut values = local_systems.read().clone();
@@ -610,6 +611,7 @@ pub fn SystemsListView() -> Element {
                                         nixos_version: detail.nixos_version,
                                         last_seen: detail.last_seen,
                                         deployment_policy: detail.deployment_policy,
+                                        fqdn: detail.fqdn,
                                     };
                                     let mut values = local_systems.read().clone();
                                     if let Some(item) = values.iter_mut().find(|item| item.id == system_id) {
@@ -785,10 +787,10 @@ pub fn SystemsListView() -> Element {
                     class: "empty",
                     style: "margin: 24px;",
                     "data-testid": "systems-loading-state",
-                    div {
-                        class: "mx-auto mb-3 animate-spin rounded-full h-8 w-8 border-b-2 border-blue-400"
+                    crate::components::loading::DashboardLoadingSpinner {
+                        label: "Loading systems".to_string(),
+                        size: 36,
                     }
-                    h3 { "Loading systems" }
                     div { "Fetching fleet data from the API." }
                 }
             } else if let Some(error_message) = load_error.read().clone() {
