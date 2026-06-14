@@ -4155,14 +4155,14 @@ fn HardeningTab(
                                             let is_waived = waiver.is_some();
                                             let is_editing = active_waiver_directive.read().as_deref() == Some(directive.name.as_str());
                                             let tile_base_style = if directive.enabled {
-                                                "display:flex;align-items:flex-start;gap:12px;padding:12px 14px;border-radius:10px;border:1px solid rgba(52,211,153,0.22);background:rgba(52,211,153,0.07);min-height:72px;"
+                                                "grid-column:auto;display:flex;align-items:flex-start;gap:12px;padding:12px 14px;border-radius:10px;border:1px solid rgba(52,211,153,0.22);background:rgba(52,211,153,0.07);min-height:72px;"
                                             } else if is_waived {
-                                                "display:flex;align-items:flex-start;gap:12px;padding:12px 14px;border-radius:10px;border:1px solid rgba(251,191,36,0.28);background:rgba(251,191,36,0.08);min-height:72px;"
+                                                "grid-column:auto;display:flex;align-items:flex-start;gap:12px;padding:12px 14px;border-radius:10px;border:1px solid rgba(251,191,36,0.28);background:rgba(251,191,36,0.08);min-height:72px;"
                                             } else {
-                                                "display:flex;align-items:flex-start;gap:12px;padding:12px 14px;border-radius:10px;border:1px solid rgba(248,113,113,0.22);background:rgba(248,113,113,0.07);min-height:72px;"
+                                                "grid-column:auto;display:flex;align-items:flex-start;gap:12px;padding:12px 14px;border-radius:10px;border:1px solid rgba(248,113,113,0.22);background:rgba(248,113,113,0.07);min-height:72px;"
                                             };
                                             let tile_style = if is_editing {
-                                                format!("grid-column:1 / -1;{tile_base_style}")
+                                                tile_base_style.replace("grid-column:auto;", "grid-column:1 / -1;")
                                             } else {
                                                 tile_base_style.to_string()
                                             };
