@@ -1,10 +1,10 @@
 ---
 id: TASK-353
 title: Close full Systems surface parity gaps against CrystalForgelatest
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-06-13 14:53'
-updated_date: '2026-06-14 02:15'
+updated_date: '2026-06-14 02:23'
 labels:
   - design-parity
   - systems
@@ -35,20 +35,9 @@ documentation:
   - >-
     /home/mcamp/code/crystal-forge/CrystalForgelatest/components/SystemDetail.jsx
 modified_files:
-  - packages/default/migrations/0135_add_system_reachability.sql
-  - packages/default/src/api/models.rs
-  - packages/default/src/handlers/api/systems.rs
-  - packages/default/src/queries/systems.rs
-  - packages/default/src/services/systems.rs
-  - packages/default/.sqlx
-  - packages/web-ui/src/api/models.rs
-  - packages/web-ui/src/systems/adapter.rs
-  - packages/web-ui/src/views/system_detail.rs
-  - packages/web-ui/src/views/systems_mock_data.rs
-  - packages/web-ui/src/components/system/edit_system_modal.rs
-  - packages/web-ui/src/components/cve/mod.rs
   - packages/web-ui/assets/app.css
-  - checks/web-ui/tests/integration-test.js
+  - packages/web-ui/src/components/cve/mod.rs
+  - packages/web-ui/src/views/system_detail.rs
 priority: high
 ordinal: 1695
 ---
@@ -124,5 +113,5 @@ This task covers the **full Systems surface**:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Resuming implementation from Review to address remaining human-review parity gaps: remove non-design CVE filter bar, restore Hardening score progress/action affordance, align Compliance View evidence placeholder closer to design evidence drawer, add generation-selection rollback modal, and clarify that Edit System heartbeat interval is local-only until TASK-279 backend support exists. LOCK: opencode-agent on this host in ~/code/crystal-forge/TASK-353-full-systems-surface-parity
+Addressed final review comments in commit 8915a87a and pushed to MR !275: removed the non-reference CVE filter controls from the System Detail CVE tab while retaining package-grouped CVE layout and real justification flow; replaced Compliance View evidence with a design-style side tray/control evidence preview; added a header Rollback generation picker that uses existing generation rollback API flow; retained/verified Hardening score progress bar and row action affordances. Confirmed heartbeat interval in Edit System modal is local UI only and does not control agent heartbeat until TASK-279 backend support exists. Fast verification passed: `cargo fmt --manifest-path packages/web-ui/Cargo.toml --all -- --check`, `cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown`, and `node --check checks/web-ui/tests/integration-test.js`. Per maintainer request, did not rerun heavyweight web-ui VM check.
 <!-- SECTION:NOTES:END -->
