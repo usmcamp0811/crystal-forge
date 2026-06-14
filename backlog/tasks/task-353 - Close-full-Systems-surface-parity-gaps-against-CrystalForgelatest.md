@@ -1,10 +1,10 @@
 ---
 id: TASK-353
 title: Close full Systems surface parity gaps against CrystalForgelatest
-status: Review
+status: In Progress
 assignee: []
 created_date: '2026-06-13 14:53'
-updated_date: '2026-06-14 01:51'
+updated_date: '2026-06-14 02:15'
 labels:
   - design-parity
   - systems
@@ -124,5 +124,5 @@ This task covers the **full Systems surface**:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Addressed the additional human-review System Detail discrepancies and pushed MR !275 through commit b00275e1. New commits: 4674cb80 wires header rollback dialog, edit-modal pinned commits, local/non-persistent tags + heartbeat UI, design loading spinner, history logs action, log day breaks, SSH modal CSS/reachability, and Compliance placeholder evidence drawer; 03bf3f1a adds the design-parity Deploy gate panel with derived placeholder data; b00275e1 re-architects the CVE tab to package-grouped design layout while preserving real CVE justification workflow and normalizes Hardening table typography with an added row action icon. Follow-ups created/linked for backend gaps: TASK-353.1 persistent system tags, TASK-353.2 deploy-gate evaluation API; existing TASK-279 covers server-directed heartbeat interval. Verification performed: `cargo fmt --manifest-path packages/web-ui/Cargo.toml --all -- --check` passed; `cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` passed; `node --check checks/web-ui/tests/integration-test.js` passed. I also ran `nix build .#checks.x86_64-linux.web-ui -L` once before maintainer requested avoiding it due runtime; command exited with `NIX_WEB_UI_OK`, but I am not relying on it further or rerunning it unless explicitly required.
+Resuming implementation from Review to address remaining human-review parity gaps: remove non-design CVE filter bar, restore Hardening score progress/action affordance, align Compliance View evidence placeholder closer to design evidence drawer, add generation-selection rollback modal, and clarify that Edit System heartbeat interval is local-only until TASK-279 backend support exists. LOCK: opencode-agent on this host in ~/code/crystal-forge/TASK-353-full-systems-surface-parity
 <!-- SECTION:NOTES:END -->
