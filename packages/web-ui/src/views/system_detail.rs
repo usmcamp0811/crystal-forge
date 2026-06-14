@@ -24,11 +24,11 @@ use crate::api::client::{
     verify_generation_closure as verify_generation_closure_request,
 };
 use crate::api::models::{
-    BuildStatus, CommitInfo, CveScanEligibilityResponse, CveSeverity, CveSummary,
-    DeploymentLogEntry, DeploymentStatus, HardeningJustificationResponse,
-    HardeningScanEligibilityResponse, HardeningServiceResultResponse, HealthStatus, LogLevel,
-    PipelineStage, SaveHardeningJustificationRequest, SystemAgentEvent, SystemCommitHistory,
-    SystemDetail, SystemGeneration, SystemHardwareInfo, SystemHistoryEntry, SystemNetworkInfo,
+    BuildStatus, CommitInfo, CveScanEligibilityResponse, CveSummary, DeploymentLogEntry,
+    DeploymentStatus, HardeningJustificationResponse, HardeningScanEligibilityResponse,
+    HardeningServiceResultResponse, HealthStatus, LogLevel, PipelineStage,
+    SaveHardeningJustificationRequest, SystemAgentEvent, SystemCommitHistory, SystemDetail,
+    SystemGeneration, SystemHardwareInfo, SystemHistoryEntry, SystemNetworkInfo,
     SystemRollbackGenerationRequest, SystemRollbackRequest, SystemSecurityInfo,
     SystemVulnerability, VerifyGenerationClosureRequest,
 };
@@ -97,6 +97,18 @@ const POLICY_JSON_SAMPLE: &str = r#"[
   }
 ]
 "#;
+
+/// Result of loading a system's vulnerabilities.
+///
+/// Security data must never silently fall back to mock CVEs in production paths,
+/// so the resource carries an explicit error/redirect signal that the CVE tab
+/// renders as a real empty/error state (TASK-353 review).
+#[derive(Debug, Clone, PartialEq)]
+struct VulnerabilitiesLoad {
+    items: Vec<SystemVulnerability>,
+    error: Option<String>,
+    redirect_to_login: bool,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -226,13 +238,36 @@ pub fn SystemDetailView(id: String) -> Element {
     let mut vulnerabilities_resource = use_resource(move || {
         let id = id_for_vulns.clone();
         async move {
+            // Security data must never fall back to mock CVEs in production paths.
+            // Surface a real error/empty state instead so an API outage cannot
+            // render fake vulnerabilities (TASK-353 review).
             let Ok(system_id) = Uuid::parse_str(&id) else {
-                return mock_vulnerabilities();
+                return VulnerabilitiesLoad {
+                    items: Vec::new(),
+                    error: Some("Invalid system identifier.".to_string()),
+                    redirect_to_login: false,
+                };
             };
 
-            fetch_system_cves(&system_id)
-                .await
-                .unwrap_or_else(|_| mock_vulnerabilities())
+            match fetch_system_cves(&system_id).await {
+                Ok(items) => VulnerabilitiesLoad {
+                    items,
+                    error: None,
+                    redirect_to_login: false,
+                },
+                Err(ApiClientError::Status {
+                    code: 401 | 403, ..
+                }) => VulnerabilitiesLoad {
+                    items: Vec::new(),
+                    error: None,
+                    redirect_to_login: true,
+                },
+                Err(err) => VulnerabilitiesLoad {
+                    items: Vec::new(),
+                    error: Some(format!("Unable to load vulnerabilities: {err}")),
+                    redirect_to_login: false,
+                },
+            }
         }
     });
 
@@ -440,10 +475,26 @@ pub fn SystemDetailView(id: String) -> Element {
             notice: None,
             redirect_to_login: false,
         });
-    let vulnerabilities = match &*vulnerabilities_resource.read_unchecked() {
-        Some(value) => value.clone(),
-        None => mock_vulnerabilities(),
-    };
+    let vulnerabilities_load = vulnerabilities_resource
+        .read_unchecked()
+        .clone()
+        .unwrap_or_else(|| VulnerabilitiesLoad {
+            items: Vec::new(),
+            error: None,
+            redirect_to_login: false,
+        });
+    if vulnerabilities_load.redirect_to_login {
+        nav.push(Route::LoginView {});
+        return rsx! {
+            div {
+                class: "flex items-center justify-center py-12",
+                p { class: "{theme::text::SECONDARY}", "Redirecting to login..." }
+            }
+        };
+    }
+    let vulnerabilities_loading = vulnerabilities_resource.read_unchecked().is_none();
+    let vulnerabilities = vulnerabilities_load.items.clone();
+    let vulnerabilities_error = vulnerabilities_load.error.clone();
     let deployment_logs = map_agent_events_to_logs(
         agent_events_resource
             .read_unchecked()
@@ -854,6 +905,8 @@ pub fn SystemDetailView(id: String) -> Element {
                             cve_counts: system.cve_counts.clone(),
                             vulnerabilities: vulnerabilities.clone(),
                             allow_mutations: can_mutate,
+                            loading: vulnerabilities_loading,
+                            error: vulnerabilities_error.clone(),
                             on_saved: move |_| {
                                 vulnerabilities_resource.restart();
                             }
@@ -5604,86 +5657,6 @@ fn map_agent_events_to_logs(events: Vec<SystemAgentEvent>) -> Vec<DeploymentLogE
             }
         })
         .collect()
-}
-
-fn mock_vulnerabilities() -> Vec<SystemVulnerability> {
-    vec![
-        SystemVulnerability {
-            cve_id: "CVE-2024-1234".to_string(),
-            severity: CveSeverity::Critical,
-            cvss_score: Some(9.8),
-            description: "Remote code execution vulnerability in OpenSSL affecting TLS handshake processing. An attacker could exploit this to execute arbitrary code.".to_string(),
-            package_name: "openssl".to_string(),
-            installed_version: "3.0.12".to_string(),
-            fixed_version: Some("3.0.13".to_string()),
-            first_seen: Some(Utc::now() - Duration::days(20)),
-            published_at: Some(Utc::now() - Duration::days(30)),
-            status: Some("open".to_string()),
-            justification_category: None,
-            justification_reason: None,
-            justification_updated_at: None,
-        },
-        SystemVulnerability {
-            cve_id: "CVE-2024-5678".to_string(),
-            severity: CveSeverity::High,
-            cvss_score: Some(7.5),
-            description: "Denial of service vulnerability in curl HTTP/2 implementation.".to_string(),
-            package_name: "curl".to_string(),
-            installed_version: "8.4.0".to_string(),
-            fixed_version: Some("8.5.0".to_string()),
-            first_seen: Some(Utc::now() - Duration::days(10)),
-            published_at: Some(Utc::now() - Duration::days(14)),
-            status: Some("open".to_string()),
-            justification_category: None,
-            justification_reason: None,
-            justification_updated_at: None,
-        },
-        SystemVulnerability {
-            cve_id: "CVE-2024-9012".to_string(),
-            severity: CveSeverity::High,
-            cvss_score: Some(7.2),
-            description: "Privilege escalation in sudo when using specific sudoers configurations.".to_string(),
-            package_name: "sudo".to_string(),
-            installed_version: "1.9.14".to_string(),
-            fixed_version: None,
-            first_seen: Some(Utc::now() - Duration::days(5)),
-            published_at: Some(Utc::now() - Duration::days(7)),
-            status: Some("open".to_string()),
-            justification_category: None,
-            justification_reason: None,
-            justification_updated_at: None,
-        },
-        SystemVulnerability {
-            cve_id: "CVE-2024-3456".to_string(),
-            severity: CveSeverity::Medium,
-            cvss_score: Some(5.3),
-            description: "Information disclosure in nginx when using certain proxy configurations.".to_string(),
-            package_name: "nginx".to_string(),
-            installed_version: "1.24.0".to_string(),
-            fixed_version: Some("1.25.0".to_string()),
-            first_seen: Some(Utc::now() - Duration::days(30)),
-            published_at: Some(Utc::now() - Duration::days(45)),
-            status: Some("fixed".to_string()),
-            justification_category: None,
-            justification_reason: None,
-            justification_updated_at: None,
-        },
-        SystemVulnerability {
-            cve_id: "CVE-2024-7890".to_string(),
-            severity: CveSeverity::Low,
-            cvss_score: Some(3.1),
-            description: "Minor information leak in bash completion scripts.".to_string(),
-            package_name: "bash".to_string(),
-            installed_version: "5.2".to_string(),
-            fixed_version: None,
-            first_seen: Some(Utc::now() - Duration::days(40)),
-            published_at: Some(Utc::now() - Duration::days(60)),
-            status: Some("open".to_string()),
-            justification_category: None,
-            justification_reason: None,
-            justification_updated_at: None,
-        },
-    ]
 }
 
 // fallback_system_detail() has been moved to crate::systems::adapter

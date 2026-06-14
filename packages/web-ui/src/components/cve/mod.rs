@@ -82,6 +82,14 @@ pub fn CvesTab(
     vulnerabilities: Vec<SystemVulnerability>,
     allow_mutations: bool,
     on_saved: EventHandler<()>,
+    /// True while the vulnerabilities resource is still loading.
+    #[props(default = false)]
+    loading: bool,
+    /// Error message when the vulnerabilities load failed. When set, the tab
+    /// renders an error state instead of (mock) data — security data must never
+    /// silently fall back to fake CVEs in production paths.
+    #[props(default = None)]
+    error: Option<String>,
 ) -> Element {
     let mut expanded_cve: Signal<Option<String>> = use_signal(|| None);
 
@@ -106,6 +114,34 @@ pub fn CvesTab(
         .as_ref()
         .map(|message| message.starts_with("Failed") || message.contains("required"))
         .unwrap_or(false);
+
+    // Loading state — show a spinner instead of an empty/fake list while the
+    // vulnerabilities resource is still in flight.
+    if loading {
+        return rsx! {
+            div {
+                class: "empty",
+                "data-testid": "system-cves-loading",
+                crate::components::loading::DashboardLoadingSpinner {
+                    label: "Loading vulnerabilities".to_string(),
+                    size: 36,
+                }
+                div { "Fetching the latest CVE scan results." }
+            }
+        };
+    }
+
+    // Error state — never render mock CVEs on API failure (security data).
+    if let Some(message) = error {
+        return rsx! {
+            div {
+                class: "empty",
+                "data-testid": "system-cves-error",
+                h3 { "Unable to load vulnerabilities" }
+                div { "{message}" }
+            }
+        };
+    }
 
     rsx! {
             div {
