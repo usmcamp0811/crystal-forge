@@ -4,7 +4,7 @@ title: Close full Systems surface parity gaps against CrystalForgelatest
 status: In Progress
 assignee: []
 created_date: '2026-06-13 14:53'
-updated_date: '2026-06-14 02:40'
+updated_date: '2026-06-14 18:25'
 labels:
   - design-parity
   - systems
@@ -106,9 +106,11 @@ This task covers the **full Systems surface**:
 - [ ] #5 System detail tab rail matches the reference in structure, ordering, iconography, active states, and badge treatment
 - [ ] #6 System detail Overview, Deploy, History, Logs, Config, CVEs, and Hardening surfaces materially match the reference for core states
 - [ ] #7 All displayed Systems list and Systems detail values are sourced from authoritative backend APIs in production paths unless explicitly tracked as backend follow-up gaps or authorized temporary Compliance placeholder data
-- [ ] #8 `checks/web-ui` captures screenshot evidence and behavior assertions for the full Systems surface, including both `/systems` and `/systems/{id}`
+- [ ] #8 checks/web-ui captures screenshot evidence and behavior assertions for the full Systems surface, including both /systems and /systems/{id}
 - [ ] #9 A human reviewer can compare the implemented Systems surface against the CrystalForgelatest reference and find no remaining material parity gaps
 <!-- AC:END -->
+
+
 
 ## Implementation Notes
 
