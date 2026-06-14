@@ -4,7 +4,7 @@ title: Close full Environments surface parity gaps against CrystalForgelatest
 status: In Progress
 assignee: []
 created_date: '2026-06-14 18:56'
-updated_date: '2026-06-14 19:07'
+updated_date: '2026-06-14 19:10'
 labels:
   - design-parity
   - environments
@@ -77,8 +77,23 @@ Medium — primarily UI component work; backend changes moderate if cache/policy
 - CrystalForgelatest reference: /home/mcamp/code/crystal-forge/CrystalForgelatest/components/EnvironmentsView.jsx
 <!-- SECTION:DESCRIPTION:END -->
 
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Backend (cheap data): new SQL view + query for per-environment rollups (health breakdown healthy/warning/critical/offline, CVE totals, flakes list) derivable from systems. New migration only. Extend EnvironmentSummary. Update query/handler. cargo sqlx prepare.
+2. API model + adapter: extend EnvironmentItem with health breakdown, CVE total, flakes, and clearly-commented placeholder fields (deploy_policy, cache, auto_sync, requires_approval, is_production) for deferred backend.
+3. UI list rewrite: header/subtitle, 5-metric stat strip, filter bar (search + cards/table seg + count), cards mode (color rail, PROD badge, health bar+legend, KV grid, footer), table mode.
+4. Unified Add/Edit modal: color picker, description, cache dropdown (placeholder), deploy mode, gate policy picker, compliance selector (placeholder), production toggle, auto-sync/approval toggles, danger zone.
+5. Delete confirmation: type-to-confirm + systems guard.
+6. web-ui check: screenshot + assertions for /environments.
+7. Tests: query mapping, adapter mapping, validation.
+8. Follow-up Backlog tasks for deferred backend (cache assignment, gate policies, compliance bundles, RBAC, per-env deploy policy persistence, production flag persistence).
+<!-- SECTION:PLAN:END -->
+
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: opencode-agent on reckless in ~/code/crystal-forge/TASK-358-environments-surface-parity
+
+Scope decision (maintainer-approved 2026-06-14): (1) Real backend now for cheap data derivable from existing systems table (per-env health breakdown, CVE totals, flakes-per-env). Clearly-commented temporary placeholders + follow-up Backlog tasks for heavier features needing new schema: cache assignment, gate policies, compliance bundles, RBAC role counts, per-env deploy policy + production flag persistence. (2) Replace inline add form + split edit modals with single unified Add/Edit modal per reference; placeholder fields wired to follow-ups.
 <!-- SECTION:NOTES:END -->
