@@ -66,7 +66,7 @@ pub fn EditSystemModal(
     });
 
     // Heartbeat interval and tags are NOT yet persisted server-side (no systems.tags or
-    // systems.heartbeat_interval column exists — see TASK-357/TASK-358 follow-ups). These
+    // systems.heartbeat_interval column exists — see TASK-353.1 and TASK-279 follow-ups). These
     // signals provide design-parity local editing only; the help text marks them as not
     // saved so operators are not misled. Wire to real persistence once the backend lands.
     let mut heartbeat_interval_sec = use_signal(|| 60_i32);
@@ -366,7 +366,7 @@ pub fn EditSystemModal(
                     // NOTE: These are editable for design parity but are NOT yet persisted —
                     // there is no systems.heartbeat_interval or systems.tags column. The help
                     // text marks them as not-saved so operators are not misled. Follow-ups
-                    // TASK-357 (tags) and TASK-358 (heartbeat interval) wire real persistence.
+                    // TASK-353.1 (tags) and TASK-279 (heartbeat interval) wire real persistence.
                     div {
                         style: "display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 8px;",
                         "data-testid": "heartbeat-tags-fields",

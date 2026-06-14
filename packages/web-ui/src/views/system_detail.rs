@@ -852,32 +852,13 @@ pub fn SystemDetailView(id: String) -> Element {
                         }
                     },
                     Tab::Cves => rsx! {
-                        div {
-                            class: "sd-grid",
-                            section {
-                                class: "card",
-                                style: "overflow: hidden;",
-                                div {
-                                    class: "sd-card-head",
-                                    style: "padding: 14px 18px;",
-                                    h2 { "Vulnerabilities" }
-                                    span {
-                                        class: "sd-card-meta",
-                                        "{system.cve_counts.total()} total · {system.cve_counts.critical} critical"
-                                    }
-                                }
-                                div {
-                                    style: "padding: 0 18px 18px;",
-                                    CvesTab {
-                                        system_id: system.id,
-                                        cve_counts: system.cve_counts.clone(),
-                                        vulnerabilities: vulnerabilities.clone(),
-                                        allow_mutations: can_mutate,
-                                        on_saved: move |_| {
-                                            vulnerabilities_resource.restart();
-                                        }
-                                    }
-                                }
+                        CvesTab {
+                            system_id: system.id,
+                            cve_counts: system.cve_counts.clone(),
+                            vulnerabilities: vulnerabilities.clone(),
+                            allow_mutations: can_mutate,
+                            on_saved: move |_| {
+                                vulnerabilities_resource.restart();
                             }
                         }
                     },
@@ -1547,7 +1528,7 @@ fn OverviewTab(
 
     // Editable tag chips (design parity). Seeded from the system's environment/flake so the
     // section is never empty, plus any operator-added tags. NOTE: tags are NOT yet persisted
-    // server-side (no systems.tags column) — see follow-up TASK-357. This is local UI state
+    // server-side (no systems.tags column) — see follow-up TASK-353.1. This is local UI state
     // only; the help text marks it as not saved so operators are not misled.
     let mut tags = use_signal(|| {
         let mut seed = vec![format!("env:{}", environment.to_lowercase())];
@@ -2477,7 +2458,7 @@ fn DeployTab(
 /// evaluation runs only inside the server-side deployment loop). This panel renders a
 /// design-accurate gate summary derived from the system's deployment policy and CVE count
 /// so the Deploy tab matches the reference. Replace with real gate evaluation results once
-/// an endpoint exists — tracked by follow-up TASK-359.
+/// an endpoint exists — tracked by follow-up TASK-353.2.
 #[component]
 fn DeployGatePanel(deployment_policy: String, cve_critical: i64) -> Element {
     // Derive a representative gate outcome from locally available signals.
@@ -3536,29 +3517,27 @@ fn HardeningTab(
                     div { class: "overflow-x-auto",
                     table { class: "sys-table",
                         thead {
-                            tr { class: "{theme::surface::CARD_BG} border-b {theme::surface::CARD_BORDER} text-left {theme::text::SECONDARY}",
+                            tr {
                                 th {
-                                    class: "sticky top-0 z-10 px-2 py-2",
                                     style: "width: 22%;",
                                     "Service"
                                 }
-                                th { class: "sticky top-0 z-10 px-2 py-2 w-[80px]", "Risk" }
-                                th { class: "sticky top-0 z-10 px-2 py-2 w-[120px]", "Score" }
+                                th { style: "width: 80px;", "Risk" }
+                                th { style: "width: 120px;", "Score" }
                                 th {
-                                    class: "sticky top-0 z-10 px-2 py-2 w-[84px]",
+                                    style: "width: 84px;",
                                     "User"
                                 }
                                 for directive_name in table_directives.iter() {
                                     th {
                                         key: "hdr-{directive_name}",
-                                        class: "sticky top-0 z-10 text-center",
-                                        style: "font-size:9px; letter-spacing:0.04em; text-align:center; padding:8px 4px;",
+                                        style: "font-size:10px; letter-spacing:0.04em; text-align:center; padding:8px 4px;",
                                         title: "{directive_name}",
                                         "{directive_short_label(directive_name)}"
                                     }
                                 }
-                                th { class: "sticky top-0 z-10 px-2 py-2 w-[90px]", "Missing" }
-                                th { class: "sticky top-0 z-10 px-2 py-2 text-right w-[84px]", "" }
+                                th { style: "width: 90px;", "Missing" }
+                                th { style: "width: 92px; text-align:right;", "" }
                             }
                         }
                         tbody {
@@ -3580,7 +3559,6 @@ fn HardeningTab(
                                     rsx! {
                                         tr {
                                             key: "svc-{service.id}",
-                                            class: "border-b {theme::surface::DIVIDER} {theme::interactive::HOVER_BG}",
                                             onclick: {
                                                 let service = service.clone();
                                                 move |_| {
@@ -3588,75 +3566,103 @@ fn HardeningTab(
                                                     selected_service.set(Some(service.clone()));
                                                 }
                                             },
-                                            td { class: "px-2 py-2 font-mono text-[12px] {theme::text::PRIMARY} whitespace-nowrap font-semibold",
+                                            td { class: "mono", style: "font-size:12px;font-weight:600;white-space:nowrap;color:var(--cf-text-primary);",
                                                 "{service.service_name}"
                                                 if !justifications_for(&service.service_name).is_empty() {
-                                                    div { class: "text-[10px] mt-0.5 {theme::text::MUTED}", "⚠ waiver" }
+                                                    div { style: "font-size:10px;margin-top:2px;color:var(--cf-text-muted);", "⚠ waiver" }
                                                 }
                                             }
-                                            td { class: "px-2 py-2",
+                                            td {
                                                 span {
                                                     class: "chip",
                                                     style: "color:{risk_color}; background:color-mix(in srgb, {risk_color} 13%, transparent); border:1px solid color-mix(in srgb, {risk_color} 30%, transparent); font-size:10px; font-weight:700;",
                                                     "{short_risk_label(&service.risk_level)}"
                                                 }
                                             }
-                                            td { class: "px-2 py-2",
+                                            td {
                                                 div { class: "flex items-center gap-2",
                                                     div { class: "h-1.5 w-[60px] rounded-full {theme::surface::SUBTLE_BG} overflow-hidden",
                                                         div { style: "height:100%; width: {bar_width}%; background: {risk_color};" }
                                                     }
-                                                    span { class: "font-mono text-[11px] {theme::text::MUTED}", "{service.hardening_score}%" }
+                                                    span { class: "mono", style: "font-size:11px;color:var(--cf-text-muted);", "{service.hardening_score}%" }
                                                 }
                                             }
-                                            td { class: "px-2 py-2",
-                                                span { class: "font-mono text-[11px] {theme::text::MUTED}", "{user_label}" }
+                                            td {
+                                                span { class: "mono", style: "font-size:11px;color:var(--cf-text-muted);", "{user_label}" }
                                             }
 
                                             for directive_name in table_directives.iter() {
                                                     {
                                                         let status = directive_badge_content(directive_for(&directives, directive_name));
                                                         rsx! {
-                                                            td { class: "px-1 py-2 text-center",
+                                                            td { style: "text-align:center;",
                                                                 if status.label == "on" || status.label == "partial" {
-                                                                    span { class: "text-emerald-400 text-[11px]", "✓" }
+                                                                    span { style: "color:#34d399;font-size:11px;", "✓" }
                                                                 } else {
-                                                                    span { class: "{theme::text::DISABLED} text-[11px]", "–" }
+                                                                    span { style: "color:var(--cf-text-muted);font-size:11px;", "–" }
                                                                 }
                                                             }
                                                         }
                                                     }
                                             }
 
-                                            td { class: "px-2 py-2",
+                                            td {
                                                 span {
-                                                    class: "text-[11px] {missing_text_class}",
+                                                    class: "{missing_text_class}",
+                                                    style: "font-size:11px;",
                                                     "{service.missing_directives_count}/{directive_cells(service).len()}"
                                                 }
                                             }
-                                            td { class: "px-2 py-2 text-right",
-                                                button {
-                                                    class: "btn-icon focus-ring",
-                                                    aria_label: "View details",
-                                                    title: "View details",
-                                                    onclick: {
-                                                        let service = service.clone();
-                                                        move |evt| {
-                                                            evt.stop_propagation();
-                                                            modal_tab.set("overview".to_string());
-                                                            selected_service.set(Some(service.clone()));
+                                            td { style: "text-align:right;",
+                                                div { class: "row-actions",
+                                                    button {
+                                                        class: "btn-icon focus-ring",
+                                                        aria_label: "Open justification notes",
+                                                        title: "Open justification notes",
+                                                        onclick: {
+                                                            let service = service.clone();
+                                                            move |evt| {
+                                                                evt.stop_propagation();
+                                                                modal_tab.set("justification".to_string());
+                                                                selected_service.set(Some(service.clone()));
+                                                            }
+                                                        },
+                                                        svg {
+                                                            class: "w-3.5 h-3.5 inline-block",
+                                                            fill: "none",
+                                                            stroke: "currentColor",
+                                                            stroke_width: "2",
+                                                            view_box: "0 0 24 24",
+                                                            path {
+                                                                stroke_linecap: "round",
+                                                                stroke_linejoin: "round",
+                                                                d: "M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
+                                                            }
                                                         }
-                                                    },
-                                                    svg {
-                                                        class: "w-3.5 h-3.5 inline-block",
-                                                        fill: "none",
-                                                        stroke: "currentColor",
-                                                        stroke_width: "2",
-                                                        view_box: "0 0 24 24",
-                                                        path {
-                                                            stroke_linecap: "round",
-                                                            stroke_linejoin: "round",
-                                                            d: "M5 12h14m-7-7l7 7-7 7"
+                                                    }
+                                                    button {
+                                                        class: "btn-icon focus-ring",
+                                                        aria_label: "View details",
+                                                        title: "View details",
+                                                        onclick: {
+                                                            let service = service.clone();
+                                                            move |evt| {
+                                                                evt.stop_propagation();
+                                                                modal_tab.set("overview".to_string());
+                                                                selected_service.set(Some(service.clone()));
+                                                            }
+                                                        },
+                                                        svg {
+                                                            class: "w-3.5 h-3.5 inline-block",
+                                                            fill: "none",
+                                                            stroke: "currentColor",
+                                                            stroke_width: "2",
+                                                            view_box: "0 0 24 24",
+                                                            path {
+                                                                stroke_linecap: "round",
+                                                                stroke_linejoin: "round",
+                                                                d: "M5 12h14m-7-7l7 7-7 7"
+                                                            }
                                                         }
                                                     }
                                                 }
