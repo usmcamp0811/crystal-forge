@@ -3875,7 +3875,7 @@ fn HardeningTab(
                                             }
                                             td {
                                                 div { class: "flex items-center gap-2",
-                                                    div { class: "h-1.5 w-[60px] rounded-full {theme::surface::SUBTLE_BG} overflow-hidden",
+                                                    div { style: "width:60px;height:6px;background:var(--cf-subtle-bg);border-radius:99px;overflow:hidden;",
                                                         div { style: "height:100%; width: {bar_width}%; background: {risk_color};" }
                                                     }
                                                     span { class: "mono", style: "font-size:11px;color:var(--cf-text-muted);", "{service.hardening_score}%" }
