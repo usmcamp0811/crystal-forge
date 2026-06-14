@@ -156,14 +156,11 @@ Medium. Cross-cuts agent, server, DB, DTOs, and UI. Backwards-compatibility hing
 - [ ] #13 checks/web-ui asserts the Edit modal persists the interval and the heartbeat countdown reflects it
 <!-- AC:END -->
 
-
-
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 No DB migrations introduced
-- [ ] #2 cargo fmt -- --check passes
-- [ ] #3 cargo clippy -- -D warnings passes on affected crates
-- [ ] #4 cargo test passes on affected crates
-- [ ] #5 Agent integration test confirms interval respected after server change
-- [ ] #6 Web UI HeartbeatSpinner uses real interval end-to-end on system detail view
+- [ ] #1 cargo fmt -- --check passes
+- [ ] #2 cargo clippy -- -D warnings passes on affected crates
+- [ ] #3 cargo test passes on affected crates
+- [ ] #4 Agent integration test confirms interval respected after server change
+- [ ] #5 Web UI HeartbeatSpinner uses real interval end-to-end on system detail view
 <!-- DOD:END -->
