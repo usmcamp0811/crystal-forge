@@ -1,9 +1,10 @@
 ---
 id: TASK-358
 title: Close full Environments surface parity gaps against CrystalForgelatest
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-06-14 18:56'
+updated_date: '2026-06-14 19:07'
 labels:
   - design-parity
   - environments
@@ -75,3 +76,9 @@ Medium — primarily UI component work; backend changes moderate if cache/policy
 - TASK-339 (Environments sidebar surface umbrella — separate scope, but may share components)
 - CrystalForgelatest reference: /home/mcamp/code/crystal-forge/CrystalForgelatest/components/EnvironmentsView.jsx
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: opencode-agent on reckless in ~/code/crystal-forge/TASK-358-environments-surface-parity
+<!-- SECTION:NOTES:END -->
