@@ -378,6 +378,7 @@ pub(super) fn build_system_detail(
     SystemDetail {
         id: Uuid::from_u128(id),
         hostname: hostname.to_string(),
+        fqdn: Some(format!("{}.{}.cf.internal", hostname, environment)),
         system_configuration_name: None,
         environment: Some(environment.to_string()),
         is_active,
@@ -403,6 +404,7 @@ pub(super) fn build_system_detail(
             primary_ip: Some(primary_ip.to_string()),
             primary_mac: Some(primary_mac.to_string()),
             gateway_ip: Some(gateway_ip.to_string()),
+            reachability: "direct".to_string(),
         },
         security: SystemSecurityInfo {
             tpm_present: Some(tpm_present),

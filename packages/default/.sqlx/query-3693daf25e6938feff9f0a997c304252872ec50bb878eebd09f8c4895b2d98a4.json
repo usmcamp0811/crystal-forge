@@ -50,7 +50,7 @@
       ]
     },
     "nullable": [
-      false,
+      true,
       false,
       true,
       false,

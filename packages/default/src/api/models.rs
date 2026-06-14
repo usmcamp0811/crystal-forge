@@ -10,8 +10,79 @@
 //! - `*Count` — numeric breakdown by category
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
+
+/// Tri-state value for PATCH-style update payloads.
+///
+/// JSON cannot, with a plain `Option<T>`, distinguish "field omitted" from
+/// "field explicitly null". For update endpoints that means an older/partial
+/// client omitting a field would be indistinguishable from a request asking to
+/// clear it — silently wiping persisted data.
+///
+/// `FieldUpdate` makes the three cases explicit:
+/// - field omitted        → [`FieldUpdate::Unset`]   (preserve existing value)
+/// - field present as null → [`FieldUpdate::Clear`]   (set to NULL)
+/// - field present + value → [`FieldUpdate::Set`]     (write the value)
+///
+/// `#[serde(default)]` on the containing field maps an omitted key to `Unset`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FieldUpdate<T> {
+    /// Field was not present in the payload; leave the stored value unchanged.
+    Unset,
+    /// Field was present and explicitly null; clear the stored value.
+    Clear,
+    /// Field was present with a value; write it.
+    Set(T),
+}
+
+impl<T> Default for FieldUpdate<T> {
+    fn default() -> Self {
+        FieldUpdate::Unset
+    }
+}
+
+impl<T> FieldUpdate<T> {
+    /// Returns true when the payload omitted this field entirely.
+    pub fn is_unset(&self) -> bool {
+        matches!(self, FieldUpdate::Unset)
+    }
+}
+
+impl<'de, T> Deserialize<'de> for FieldUpdate<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // A present key (even `null`) reaches this deserializer; an omitted key
+        // is handled by `#[serde(default)]` on the field, which yields `Unset`.
+        let value = Option::<T>::deserialize(deserializer)?;
+        Ok(match value {
+            Some(inner) => FieldUpdate::Set(inner),
+            None => FieldUpdate::Clear,
+        })
+    }
+}
+
+impl<T> Serialize for FieldUpdate<T>
+where
+    T: Serialize,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // Serialize transparently as `null` / value. `Unset` serializes as
+        // `null`; callers that must omit the key should skip it explicitly.
+        match self {
+            FieldUpdate::Set(value) => serializer.serialize_some(value),
+            FieldUpdate::Unset | FieldUpdate::Clear => serializer.serialize_none(),
+        }
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Common Enums
@@ -333,13 +404,13 @@ pub struct SaveSystemCveJustificationRequest {
 /// Filter parameters for CVE list queries.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CveFilters {
-    pub severity: Option<String>,       // "critical", "high", "medium", "low"
-    pub fix_status: Option<String>,     // "available", "pending", "exploited"
-    pub triage_status: Option<String>,  // "outstanding", "scheduled", "accepted"
-    pub package: Option<String>,        // Package name substring match
-    pub search: Option<String>,         // Search across CVE ID, package, title
-    pub sort: Option<String>,           // "severity", "cvss", "age", "affected"
-    pub limit: Option<i64>,             // Max results (default 500, max 1000)
+    pub severity: Option<String>,      // "critical", "high", "medium", "low"
+    pub fix_status: Option<String>,    // "available", "pending", "exploited"
+    pub triage_status: Option<String>, // "outstanding", "scheduled", "accepted"
+    pub package: Option<String>,       // Package name substring match
+    pub search: Option<String>,        // Search across CVE ID, package, title
+    pub sort: Option<String>,          // "severity", "cvss", "age", "affected"
+    pub limit: Option<i64>,            // Max results (default 500, max 1000)
 }
 
 /// CVE list item for table views.
@@ -711,6 +782,8 @@ pub struct SystemSummary {
     pub nixos_version: Option<String>,
     pub last_seen: Option<DateTime<Utc>>,
     pub deployment_policy: String,
+    #[serde(default)]
+    pub fqdn: Option<String>,
 }
 
 /// Full system representation for the detail view.
@@ -719,6 +792,8 @@ pub struct SystemDetail {
     /// Core identity.
     pub id: Uuid,
     pub hostname: String,
+    #[serde(default)]
+    pub fqdn: Option<String>,
     pub system_configuration_name: Option<String>,
     pub environment: Option<String>,
     pub is_active: bool,
@@ -777,6 +852,12 @@ pub struct SystemNetworkInfo {
     pub primary_ip: Option<String>,
     pub primary_mac: Option<String>,
     pub gateway_ip: Option<String>,
+    #[serde(default = "default_system_reachability")]
+    pub reachability: String,
+}
+
+fn default_system_reachability() -> String {
+    "direct".to_string()
 }
 
 /// Security posture subset for system detail.
@@ -1034,6 +1115,10 @@ pub struct CreateSystemRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateSystemRequest {
     pub hostname: String,
+    /// Tri-state FQDN update. Omitting the key preserves the persisted FQDN;
+    /// sending `null` (or an empty string, normalized server-side) clears it.
+    #[serde(default)]
+    pub fqdn: FieldUpdate<String>,
     pub system_configuration_name: Option<String>,
     pub environment: Option<String>,
     pub flake_name: Option<String>,
@@ -1476,6 +1561,42 @@ pub struct ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_system_request_omitted_fqdn_is_unset() {
+        // Older/partial clients that don't send `fqdn` must not clear it.
+        let json = r#"{"hostname":"web01","deployment_policy":"manual"}"#;
+        let req: UpdateSystemRequest =
+            serde_json::from_str(json).expect("payload without fqdn should deserialize");
+        assert_eq!(req.fqdn, FieldUpdate::Unset);
+        assert!(req.fqdn.is_unset());
+    }
+
+    #[test]
+    fn update_system_request_null_fqdn_is_clear() {
+        let json = r#"{"hostname":"web01","fqdn":null,"deployment_policy":"manual"}"#;
+        let req: UpdateSystemRequest =
+            serde_json::from_str(json).expect("payload with null fqdn should deserialize");
+        assert_eq!(req.fqdn, FieldUpdate::Clear);
+    }
+
+    #[test]
+    fn update_system_request_value_fqdn_is_set() {
+        let json =
+            r#"{"hostname":"web01","fqdn":"web01.prod.cf.internal","deployment_policy":"manual"}"#;
+        let req: UpdateSystemRequest =
+            serde_json::from_str(json).expect("payload with fqdn value should deserialize");
+        assert_eq!(
+            req.fqdn,
+            FieldUpdate::Set("web01.prod.cf.internal".to_string())
+        );
+    }
+
+    #[test]
+    fn field_update_default_is_unset() {
+        let value: FieldUpdate<String> = FieldUpdate::default();
+        assert_eq!(value, FieldUpdate::Unset);
+    }
 
     #[test]
     fn fleet_health_summary_total() {

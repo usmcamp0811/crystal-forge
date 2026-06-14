@@ -259,6 +259,7 @@ pub async fn create_system_via_api(
 pub async fn update_system_via_api(
     system_id: Uuid,
     hostname: String,
+    fqdn: Option<String>,
     system_configuration_name: Option<String>,
     environment: Option<String>,
     flake_name: Option<String>,
@@ -266,6 +267,7 @@ pub async fn update_system_via_api(
 ) -> Result<SystemDetail, String> {
     let request = UpdateSystemRequest {
         hostname,
+        fqdn,
         system_configuration_name,
         environment,
         flake_name,
@@ -440,6 +442,7 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
             nixos_version: Some("24.11".to_string()),
             last_seen: Some(now - Duration::minutes(5)),
             deployment_policy: "auto_latest".to_string(),
+            fqdn: None,
         },
         SystemSummary {
             id: Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap(),
@@ -460,6 +463,7 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
             nixos_version: Some("24.11".to_string()),
             last_seen: Some(now - Duration::minutes(10)),
             deployment_policy: "manual".to_string(),
+            fqdn: None,
         },
         SystemSummary {
             id: Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap(),
@@ -480,6 +484,7 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
             nixos_version: Some("24.11".to_string()),
             last_seen: Some(now - Duration::hours(1)),
             deployment_policy: "manual".to_string(),
+            fqdn: None,
         },
         SystemSummary {
             id: Uuid::parse_str("00000000-0000-0000-0000-000000000004").unwrap(),
@@ -500,6 +505,7 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
             nixos_version: None,
             last_seen: Some(now - Duration::days(3)),
             deployment_policy: "manual".to_string(),
+            fqdn: None,
         },
     ]
 }
@@ -518,6 +524,7 @@ pub fn fallback_system_detail() -> SystemDetail {
     SystemDetail {
         id: Uuid::parse_str("00000000-0000-0000-0000-000000000000").unwrap(),
         hostname: "unknown-system".to_string(),
+        fqdn: None,
         system_configuration_name: None,
         environment: None,
         is_active: false,
@@ -543,6 +550,7 @@ pub fn fallback_system_detail() -> SystemDetail {
             primary_ip: None,
             primary_mac: None,
             gateway_ip: None,
+            reachability: "direct".to_string(),
         },
         security: SystemSecurityInfo {
             tpm_present: None,

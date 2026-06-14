@@ -202,7 +202,13 @@ pub fn SystemCardV2(
                     }
                     div {
                         class: "sys-fqdn",
-                        "{derived_fqdn(&system.hostname, &environment)}"
+                        {
+                            // Prefer persisted operator-managed FQDN when set.
+                            let display_fqdn = system.fqdn.clone()
+                                .filter(|v| !v.trim().is_empty())
+                                .unwrap_or_else(|| derived_fqdn(&system.hostname, &environment));
+                            rsx! { "{display_fqdn}" }
+                        }
                     }
                 }
                 EnvBadge {
