@@ -3960,6 +3960,7 @@ const steps = [
     name: "14-environments",
     description: "Environments registry cards/table parity",
     action: async (page) => {
+      await routeEnvironmentWarningData(page);
       await page.goto(`${baseUrl}/environments`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
       await assertVisible(page.getByRole("heading", { name: "Environments" }), "Expected Environments heading");
@@ -3973,12 +3974,14 @@ const steps = [
       await assertVisible(page.getByRole("columnheader", { name: "Enforcement" }), "Expected Enforcement table column");
       await assertVisible(page.getByRole("columnheader", { name: "Cache" }), "Expected Cache table column");
       await page.getByRole("button", { name: /Cards/i }).click();
+      await unrouteEnvironmentWarningData(page);
     },
   },
   {
     name: "14a-environments-add-modal",
     description: "Environments unified Add/Edit modal parity",
     action: async (page) => {
+      await routeEnvironmentWarningData(page);
       await page.goto(`${baseUrl}/environments`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
       await page.getByRole("button", { name: /Add environment/i }).click();
@@ -3987,6 +3990,7 @@ const steps = [
       await assertVisible(page.getByText("Default deployment mode"), "Expected deployment policy section");
       await assertVisible(page.getByText("Policy enforcement"), "Expected policy enforcement section");
       await assertVisible(page.getByText("Production environment"), "Expected production toggle");
+      await unrouteEnvironmentWarningData(page);
     },
   },
   {
