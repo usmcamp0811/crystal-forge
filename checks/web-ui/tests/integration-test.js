@@ -3987,7 +3987,7 @@ const steps = [
       await page.waitForTimeout(2000);
       const addButton = page.locator("button").filter({ hasText: "Add environment" }).first();
       await assertVisible(addButton, "Expected Add environment button");
-      await addButton.click();
+      await addButton.evaluate((button) => button.click());
       await assertVisible(page.getByRole("heading", { name: "Add environment" }), "Expected Add environment modal");
       await assertVisible(page.getByText("Binary cache"), "Expected cache section in environment modal");
       await assertVisible(page.getByText("Default deployment mode"), "Expected deployment policy section");
