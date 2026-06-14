@@ -2,10 +2,7 @@
 
 use dioxus::prelude::*;
 
-use super::{
-    EnvironmentItem, NewEnvironmentDraft, PolicyOption, normalize_color_hex, normalize_optional,
-    required_policy_names,
-};
+use super::{required_policy_names, EnvironmentItem, NewEnvironmentDraft, PolicyOption};
 use crate::components::layout::Card;
 use crate::theme;
 

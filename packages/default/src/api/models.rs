@@ -898,6 +898,27 @@ pub struct FlakeCredentialSummary {
     pub has_secret: bool,
 }
 
+/// Per-environment system health + risk rollup.
+///
+/// Derived from the `view_environment_rollups` view (TASK-358). All counts are
+/// authoritative and computed from the active systems assigned to the
+/// environment, mirroring the Systems surface health thresholds.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct EnvironmentRollup {
+    /// Systems in the `healthy` state.
+    pub healthy: i64,
+    /// Systems in the `warning` state.
+    pub warning: i64,
+    /// Systems in the `critical` state.
+    pub critical: i64,
+    /// Systems in the `offline` state.
+    pub offline: i64,
+    /// Distinct CRITICAL+HIGH CVEs across this environment's active systems.
+    pub cve_critical_high: i64,
+    /// Names of the flakes spanning this environment's systems.
+    pub flakes: Vec<String>,
+}
+
 /// Environment summary for API responses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnvironmentSummary {
@@ -908,6 +929,9 @@ pub struct EnvironmentSummary {
     pub is_active: bool,
     /// Number of systems assigned to this environment.
     pub system_count: i64,
+    /// Per-environment health breakdown, CVE totals, and flakes.
+    #[serde(default)]
+    pub rollup: EnvironmentRollup,
 }
 
 /// Request payload for creating an environment.

@@ -1,14 +1,15 @@
-//! Environments list view with add/remove and required policy assignment.
+//! Environments list view with CrystalForgelatest parity.
 
 use dioxus::prelude::*;
 use uuid::Uuid;
 
 use crate::components::environments::{
-    AddEnvironmentForm, EditEnvironmentDraft, EditEnvironmentModal, EditRequirementsModal,
-    EnvironmentCard, EnvironmentItem, NewEnvironmentDraft, PolicyPickerModal,
-    RemoveEnvironmentDialog, environment_name_for_id, normalize_color_hex, normalize_optional,
-    policy_library, required_agent_policy_id, validate_environment, validate_environment_edit,
+    environment_name_for_id, normalize_color_hex, normalize_optional, policy_library,
+    required_agent_policy_id, validate_environment, validate_environment_form, EnvironmentCard,
+    EnvironmentDeploymentPolicy, EnvironmentFormDraft, EnvironmentFormModal, EnvironmentItem,
+    EnvironmentTable, NewEnvironmentDraft, PolicyOption, RemoveEnvironmentDialog,
 };
+use crate::components::icon::{Icon, IconName};
 use crate::components::notifications::{AlertBanner, AlertSeverity};
 use crate::environments::adapter::{
     create_environment_via_api, delete_environment_via_api, load_environments_with_fallback,
@@ -18,6 +19,12 @@ use crate::routes::Route;
 use crate::state::app_state::AppState;
 use crate::state::auth;
 use crate::theme;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ViewMode {
+    Cards,
+    Table,
+}
 
 fn came_from_setup() -> bool {
     if let Some(storage) = web_sys::window()
@@ -37,21 +44,15 @@ fn came_from_setup() -> bool {
 pub fn EnvironmentsListView() -> Element {
     let app_state = use_context::<Signal<AppState>>();
     let is_admin_user = auth::is_admin(&app_state.read().auth);
+    let config_health = app_state.read().config_health.clone();
 
     let mut policy_library_state = use_signal(policy_library);
     let default_required_policy = required_agent_policy_id(&policy_library_state.read());
 
-    // Shared config health (admin only) — used for contextual environment warnings.
-    let config_health = app_state.read().config_health.clone();
-
-    // Seed initial state from the backend API; fall back to deterministic mock
-    // on error. The rest of the component's local-state CRUD (add/edit/remove)
-    // continues to operate on the signal after initial load.
     let mut environments = use_signal(Vec::<EnvironmentItem>::new);
     let mut api_notice = use_signal(|| None::<String>);
     let mut loading = use_signal(|| true);
     let mut redirect_to_login = use_signal(|| false);
-
     let nav = use_navigator();
 
     use_effect(move || {
@@ -68,18 +69,15 @@ pub fn EnvironmentsListView() -> Element {
 
             let mut items = result.environments;
             items.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-
             environments.set(items);
             policy_library_state.set(policies_result.policies);
 
-            let merged_notice = match (result.notice, policies_result.notice) {
+            api_notice.set(match (result.notice, policies_result.notice) {
                 (Some(a), Some(b)) => Some(format!("{a}; {b}")),
                 (Some(a), None) => Some(a),
                 (None, Some(b)) => Some(b),
                 (None, None) => None,
-            };
-
-            api_notice.set(merged_notice);
+            });
             loading.set(false);
         });
     });
@@ -87,60 +85,42 @@ pub fn EnvironmentsListView() -> Element {
     if *redirect_to_login.read() {
         nav.push(Route::LoginView {});
         return rsx! {
-            div {
-                class: "flex items-center justify-center py-12",
+            div { class: "flex items-center justify-center py-12",
                 p { class: "{theme::text::SECONDARY}", "Redirecting to login..." }
             }
         };
     }
 
-    let mut show_add_form = use_signal(|| false);
-    let mut add_error = use_signal(|| None::<String>);
-    let mut draft = use_signal(|| NewEnvironmentDraft {
-        name: String::new(),
-        description: String::new(),
-        color_hex: "#4F46E5".to_string(),
-        required_policy_ids: vec![default_required_policy],
-    });
+    let from_setup = use_signal(came_from_setup);
+    let mut query = use_signal(String::new);
+    let mut view_mode = use_signal(|| ViewMode::Cards);
+    let mut form_draft = use_signal(|| None::<EnvironmentFormDraft>);
+    let mut form_error = use_signal(|| None::<String>);
     let mut pending_remove = use_signal(|| None::<EnvironmentItem>);
-    let mut show_add_policy_modal = use_signal(|| false);
-    let mut editing_environment_meta = use_signal(|| None::<EditEnvironmentDraft>);
-    let mut edit_meta_error = use_signal(|| None::<String>);
-
-    let mut editing_environment = use_signal(|| None::<Uuid>);
-    let mut editing_required_policy_ids = use_signal(Vec::<Uuid>::new);
-    let mut edit_error = use_signal(|| None::<String>);
 
     let items = environments.read().clone();
-    let policy_library_for_add = policy_library_state.read().clone();
-
-    let from_setup = use_signal(came_from_setup);
-    let mut dismiss_add_target_callout = use_signal(|| false);
+    let filtered = filtered_environments(&items, &query());
+    let totals = EnvironmentTotals::from(&items);
 
     rsx! {
-        div {
-            class: "space-y-6",
-
+        div { style: "display:flex; flex-direction:column; gap:16px;",
             if from_setup() {
-                div {
-                    "data-testid": "setup-coach-environments-callout",
-                    style: "background:rgba(30,58,138,0.22); border:1px solid rgba(96,165,250,0.55); border-radius:8px; padding:12px 16px;",
-                    p { style: "color:#dbeafe; font-size:12px; font-weight:700; margin:0; letter-spacing:0.03em; text-transform:uppercase;", "Setup Tour - Step 1 of 6" }
-                    p { style: "color:#dbeafe; font-size:14px; font-weight:600; margin:4px 0 0 0;", "Create your first environment" }
-                    p { style: "color:#bfdbfe; font-size:13px; margin:4px 0 0 0;", "Use Add Environment to define a deployment boundary like staging or production." }
+                div { "data-testid": "setup-coach-environments-callout", class: "sd-callout sd-callout-info",
+                    Icon { name: IconName::Plus, size: 13 }
+                    div {
+                        div { style: "font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:0.03em;", "Setup Tour - Step 1 of 6" }
+                        div { style: "font-size:13px;", "Create your first environment using Add environment." }
+                    }
                 }
             }
 
-            // API fallback notice banner
             if let Some(notice) = api_notice.read().clone() {
-                div {
-                    class: "flex items-center gap-2 px-4 py-3 rounded-lg border text-yellow-100 text-sm cf-chip-olive",
+                div { class: "flex items-center gap-2 px-4 py-3 rounded-lg border text-yellow-100 text-sm cf-chip-olive",
                     span { class: "shrink-0", "⚠" }
                     span { "{notice}" }
                 }
             }
 
-            // Admin-only contextual environment warnings from config health.
             if is_admin_user {
                 if let Some(ref health) = config_health {
                     if !health.has_builders {
@@ -162,261 +142,113 @@ pub fn EnvironmentsListView() -> Element {
                 }
             }
 
-            header {
-                class: "flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between",
+            div { class: "page-head",
                 div {
-                    h1 { class: "{theme::typography::PAGE_TITLE}", "Environment Registry" }
-                    p { class: "text-sm {theme::text::SECONDARY}", "Group systems by deployment domain and define required deployment policy baselines." }
+                    h1 { class: "page-title", "Environments" }
+                    p { class: "page-subtitle", "{items.len()} tiers · {totals.systems} systems · {totals.caches}/{items.len()} caches configured" }
                 }
-                div {
-                    class: "relative",
+                div { style: "display:flex; gap:8px;",
                     button {
-                        class: if from_setup() && !*show_add_form.read() {
-                            "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN} animate-pulse ring-2 ring-blue-300/70 ring-offset-2 ring-offset-slate-950"
-                        } else {
-                            "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}"
-                        },
+                        class: "btn btn-primary focus-ring",
+                        "data-coach-target": "env",
                         onclick: move |_| {
-                            let next = !*show_add_form.read();
-                            show_add_form.set(next);
-                            add_error.set(None);
-                            if next {
-                                dismiss_add_target_callout.set(true);
-                            }
+                            form_error.set(None);
+                            form_draft.set(Some(new_environment_form_draft(default_required_policy)));
                         },
-                        if *show_add_form.read() { "Close" } else { "Add Environment" }
-                    }
-                    if from_setup() && !*show_add_form.read() && !dismiss_add_target_callout() {
-                        div {
-                            "data-testid": "setup-coach-environments-target-callout",
-                            style: "position:absolute; right:0; top:calc(100% + 10px); background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; width:220px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
-                            div {
-                                style: "position:absolute; top:-6px; right:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
-                            }
-                            p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
-                            p { style: "margin:2px 0 0 0;", "Click Add Environment to create your first environment." }
-                        }
+                        Icon { name: IconName::Plus, size: 14 }
+                        " Add environment"
                     }
                 }
+            }
+
+            StatStrip { totals: totals.clone(), total_tiers: items.len() }
+
+            div { class: "filterbar",
+                div { class: "filter-search", style: "max-width:320px;",
+                    Icon { name: IconName::Search }
+                    input {
+                        class: "input focus-ring",
+                        placeholder: "Search environments…",
+                        value: "{query}",
+                        oninput: move |evt| query.set(evt.value())
+                    }
+                }
+                div { class: "seg",
+                    button {
+                        class: if view_mode() == ViewMode::Cards { "active" } else { "" },
+                        onclick: move |_| view_mode.set(ViewMode::Cards),
+                        Icon { name: IconName::Grid, size: 12 }
+                        " Cards"
+                    }
+                    button {
+                        class: if view_mode() == ViewMode::Table { "active" } else { "" },
+                        onclick: move |_| view_mode.set(ViewMode::Table),
+                        Icon { name: IconName::Rows, size: 12 }
+                        " Table"
+                    }
+                }
+                span { class: "filter-count", "{filtered.len()} environments" }
             }
 
             if *loading.read() {
-                div {
-                    class: "flex justify-center py-12",
-                    div {
-                        class: "flex flex-col items-center gap-3",
-                        div {
-                            class: "animate-spin rounded-full h-10 w-10 border-b-2 cf-spinner-accent",
+                div { class: "flex justify-center py-12",
+                    div { class: "flex flex-col items-center gap-3",
+                        div { class: "animate-spin rounded-full h-10 w-10 border-b-2 cf-spinner-accent" }
+                        p { class: "text-sm {theme::text::SECONDARY}", "Loading environments…" }
+                    }
+                }
+            } else if filtered.is_empty() {
+                div { class: "empty", style: "margin:24px;", "No environments match." }
+            } else if view_mode() == ViewMode::Cards {
+                div { class: "cards-grid",
+                    for env in filtered.iter() {
+                        EnvironmentCard {
+                            key: "{env.id}",
+                            environment: env.clone(),
+                            policy_library: policy_library_state.read().clone(),
+                            on_edit: move |env| {
+                                form_error.set(None);
+                                form_draft.set(Some(form_draft_from_environment(&env)));
+                            }
                         }
-                        p {
-                            class: "text-sm {theme::text::SECONDARY}",
-                            "Loading environments…"
-                        }
+                    }
+                }
+            } else {
+                EnvironmentTable {
+                    environments: filtered.clone(),
+                    policy_library: policy_library_state.read().clone(),
+                    on_edit: move |env| {
+                        form_error.set(None);
+                        form_draft.set(Some(form_draft_from_environment(&env)));
                     }
                 }
             }
 
-            if !*loading.read() && *show_add_form.read() {
-                AddEnvironmentForm {
-                    draft: draft.clone(),
-                    error: add_error.clone(),
-                    policy_library: policy_library_state.read().clone(),
-                    default_required_policy,
-                    on_cancel: move |_| {
-                        draft.set(NewEnvironmentDraft {
-                            name: String::new(),
-                            description: String::new(),
-                            color_hex: "#4F46E5".to_string(),
-                            required_policy_ids: vec![default_required_policy],
-                        });
-                        add_error.set(None);
-                        show_add_form.set(false);
-                    },
-                    on_submit: move |next: NewEnvironmentDraft| {
-                        if let Err(err) = validate_environment(&next, &environments.read(), &policy_library_for_add) {
-                            add_error.set(Some(err));
-                            return;
-                        }
-
-                        let mut environments = environments.clone();
-                        let mut draft = draft.clone();
-                        let mut add_error = add_error.clone();
-                        let mut show_add_form = show_add_form.clone();
-                        let mut api_notice = api_notice.clone();
-
-                        spawn(async move {
-                            match create_environment_via_api(
-                                next.name.trim().to_string(),
-                                normalize_optional(&next.description),
-                                normalize_color_hex(&next.color_hex),
-                                true,
-                                default_required_policy,
-                            )
-                            .await
-                            {
-                                Ok(mut created) => {
-                                    created.required_policy_ids = next.required_policy_ids;
-                                    let mut values = environments.read().clone();
-                                    values.push(created);
-                                    values.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-                                    environments.set(values);
-                                    draft.set(NewEnvironmentDraft {
-                                        name: String::new(),
-                                        description: String::new(),
-                                        color_hex: "#4F46E5".to_string(),
-                                        required_policy_ids: vec![default_required_policy],
-                                    });
-                                    add_error.set(None);
-                                    show_add_form.set(false);
-                                }
-                                Err(message) => {
-                                    api_notice.set(Some(message));
-                                }
-                            }
-                        });
-                    },
-                    on_choose_policies: move |_| show_add_policy_modal.set(true),
-                }
-            }
-
-            if !*loading.read() && *show_add_policy_modal.read() {
-                PolicyPickerModal {
-                    title: "Choose Required Policies".to_string(),
-                    current_ids: draft.read().required_policy_ids.clone(),
-                    policy_library: policy_library_state.read().clone(),
-                    on_apply: move |ids| {
-                        let mut next = draft.read().clone();
-                        next.required_policy_ids = ids;
-                        draft.set(next);
-                        show_add_policy_modal.set(false);
-                    },
-                    on_close: move |_| show_add_policy_modal.set(false),
-                }
-            }
-
-            if !*loading.read() {
-              div {
-                class: "space-y-3",
-                for env in items {
-                    EnvironmentCard {
-                        environment: env.clone(),
-                        policy_library: policy_library_state.read().clone(),
-                        on_edit_meta: move |e: EnvironmentItem| {
-                            editing_environment_meta.set(Some(EditEnvironmentDraft {
-                                id: e.id,
-                                name: e.name,
-                                description: e.description.unwrap_or_default(),
-                                color_hex: e.color_hex,
-                            }));
-                            edit_meta_error.set(None);
-                        },
-                        on_edit_requirements: move |(id, ids): (Uuid, Vec<Uuid>)| {
-                            editing_environment.set(Some(id));
-                            editing_required_policy_ids.set(ids);
-                            edit_error.set(None);
-                        },
-                        on_remove: move |e: EnvironmentItem| {
-                            pending_remove.set(Some(e));
-                        },
+            EnvironmentFormModal {
+                draft: form_draft,
+                existing: items.clone(),
+                policy_library: policy_library_state.read().clone(),
+                error: form_error,
+                on_close: move |_| {
+                    form_draft.set(None);
+                    form_error.set(None);
+                },
+                on_remove: move |env| {
+                    pending_remove.set(Some(env));
+                },
+                on_save: move |next: EnvironmentFormDraft| {
+                    if let Err(err) = validate_environment_form(&next, &environments.read()) {
+                        form_error.set(Some(err));
+                        return;
                     }
-                }
-              }
-            }
-
-            if let Some(env_id) = editing_environment.read().clone() {
-                EditRequirementsModal {
-                    environment_name: environment_name_for_id(env_id, &environments.read()),
-                    policy_library: policy_library_state.read().clone(),
-                    selected_policy_ids: editing_required_policy_ids.clone(),
-                    error: edit_error.clone(),
-                    on_close: move |_| {
-                        editing_environment.set(None);
-                        edit_error.set(None);
-                    },
-                    on_save: move |_| {
-                        let selected = editing_required_policy_ids.read().clone();
-                        if selected.is_empty() {
-                            edit_error.set(Some("At least one required policy must be selected.".to_string()));
-                            return;
-                        }
-
-                        let mut environments = environments.clone();
-                        let env_id = env_id;
-                        let mut editing_environment = editing_environment.clone();
-                        let mut edit_error = edit_error.clone();
-                        let mut api_notice = api_notice.clone();
-
-                        spawn(async move {
-                            // Call the API to update policies
-                            match update_environment_policies_via_api(env_id, selected.clone()).await {
-                                Ok(()) => {
-                                    // Update local state on success
-                                    let mut values = environments.read().clone();
-                                    if let Some(target) = values.iter_mut().find(|env| env.id == env_id) {
-                                        target.required_policy_ids = selected;
-                                    }
-                                    environments.set(values);
-                                    editing_environment.set(None);
-                                    edit_error.set(None);
-                                }
-                                Err(message) => {
-                                    // Show error but still update local state for now
-                                    api_notice.set(Some(message.clone()));
-                                    edit_error.set(Some(message));
-                                }
-                            }
-                        });
-                    }
-                }
-            }
-
-            if let Some(_) = editing_environment_meta.read().clone() {
-                EditEnvironmentModal {
-                    draft: editing_environment_meta.clone(),
-                    error: edit_meta_error.clone(),
-                    on_close: move |_| {
-                        editing_environment_meta.set(None);
-                        edit_meta_error.set(None);
-                    },
-                    on_save: move |next: EditEnvironmentDraft| {
-                        if let Err(err) = validate_environment_edit(&next, &environments.read()) {
-                            edit_meta_error.set(Some(err));
-                            return;
-                        }
-
-                        let mut environments = environments.clone();
-                        let mut editing_environment_meta = editing_environment_meta.clone();
-                        let mut edit_meta_error = edit_meta_error.clone();
-                        let mut api_notice = api_notice.clone();
-
-                        spawn(async move {
-                            match update_environment_via_api(
-                                next.id,
-                                next.name.trim().to_string(),
-                                normalize_optional(&next.description),
-                                normalize_color_hex(&next.color_hex),
-                                default_required_policy,
-                            )
-                            .await
-                            {
-                                Ok(updated) => {
-                                    let mut values = environments.read().clone();
-                                    if let Some(target) = values.iter_mut().find(|env| env.id == updated.id)
-                                    {
-                                        *target = updated;
-                                    }
-                                    values.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-                                    environments.set(values);
-                                    editing_environment_meta.set(None);
-                                    edit_meta_error.set(None);
-                                }
-                                Err(message) => {
-                                    api_notice.set(Some(message.clone()));
-                                    edit_meta_error.set(Some(message));
-                                }
-                            }
-                        });
-                    },
+                    save_environment_form(
+                        next,
+                        environments.clone(),
+                        form_draft.clone(),
+                        form_error.clone(),
+                        api_notice.clone(),
+                        default_required_policy,
+                    );
                 }
             }
 
@@ -430,6 +262,7 @@ pub fn EnvironmentsListView() -> Element {
                             let mut environments = environments.clone();
                             let mut pending_remove = pending_remove.clone();
                             let mut api_notice = api_notice.clone();
+                            let mut form_draft = form_draft.clone();
                             spawn(async move {
                                 match delete_environment_via_api(environment_id).await {
                                     Ok(()) => {
@@ -437,6 +270,7 @@ pub fn EnvironmentsListView() -> Element {
                                         values.retain(|item| item.id != environment_id);
                                         environments.set(values);
                                         pending_remove.set(None);
+                                        form_draft.set(None);
                                     }
                                     Err(message) => {
                                         api_notice.set(Some(message));
@@ -452,4 +286,182 @@ pub fn EnvironmentsListView() -> Element {
             }
         }
     }
+}
+
+#[derive(Clone, PartialEq)]
+struct EnvironmentTotals {
+    systems: usize,
+    caches: usize,
+    manual_policy: usize,
+    auto_sync_off: usize,
+}
+
+impl EnvironmentTotals {
+    fn from(items: &[EnvironmentItem]) -> Self {
+        Self {
+            systems: items.iter().map(|env| env.system_count).sum(),
+            caches: items.iter().filter(|env| env.cache.is_some()).count(),
+            manual_policy: items
+                .iter()
+                .filter(|env| env.default_policy == EnvironmentDeploymentPolicy::Manual)
+                .count(),
+            auto_sync_off: items.iter().filter(|env| !env.auto_sync).count(),
+        }
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct StatStripProps {
+    totals: EnvironmentTotals,
+    total_tiers: usize,
+}
+
+#[component]
+fn StatStrip(props: StatStripProps) -> Element {
+    let cache_value = format!("{}/{}", props.totals.caches, props.total_tiers);
+    rsx! {
+        div { class: "stat-strip",
+            StatCard { label: "Total tiers", value: props.total_tiers.to_string(), color: "#a78bfa" }
+            StatCard { label: "Systems", value: props.totals.systems.to_string(), color: "#60a5fa" }
+            StatCard { label: "Caches", value: cache_value, color: "#34d399" }
+            StatCard { label: "Manual policy", value: props.totals.manual_policy.to_string(), color: "#fbbf24" }
+            StatCard { label: "Auto-sync off", value: props.totals.auto_sync_off.to_string(), color: "#f87171" }
+        }
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct StatCardProps {
+    label: &'static str,
+    value: String,
+    color: &'static str,
+}
+
+#[component]
+fn StatCard(props: StatCardProps) -> Element {
+    rsx! {
+        div { class: "stat",
+            span { class: "stat-accent", style: "--stat-color:{props.color};" }
+            div { class: "stat-label", "{props.label}" }
+            div { class: "stat-value", "{props.value}" }
+        }
+    }
+}
+
+fn filtered_environments(items: &[EnvironmentItem], query: &str) -> Vec<EnvironmentItem> {
+    let q = query.trim().to_ascii_lowercase();
+    items
+        .iter()
+        .filter(|env| {
+            q.is_empty()
+                || env.name.to_ascii_lowercase().contains(&q)
+                || env
+                    .description
+                    .as_ref()
+                    .map(|description| description.to_ascii_lowercase().contains(&q))
+                    .unwrap_or(false)
+        })
+        .cloned()
+        .collect()
+}
+
+fn new_environment_form_draft(default_required_policy: Uuid) -> EnvironmentFormDraft {
+    EnvironmentFormDraft {
+        id: None,
+        name: String::new(),
+        description: String::new(),
+        color_hex: "#2563eb".to_string(),
+        required_policy_ids: vec![default_required_policy],
+        default_policy: EnvironmentDeploymentPolicy::Manual,
+        auto_sync: true,
+        requires_approval: true,
+        is_production: false,
+    }
+}
+
+fn form_draft_from_environment(env: &EnvironmentItem) -> EnvironmentFormDraft {
+    EnvironmentFormDraft {
+        id: Some(env.id),
+        name: env.name.clone(),
+        description: env.description.clone().unwrap_or_default(),
+        color_hex: env.color_hex.clone(),
+        required_policy_ids: env.required_policy_ids.clone(),
+        default_policy: env.default_policy,
+        auto_sync: env.auto_sync,
+        requires_approval: env.requires_approval,
+        is_production: env.is_production,
+    }
+}
+
+fn save_environment_form(
+    next: EnvironmentFormDraft,
+    mut environments: Signal<Vec<EnvironmentItem>>,
+    mut form_draft: Signal<Option<EnvironmentFormDraft>>,
+    mut form_error: Signal<Option<String>>,
+    mut api_notice: Signal<Option<String>>,
+    default_required_policy: Uuid,
+) {
+    spawn(async move {
+        let result = if let Some(environment_id) = next.id {
+            update_environment_via_api(
+                environment_id,
+                next.name.trim().to_string(),
+                normalize_optional(&next.description),
+                normalize_color_hex(&next.color_hex),
+                default_required_policy,
+            )
+            .await
+        } else {
+            let draft = NewEnvironmentDraft {
+                name: next.name.clone(),
+                description: next.description.clone(),
+                color_hex: next.color_hex.clone(),
+                required_policy_ids: next.required_policy_ids.clone(),
+            };
+            if let Err(err) = validate_environment(&draft, &environments.read(), &policy_library())
+            {
+                form_error.set(Some(err));
+                return;
+            }
+            create_environment_via_api(
+                next.name.trim().to_string(),
+                normalize_optional(&next.description),
+                normalize_color_hex(&next.color_hex),
+                true,
+                default_required_policy,
+            )
+            .await
+        };
+
+        match result {
+            Ok(mut saved) => {
+                if let Err(message) =
+                    update_environment_policies_via_api(saved.id, next.required_policy_ids.clone())
+                        .await
+                {
+                    api_notice.set(Some(message));
+                }
+                saved.required_policy_ids = next.required_policy_ids;
+                saved.default_policy = next.default_policy;
+                saved.auto_sync = next.auto_sync;
+                saved.requires_approval = next.requires_approval;
+                saved.is_production = next.is_production;
+
+                let mut values = environments.read().clone();
+                if let Some(target) = values.iter_mut().find(|env| env.id == saved.id) {
+                    *target = saved;
+                } else {
+                    values.push(saved);
+                }
+                values.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                environments.set(values);
+                form_draft.set(None);
+                form_error.set(None);
+            }
+            Err(message) => {
+                api_notice.set(Some(message.clone()));
+                form_error.set(Some(message));
+            }
+        }
+    });
 }
