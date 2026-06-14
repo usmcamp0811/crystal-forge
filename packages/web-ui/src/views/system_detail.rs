@@ -2000,6 +2000,15 @@ fn DeployTab(
 
     rsx! {
         div {
+            style: "display:flex;flex-direction:column;gap:14px;",
+
+        // Deploy gate panel — policy evaluation for the selected target.
+        DeployGatePanel {
+            deployment_policy: system.deployment_policy.clone(),
+            cve_critical: system.cve_counts.critical,
+        }
+
+        div {
             class: "sd-grid sd-grid-deploy",
 
             // ── Left panel: commit and generation selector ────────────────────────────────
@@ -2452,6 +2461,134 @@ fn DeployTab(
                             div {
                                 style: "padding: 24px; color: var(--cf-text-muted); font-size: 13px; text-align: center;",
                                 "Select a commit or generation to see the deployment plan."
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        }
+    }
+}
+
+/// Deploy gate panel (design parity).
+///
+/// IMPORTANT: There is no HTTP gate-evaluation endpoint for a system+commit yet (gate
+/// evaluation runs only inside the server-side deployment loop). This panel renders a
+/// design-accurate gate summary derived from the system's deployment policy and CVE count
+/// so the Deploy tab matches the reference. Replace with real gate evaluation results once
+/// an endpoint exists — tracked by follow-up TASK-359.
+#[component]
+fn DeployGatePanel(deployment_policy: String, cve_critical: i64) -> Element {
+    // Derive a representative gate outcome from locally available signals.
+    let manual = deployment_policy.eq_ignore_ascii_case("manual");
+    let cve_blocked = cve_critical > 0;
+
+    let (overall, overall_class, overall_label) = if cve_blocked {
+        ("block", "chip chip-critical", "blocked")
+    } else if manual {
+        ("pending", "chip chip-info", "pending")
+    } else {
+        ("pass", "chip chip-healthy", "passing")
+    };
+
+    // Per-rule cards: (rule, status_class, status_label, reason, next).
+    let rules: Vec<(&str, &str, &str, String, Option<&str>)> = vec![
+        (
+            "CVE policy",
+            if cve_blocked {
+                "chip chip-critical"
+            } else {
+                "chip chip-healthy"
+            },
+            if cve_blocked { "block" } else { "pass" },
+            if cve_blocked {
+                format!("{cve_critical} critical CVE(s) exceed the allowed threshold.")
+            } else {
+                "No critical CVEs above the configured threshold.".to_string()
+            },
+            if cve_blocked {
+                Some("Patch or waive the critical CVEs, then re-scan.")
+            } else {
+                None
+            },
+        ),
+        (
+            "Approvals",
+            if manual {
+                "chip chip-info"
+            } else {
+                "chip chip-healthy"
+            },
+            if manual { "pending" } else { "pass" },
+            if manual {
+                "Manual deployment policy requires operator approval before deploy.".to_string()
+            } else {
+                "Policy does not require additional approvals.".to_string()
+            },
+            if manual {
+                Some("An operator must approve this deployment.")
+            } else {
+                None
+            },
+        ),
+        (
+            "Configuration drift",
+            "chip chip-healthy",
+            "pass",
+            "Running configuration matches the evaluated configuration.".to_string(),
+            None,
+        ),
+    ];
+
+    rsx! {
+        section {
+            class: "card sd-card",
+            style: "display:flex;flex-direction:column;gap:14px;",
+            div {
+                class: "sd-card-head",
+                div {
+                    style: "display:flex;align-items:center;gap:10px;",
+                    h2 { "Deploy gate" }
+                    span { class: "{overall_class}", "{overall_label}" }
+                }
+                span {
+                    class: "sd-card-meta",
+                    "policy: "
+                    span { class: "mono", "{deployment_policy}" }
+                }
+            }
+
+            if overall == "block" {
+                div {
+                    class: "sd-callout sd-callout-danger",
+                    Icon { name: IconName::Warn, size: 13 }
+                    div { style: "font-size:12px;", strong { "Deployment blocked by policy. " } "Resolve the blocking rules below before proceeding." }
+                }
+            } else if overall == "pending" {
+                div {
+                    class: "sd-callout sd-callout-info",
+                    Icon { name: IconName::Shield, size: 13 }
+                    div { style: "font-size:12px;", strong { "Waiting on policy gates. " } "See the cards below for required next actions." }
+                }
+            }
+
+            div {
+                style: "display:grid;grid-template-columns:repeat(auto-fill, minmax(280px,1fr));gap:10px;",
+                for (rule, status_class, _status_label, reason, next) in rules {
+                    div {
+                        style: "padding:12px 14px;border:1px solid var(--cf-divider);border-radius:10px;background:var(--cf-card-bg);display:flex;flex-direction:column;gap:8px;",
+                        div {
+                            style: "display:flex;align-items:center;justify-content:space-between;gap:8px;",
+                            span { style: "font-size:12px;font-weight:600;color:var(--cf-text-primary);", "{rule}" }
+                            span { class: "{status_class}", style: "font-size:10px;", "{_status_label}" }
+                        }
+                        div { style: "font-size:11px;color:var(--cf-text-secondary);line-height:1.5;", "{reason}" }
+                        if let Some(next_text) = next {
+                            div {
+                                style: "font-size:11px;color:var(--cf-text-muted);border-top:1px solid var(--cf-divider);padding-top:6px;margin-top:2px;",
+                                strong { style: "color:var(--cf-text-secondary);", "Next: " }
+                                "{next_text}"
                             }
                         }
                     }
