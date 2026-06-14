@@ -36,7 +36,20 @@ pub fn EditSystemModal(
 ) -> Element {
     let mut hostname = use_signal(|| system.hostname.clone());
     let mut environment = use_signal(|| system.environment.clone().unwrap_or_default());
-    let mut fqdn = use_signal(|| derived_fqdn(&system.hostname, system.environment.as_deref()));
+    let mut fqdn = use_signal(|| {
+        system
+            .fqdn
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| derived_fqdn(&system.hostname, system.environment.as_deref()))
+    });
+    let mut fqdn_manually_edited = use_signal(|| {
+        system
+            .fqdn
+            .as_ref()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+    });
     let mut system_configuration_name =
         use_signal(|| system.system_configuration_name.clone().unwrap_or_default());
     let mut deployment_policy = use_signal(|| system.deployment_policy.clone());
@@ -81,7 +94,9 @@ pub fn EditSystemModal(
             let h = hostname_clone.read().clone();
             let e = environment_clone.read().clone();
             let env_opt = if e.is_empty() { None } else { Some(e.as_str()) };
-            fqdn_clone.set(derived_fqdn(&h, env_opt));
+            if !*fqdn_manually_edited.read() {
+                fqdn_clone.set(derived_fqdn(&h, env_opt));
+            }
         });
     }
 
@@ -99,6 +114,11 @@ pub fn EditSystemModal(
 
         let request = UpdateSystemRequest {
             hostname: hostname.read().clone(),
+            fqdn: if fqdn.read().trim().is_empty() {
+                None
+            } else {
+                Some(fqdn.read().trim().to_string())
+            },
             system_configuration_name: if system_configuration_name.read().trim().is_empty() {
                 None
             } else {
@@ -194,8 +214,12 @@ pub fn EditSystemModal(
                             r#type: "text",
                             class: "input focus-ring mono",
                             value: "{fqdn}",
-                            oninput: move |e| fqdn.set(e.value().clone()),
+                            oninput: move |e| {
+                                fqdn_manually_edited.set(true);
+                                fqdn.set(e.value().clone());
+                            },
                         }
+                        p { class: "help", "Saved as this system's operator-managed FQDN. Clear it to fall back to hostname + environment." }
                     }
 
                     // System Configuration Name

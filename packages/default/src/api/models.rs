@@ -333,13 +333,13 @@ pub struct SaveSystemCveJustificationRequest {
 /// Filter parameters for CVE list queries.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CveFilters {
-    pub severity: Option<String>,       // "critical", "high", "medium", "low"
-    pub fix_status: Option<String>,     // "available", "pending", "exploited"
-    pub triage_status: Option<String>,  // "outstanding", "scheduled", "accepted"
-    pub package: Option<String>,        // Package name substring match
-    pub search: Option<String>,         // Search across CVE ID, package, title
-    pub sort: Option<String>,           // "severity", "cvss", "age", "affected"
-    pub limit: Option<i64>,             // Max results (default 500, max 1000)
+    pub severity: Option<String>,      // "critical", "high", "medium", "low"
+    pub fix_status: Option<String>,    // "available", "pending", "exploited"
+    pub triage_status: Option<String>, // "outstanding", "scheduled", "accepted"
+    pub package: Option<String>,       // Package name substring match
+    pub search: Option<String>,        // Search across CVE ID, package, title
+    pub sort: Option<String>,          // "severity", "cvss", "age", "affected"
+    pub limit: Option<i64>,            // Max results (default 500, max 1000)
 }
 
 /// CVE list item for table views.
@@ -719,6 +719,8 @@ pub struct SystemDetail {
     /// Core identity.
     pub id: Uuid,
     pub hostname: String,
+    #[serde(default)]
+    pub fqdn: Option<String>,
     pub system_configuration_name: Option<String>,
     pub environment: Option<String>,
     pub is_active: bool,
@@ -1040,6 +1042,7 @@ pub struct CreateSystemRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateSystemRequest {
     pub hostname: String,
+    pub fqdn: Option<String>,
     pub system_configuration_name: Option<String>,
     pub environment: Option<String>,
     pub flake_name: Option<String>,

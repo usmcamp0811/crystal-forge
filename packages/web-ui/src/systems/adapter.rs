@@ -259,6 +259,7 @@ pub async fn create_system_via_api(
 pub async fn update_system_via_api(
     system_id: Uuid,
     hostname: String,
+    fqdn: Option<String>,
     system_configuration_name: Option<String>,
     environment: Option<String>,
     flake_name: Option<String>,
@@ -266,6 +267,7 @@ pub async fn update_system_via_api(
 ) -> Result<SystemDetail, String> {
     let request = UpdateSystemRequest {
         hostname,
+        fqdn,
         system_configuration_name,
         environment,
         flake_name,
@@ -518,6 +520,7 @@ pub fn fallback_system_detail() -> SystemDetail {
     SystemDetail {
         id: Uuid::parse_str("00000000-0000-0000-0000-000000000000").unwrap(),
         hostname: "unknown-system".to_string(),
+        fqdn: None,
         system_configuration_name: None,
         environment: None,
         is_active: false,

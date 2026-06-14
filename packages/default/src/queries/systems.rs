@@ -63,6 +63,7 @@ pub async fn update_system_metadata(
     pool: &PgPool,
     system_id: Uuid,
     hostname: &str,
+    fqdn: Option<&str>,
     environment_id: Option<Uuid>,
     flake_id: Option<i32>,
     system_configuration_name: Option<&str>,
@@ -71,14 +72,16 @@ pub async fn update_system_metadata(
     sqlx::query(
         "UPDATE systems
          SET hostname = $1,
-             environment_id = $2,
-             flake_id = $3,
-             system_configuration_name = $4,
-             deployment_policy = $5,
+             fqdn = $2,
+             environment_id = $3,
+             flake_id = $4,
+             system_configuration_name = $5,
+             deployment_policy = $6,
              updated_at = NOW()
-         WHERE id = $6",
+          WHERE id = $7",
     )
     .bind(hostname)
+    .bind(fqdn)
     .bind(environment_id)
     .bind(flake_id)
     .bind(system_configuration_name)
@@ -451,6 +454,7 @@ pub async fn get_user_environment_membership_ids(
 pub struct SystemDetailRow {
     pub id: Uuid,
     pub hostname: String,
+    pub fqdn: Option<String>,
     pub system_configuration_name: Option<String>,
     pub environment: Option<String>,
     pub is_active: bool,

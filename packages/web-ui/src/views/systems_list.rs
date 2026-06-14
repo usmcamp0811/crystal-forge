@@ -589,6 +589,7 @@ pub fn SystemsListView() -> Element {
                             match update_system_via_api(
                                 system_id,
                                 next.hostname.trim().to_string(),
+                                None,
                                 normalize_optional(&next.system_configuration_name),
                                 normalize_optional(&next.environment),
                                 normalize_optional(&next.flake_name),
@@ -1027,6 +1028,7 @@ pub fn SystemsListView() -> Element {
                             match update_system_via_api(
                                 system_id,
                                 request.hostname,
+                                request.fqdn,
                                 request.system_configuration_name,
                                 request.environment,
                                 request.flake_name,
@@ -1230,7 +1232,10 @@ fn SystemPreviewPanel(
                             "{detail.health_status.label()}"
                         }
                     }
-                    span { class: "fqdn", "{derived_fqdn(&detail.hostname, detail.environment.as_deref())}" }
+                    span {
+                        class: "fqdn",
+                        "{detail.fqdn.clone().filter(|value| !value.trim().is_empty()).unwrap_or_else(|| derived_fqdn(&detail.hostname, detail.environment.as_deref()))}"
+                    }
                 }
                 button {
                     class: "btn-icon focus-ring",

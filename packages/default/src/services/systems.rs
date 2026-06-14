@@ -312,6 +312,7 @@ fn detail_row_to_api_model(row: queries::SystemDetailRow) -> SystemDetail {
     SystemDetail {
         id: row.id,
         hostname: row.hostname,
+        fqdn: row.fqdn,
         system_configuration_name: row.system_configuration_name,
         environment: row.environment,
         is_active: row.is_active,

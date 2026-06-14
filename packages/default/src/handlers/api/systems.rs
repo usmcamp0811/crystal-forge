@@ -15,9 +15,9 @@ use crate::api::models::{
     DeploymentStatus, PipelineStage, SaveSystemCveJustificationRequest, SortOrder,
     SystemAgentEvent, SystemCommitsResponse, SystemDetail, SystemGeneration,
     SystemGenerationsResponse, SystemHardwareInfo, SystemHistoryEntry, SystemMutationResponse,
-    SystemNetworkInfo, SystemRollbackGenerationRequest, SystemRollbackRequest, SystemSecurityInfo, SystemSummary,
-    SystemVulnerability, SystemsListParams, UpdateSystemPublicKeyRequest, UpdateSystemRequest,
-    VerifyGenerationClosureRequest, VerifyGenerationClosureResponse,
+    SystemNetworkInfo, SystemRollbackGenerationRequest, SystemRollbackRequest, SystemSecurityInfo,
+    SystemSummary, SystemVulnerability, SystemsListParams, UpdateSystemPublicKeyRequest,
+    UpdateSystemRequest, VerifyGenerationClosureRequest, VerifyGenerationClosureResponse,
 };
 use crate::auth::models::Role;
 use crate::handlers::api::rbac::{
@@ -743,6 +743,11 @@ pub async fn update_system_handler(
     if hostname.is_empty() {
         return bad_request("Hostname is required");
     }
+    let fqdn = payload
+        .fqdn
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     if !matches!(
         payload.deployment_policy.as_str(),
         "manual" | "auto_latest" | "pinned"
@@ -802,6 +807,7 @@ pub async fn update_system_handler(
         &pool,
         system_id,
         hostname,
+        fqdn,
         environment_id,
         flake_id,
         payload
@@ -1235,6 +1241,7 @@ fn detail_row_to_api_model(row: SystemDetailRow) -> SystemDetail {
     SystemDetail {
         id: row.id,
         hostname: row.hostname,
+        fqdn: row.fqdn,
         system_configuration_name: row.system_configuration_name,
         environment: row.environment,
         is_active: row.is_active,
@@ -1768,10 +1775,11 @@ pub async fn verify_generation_closure(
         return bad_request("store_path is required");
     }
 
-    let last_seen_at = match find_generation_store_path_last_seen(&pool, system_id, store_path).await {
-        Ok(value) => value,
-        Err(_) => return internal_error("Failed to verify generation closure"),
-    };
+    let last_seen_at =
+        match find_generation_store_path_last_seen(&pool, system_id, store_path).await {
+            Ok(value) => value,
+            Err(_) => return internal_error("Failed to verify generation closure"),
+        };
 
     let response = if let Some(last_seen_at) = last_seen_at {
         VerifyGenerationClosureResponse {
@@ -2204,9 +2212,13 @@ mod tests {
         let hostname = format!("task294-rollback-gen-{suffix}");
         let store_path = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-system".to_string();
 
-        let user = insert_user(&pool, &format!("{suffix}@example.com"), Some("Task 294 Tester"))
-            .await
-            .expect("insert_user should succeed");
+        let user = insert_user(
+            &pool,
+            &format!("{suffix}@example.com"),
+            Some("Task 294 Tester"),
+        )
+        .await
+        .expect("insert_user should succeed");
         sync_user_role(&pool, user.id, AuthRole::Admin)
             .await
             .expect("sync_user_role should succeed");

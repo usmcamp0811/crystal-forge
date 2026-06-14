@@ -575,6 +575,8 @@ pub struct SystemDetail {
     pub id: Uuid,
     pub hostname: String,
     #[serde(default)]
+    pub fqdn: Option<String>,
+    #[serde(default)]
     pub system_configuration_name: Option<String>,
     pub environment: Option<String>,
     pub is_active: bool,
@@ -1408,6 +1410,8 @@ pub struct CreateSystemRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateSystemRequest {
     pub hostname: String,
+    #[serde(default)]
+    pub fqdn: Option<String>,
     pub system_configuration_name: Option<String>,
     pub environment: Option<String>,
     pub flake_name: Option<String>,

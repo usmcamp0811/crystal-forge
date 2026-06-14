@@ -130,6 +130,14 @@ fn derived_fqdn(hostname: &str, environment: Option<&str>) -> String {
     format!("{hostname}.{env}.cf.internal")
 }
 
+fn effective_fqdn(system: &SystemDetail) -> String {
+    system
+        .fqdn
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| derived_fqdn(&system.hostname, system.environment.as_deref()))
+}
+
 fn is_pull_reachability(reachability: &str) -> bool {
     reachability.eq_ignore_ascii_case("pull")
 }
@@ -497,7 +505,7 @@ pub fn SystemDetailView(id: String) -> Element {
         HealthStatus::Offline => "chip chip-unknown",
     };
     let health_label = system.health_status.label();
-    let detail_fqdn = derived_fqdn(&system.hostname, system.environment.as_deref());
+    let detail_fqdn = effective_fqdn(&system);
     let deployment_chip_class = match system.deployment_status {
         DeploymentStatus::UpToDate => "chip chip-healthy",
         DeploymentStatus::Behind => "chip chip-warning",
@@ -902,6 +910,7 @@ pub fn SystemDetailView(id: String) -> Element {
                         match update_system_via_api(
                             system_id,
                             request.hostname,
+                            request.fqdn,
                             request.system_configuration_name,
                             request.environment,
                             request.flake_name,
@@ -1567,8 +1576,8 @@ fn SshConnectModal(system: SystemDetail, on_close: EventHandler<()>) -> Element 
         .primary_ip
         .clone()
         .filter(|ip| !ip.is_empty())
-        .unwrap_or_else(|| derived_fqdn(&system.hostname, system.environment.as_deref()));
-    let fqdn = derived_fqdn(&system.hostname, system.environment.as_deref());
+        .unwrap_or_else(|| effective_fqdn(&system));
+    let fqdn = effective_fqdn(&system);
     let jump_domain = fqdn.split('.').skip(1).collect::<Vec<_>>().join(".");
     let jump_domain = if jump_domain.is_empty() {
         "example.com".to_string()
@@ -1758,11 +1767,7 @@ fn OverviewTab(
         .last_seen
         .map(|dt| 60.0 - now.signed_duration_since(dt).num_seconds() as f64)
         .unwrap_or(0.0);
-    let fqdn_text = format!(
-        "{}.{}.cf.internal",
-        system.hostname,
-        environment.to_lowercase()
-    );
+    let fqdn_text = effective_fqdn(&system);
 
     let flake_name = system
         .flake

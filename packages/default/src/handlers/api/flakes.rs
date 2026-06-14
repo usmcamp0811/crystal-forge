@@ -3199,6 +3199,7 @@ mod task_221_integration_tests {
             system.id,
             "host-meta",
             None,
+            None,
             Some(flake.id),
             Some("new-config-name"),
             "manual",
@@ -3234,6 +3235,7 @@ mod task_221_integration_tests {
             &pool,
             system.id,
             "host-fk",
+            None,
             None,
             Some(999999), // non-existent flake_id → FK violation
             None,
