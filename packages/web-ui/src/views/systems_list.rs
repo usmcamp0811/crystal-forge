@@ -818,17 +818,6 @@ pub fn SystemsListView() -> Element {
                             }
                         });
                     },
-                    on_export: move |id: uuid::Uuid| {
-                        let systems_snapshot = local_systems.read().clone();
-                        let selected = systems_snapshot
-                            .into_iter()
-                            .find(|system| system.id == id)
-                            .into_iter()
-                            .collect::<Vec<_>>();
-                        if !selected.is_empty() {
-                            export_systems_oscal(&selected);
-                        }
-                    },
                     on_open: move |id: uuid::Uuid| {
                         let mut preview_system = preview_system.clone();
                         spawn(async move {

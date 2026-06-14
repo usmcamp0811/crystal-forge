@@ -39,8 +39,6 @@ pub fn SystemsTable(
     on_edit: EventHandler<Uuid>,
     /// Called when user clicks deploy on a system
     on_deploy: EventHandler<Uuid>,
-    /// Called when user clicks export on a system
-    on_export: EventHandler<Uuid>,
     /// Called when user clicks a row/open action
     on_open: EventHandler<Uuid>,
     /// Currently selected row (for preview drawer highlight)
@@ -300,21 +298,10 @@ pub fn SystemsTable(
                                         }
                                     }
                                 }
-                                // Row actions: Export | Deploy | Edit (matching design SystemRow plus per-row export)
+                                // Row actions: Deploy | Edit (matching design SystemRow)
                                 td {
                                     div {
                                         class: "row-actions",
-                                        // Export
-                                        button {
-                                            class: "btn-icon focus-ring",
-                                            title: "Export",
-                                            "aria-label": "Export",
-                                            onclick: move |evt| {
-                                                evt.stop_propagation();
-                                                on_export.call(system.id);
-                                            },
-                                            Icon { name: IconName::Download, size: 14 }
-                                        }
                                         // Deploy
                                         button {
                                             class: "btn-icon focus-ring",
