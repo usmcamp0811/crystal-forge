@@ -4154,12 +4154,17 @@ fn HardeningTab(
                                             });
                                             let is_waived = waiver.is_some();
                                             let is_editing = active_waiver_directive.read().as_deref() == Some(directive.name.as_str());
-                                            let tile_style = if directive.enabled {
+                                            let tile_base_style = if directive.enabled {
                                                 "display:flex;align-items:flex-start;gap:12px;padding:12px 14px;border-radius:10px;border:1px solid rgba(52,211,153,0.22);background:rgba(52,211,153,0.07);min-height:72px;"
                                             } else if is_waived {
                                                 "display:flex;align-items:flex-start;gap:12px;padding:12px 14px;border-radius:10px;border:1px solid rgba(251,191,36,0.28);background:rgba(251,191,36,0.08);min-height:72px;"
                                             } else {
                                                 "display:flex;align-items:flex-start;gap:12px;padding:12px 14px;border-radius:10px;border:1px solid rgba(248,113,113,0.22);background:rgba(248,113,113,0.07);min-height:72px;"
+                                            };
+                                            let tile_style = if is_editing {
+                                                format!("grid-column:1 / -1;{tile_base_style}")
+                                            } else {
+                                                tile_base_style.to_string()
                                             };
                                             let status_text = if directive.enabled {
                                                 "enforced".to_string()
@@ -4243,11 +4248,13 @@ fn HardeningTab(
                                                         }
 
                                                         if is_editing {
-                                                            div { style: "display:flex;flex-direction:column;gap:8px;margin-top:6px;",
+                                                            div { style: "display:flex;flex-direction:column;gap:0;margin-top:8px;",
                                                                 textarea {
                                                                     class: "input focus-ring",
-                                                                    style: "width:100%;min-height:76px;resize:vertical;font-size:13px;line-height:1.45;padding:9px 10px;",
-                                                                    placeholder: "Why is this directive not applicable or otherwise acceptable?",
+                                                                    autofocus: "true",
+                                                                    rows: "2",
+                                                                    style: "resize:vertical;width:100%;font-size:12px;",
+                                                                    placeholder: "Why is leaving this unset acceptable? (compensating control, N/A…)",
                                                                     value: "{reason}",
                                                                     oninput: move |evt| {
                                                                         reason.set(evt.value());
@@ -4255,41 +4262,42 @@ fn HardeningTab(
                                                                         justification_notice.set(None);
                                                                     },
                                                                 }
-                                                                div { style: "display:flex;gap:6px;flex-wrap:wrap;",
+                                                                div { style: "display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;",
                                                                     for preset in [
                                                                         "Not applicable — service runs in an isolated container.",
-                                                                        "Accepted risk with compensating controls in place.",
-                                                                        "Directive breaks required service functionality.",
+                                                                        "Compensating control in place (AppArmor/SELinux confinement).",
+                                                                        "Enforcing breaks required functionality; risk accepted.",
+                                                                        "Upstream unit limitation — cannot be enforced here.",
                                                                     ] {
                                                                         button {
                                                                             key: "waiver-preset-{preset}",
                                                                             class: "focus-ring",
-                                                                            style: "all:unset;cursor:pointer;font-size:10px;padding:3px 8px;border-radius:99px;background:var(--cf-subtle-bg);color:var(--cf-text-secondary);border:1px solid var(--cf-divider);",
+                                                                            style: "all:unset;cursor:pointer;font-size:10px;padding:3px 8px;border-radius:99px;background:var(--cf-subtle-bg);color:var(--cf-text-secondary);border:1px solid var(--cf-card-border);",
                                                                             onclick: move |_| {
                                                                                 reason.set(preset.to_string());
                                                                                 justification_error.set(None);
                                                                                 justification_notice.set(None);
                                                                             },
-                                                                            if preset.len() > 42 {
-                                                                                "{preset.chars().take(40).collect::<String>()}…"
+                                                                            if preset.len() > 46 {
+                                                                                "{preset.chars().take(44).collect::<String>()}…"
                                                                             } else {
                                                                                 "{preset}"
                                                                             }
                                                                         }
                                                                     }
                                                                 }
-                                                                div { style: "display:flex;align-items:center;justify-content:flex-end;gap:8px;",
+                                                                div { style: "display:flex;gap:8px;margin-top:8px;",
                                                                     button {
                                                                         class: "btn btn-primary focus-ring xs",
-                                                                        disabled: is_saving_justification() || reason.read().trim().is_empty(),
+                                                                        disabled: is_saving_justification() || reason.read().trim().len() < 8,
                                                                         onclick: {
                                                                             let service_name = service.service_name.clone();
                                                                             let directive_name = directive_name.clone();
                                                                             let on_saved = on_saved.clone();
                                                                             move |_| {
                                                                                 let reason_value = reason();
-                                                                                if reason_value.trim().is_empty() {
-                                                                                    justification_error.set(Some("Justification is required.".to_string()));
+                                                                                if reason_value.trim().len() < 8 {
+                                                                                    justification_error.set(Some("Add a bit more detail before saving the waiver.".to_string()));
                                                                                     return;
                                                                                 }
 
@@ -4320,6 +4328,18 @@ fn HardeningTab(
                                                                                 });
                                                                             }
                                                                         },
+                                                                        svg {
+                                                                            class: "w-3 h-3 inline-block",
+                                                                            fill: "none",
+                                                                            stroke: "currentColor",
+                                                                            stroke_width: "2",
+                                                                            view_box: "0 0 24 24",
+                                                                            path {
+                                                                                stroke_linecap: "round",
+                                                                                stroke_linejoin: "round",
+                                                                                d: "M5 13l4 4L19 7"
+                                                                            }
+                                                                        }
                                                                         if is_saving_justification() { "Saving…" } else { "Save waiver" }
                                                                     }
                                                                     button {
