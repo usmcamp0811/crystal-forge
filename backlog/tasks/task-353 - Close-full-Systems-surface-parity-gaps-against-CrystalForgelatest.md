@@ -1,10 +1,10 @@
 ---
 id: TASK-353
 title: Close full Systems surface parity gaps against CrystalForgelatest
-status: Review
+status: In Progress
 assignee: []
 created_date: '2026-06-13 14:53'
-updated_date: '2026-06-14 02:23'
+updated_date: '2026-06-14 02:40'
 labels:
   - design-parity
   - systems
@@ -113,5 +113,5 @@ This task covers the **full Systems surface**:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Addressed final review comments in commit 8915a87a and pushed to MR !275: removed the non-reference CVE filter controls from the System Detail CVE tab while retaining package-grouped CVE layout and real justification flow; replaced Compliance View evidence with a design-style side tray/control evidence preview; added a header Rollback generation picker that uses existing generation rollback API flow; retained/verified Hardening score progress bar and row action affordances. Confirmed heartbeat interval in Edit System modal is local UI only and does not control agent heartbeat until TASK-279 backend support exists. Fast verification passed: `cargo fmt --manifest-path packages/web-ui/Cargo.toml --all -- --check`, `cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown`, and `node --check checks/web-ui/tests/integration-test.js`. Per maintainer request, did not rerun heavyweight web-ui VM check.
+Resuming implementation from Review to add real backend support for editable system FQDN from the Edit System modal. This must use a NEW migration file only because the dev server has prior migrations applied. LOCK: opencode-agent on this host in ~/code/crystal-forge/TASK-353-full-systems-surface-parity
 <!-- SECTION:NOTES:END -->
