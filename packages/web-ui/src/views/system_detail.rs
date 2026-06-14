@@ -189,6 +189,7 @@ pub fn SystemDetailView(id: String) -> Element {
 
     // Confirmation dialog state for rollback/deploying a historical commit
     let mut show_rollback_dialog = use_signal(|| false);
+    let mut show_generation_rollback_modal = use_signal(|| false);
     let mut rollback_target: Signal<Option<SystemCommitHistory>> = use_signal(|| None);
 
     // Toast notification state
@@ -589,19 +590,7 @@ pub fn SystemDetailView(id: String) -> Element {
                         button {
                             class: "btn btn-ghost focus-ring",
                             disabled: !can_mutate,
-                            onclick: {
-                                // The header Rollback action seeds the confirmation dialog with the
-                                // currently deployed commit (falling back to the most recent known
-                                // commit) so the dialog actually renders. Without a rollback_target
-                                // the dialog's `if let Some(..)` guard short-circuits and nothing
-                                // appears. Operators can pick a specific generation from the Deploy
-                                // tab; this header shortcut confirms a rollback of the active commit.
-                                let seed = overview_current_commit.clone();
-                                move |_| {
-                                    rollback_target.set(seed.clone());
-                                    show_rollback_dialog.set(true);
-                                }
-                            },
+                            onclick: move |_| show_generation_rollback_modal.set(true),
                             Icon { name: IconName::Rollback, size: 14 }
                             "Rollback"
                         }
@@ -941,6 +930,44 @@ pub fn SystemDetailView(id: String) -> Element {
             }
         }
 
+        if *show_generation_rollback_modal.read() {
+            GenerationRollbackModal {
+                hostname: system.hostname.clone(),
+                generations: generations_result.generations.clone(),
+                current_generation: generations_result.current_generation,
+                on_close: move |_| show_generation_rollback_modal.set(false),
+                on_confirm: {
+                    let system_id = system.id;
+                    let hostname = system.hostname.clone();
+                    let toast_message = toast_message.clone();
+                    move |store_path: String| {
+                        show_generation_rollback_modal.set(false);
+                        let hostname = hostname.clone();
+                        let toast_message = toast_message.clone();
+                        spawn(async move {
+                            let message = match request_system_generation_rollback(
+                                &system_id,
+                                &SystemRollbackGenerationRequest {
+                                    store_path: store_path.clone(),
+                                },
+                            )
+                            .await
+                            {
+                                Ok(response) if !response.message.trim().is_empty() => response.message,
+                                Ok(_) => format!("Requested generation rollback for {}", hostname),
+                                Err(error) => format!(
+                                    "Generation rollback request failed for {}: {}",
+                                    hostname, error
+                                ),
+                            };
+                            let success = !message.to_ascii_lowercase().contains("failed");
+                            let _ = dispatch_sync_notification(message, success, toast_message).await;
+                        });
+                    }
+                },
+            }
+        }
+
         // Sync confirmation dialog (rendered as portal outside main content)
         if *show_sync_dialog.read() {
             SyncConfirmDialog {
@@ -1249,91 +1276,279 @@ fn ComplianceEvidenceDrawer(
     on_close: EventHandler<()>,
 ) -> Element {
     // Representative sample controls for the placeholder drawer.
-    let sample_controls: [(&str, &str, &str); 4] = [
+    let sample_controls: [(&str, &str, &str, &str); 4] = [
         (
             "CIS-1.1.1",
             "pass",
+            "low",
             "Ensure mounting of cramfs filesystems is disabled",
         ),
-        ("CIS-1.4.1", "pass", "Ensure bootloader password is set"),
-        ("CIS-5.2.5", "warn", "Ensure SSH LogLevel is appropriate"),
+        (
+            "CIS-1.4.1",
+            "pass",
+            "medium",
+            "Ensure bootloader password is set",
+        ),
+        (
+            "CIS-5.2.5",
+            "warn",
+            "medium",
+            "Ensure SSH LogLevel is appropriate",
+        ),
         (
             "CIS-5.3.1",
             "fail",
+            "high",
             "Ensure password creation requirements are configured",
         ),
     ];
+    let mut active_control = use_signal(|| 0_usize);
+    let active_idx = (*active_control.read()).min(sample_controls.len().saturating_sub(1));
+    let (active_id, active_status, active_severity, active_desc) = sample_controls[active_idx];
+    let status_color = match active_status {
+        "pass" => "#34d399",
+        "warn" => "#fbbf24",
+        "waiver" => "#a78bfa",
+        _ => "#f87171",
+    };
+    let severity_color = match active_severity {
+        "high" => "#f87171",
+        "medium" => "#fbbf24",
+        _ => "#60a5fa",
+    };
+    let evidence_count = 3;
 
     rsx! {
-        div {
-            class: "modal-backdrop",
-            onclick: move |_| on_close.call(()),
-            div {
-                class: "modal",
-                style: "width:min(640px,96vw);max-height:92vh;",
-                onclick: move |e| e.stop_propagation(),
-
-                div {
-                    class: "modal-head",
-                    h2 {
-                        Icon { name: IconName::File, size: 14 }
-                        span { style: "margin-left:6px;", "Evidence · {bundle.name}" }
-                    }
-                    p {
-                        "Per-control evidence for "
-                        span { class: "mono", "{hostname}" }
-                        " · {bundle.framework} {bundle.version}"
+        div { class: "fl-tray-backdrop", onclick: move |_| on_close.call(()) }
+        aside {
+            class: "fl-tray",
+            style: "width:min(960px,96vw);",
+            header {
+                class: "fl-tray-head",
+                div { style: "display:flex;align-items:center;gap:12px;min-width:0;flex:1;",
+                    Icon { name: IconName::Shield, size: 18 }
+                    div { style: "min-width:0;",
+                        div { style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
+                            span { class: "mono", style: "font-weight:700;font-size:15px;", "{hostname}" }
+                            span { style: "font-size:11px;color:var(--cf-text-muted);", "vs" }
+                            span { class: "chip chip-info", "{bundle.name}" }
+                        }
+                        div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:2px;",
+                            "Stepping through {sample_controls.len()} controls · preview data until TASK-356 wires real evidence"
+                        }
                     }
                 }
+                div { style: "display:flex;gap:6px;",
+                    button { class: "btn btn-ghost focus-ring xs", Icon { name: IconName::ArrowRight, size: 11 } "View bundle" }
+                    button { class: "btn-icon focus-ring", onclick: move |_| on_close.call(()), Icon { name: IconName::X, size: 16 } }
+                }
+            }
 
-                div {
-                    class: "modal-body",
-                    style: "overflow-y:auto;",
-
-                    div {
-                        class: "sd-callout sd-callout-info",
-                        style: "margin-bottom:14px;",
-                        Icon { name: IconName::Shield, size: 13 }
-                        div {
-                            style: "font-size:12px;",
-                            strong { "Preview only. " }
-                            "Representative controls are shown. Real collected evidence (config output, systemd unit state, audit results, waivers) is tracked by TASK-356."
-                        }
-                    }
-
-                    table {
-                        class: "sys-table",
-                        thead {
-                            tr {
-                                th { "Control" }
-                                th { "Status" }
-                                th { "Description" }
-                            }
-                        }
-                        tbody {
-                            for (id, status, desc) in sample_controls {
-                                tr {
-                                    td { class: "mono", "{id}" }
-                                    td {
-                                        match status {
-                                            "pass" => rsx!(span { class: "chip chip-healthy", "pass" }),
-                                            "warn" => rsx!(span { class: "chip chip-warning", "warn" }),
-                                            _ => rsx!(span { class: "chip chip-critical", "fail" }),
-                                        }
+            div { style: "display:grid;grid-template-columns:260px 1fr;flex:1;min-height:0;overflow:hidden;",
+                nav { style: "border-right:1px solid var(--cf-divider);overflow-y:auto;background:color-mix(in oklab,var(--cf-page-bg) 30%,var(--cf-card-bg));",
+                    for (idx, (id, status, _severity, desc)) in sample_controls.iter().enumerate() {
+                        {
+                            let is_selected = idx == active_idx;
+                            let dot = match *status {
+                                "pass" => "#34d399",
+                                "warn" => "#fbbf24",
+                                "waiver" => "#a78bfa",
+                                _ => "#f87171",
+                            };
+                            rsx! {
+                                button {
+                                    class: "focus-ring",
+                                    style: if is_selected {
+                                        "all:unset;cursor:pointer;display:block;padding:10px 14px;width:100%;box-sizing:border-box;border-left:3px solid var(--cf-brand-purple);background:color-mix(in oklab,var(--cf-brand-purple) 8%,transparent);border-bottom:1px solid var(--cf-divider);"
+                                    } else {
+                                        "all:unset;cursor:pointer;display:block;padding:10px 14px;width:100%;box-sizing:border-box;border-left:3px solid transparent;background:transparent;border-bottom:1px solid var(--cf-divider);"
+                                    },
+                                    onclick: move |_| active_control.set(idx),
+                                    div { style: "display:flex;justify-content:space-between;align-items:center;gap:8px;",
+                                        span { class: "mono", style: "font-size:11px;color:var(--cf-text-muted);", "{idx + 1:02}" }
+                                        span { style: "width:8px;height:8px;border-radius:50%;background:{dot};" }
                                     }
-                                    td { style: "font-size:13px;", "{desc}" }
+                                    div { style: if is_selected { "font-size:12px;color:var(--cf-text-primary);margin-top:4px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" } else { "font-size:12px;color:var(--cf-text-primary);margin-top:4px;font-weight:400;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" },
+                                        "{id} · {desc}"
+                                    }
                                 }
                             }
                         }
                     }
                 }
 
-                div {
-                    class: "modal-foot",
+                div { style: "overflow:auto;padding:20px;display:flex;flex-direction:column;gap:16px;",
+                    div {
+                        div { style: "display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px;",
+                            span { style: "font-size:11px;color:var(--cf-text-muted);", "Control {active_idx + 1} of {sample_controls.len()}" }
+                            span { class: "chip", style: "color:{status_color};background:color-mix(in oklab,{status_color} 14%,transparent);border:1px solid {status_color};", "{active_status}" }
+                            span { class: "chip", style: "color:{severity_color};background:color-mix(in oklab,{severity_color} 14%,transparent);", "{active_severity} severity" }
+                        }
+                        h2 { class: "mono", style: "margin:0;font-size:18px;font-weight:700;", "{active_id}" }
+                        p { style: "margin:6px 0 0;font-size:13px;color:var(--cf-text-secondary);line-height:1.5;", "{active_desc}" }
+                    }
+
+                    div { class: "sd-callout sd-callout-info",
+                        Icon { name: IconName::File, size: 13 }
+                        div { style: "font-size:12px;", strong { "Preview only. " } "Representative evidence artifacts are shown until real Compliance evidence APIs land." }
+                    }
+
+                    div {
+                        h3 { style: "font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:var(--cf-text-muted);margin:0 0 8px;font-weight:600;", "Evidence · {evidence_count} items" }
+                        div { style: "display:flex;flex-direction:column;gap:10px;",
+                            EvidencePreviewItem { label: "NixOS config output".to_string(), reference: "systemd.services.sshd.serviceConfig".to_string(), source: "agent".to_string(), artifact: "services.openssh.settings.LogLevel = \"VERBOSE\";".to_string() }
+                            EvidencePreviewItem { label: "systemd unit state".to_string(), reference: "systemctl show sshd.service".to_string(), source: "systemd".to_string(), artifact: "NoNewPrivileges=yes\nProtectSystem=strict\nPrivateTmp=yes".to_string() }
+                            EvidencePreviewItem { label: "Audit result".to_string(), reference: "crystal-forge hardening scan".to_string(), source: "scanner".to_string(), artifact: "PASS {active_id} on {hostname}".to_string() }
+                        }
+                    }
+
+                    div { style: "padding:12px;background:var(--cf-subtle-bg);border-radius:8px;font-size:11px;color:var(--cf-text-secondary);",
+                        strong { style: "color:var(--cf-text-primary);", "Framework mapping" }
+                        span { style: "margin-left:8px;", "—" }
+                        span { class: "mono", style: "margin-left:8px;", "{bundle.framework} / {bundle.version}" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn EvidencePreviewItem(
+    label: String,
+    reference: String,
+    source: String,
+    artifact: String,
+) -> Element {
+    rsx! {
+        div { class: "ev-item",
+            div { class: "ev-item-head",
+                Icon { name: IconName::File, size: 14 }
+                div { style: "min-width:0;flex:1;",
+                    div { style: "font-size:12px;font-weight:600;color:var(--cf-text-primary);", "{label}" }
+                    div { class: "mono", style: "font-size:11px;color:var(--cf-text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;", "{reference}" }
+                }
+                div { style: "font-size:11px;color:var(--cf-text-muted);text-align:right;white-space:nowrap;flex-shrink:0;",
+                    div { "preview" }
+                    div { class: "mono", style: "font-size:10px;margin-top:2px;", "{source}" }
+                }
+            }
+            pre { class: "sd-diff", style: "margin-top:8px;", "{artifact}" }
+        }
+    }
+}
+
+#[component]
+fn GenerationRollbackModal(
+    hostname: String,
+    generations: Vec<SystemGeneration>,
+    current_generation: Option<i32>,
+    on_close: EventHandler<()>,
+    on_confirm: EventHandler<String>,
+) -> Element {
+    let rollback_candidates = generations
+        .iter()
+        .filter(|generation| {
+            !generation.is_current
+                && generation
+                    .store_path
+                    .as_ref()
+                    .map(|path| !path.is_empty())
+                    .unwrap_or(false)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut selected_generation = use_signal(|| {
+        rollback_candidates
+            .first()
+            .map(|generation| generation.generation)
+    });
+    let selected = selected_generation.read().and_then(|generation_number| {
+        rollback_candidates
+            .iter()
+            .find(|item| item.generation == generation_number)
+            .cloned()
+    });
+    let selected_store_path = selected.as_ref().and_then(|item| item.store_path.clone());
+
+    rsx! {
+        div { class: "modal-backdrop", onclick: move |_| on_close.call(()),
+            div {
+                class: "modal",
+                style: "width:min(640px,96vw);max-height:92vh;",
+                onclick: move |e| e.stop_propagation(),
+
+                div { class: "modal-head",
+                    h2 { Icon { name: IconName::Rollback, size: 14 } span { style: "margin-left:6px;", "Rollback" } }
+                    p { "Select a prior NixOS generation for " span { class: "mono", "{hostname}" } "." }
+                }
+
+                div { class: "modal-body", style: "overflow-y:auto;",
+                    div { class: "sd-callout sd-callout-warn", style: "margin-bottom:14px;",
+                        Icon { name: IconName::Warn, size: 13 }
+                        div { style: "font-size:12px;", "Rollback switches the host to an existing generation. Heartbeat may pause briefly during activation." }
+                    }
+
+                    if rollback_candidates.is_empty() {
+                        div { class: "empty", style: "margin:0;",
+                            h3 { "No rollback generations available" }
+                            div { "This host has no prior generation with a recorded store path." }
+                        }
+                    } else {
+                        div { class: "sd-commit-list", style: "max-height:280px;",
+                            for generation in rollback_candidates.iter() {
+                                {
+                                    let is_selected = *selected_generation.read() == Some(generation.generation);
+                                    let gen_number = generation.generation;
+                                    let sha = generation
+                                        .commit_hash
+                                        .clone()
+                                        .unwrap_or_else(|| "—".to_string());
+                                    let short_sha = sha.chars().take(7).collect::<String>();
+                                    let when = generation.timestamp.format("%b %d, %H:%M").to_string();
+                                    rsx! {
+                                        button {
+                                            class: if is_selected { "sd-commit-item focus-ring selected" } else { "sd-commit-item focus-ring" },
+                                            style: "grid-template-columns:72px 80px 1fr auto auto;",
+                                            onclick: move |_| selected_generation.set(Some(gen_number)),
+                                            span { class: "mono sd-commit-sha", style: "color:var(--cf-brand-purple);", "#{generation.generation}" }
+                                            span { class: "mono sd-commit-sha", "{short_sha}" }
+                                            span { class: "sd-commit-msg", "Rollback to generation #{generation.generation}" }
+                                            span { class: "sd-commit-meta", "{when}" }
+                                            if Some(generation.generation) == current_generation {
+                                                span { class: "chip chip-healthy", "active" }
+                                            } else {
+                                                span { class: "chip chip-unknown", "rollback" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if let Some(selected) = selected {
+                            dl { class: "kv-grid", style: "margin-top:16px;",
+                                dt { "Target" } dd { class: "mono", "{hostname}" }
+                                dt { "To" } dd { class: "mono", "gen #{selected.generation}" }
+                                dt { "Store path" }
+                                dd { class: "mono", style: "font-size:11px;white-space:normal;word-break:break-all;", "{selected.store_path.clone().unwrap_or_default()}" }
+                            }
+                        }
+                    }
+                }
+
+                div { class: "modal-foot",
+                    button { class: "btn btn-ghost focus-ring", onclick: move |_| on_close.call(()), "Cancel" }
                     button {
                         class: "btn btn-primary focus-ring",
-                        onclick: move |_| on_close.call(()),
-                        "Close"
+                        disabled: selected_store_path.is_none(),
+                        onclick: move |_| {
+                            if let Some(store_path) = selected_store_path.clone() {
+                                on_confirm.call(store_path);
+                            }
+                        },
+                        Icon { name: IconName::Rollback, size: 13 }
+                        " Switch generation"
                     }
                 }
             }

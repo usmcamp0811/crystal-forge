@@ -4325,6 +4325,10 @@ tr.kbd-focused > td {
 .ssh-cmd code { flex: 1; min-width: 0; font-size: 12.5px; color: #7dd3fc; overflow-x: auto; white-space: nowrap; }
 .ssh-cmd .btn { flex-shrink: 0; }
 
+/* ─── Compliance evidence drawer preview items ─── */
+.ev-item { border:1px solid var(--cf-divider); border-radius:8px; background:var(--cf-card-bg); overflow:hidden; }
+.ev-item-head { display:flex; gap:10px; align-items:flex-start; padding:10px 12px; }
+
 /* ─── Logs tab: day dividers ─── */
 .sd-log-day {
   position: sticky;

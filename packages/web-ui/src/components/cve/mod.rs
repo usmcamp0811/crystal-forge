@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::api::client::save_system_cve_justification;
 use crate::api::models::{
-    CveSeverity, CveSummary, HealthStatus, SaveSystemCveJustificationRequest, SystemVulnerability,
+    CveSeverity, CveSummary, SaveSystemCveJustificationRequest, SystemVulnerability,
 };
 use crate::theme;
 
@@ -83,10 +83,6 @@ pub fn CvesTab(
     allow_mutations: bool,
     on_saved: EventHandler<()>,
 ) -> Element {
-    let mut severity_filter = use_signal(|| "all".to_string());
-    let mut cve_search = use_signal(String::new);
-    let mut package_search = use_signal(String::new);
-    let mut description_search = use_signal(String::new);
     let mut expanded_cve: Signal<Option<String>> = use_signal(|| None);
 
     let mut editing_cve: Signal<Option<String>> = use_signal(|| None);
@@ -95,84 +91,15 @@ pub fn CvesTab(
     let mut save_status: Signal<Option<String>> = use_signal(|| None);
     let mut save_in_progress = use_signal(|| false);
 
-    let severity_value = severity_filter.read().clone();
-    let cve_query = cve_search.read().trim().to_lowercase();
-    let package_query = package_search.read().trim().to_lowercase();
-    let desc_query = description_search.read().trim().to_lowercase();
-
-    // Package-first grouping (design reference), with per-CVE filters applied
-    // inside each package group. A package is shown only if it retains >=1 CVE.
-    let mut package_groups = group_vulnerabilities_by_package(&vulnerabilities);
-    for group in &mut package_groups {
-        let matches_package_query = package_query.is_empty()
-            || group.package_name.to_lowercase().contains(&package_query)
-            || group.version.to_lowercase().contains(&package_query);
-
-        group.cves.retain(|cve| {
-            let severity_ok = match severity_value.as_str() {
-                "critical" => cve.severity == CveSeverity::Critical,
-                "high" => cve.severity == CveSeverity::High,
-                "medium" => cve.severity == CveSeverity::Medium,
-                "low" => cve.severity == CveSeverity::Low,
-                _ => true,
-            };
-            if !severity_ok {
-                return false;
-            }
-            if !cve_query.is_empty() && !cve.cve_id.to_lowercase().contains(&cve_query) {
-                return false;
-            }
-            if !matches_package_query {
-                return false;
-            }
-            if !desc_query.is_empty() && !cve.description.to_lowercase().contains(&desc_query) {
-                return false;
-            }
-            true
-        });
-    }
-
-    // Recompute per-group aggregates after filtering and drop empty packages.
-    let filtered_groups = package_groups
-        .into_iter()
-        .filter_map(|mut group| {
-            if group.cves.is_empty() {
-                return None;
-            }
-            group.critical = 0;
-            group.high = 0;
-            group.medium = 0;
-            group.low = 0;
-            group.fixable = 0;
-            group.max_cvss = 0.0;
-            for cve in &group.cves {
-                match cve.severity {
-                    CveSeverity::Critical => group.critical += 1,
-                    CveSeverity::High => group.high += 1,
-                    CveSeverity::Medium => group.medium += 1,
-                    CveSeverity::Low => group.low += 1,
-                }
-                if cve.has_fix {
-                    group.fixable += 1;
-                }
-                let score = cve.cvss_score.unwrap_or_default();
-                if score > group.max_cvss {
-                    group.max_cvss = score;
-                }
-            }
-            Some(group)
-        })
-        .collect::<Vec<_>>();
+    // Package-first grouping matching the design reference. The System Detail CVE
+    // example does not include a filter/search bar; filtering remains available on the
+    // dedicated CVE surface, while this tab focuses on the per-system package rollup.
+    let filtered_groups = group_vulnerabilities_by_package(&vulnerabilities);
 
     let shown_cve_count: usize = filtered_groups.iter().map(|group| group.cves.len()).sum();
     let shown_package_count = filtered_groups.len();
     let shown_package_suffix = if shown_package_count == 1 { "" } else { "s" };
     let total_cves = cve_counts.total();
-
-    let has_active_filters = !cve_search.read().trim().is_empty()
-        || !package_search.read().trim().is_empty()
-        || !description_search.read().trim().is_empty()
-        || severity_filter.read().as_str() != "all";
 
     let status_is_error = save_status
         .read()
@@ -182,91 +109,7 @@ pub fn CvesTab(
 
     rsx! {
             div {
-                class: "pt-6 space-y-5",
-
-            div {
-                class: "{theme::presets::CARD}",
-
-                div { class: "flex flex-wrap items-end justify-between gap-4",
-                    div {
-                        class: "space-y-1",
-                        div { class: "{theme::typography::TABLE_HEADER}", "System CVE review" }
-                        div { class: "flex items-baseline gap-3",
-                            span {
-                                class: "{theme::typography::STAT_VALUE} {theme::text::PRIMARY}",
-                                "{cve_counts.total()}"
-                            }
-                            span {
-                                class: "{theme::text::SECONDARY}",
-                                "known vulnerabilities"
-                            }
-                        }
-                    }
-
-                    div { class: "flex items-center gap-1.5 flex-wrap",
-                        span {
-                            class: "text-[11px] px-2 py-0.5 rounded-md border {theme::surface::CARD_BORDER} {theme::surface::SUBTLE_BG} {theme::text::SECONDARY}",
-                            "{format_count(shown_cve_count as i64)} shown · {format_count(shown_package_count as i64)} packages"
-                        }
-                        span { class: "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium {CveSeverity::Critical.color_class()} {CveSeverity::Critical.bg_class()}", "Critical {format_count(cve_counts.critical)}" }
-                        span { class: "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium {CveSeverity::High.color_class()} {CveSeverity::High.bg_class()}", "High {format_count(cve_counts.high)}" }
-                        span { class: "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium {CveSeverity::Medium.color_class()} {CveSeverity::Medium.bg_class()}", "Medium {format_count(cve_counts.medium)}" }
-                        span { class: "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium {CveSeverity::Low.color_class()} {CveSeverity::Low.bg_class()}", "Low {format_count(cve_counts.low)}" }
-                    }
-                }
-            }
-
-            // Filters
-            div {
-                class: "{theme::presets::CARD} space-y-3",
-
-                div { class: "flex items-center justify-between gap-3 flex-wrap",
-                    div { class: "{theme::typography::TABLE_HEADER}", "Filters" }
-                    button {
-                        class: "px-3 py-1.5 rounded-md border {theme::surface::CARD_BORDER} text-xs font-medium {theme::text::SECONDARY} {theme::interactive::HOVER_BG} transition-colors disabled:opacity-40 {theme::interactive::FOCUS_RING}",
-                        disabled: !has_active_filters,
-                        onclick: move |_| {
-                            cve_search.set(String::new());
-                            package_search.set(String::new());
-                            description_search.set(String::new());
-                            severity_filter.set("all".to_string());
-                        },
-                        "Reset filters"
-                    }
-                }
-
-                div {
-                    class: "grid grid-cols-1 md:grid-cols-4 gap-3",
-                    input {
-                        class: "{theme::interactive::INPUT} h-10",
-                        placeholder: "Search CVE ID (e.g. CVE-2025)",
-                        value: cve_search.read().clone(),
-                        oninput: move |evt| cve_search.set(evt.value()),
-                    }
-                    input {
-                        class: "{theme::interactive::INPUT} h-10",
-                        placeholder: "Filter package/version",
-                        value: package_search.read().clone(),
-                        oninput: move |evt| package_search.set(evt.value()),
-                    }
-                    input {
-                        class: "{theme::interactive::INPUT} h-10",
-                        placeholder: "Search description",
-                        value: description_search.read().clone(),
-                        oninput: move |evt| description_search.set(evt.value()),
-                    }
-                    select {
-                        class: "{theme::interactive::INPUT} h-10",
-                        value: severity_filter.read().clone(),
-                        onchange: move |evt| severity_filter.set(evt.value()),
-                        option { value: "all", "All severities" }
-                        option { value: "critical", "Critical" }
-                        option { value: "high", "High" }
-                        option { value: "medium", "Medium" }
-                        option { value: "low", "Low" }
-                    }
-                }
-            }
+                style: "display:flex;flex-direction:column;gap:14px;",
 
             if let Some(message) = save_status() {
                 div {
@@ -297,9 +140,8 @@ pub fn CvesTab(
                 if filtered_groups.is_empty() {
                     div {
                         class: "empty",
-                        h3 {
-                            if total_cves == 0 { "No vulnerabilities detected" } else { "No vulnerabilities match current filters" }
-                        }
+                        h3 { "No vulnerabilities detected" }
+                        div { "Last scan data did not report any package-level CVEs for this host." }
                     }
                 } else {
                     div {
