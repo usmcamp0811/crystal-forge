@@ -3771,7 +3771,7 @@ fn HardeningTab(
                                 for directive_name in table_directives.iter() {
                                     th {
                                         key: "hdr-{directive_name}",
-                                        style: "font-size:10px; letter-spacing:0.04em; text-align:center; padding:8px 4px;",
+                                        style: "text-align:center;",
                                         title: "{directive_name}",
                                         "{directive_short_label(directive_name)}"
                                     }
