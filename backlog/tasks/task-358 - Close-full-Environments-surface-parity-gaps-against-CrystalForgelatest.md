@@ -1,10 +1,10 @@
 ---
 id: TASK-358
 title: Close full Environments surface parity gaps against CrystalForgelatest
-status: Review
+status: Done
 assignee: []
 created_date: '2026-06-14 18:56'
-updated_date: '2026-06-15 00:54'
+updated_date: '2026-06-15 01:13'
 labels:
   - design-parity
   - environments
@@ -104,11 +104,39 @@ Medium — primarily UI component work; backend changes moderate if cache/policy
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-MR !276 migration repair note added: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/276#note_3454176150
+MR !276 is merged. Latest pipeline 2600716097 reports success. Completed worktree cleanup with `git worktree remove ../TASK-358-environments-surface-parity` and `git worktree prune`.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Migration repair addressed in 16a90840: restored 0139 to its original contents and added 0140_update_environment_rollups_active_system_count.sql for the forward-only view change. Applied 0140 locally and reran SQLx/backend/web-ui targeted verification.
+Implemented full Environments surface parity for the core desktop `/environments` flows and merged MR !276 into `dev`.
+
+Summary:
+- Added authoritative environment rollup data for active-system health, CRITICAL/HIGH CVE totals, and flake names while preserving `system_count` as all assigned systems.
+- Reworked the Environments list UI to match the CrystalForgelatest reference: header/subtitle, 5-metric stat strip, filter/search bar, cards/table toggle, cards, table, unified Add/Edit modal, and guarded remove dialog.
+- Rendered unsupported operational fields as read-only/not persisted instead of fabricating backend state.
+- Added web-ui screenshot/behavior coverage for the Environments surface and modal warning state.
+- Fixed MR review blockers, including preserving migration immutability by restoring 0139 and adding forward migration 0140 for `active_system_count`.
+
+Verification:
+- `cargo check --manifest-path packages/web-ui/Cargo.toml --all-targets` — passed
+- `cargo check --manifest-path packages/default/Cargo.toml --all-targets` — passed
+- `cargo test --manifest-path packages/default/Cargo.toml --lib queries::environments::tests::environment_summary_from_row_maps_rollup_fields` — passed
+- `cargo test --manifest-path packages/web-ui/Cargo.toml --bin crystal-forge-ui environments::adapter::tests::api_to_environment_item_maps_known_names` — passed
+- `cargo test --manifest-path packages/web-ui/Cargo.toml --bin crystal-forge-ui views::environments_list::tests` — passed
+- `cargo sqlx prepare --check` — passed
+- `node --check checks/web-ui/tests/integration-test.js` — passed
+- `nix build .#checks.x86_64-linux.web-ui` — passed and produced screenshots
+- GitLab pipeline 2600716097 — success for merged MR !276
+
+Follow-ups created:
+- TASK-359 — Persist per-environment deployment policy and production flag
+- TASK-360 — Add per-environment binary cache assignment backend and API
+- TASK-361 — Add per-environment gate policies and compliance bundle enforcement backend
+- TASK-362 — Add per-environment auto-sync, approval, and RBAC role assignment backend
+- TASK-358.1 — Split oversized environments query module
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/276
+Worktree cleanup: `/home/mcamp/code/crystal-forge/TASK-358-environments-surface-parity` removed and pruned.
 <!-- SECTION:FINAL_SUMMARY:END -->
