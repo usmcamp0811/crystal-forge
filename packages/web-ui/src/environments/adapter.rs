@@ -240,6 +240,7 @@ pub fn fallback_environments(default_required_policy: Uuid) -> Vec<EnvironmentIt
             system_count: 12,
             required_policy_ids: vec![default_required_policy, Uuid::from_u128(3)],
             health: EnvironmentHealthBreakdown {
+                active: 12,
                 healthy: 9,
                 warning: 2,
                 critical: 1,
@@ -247,17 +248,17 @@ pub fn fallback_environments(default_required_policy: Uuid) -> Vec<EnvironmentIt
             },
             cve_critical_high: 7,
             flake_names: vec!["infrastructure".to_string(), "edge".to_string()],
-            default_policy: EnvironmentDeploymentPolicy::Manual,
+            default_policy: Some(EnvironmentDeploymentPolicy::Manual),
             cache: Some(EnvironmentCacheSummary {
                 name: "prod-cache".to_string(),
                 url: "s3://crystal-forge-prod-cache".to_string(),
                 cache_type: "s3".to_string(),
                 status: "healthy".to_string(),
             }),
-            auto_sync: true,
-            requires_approval: true,
-            is_production: true,
-            role_assignment_count: 4,
+            auto_sync: Some(true),
+            requires_approval: Some(true),
+            is_production: Some(true),
+            role_assignment_count: Some(4),
         },
         EnvironmentItem {
             id: Uuid::from_u128(102),
@@ -267,6 +268,7 @@ pub fn fallback_environments(default_required_policy: Uuid) -> Vec<EnvironmentIt
             system_count: 2,
             required_policy_ids: vec![default_required_policy],
             health: EnvironmentHealthBreakdown {
+                active: 2,
                 healthy: 1,
                 warning: 1,
                 critical: 0,
@@ -274,17 +276,17 @@ pub fn fallback_environments(default_required_policy: Uuid) -> Vec<EnvironmentIt
             },
             cve_critical_high: 2,
             flake_names: vec!["infrastructure".to_string()],
-            default_policy: EnvironmentDeploymentPolicy::Manual,
+            default_policy: Some(EnvironmentDeploymentPolicy::Manual),
             cache: Some(EnvironmentCacheSummary {
                 name: "staging-cache".to_string(),
                 url: "s3://crystal-forge-staging-cache".to_string(),
                 cache_type: "s3".to_string(),
                 status: "healthy".to_string(),
             }),
-            auto_sync: true,
-            requires_approval: true,
-            is_production: false,
-            role_assignment_count: 5,
+            auto_sync: Some(true),
+            requires_approval: Some(true),
+            is_production: Some(false),
+            role_assignment_count: Some(5),
         },
         EnvironmentItem {
             id: Uuid::from_u128(103),
@@ -294,6 +296,7 @@ pub fn fallback_environments(default_required_policy: Uuid) -> Vec<EnvironmentIt
             system_count: 8,
             required_policy_ids: vec![default_required_policy],
             health: EnvironmentHealthBreakdown {
+                active: 8,
                 healthy: 6,
                 warning: 1,
                 critical: 0,
@@ -301,17 +304,17 @@ pub fn fallback_environments(default_required_policy: Uuid) -> Vec<EnvironmentIt
             },
             cve_critical_high: 1,
             flake_names: vec!["workstations".to_string(), "lab".to_string()],
-            default_policy: EnvironmentDeploymentPolicy::AutoLatest,
+            default_policy: Some(EnvironmentDeploymentPolicy::AutoLatest),
             cache: Some(EnvironmentCacheSummary {
                 name: "dev-attic".to_string(),
                 url: "attic://cf-attic.dev/dev".to_string(),
                 cache_type: "attic".to_string(),
                 status: "warning".to_string(),
             }),
-            auto_sync: true,
-            requires_approval: false,
-            is_production: false,
-            role_assignment_count: 7,
+            auto_sync: Some(true),
+            requires_approval: Some(false),
+            is_production: Some(false),
+            role_assignment_count: Some(7),
         },
         EnvironmentItem {
             id: Uuid::from_u128(104),
@@ -323,12 +326,12 @@ pub fn fallback_environments(default_required_policy: Uuid) -> Vec<EnvironmentIt
             health: EnvironmentHealthBreakdown::default(),
             cve_critical_high: 0,
             flake_names: Vec::new(),
-            default_policy: EnvironmentDeploymentPolicy::Pinned,
+            default_policy: Some(EnvironmentDeploymentPolicy::Pinned),
             cache: None,
-            auto_sync: false,
-            requires_approval: false,
-            is_production: false,
-            role_assignment_count: 1,
+            auto_sync: Some(false),
+            requires_approval: Some(false),
+            is_production: Some(false),
+            role_assignment_count: Some(1),
         },
     ]
 }
@@ -345,7 +348,6 @@ pub fn api_to_environment_item(
     env: EnvironmentSummary,
     required_policy_ids: Vec<Uuid>,
 ) -> EnvironmentItem {
-    let env_name = env.name.clone();
     EnvironmentItem {
         id: env.id,
         name: env.name,
@@ -354,6 +356,7 @@ pub fn api_to_environment_item(
         system_count: env.system_count as usize,
         required_policy_ids,
         health: EnvironmentHealthBreakdown {
+            active: env.rollup.active_system_count.max(0) as usize,
             healthy: env.rollup.healthy.max(0) as usize,
             warning: env.rollup.warning.max(0) as usize,
             critical: env.rollup.critical.max(0) as usize,
@@ -361,75 +364,15 @@ pub fn api_to_environment_item(
         },
         cve_critical_high: env.rollup.cve_critical_high.max(0) as usize,
         flake_names: env.rollup.flakes,
-        // TASK-359..TASK-362 placeholders: these fields exist in the reference
-        // but are not persisted by the backend yet. Keep deterministic values
-        // so visual parity is possible without pretending they are authoritative.
-        default_policy: placeholder_default_policy(&env_name),
-        cache: placeholder_cache(&env_name),
-        auto_sync: placeholder_auto_sync(&env_name),
-        requires_approval: placeholder_requires_approval(&env_name),
-        is_production: placeholder_is_production(&env_name),
-        role_assignment_count: placeholder_role_assignment_count(&env_name),
-    }
-}
-
-fn placeholder_default_policy(name: &str) -> EnvironmentDeploymentPolicy {
-    match name.to_ascii_lowercase().as_str() {
-        "dev" | "development" | "edge" => EnvironmentDeploymentPolicy::AutoLatest,
-        "lab" | "remote" => EnvironmentDeploymentPolicy::Pinned,
-        _ => EnvironmentDeploymentPolicy::Manual,
-    }
-}
-
-fn placeholder_cache(name: &str) -> Option<EnvironmentCacheSummary> {
-    match name.to_ascii_lowercase().as_str() {
-        "production" | "prod" => Some(EnvironmentCacheSummary {
-            name: "prod-cache".to_string(),
-            url: "s3://crystal-forge-prod-cache".to_string(),
-            cache_type: "s3".to_string(),
-            status: "healthy".to_string(),
-        }),
-        "staging" => Some(EnvironmentCacheSummary {
-            name: "staging-cache".to_string(),
-            url: "s3://crystal-forge-staging-cache".to_string(),
-            cache_type: "s3".to_string(),
-            status: "healthy".to_string(),
-        }),
-        "dev" | "development" => Some(EnvironmentCacheSummary {
-            name: "dev-attic".to_string(),
-            url: "attic://cf-attic.dev/dev".to_string(),
-            cache_type: "attic".to_string(),
-            status: "warning".to_string(),
-        }),
-        _ => None,
-    }
-}
-
-fn placeholder_auto_sync(name: &str) -> bool {
-    !matches!(name.to_ascii_lowercase().as_str(), "lab" | "remote")
-}
-
-fn placeholder_requires_approval(name: &str) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "production" | "prod" | "staging" | "edge"
-    )
-}
-
-fn placeholder_is_production(name: &str) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "production" | "prod" | "edge"
-    )
-}
-
-fn placeholder_role_assignment_count(name: &str) -> usize {
-    match name.to_ascii_lowercase().as_str() {
-        "production" | "prod" => 4,
-        "staging" => 5,
-        "dev" | "development" => 7,
-        "edge" => 3,
-        _ => 1,
+        // TASK-359..TASK-362 placeholders are intentionally not populated for
+        // successful API responses. Rendering these as Some(..) would fabricate
+        // operational state and make non-persisted edits appear successful.
+        default_policy: None,
+        cache: None,
+        auto_sync: None,
+        requires_approval: None,
+        is_production: None,
+        role_assignment_count: None,
     }
 }
 
@@ -597,6 +540,7 @@ mod tests {
             is_active: true,
             system_count: 6,
             rollup: crate::api::models::EnvironmentRollup {
+                active_system_count: 5,
                 healthy: 4,
                 warning: 1,
                 critical: 1,
@@ -610,12 +554,17 @@ mod tests {
         assert_eq!(item.name, "production");
         assert_eq!(item.color_hex, "#0F766E");
         assert_eq!(item.system_count, 6);
+        assert_eq!(item.health.active, 5);
         assert_eq!(item.health.healthy, 4);
         assert_eq!(item.health.warning, 1);
         assert_eq!(item.health.critical, 1);
         assert_eq!(item.cve_critical_high, 9);
         assert_eq!(item.flake_names, vec!["infra", "edge"]);
-        assert!(item.is_production);
+        assert_eq!(item.cache, None);
+        assert_eq!(item.default_policy, None);
+        assert_eq!(item.auto_sync, None);
+        assert_eq!(item.requires_approval, None);
+        assert_eq!(item.is_production, None);
         assert_eq!(item.required_policy_ids, vec![DEFAULT_POLICY]);
     }
 

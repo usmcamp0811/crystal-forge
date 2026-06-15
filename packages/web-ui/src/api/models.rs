@@ -727,6 +727,7 @@ pub struct TestFlakeCredentialResponse {
 /// Per-environment system health + risk rollup returned by the environments API.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct EnvironmentRollup {
+    pub active_system_count: i64,
     pub healthy: i64,
     pub warning: i64,
     pub critical: i64,

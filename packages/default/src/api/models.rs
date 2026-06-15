@@ -905,6 +905,8 @@ pub struct FlakeCredentialSummary {
 /// environment, mirroring the Systems surface health thresholds.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EnvironmentRollup {
+    /// Active systems included in this health rollup.
+    pub active_system_count: i64,
     /// Systems in the `healthy` state.
     pub healthy: i64,
     /// Systems in the `warning` state.

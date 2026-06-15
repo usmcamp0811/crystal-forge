@@ -100,20 +100,20 @@ pub fn EnvironmentFormModal(props: EnvironmentFormModalProps) -> Element {
                         label { style: "display:flex; gap:8px; align-items:center; font-size:13px; cursor:pointer;",
                             input {
                                 r#type: "checkbox",
-                                checked: current.auto_sync,
+                                checked: current.auto_sync.unwrap_or(false),
+                                disabled: true,
                                 style: "accent-color:var(--cf-brand-purple);",
-                                onchange: move |evt| update_draft(&mut draft, |next| next.auto_sync = evt.checked())
                             }
-                            span { "Auto-sync flakes" }
+                            span { "Auto-sync flakes (not yet persisted)" }
                         }
                         label { style: "display:flex; gap:8px; align-items:center; font-size:13px; cursor:pointer;",
                             input {
                                 r#type: "checkbox",
-                                checked: current.requires_approval,
+                                checked: current.requires_approval.unwrap_or(false),
+                                disabled: true,
                                 style: "accent-color:var(--cf-brand-purple);",
-                                onchange: move |evt| update_draft(&mut draft, |next| next.requires_approval = evt.checked())
                             }
-                            span { "Require approval before deploy" }
+                            span { "Require approval before deploy (not yet persisted)" }
                         }
                     }
 
@@ -253,8 +253,9 @@ fn DeploymentPolicySection(props: DeploymentPolicySectionProps) -> Element {
             div { class: "seg", style: "width:fit-content; flex-wrap:wrap;",
                 for (policy, label) in policies {
                     button {
-                        class: if current.default_policy == policy { "active" } else { "" },
-                        onclick: move |_| update_draft(&mut draft, |next| next.default_policy = policy),
+                        class: if current.default_policy == Some(policy) { "active" } else { "" },
+                        disabled: true,
+                        title: "TASK-359 tracks persisted environment deployment policy",
                         "{label}"
                     }
                 }
@@ -330,12 +331,12 @@ fn ProductionToggle(props: ProductionToggleProps) -> Element {
     let Some(current) = draft.read().clone() else {
         return rsx! {};
     };
-    let border = if current.is_production {
+    let border = if current.is_production.unwrap_or(false) {
         "color-mix(in oklab, var(--cf-danger-berry) 55%, var(--cf-card-border))"
     } else {
         "var(--cf-card-border)"
     };
-    let background = if current.is_production {
+    let background = if current.is_production.unwrap_or(false) {
         "color-mix(in oklab, var(--cf-danger-berry) 10%, transparent)"
     } else {
         "transparent"
@@ -344,9 +345,9 @@ fn ProductionToggle(props: ProductionToggleProps) -> Element {
         label { class: "env-prod-toggle", style: "display:flex; gap:11px; align-items:flex-start; cursor:pointer; padding:11px 13px; border:1px solid {border}; border-radius:10px; background:{background}; margin-bottom:14px;",
             input {
                 r#type: "checkbox",
-                checked: current.is_production,
+                checked: current.is_production.unwrap_or(false),
+                disabled: true,
                 style: "accent-color:var(--cf-danger-berry); margin-top:2px;",
-                onchange: move |evt| update_draft(&mut draft, |next| next.is_production = evt.checked())
             }
             span { style: "min-width:0;",
                 span { style: "display:flex; align-items:center; gap:7px; font-size:13px; font-weight:600;",
@@ -354,7 +355,7 @@ fn ProductionToggle(props: ProductionToggleProps) -> Element {
                     "Production environment"
                 }
                 span { style: "display:block; font-size:11.5px; color:var(--cf-text-muted); margin-top:3px; line-height:1.45;",
-                    "Flags hosts in this environment as production. Persistence is tracked by TASK-359."
+                    "Production flag persistence is tracked by TASK-359. This control is read-only until backend support lands."
                 }
             }
         }

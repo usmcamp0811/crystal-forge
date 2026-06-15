@@ -29,23 +29,24 @@ pub struct EnvironmentItem {
     pub cve_critical_high: usize,
     /// Real backend data from `EnvironmentSummary.rollup`.
     pub flake_names: Vec<String>,
-    /// Placeholder until TASK-359 persists per-environment deployment policy.
-    pub default_policy: EnvironmentDeploymentPolicy,
-    /// Placeholder until TASK-360 persists per-environment cache assignments.
+    /// Present only for fallback/mock data until TASK-359 persists this value.
+    pub default_policy: Option<EnvironmentDeploymentPolicy>,
+    /// Present only for fallback/mock data until TASK-360 persists this value.
     pub cache: Option<EnvironmentCacheSummary>,
-    /// Placeholder until TASK-362 persists per-environment auto-sync.
-    pub auto_sync: bool,
-    /// Placeholder until TASK-362 persists per-environment approval requirements.
-    pub requires_approval: bool,
-    /// Placeholder until TASK-359 persists production flags.
-    pub is_production: bool,
-    /// Placeholder until TASK-362 persists environment RBAC assignments.
-    pub role_assignment_count: usize,
+    /// Present only for fallback/mock data until TASK-362 persists this value.
+    pub auto_sync: Option<bool>,
+    /// Present only for fallback/mock data until TASK-362 persists this value.
+    pub requires_approval: Option<bool>,
+    /// Present only for fallback/mock data until TASK-359 persists this value.
+    pub is_production: Option<bool>,
+    /// Present only for fallback/mock data until TASK-362 persists this value.
+    pub role_assignment_count: Option<usize>,
 }
 
 /// Health-state counts for active systems in an environment.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct EnvironmentHealthBreakdown {
+    pub active: usize,
     pub healthy: usize,
     pub warning: usize,
     pub critical: usize,
@@ -119,10 +120,10 @@ pub struct EnvironmentFormDraft {
     pub description: String,
     pub color_hex: String,
     pub required_policy_ids: Vec<Uuid>,
-    pub default_policy: EnvironmentDeploymentPolicy,
-    pub auto_sync: bool,
-    pub requires_approval: bool,
-    pub is_production: bool,
+    pub default_policy: Option<EnvironmentDeploymentPolicy>,
+    pub auto_sync: Option<bool>,
+    pub requires_approval: Option<bool>,
+    pub is_production: Option<bool>,
 }
 
 mod add_environment_form;

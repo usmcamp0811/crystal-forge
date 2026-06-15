@@ -303,9 +303,12 @@ impl EnvironmentTotals {
             caches: items.iter().filter(|env| env.cache.is_some()).count(),
             manual_policy: items
                 .iter()
-                .filter(|env| env.default_policy == EnvironmentDeploymentPolicy::Manual)
+                .filter(|env| env.default_policy == Some(EnvironmentDeploymentPolicy::Manual))
                 .count(),
-            auto_sync_off: items.iter().filter(|env| !env.auto_sync).count(),
+            auto_sync_off: items
+                .iter()
+                .filter(|env| env.auto_sync == Some(false))
+                .count(),
         }
     }
 }
@@ -372,10 +375,10 @@ fn new_environment_form_draft(default_required_policy: Uuid) -> EnvironmentFormD
         description: String::new(),
         color_hex: "#2563eb".to_string(),
         required_policy_ids: vec![default_required_policy],
-        default_policy: EnvironmentDeploymentPolicy::Manual,
-        auto_sync: true,
-        requires_approval: true,
-        is_production: false,
+        default_policy: None,
+        auto_sync: None,
+        requires_approval: None,
+        is_production: None,
     }
 }
 
@@ -441,11 +444,10 @@ fn save_environment_form(
                 {
                     api_notice.set(Some(message));
                 }
-                saved.required_policy_ids = next.required_policy_ids;
-                saved.default_policy = next.default_policy;
-                saved.auto_sync = next.auto_sync;
-                saved.requires_approval = next.requires_approval;
-                saved.is_production = next.is_production;
+                apply_persisted_form_fields(&mut saved, &next);
+                // TASK-359/TASK-362 fields are read-only until backend support
+                // lands. Do not copy modal display values into local state;
+                // doing so would make non-persisted changes appear saved.
 
                 let mut values = environments.read().clone();
                 if let Some(target) = values.iter_mut().find(|env| env.id == saved.id) {
@@ -464,4 +466,67 @@ fn save_environment_form(
             }
         }
     });
+}
+
+fn apply_persisted_form_fields(saved: &mut EnvironmentItem, next: &EnvironmentFormDraft) {
+    saved.required_policy_ids = next.required_policy_ids.clone();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_env(name: &str) -> EnvironmentItem {
+        EnvironmentItem {
+            id: Uuid::from_u128(42),
+            name: name.to_string(),
+            description: None,
+            color_hex: "#2563EB".to_string(),
+            system_count: 2,
+            required_policy_ids: Vec::new(),
+            health: Default::default(),
+            cve_critical_high: 0,
+            flake_names: Vec::new(),
+            default_policy: None,
+            cache: None,
+            auto_sync: None,
+            requires_approval: None,
+            is_production: None,
+            role_assignment_count: None,
+        }
+    }
+
+    #[test]
+    fn totals_do_not_count_unpersisted_cache_or_policy_placeholders() {
+        let items = vec![test_env("production")];
+        let totals = EnvironmentTotals::from(&items);
+
+        assert_eq!(totals.caches, 0);
+        assert_eq!(totals.manual_policy, 0);
+        assert_eq!(totals.auto_sync_off, 0);
+    }
+
+    #[test]
+    fn form_save_helper_does_not_copy_placeholder_only_fields() {
+        let mut saved = test_env("production");
+        let draft = EnvironmentFormDraft {
+            id: Some(saved.id),
+            name: saved.name.clone(),
+            description: String::new(),
+            color_hex: saved.color_hex.clone(),
+            required_policy_ids: vec![Uuid::from_u128(1)],
+            default_policy: Some(EnvironmentDeploymentPolicy::AutoLatest),
+            auto_sync: Some(false),
+            requires_approval: Some(true),
+            is_production: Some(true),
+        };
+
+        apply_persisted_form_fields(&mut saved, &draft);
+
+        assert_eq!(saved.required_policy_ids, vec![Uuid::from_u128(1)]);
+        assert_eq!(saved.default_policy, None);
+        assert_eq!(saved.auto_sync, None);
+        assert_eq!(saved.requires_approval, None);
+        assert_eq!(saved.is_production, None);
+    }
 }

@@ -12,6 +12,8 @@
 -- NOT modeled here; they are tracked as follow-up tasks (TASK-359..TASK-362)
 -- and rendered from clearly-commented UI placeholders until those land.
 
+DROP VIEW IF EXISTS public.view_environment_rollups;
+
 CREATE OR REPLACE VIEW public.view_environment_rollups AS
 WITH latest_heartbeat AS (
     SELECT DISTINCT ON (s.id)
@@ -61,7 +63,7 @@ env_flakes AS (
 )
 SELECT
     e.id AS environment_id,
-    COUNT(sh.system_id)::bigint AS system_count,
+    COUNT(sh.system_id)::bigint AS active_system_count,
     COUNT(sh.system_id) FILTER (WHERE sh.health_status = 'healthy')::bigint  AS healthy_count,
     COUNT(sh.system_id) FILTER (WHERE sh.health_status = 'warning')::bigint  AS warning_count,
     COUNT(sh.system_id) FILTER (WHERE sh.health_status = 'critical')::bigint AS critical_count,
@@ -75,4 +77,4 @@ LEFT JOIN env_flakes ef ON ef.environment_id = e.id
 GROUP BY e.id, ecc.critical_high_cve_count, ef.flake_names;
 
 COMMENT ON VIEW public.view_environment_rollups IS
-    'Per-environment system health breakdown, critical+high CVE totals, and flake names. Derived from systems; mirrors view_system_list health thresholds. Added by TASK-358.';
+    'Per-environment active-system health breakdown, critical+high CVE totals, and flake names. Derived from active systems; mirrors view_system_list health thresholds. Added by TASK-358.';

@@ -36,7 +36,7 @@ pub fn EnvironmentCard(props: EnvironmentCardProps) -> Element {
                     div { class: "env-card-title",
                         span { class: "env-dot", style: "background:{env.color_hex};" }
                         span { "{env.name}" }
-                        if env.is_production {
+                        if env.is_production.unwrap_or(false) {
                             span { class: "env-prod-badge", Icon { name: IconName::Shield, size: 9 } " PROD" }
                         }
                     }
@@ -89,7 +89,11 @@ pub fn EnvironmentCard(props: EnvironmentCardProps) -> Element {
             }
 
             div { class: "env-card-foot",
-                span { style: "font-size:11px; color:var(--cf-text-muted);", "{env.role_assignment_count} role assignments" }
+                if let Some(count) = env.role_assignment_count {
+                    span { style: "font-size:11px; color:var(--cf-text-muted);", "{count} role assignments" }
+                } else {
+                    span { style: "font-size:11px; color:var(--cf-text-muted);", title: "TASK-362 tracks persisted environment RBAC assignments", "RBAC not persisted" }
+                }
                 button {
                     class: "btn btn-subtle focus-ring",
                     style: "padding:4px 10px; font-size:12px;",
@@ -157,7 +161,7 @@ fn EnvironmentRow(props: EnvironmentRowProps) -> Element {
                     div {
                         div { class: "mono", style: "font-weight:600; font-size:13px; display:flex; align-items:center; gap:7px;",
                             "{env.name}"
-                            if env.is_production {
+                            if env.is_production.unwrap_or(false) {
                                 span { class: "env-prod-badge", Icon { name: IconName::Shield, size: 9 } " PROD" }
                             }
                         }
@@ -245,18 +249,22 @@ fn HealthLegend(props: HealthLegendProps) -> Element {
 
 #[derive(Props, Clone, PartialEq)]
 struct PolicyChipProps {
-    policy: EnvironmentDeploymentPolicy,
+    policy: Option<EnvironmentDeploymentPolicy>,
 }
 
 #[component]
 fn PolicyChip(props: PolicyChipProps) -> Element {
-    let class = match props.policy {
-        EnvironmentDeploymentPolicy::Manual | EnvironmentDeploymentPolicy::Pinned => {
-            "chip chip-warning"
-        }
-        EnvironmentDeploymentPolicy::AutoLatest => "chip chip-healthy",
-    };
-    rsx! { span { class, "{props.policy.label()}" } }
+    if let Some(policy) = props.policy {
+        let class = match policy {
+            EnvironmentDeploymentPolicy::Manual | EnvironmentDeploymentPolicy::Pinned => {
+                "chip chip-warning"
+            }
+            EnvironmentDeploymentPolicy::AutoLatest => "chip chip-healthy",
+        };
+        rsx! { span { class, "{policy.label()}" } }
+    } else {
+        rsx! { span { class: "chip chip-unknown", title: "TASK-359 tracks persisted environment deployment policy", "not persisted" } }
+    }
 }
 
 #[derive(Props, Clone, PartialEq)]
@@ -271,7 +279,7 @@ struct EnforcementChipsProps {
 fn EnforcementChips(props: EnforcementChipsProps) -> Element {
     let env = props.environment;
     let policy_count = env.required_policy_ids.len();
-    let compliance_label = if env.is_production {
+    let compliance_label = if env.is_production.unwrap_or(false) {
         Some("STIG")
     } else {
         None
@@ -318,17 +326,21 @@ fn CacheSummary(props: CacheSummaryProps) -> Element {
 
 #[derive(Props, Clone, PartialEq)]
 struct ToggleChipProps {
-    enabled: bool,
+    enabled: Option<bool>,
     on_label: &'static str,
     off_label: &'static str,
 }
 
 #[component]
 fn ToggleChip(props: ToggleChipProps) -> Element {
-    if props.enabled {
-        rsx! { span { class: "chip chip-healthy", "{props.on_label}" } }
+    if let Some(enabled) = props.enabled {
+        if enabled {
+            rsx! { span { class: "chip chip-healthy", "{props.on_label}" } }
+        } else {
+            rsx! { span { class: "chip chip-unknown", "{props.off_label}" } }
+        }
     } else {
-        rsx! { span { class: "chip chip-unknown", "{props.off_label}" } }
+        rsx! { span { class: "chip chip-unknown", title: "TASK-362 tracks persisted environment automation/approval settings", "not persisted" } }
     }
 }
 
