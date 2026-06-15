@@ -23,6 +23,75 @@ pub struct EnvironmentItem {
     pub color_hex: String,
     pub system_count: usize,
     pub required_policy_ids: Vec<Uuid>,
+    /// Real backend data from `EnvironmentSummary.rollup`.
+    pub health: EnvironmentHealthBreakdown,
+    /// Real backend data from `EnvironmentSummary.rollup`.
+    pub cve_critical_high: usize,
+    /// Real backend data from `EnvironmentSummary.rollup`.
+    pub flake_names: Vec<String>,
+    /// Present only for fallback/mock data until TASK-359 persists this value.
+    pub default_policy: Option<EnvironmentDeploymentPolicy>,
+    /// Present only for fallback/mock data until TASK-360 persists this value.
+    pub cache: Option<EnvironmentCacheSummary>,
+    /// Present only for fallback/mock data until TASK-362 persists this value.
+    pub auto_sync: Option<bool>,
+    /// Present only for fallback/mock data until TASK-362 persists this value.
+    pub requires_approval: Option<bool>,
+    /// Present only for fallback/mock data until TASK-359 persists this value.
+    pub is_production: Option<bool>,
+    /// Present only for fallback/mock data until TASK-362 persists this value.
+    pub role_assignment_count: Option<usize>,
+}
+
+/// Health-state counts for active systems in an environment.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EnvironmentHealthBreakdown {
+    pub active: usize,
+    pub healthy: usize,
+    pub warning: usize,
+    pub critical: usize,
+    pub offline: usize,
+}
+
+impl EnvironmentHealthBreakdown {
+    pub fn total(&self) -> usize {
+        self.healthy + self.warning + self.critical + self.offline
+    }
+}
+
+/// Display value for the default deployment policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EnvironmentDeploymentPolicy {
+    Manual,
+    AutoLatest,
+    Pinned,
+}
+
+impl EnvironmentDeploymentPolicy {
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::AutoLatest => "auto_latest",
+            Self::Pinned => "pinned",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::AutoLatest => "auto_latest",
+            Self::Pinned => "pinned",
+        }
+    }
+}
+
+/// Display-only cache summary placeholder until TASK-360 lands.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EnvironmentCacheSummary {
+    pub name: String,
+    pub url: String,
+    pub cache_type: String,
+    pub status: String,
 }
 
 /// Draft for creating a new environment.
@@ -43,21 +112,31 @@ pub struct EditEnvironmentDraft {
     pub color_hex: String,
 }
 
+/// Unified Add/Edit modal draft for the CrystalForgelatest Environments surface.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EnvironmentFormDraft {
+    pub id: Option<Uuid>,
+    pub name: String,
+    pub description: String,
+    pub color_hex: String,
+    pub required_policy_ids: Vec<Uuid>,
+    pub default_policy: Option<EnvironmentDeploymentPolicy>,
+    pub auto_sync: Option<bool>,
+    pub requires_approval: Option<bool>,
+    pub is_production: Option<bool>,
+}
+
 mod add_environment_form;
-mod edit_environment_modal;
 mod environment_card;
-mod policy_modals;
+mod environment_form_modal;
 mod remove_environment_dialog;
 
-pub use add_environment_form::AddEnvironmentForm;
-pub use edit_environment_modal::EditEnvironmentModal;
-pub use environment_card::EnvironmentCard;
-pub use policy_modals::{EditRequirementsModal, PolicyPickerModal};
+pub use environment_card::{EnvironmentCard, EnvironmentTable};
+pub use environment_form_modal::{validate_environment_form, EnvironmentFormModal};
 pub use remove_environment_dialog::RemoveEnvironmentDialog;
 
 // Re-export helper functions
 pub use add_environment_form::validate_environment;
-pub use edit_environment_modal::validate_environment_edit;
 
 /// Get the default required policy ID (Crystal Forge Agent).
 pub fn required_agent_policy_id(policy_library: &[PolicyOption]) -> Uuid {
