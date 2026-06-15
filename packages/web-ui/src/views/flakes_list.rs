@@ -640,7 +640,7 @@ fn EditFlakeDialog(
     let draft_for_name = draft.clone();
     let draft_for_repo = draft.clone();
     let draft_for_branch = draft.clone();
-    let draft_for_build_scope = draft.clone();
+
     let draft_signal = use_signal(|| draft.clone());
     {
         let mut draft_signal = draft_signal.clone();
@@ -757,13 +757,10 @@ fn EditFlakeDialog(
                         input {
                             class: "input focus-ring",
                             value: "{draft.description}",
-                            placeholder: "Short description shown in the registry",
-                            oninput: move |evt| {
-                                let mut next = draft_for_build_scope.clone();
-                                next.description = evt.value();
-                                on_change.call(next);
-                            }
+                            placeholder: "not persisted",
+                            disabled: true,
                         }
+                        div { class: "help", "Description is not persisted by the current backend API." }
                     }
 
                     div { style: "display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding: 12px; border: 1px solid var(--cf-divider); border-radius: 10px; background: color-mix(in oklab, var(--cf-page-bg) 45%, var(--cf-card-bg));",
