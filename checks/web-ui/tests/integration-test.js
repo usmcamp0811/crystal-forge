@@ -3958,10 +3958,42 @@ const steps = [
   },
   {
     name: "14-environments",
-    description: "Environments registry",
+    description: "Environments registry cards/table parity",
     action: async (page) => {
+      await routeEnvironmentWarningData(page);
       await page.goto(`${baseUrl}/environments`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
+      await assertVisible(page.getByRole("heading", { name: "Environments" }), "Expected Environments heading");
+      await assertVisible(page.getByText("Total tiers"), "Expected environments stat strip total tiers");
+      await assertVisible(page.getByText("Manual policy"), "Expected environments manual policy stat");
+      await assertVisible(page.getByText("Auto-sync off"), "Expected environments auto-sync stat");
+      await assertVisible(page.getByPlaceholder("Search environments…"), "Expected environments search input");
+      await page.getByRole("button", { name: /Table/i }).click();
+      const envTable = page.locator("table").first();
+      await assertVisible(envTable.getByText("Environment").first(), "Expected Environment table column");
+      await assertVisible(envTable.getByText("Health").first(), "Expected Health table column");
+      await assertVisible(envTable.getByText("Enforcement").first(), "Expected Enforcement table column");
+      await assertVisible(envTable.getByText("Cache").first(), "Expected Cache table column");
+      await page.getByRole("button", { name: /Cards/i }).click();
+      await unrouteEnvironmentWarningData(page);
+    },
+  },
+  {
+    name: "14a-environments-add-modal",
+    description: "Environments unified Add/Edit modal parity",
+    action: async (page) => {
+      await routeEnvironmentWarningData(page);
+      await page.goto(`${baseUrl}/environments`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2000);
+      const addButton = page.locator("button").filter({ hasText: "Add environment" }).first();
+      await assertVisible(addButton, "Expected Add environment button");
+      await addButton.evaluate((button) => button.click());
+      await assertVisible(page.getByRole("heading", { name: "Add environment" }), "Expected Add environment modal");
+      await assertVisible(page.getByText("Binary cache"), "Expected cache section in environment modal");
+      await assertVisible(page.getByText("Default deployment mode"), "Expected deployment policy section");
+      await assertVisible(page.getByText("Policy enforcement"), "Expected policy enforcement section");
+      await assertVisible(page.getByText("Production environment"), "Expected production toggle");
+      await unrouteEnvironmentWarningData(page);
     },
   },
   {
@@ -5660,6 +5692,10 @@ const CI_FAST_STEP_NAMES = new Set([
   "13f-flakes-edit-modal-credentials",
   "13g-flakes-edit-modal-ssh-save-persist",
   "13h-flakes-force-push-rewrite-recovery",
+  // TASK-358: Environments parity evidence
+  "14-environments",
+  "14a-environments-add-modal",
+  "14b-environments-config-warning",
   // TASK-237: builds queue controls evidence
   "15d-builds-queue-table-view",
   "15e-builds-cancelling-state",

@@ -1,119 +1,357 @@
-//! Environment card component.
+//! CrystalForgelatest-style Environments cards and table.
 
 use dioxus::prelude::*;
-use uuid::Uuid;
 
-use super::{EnvironmentItem, PolicyOption, required_policy_names, with_alpha};
-use crate::theme;
+use super::{
+    EnvironmentDeploymentPolicy, EnvironmentHealthBreakdown, EnvironmentItem, PolicyOption,
+};
+use crate::components::icon::{Icon, IconName};
 
-/// Props for the environment card.
 #[derive(Props, Clone, PartialEq)]
 pub struct EnvironmentCardProps {
     pub environment: EnvironmentItem,
     pub policy_library: Vec<PolicyOption>,
-    pub on_edit_meta: EventHandler<EnvironmentItem>,
-    pub on_edit_requirements: EventHandler<(Uuid, Vec<uuid::Uuid>)>,
-    pub on_remove: EventHandler<EnvironmentItem>,
+    pub on_edit: EventHandler<EnvironmentItem>,
 }
 
-/// Environment card with color header, system count, and policy display.
+#[derive(Props, Clone, PartialEq)]
+pub struct EnvironmentTableProps {
+    pub environments: Vec<EnvironmentItem>,
+    pub policy_library: Vec<PolicyOption>,
+    pub on_edit: EventHandler<EnvironmentItem>,
+}
+
 #[component]
 pub fn EnvironmentCard(props: EnvironmentCardProps) -> Element {
-    let env = &props.environment;
-    let required_names = required_policy_names(&env.required_policy_ids, &props.policy_library);
-    let required_count = required_names.len();
-    let visible_chips: Vec<String> = required_names.iter().take(3).cloned().collect();
-    let overflow = required_count.saturating_sub(visible_chips.len());
-
-    let env_for_remove = env.clone();
-    let env_for_edit_meta = env.clone();
-    let env_for_edit_req = env.clone();
+    let env = props.environment.clone();
+    let env_for_header = env.clone();
+    let env_for_footer = env.clone();
+    let total = env.health.total().max(env.system_count).max(1);
 
     rsx! {
-        div {
-            class: "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden shadow-sm",
-            div {
-                class: "flex items-center justify-between px-6 py-4 border-b border-gray-800",
-                style: "background: linear-gradient(135deg, {with_alpha(&env.color_hex, 0.42)} 0%, rgba(17, 24, 39, 0.92) 100%);",
+        div { class: "env-card",
+            div { class: "env-card-rail", style: "background:{env.color_hex};" }
+            div { class: "env-card-head",
                 div {
-                    p { class: "text-sm font-semibold text-white", "{env.name}" }
-                    p {
-                        class: "text-xs {theme::text::SECONDARY}",
-                        if let Some(description) = env.description.clone() {
-                            "{description}"
-                        } else {
-                            "No description"
+                    div { class: "env-card-title",
+                        span { class: "env-dot", style: "background:{env.color_hex};" }
+                        span { "{env.name}" }
+                        if env.is_production.unwrap_or(false) {
+                            span { class: "env-prod-badge", Icon { name: IconName::Shield, size: 9 } " PROD" }
+                        }
+                    }
+                    if let Some(description) = env.description.clone() {
+                        div { class: "env-card-desc", "{description}" }
+                    }
+                }
+                div { style: "display:flex; gap:4px;",
+                    button {
+                        class: "btn-icon focus-ring",
+                        title: "Edit",
+                        onclick: move |_| props.on_edit.call(env_for_header.clone()),
+                        Icon { name: IconName::Gear, size: 14 }
+                    }
+                }
+            }
+
+            div { class: "env-card-stat",
+                div { class: "env-card-stat-num", "{env.system_count}" }
+                div { class: "env-card-stat-label", "systems" }
+                div { style: "flex:1;" }
+                div { class: "env-card-flakes",
+                    if env.flake_names.is_empty() {
+                        span { class: "chip chip-unknown", style: "font-size:10px;", "no flakes" }
+                    } else {
+                        for flake in env.flake_names.iter().take(3) {
+                            span { class: "chip chip-unknown mono", style: "font-size:10px;", "{flake}" }
+                        }
+                        if env.flake_names.len() > 3 {
+                            span { class: "chip chip-unknown", style: "font-size:10px;", "+{env.flake_names.len() - 3}" }
                         }
                     }
                 }
             }
 
-            div {
-                class: "px-6 py-3 bg-gray-800/50",
-                div {
-                    class: "flex flex-wrap items-center gap-2 text-xs",
-                    span {
-                        class: "inline-flex px-2 py-1 rounded border text-gray-100 cf-chip-slate",
-                        "{env.system_count} systems"
-                    }
-                    span {
-                        class: "inline-flex px-2 py-1 rounded border text-gray-100 cf-chip-teal",
-                        "{required_count} required"
-                    }
-                }
+            HealthBar { health: env.health.clone(), total }
+            HealthLegend { health: env.health.clone(), cve_critical_high: env.cve_critical_high }
+
+            dl { class: "env-kv",
+                dt { "Deploy" }
+                dd { PolicyChip { policy: env.default_policy } }
+                dt { "Enforcement" }
+                dd { EnforcementChips { environment: env.clone(), policy_library: props.policy_library.clone() } }
+                dt { "Cache" }
+                dd { CacheSummary { environment: env.clone() } }
+                dt { "Auto-sync" }
+                dd { ToggleChip { enabled: env.auto_sync, on_label: "on", off_label: "off" } }
+                dt { "Approval" }
+                dd { ToggleChip { enabled: env.requires_approval, on_label: "required", off_label: "not required" } }
             }
 
-            div {
-                class: "px-6 py-3 bg-gray-900 space-y-2",
-                p { class: "text-[10px] font-semibold uppercase tracking-wider text-gray-500", "Required Policies" }
-                p {
-                    class: "text-[10px] text-amber-300/80",
-                    "Policies are persisted server-side and inherited as environment baseline requirements."
-                }
-                div {
-                    class: "flex flex-wrap gap-2",
-                    for policy_name in visible_chips {
-                        span {
-                            class: "inline-flex px-2 py-1 text-xs rounded border text-blue-100 cf-chip-blue",
-                            "{policy_name}"
-                        }
-                    }
-                    if overflow > 0 {
-                        span { class: "inline-flex px-2 py-1 text-xs rounded border border-gray-700 text-gray-400", "+{overflow}" }
-                    }
-                }
-            }
-
-            div {
-                class: "px-6 py-3 bg-gray-800/50 flex items-center justify-between",
-                div {
-                    class: "flex items-center gap-2",
-                    button {
-                        class: "text-xs px-2 py-1 rounded transition-colors cf-action-link",
-                        onclick: move |_| props.on_edit_meta.call(env_for_edit_meta.clone()),
-                        "Edit Environment"
-                    }
-                    button {
-                        class: "text-xs px-2 py-1 rounded transition-colors cf-action-link",
-                        onclick: {
-                            let id = env.id;
-                            let ids = env.required_policy_ids.clone();
-                            move |_| props.on_edit_requirements.call((id, ids.clone()))
-                        },
-                        "Edit Requirements"
-                    }
-                }
-
-                if env.system_count > 0 {
-                    span { class: "text-xs text-gray-500", "In Use" }
+            div { class: "env-card-foot",
+                if let Some(count) = env.role_assignment_count {
+                    span { style: "font-size:11px; color:var(--cf-text-muted);", "{count} role assignments" }
                 } else {
-                    button {
-                        class: "text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors",
-                        onclick: move |_| props.on_remove.call(env_for_remove.clone()),
-                        "Remove"
+                    span { style: "font-size:11px; color:var(--cf-text-muted);", title: "TASK-362 tracks persisted environment RBAC assignments", "RBAC not persisted" }
+                }
+                button {
+                    class: "btn btn-subtle focus-ring",
+                    style: "padding:4px 10px; font-size:12px;",
+                    onclick: move |_| props.on_edit.call(env_for_footer.clone()),
+                    Icon { name: IconName::Gear, size: 12 }
+                    " Edit"
+                }
+            }
+        }
+    }
+}
+
+#[component]
+pub fn EnvironmentTable(props: EnvironmentTableProps) -> Element {
+    rsx! {
+        div { class: "card", style: "overflow:hidden;",
+            table { class: "sys-table",
+                thead {
+                    tr {
+                        th { "Environment" }
+                        th { "Systems" }
+                        th { "Health" }
+                        th { "Deploy" }
+                        th { "Enforcement" }
+                        th { "Cache" }
+                        th { "Auto-sync" }
+                        th { "Approval" }
+                        th { style: "text-align:right;", " " }
+                    }
+                }
+                tbody {
+                    for env in props.environments.iter() {
+                        EnvironmentRow {
+                            key: "{env.id}",
+                            environment: env.clone(),
+                            policy_library: props.policy_library.clone(),
+                            on_edit: props.on_edit
+                        }
                     }
                 }
             }
         }
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct EnvironmentRowProps {
+    environment: EnvironmentItem,
+    policy_library: Vec<PolicyOption>,
+    on_edit: EventHandler<EnvironmentItem>,
+}
+
+#[component]
+fn EnvironmentRow(props: EnvironmentRowProps) -> Element {
+    let env = props.environment.clone();
+    let env_for_row = env.clone();
+    let env_for_button = env.clone();
+    let total = env.health.total().max(env.system_count).max(1);
+
+    rsx! {
+        tr { onclick: move |_| props.on_edit.call(env_for_row.clone()),
+            td {
+                div { style: "display:flex; align-items:center; gap:8px;",
+                    span { class: "env-dot", style: "background:{env.color_hex};" }
+                    div {
+                        div { class: "mono", style: "font-weight:600; font-size:13px; display:flex; align-items:center; gap:7px;",
+                            "{env.name}"
+                            if env.is_production.unwrap_or(false) {
+                                span { class: "env-prod-badge", Icon { name: IconName::Shield, size: 9 } " PROD" }
+                            }
+                        }
+                        if let Some(description) = env.description.clone() {
+                            div { style: "font-size:11px; color:var(--cf-text-muted);", "{description}" }
+                        }
+                    }
+                }
+            }
+            td { class: "mono", style: "font-size:13px;", "{env.system_count}" }
+            td {
+                div { style: "display:flex; align-items:center; gap:6px; min-width:140px;",
+                    HealthBar { health: env.health.clone(), total, compact: true }
+                    span { class: "mono", style: "font-size:11px; color:var(--cf-text-muted);", "{env.health.healthy}/{env.system_count}" }
+                }
+            }
+            td { PolicyChip { policy: env.default_policy } }
+            td { EnforcementChips { environment: env.clone(), policy_library: props.policy_library.clone(), compact: true } }
+            td { CacheSummary { environment: env.clone(), compact: true } }
+            td { ToggleChip { enabled: env.auto_sync, on_label: "on", off_label: "off" } }
+            td { ToggleChip { enabled: env.requires_approval, on_label: "required", off_label: "not required" } }
+            td {
+                div { class: "row-actions",
+                    button {
+                        class: "btn-icon focus-ring",
+                        title: "Edit",
+                        onclick: move |e| {
+                            e.stop_propagation();
+                            props.on_edit.call(env_for_button.clone());
+                        },
+                        Icon { name: IconName::Gear, size: 14 }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct HealthBarProps {
+    health: EnvironmentHealthBreakdown,
+    total: usize,
+    #[props(default = false)]
+    compact: bool,
+}
+
+#[component]
+fn HealthBar(props: HealthBarProps) -> Element {
+    let total = props.total.max(1) as f64;
+    let class = if props.compact {
+        "env-health-bar compact"
+    } else {
+        "env-health-bar"
+    };
+    rsx! {
+        div { class,
+            if props.health.healthy > 0 { div { style: "width:{pct(props.health.healthy, total)}%; background:#34d399;", title: "{props.health.healthy} healthy" } }
+            if props.health.warning > 0 { div { style: "width:{pct(props.health.warning, total)}%; background:#fbbf24;", title: "{props.health.warning} warning" } }
+            if props.health.critical > 0 { div { style: "width:{pct(props.health.critical, total)}%; background:#f87171;", title: "{props.health.critical} critical" } }
+            if props.health.offline > 0 { div { style: "width:{pct(props.health.offline, total)}%; background:#6b7280;", title: "{props.health.offline} offline" } }
+        }
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct HealthLegendProps {
+    health: EnvironmentHealthBreakdown,
+    cve_critical_high: usize,
+}
+
+#[component]
+fn HealthLegend(props: HealthLegendProps) -> Element {
+    rsx! {
+        div { class: "env-health-legend",
+            if props.health.healthy > 0 { span { span { class: "env-health-sw", style: "background:#34d399;" } "{props.health.healthy}" } }
+            if props.health.warning > 0 { span { span { class: "env-health-sw", style: "background:#fbbf24;" } "{props.health.warning}" } }
+            if props.health.critical > 0 { span { span { class: "env-health-sw", style: "background:#f87171;" } "{props.health.critical}" } }
+            if props.health.offline > 0 { span { span { class: "env-health-sw", style: "background:#6b7280;" } "{props.health.offline}" } }
+            if props.cve_critical_high > 0 {
+                span { style: "margin-left:auto;", Icon { name: IconName::Shield, size: 10 } " {props.cve_critical_high} CVE" }
+            }
+        }
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct PolicyChipProps {
+    policy: Option<EnvironmentDeploymentPolicy>,
+}
+
+#[component]
+fn PolicyChip(props: PolicyChipProps) -> Element {
+    if let Some(policy) = props.policy {
+        let class = match policy {
+            EnvironmentDeploymentPolicy::Manual | EnvironmentDeploymentPolicy::Pinned => {
+                "chip chip-warning"
+            }
+            EnvironmentDeploymentPolicy::AutoLatest => "chip chip-healthy",
+        };
+        rsx! { span { class, "{policy.label()}" } }
+    } else {
+        rsx! { span { class: "chip chip-unknown", title: "TASK-359 tracks persisted environment deployment policy", "not persisted" } }
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct EnforcementChipsProps {
+    environment: EnvironmentItem,
+    policy_library: Vec<PolicyOption>,
+    #[props(default = false)]
+    compact: bool,
+}
+
+#[component]
+fn EnforcementChips(props: EnforcementChipsProps) -> Element {
+    let env = props.environment;
+    let policy_count = env.required_policy_ids.len();
+    let compliance_label = if env.is_production.unwrap_or(false) {
+        Some("STIG")
+    } else {
+        None
+    };
+    rsx! {
+        div { style: "display:flex; gap:6px; align-items:center; flex-wrap:wrap;",
+            if let Some(label) = compliance_label {
+                span { class: "chip chip-info", title: "Temporary placeholder until TASK-361 persists compliance bundles", Icon { name: IconName::Shield, size: 9 } " {label}" }
+            }
+            if policy_count > 0 {
+                span { class: "chip chip-unknown", title: "Environment baseline policies; gate policies are tracked by TASK-361", "{policy_count} gate{plural(policy_count)}" }
+            }
+            if compliance_label.is_none() && policy_count == 0 {
+                span { style: "font-size:11px; color:var(--cf-text-muted);", if props.compact { "—" } else { "none" } }
+            }
+        }
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct CacheSummaryProps {
+    environment: EnvironmentItem,
+    #[props(default = false)]
+    compact: bool,
+}
+
+#[component]
+fn CacheSummary(props: CacheSummaryProps) -> Element {
+    let env = props.environment;
+    rsx! {
+        if let Some(cache) = env.cache {
+            span {
+                class: "mono truncate",
+                style: "font-size:11px;",
+                title: "Temporary placeholder until TASK-360 persists cache assignments: {cache.url}",
+                if !props.compact { Icon { name: IconName::Download, size: 10 } " " }
+                "{cache.url}"
+            }
+        } else {
+            span { style: "font-size:11px; color:var(--cf-text-muted); font-style:italic;", if props.compact { "none" } else { "not configured" } }
+        }
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct ToggleChipProps {
+    enabled: Option<bool>,
+    on_label: &'static str,
+    off_label: &'static str,
+}
+
+#[component]
+fn ToggleChip(props: ToggleChipProps) -> Element {
+    if let Some(enabled) = props.enabled {
+        if enabled {
+            rsx! { span { class: "chip chip-healthy", "{props.on_label}" } }
+        } else {
+            rsx! { span { class: "chip chip-unknown", "{props.off_label}" } }
+        }
+    } else {
+        rsx! { span { class: "chip chip-unknown", title: "TASK-362 tracks persisted environment automation/approval settings", "not persisted" } }
+    }
+}
+
+fn pct(count: usize, total: f64) -> i32 {
+    ((count as f64 / total) * 100.0).round() as i32
+}
+
+fn plural(count: usize) -> &'static str {
+    if count == 1 {
+        ""
+    } else {
+        "s"
     }
 }
