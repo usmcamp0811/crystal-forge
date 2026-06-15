@@ -4,7 +4,7 @@ title: Close full Environments surface parity gaps against CrystalForgelatest
 status: Review
 assignee: []
 created_date: '2026-06-14 18:56'
-updated_date: '2026-06-15 00:33'
+updated_date: '2026-06-15 00:40'
 labels:
   - design-parity
   - environments
@@ -104,11 +104,11 @@ Medium — primarily UI component work; backend changes moderate if cache/policy
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-MR !276 blocker fix pushed: f44581d0. Verification after fixes: web-ui cargo check passed, backend cargo check passed, backend rollup mapping test passed, web-ui adapter test passed, web-ui view placeholder-boundary tests passed, cargo sqlx prepare --check passed, node --check passed, nix build .#checks.x86_64-linux.web-ui passed with 14-environments / 14a-environments-add-modal / 14b-environments-config-warning screenshots.
+Final blocker verification: rustfmt check for environments_list.rs passed, web-ui cargo check passed, and views::environments_list::tests passed. MR note added: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/276#note_3454164353
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Review blockers addressed in f44581d0: preserved `system_count` as all assigned systems, added separate `rollup.active_system_count`, removed fake operational placeholders for successful API data, disabled/read-only unsupported modal fields, stopped copying placeholder-only values into local state, added targeted tests, refreshed screenshots, and updated MR !276 description/comment.
+Final MR !276 blocker addressed in a317bd0d: inlined the post-save success path so only `required_policy_ids` is copied into local state. There are no remaining assignments to `saved.default_policy`, `saved.auto_sync`, `saved.requires_approval`, or `saved.is_production` after API save.
 <!-- SECTION:FINAL_SUMMARY:END -->
