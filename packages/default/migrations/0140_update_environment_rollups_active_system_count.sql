@@ -1,18 +1,15 @@
--- Per-environment rollups for the Environments surface (TASK-358).
+-- Rename the active-system rollup count without editing the already-added
+-- TASK-358 migration 0139.
 --
--- Aggregates data that is cheaply derivable from the existing systems table so
--- the Environments list/cards/table can show a health breakdown, CVE totals,
--- and the set of flakes spanning each environment without N+1 queries.
---
--- Health-status thresholds intentionally mirror view_system_list so the
--- Environments surface stays consistent with the Systems surface.
---
--- Heavier per-environment attributes (cache assignment, gate policies,
--- compliance bundle, auto-sync, requires-approval, production flag, RBAC) are
--- NOT modeled here; they are tracked as follow-up tasks (TASK-359..TASK-362)
--- and rendered from clearly-commented UI placeholders until those land.
+-- Migration 0139 introduced view_environment_rollups with a `system_count`
+-- column that counted only active systems. Application/API compatibility
+-- requires EnvironmentSummary.system_count to continue meaning all assigned
+-- systems, so the active-only rollup count is moved to a distinct
+-- `active_system_count` column here.
 
-CREATE OR REPLACE VIEW public.view_environment_rollups AS
+DROP VIEW IF EXISTS public.view_environment_rollups;
+
+CREATE VIEW public.view_environment_rollups AS
 WITH latest_heartbeat AS (
     SELECT DISTINCT ON (s.id)
         s.id AS system_id,
@@ -61,7 +58,7 @@ env_flakes AS (
 )
 SELECT
     e.id AS environment_id,
-    COUNT(sh.system_id)::bigint AS system_count,
+    COUNT(sh.system_id)::bigint AS active_system_count,
     COUNT(sh.system_id) FILTER (WHERE sh.health_status = 'healthy')::bigint  AS healthy_count,
     COUNT(sh.system_id) FILTER (WHERE sh.health_status = 'warning')::bigint  AS warning_count,
     COUNT(sh.system_id) FILTER (WHERE sh.health_status = 'critical')::bigint AS critical_count,
@@ -75,4 +72,4 @@ LEFT JOIN env_flakes ef ON ef.environment_id = e.id
 GROUP BY e.id, ecc.critical_high_cve_count, ef.flake_names;
 
 COMMENT ON VIEW public.view_environment_rollups IS
-    'Per-environment system health breakdown, critical+high CVE totals, and flake names. Derived from systems; mirrors view_system_list health thresholds. Added by TASK-358.';
+    'Per-environment active-system health breakdown, critical+high CVE totals, and flake names. Derived from active systems; mirrors view_system_list health thresholds. Updated by TASK-358 migration 0140.';
