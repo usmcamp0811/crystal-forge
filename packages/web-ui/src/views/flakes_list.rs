@@ -763,19 +763,22 @@ fn EditFlakeDialog(
                         div { class: "help", "Description is not persisted by the current backend API." }
                     }
 
-                    div { style: "display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding: 12px; border: 1px solid var(--cf-divider); border-radius: 10px; background: color-mix(in oklab, var(--cf-page-bg) 45%, var(--cf-card-bg));",
-                        label { style: "display: flex; gap: 8px; align-items: center; font-size: 13px; color: var(--cf-text-muted); cursor: not-allowed;",
-                            input { r#type: "checkbox", disabled: true }
+                    div { style: "display: grid; grid-template-columns: 1fr 1fr; gap: 14px;",
+                        label { style: "display: flex; gap: 8px; align-items: center; font-size: 13px; cursor: pointer;",
+                            input { r#type: "checkbox", disabled: true, style: "accent-color: var(--cf-brand-purple);" }
                             span { "Auto-sync" }
                         }
                         div { class: "field",
                             label { "Sync interval" }
                             select { class: "input focus-ring", disabled: true,
-                                option { "not persisted" }
+                                option { value: "1m", "Every 1 min" }
+                                option { value: "5m", selected: true, "Every 5 min" }
+                                option { value: "15m", "Every 15 min" }
+                                option { value: "1h", "Every hour" }
                             }
-                            div { class: "help", "Auto-sync scheduling is not persisted by the current backend API." }
                         }
                     }
+                    div { class: "help", "Auto-sync scheduling is not persisted by the current backend API." }
 
                     FlakeCredentialFields {
                         flake_id: Some(draft.id),
