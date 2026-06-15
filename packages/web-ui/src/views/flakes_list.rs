@@ -22,17 +22,20 @@ use crate::api::client::{
     ApiClientError, accept_flake_history_rewrite, create_flake, delete_flake,
     delete_flake_credentials, fetch_commit_diff, fetch_cve_scan_status, fetch_environments,
     fetch_flake_credentials, fetch_flake_timeline_for_tray, fetch_flake_timelines,
-    fetch_flake_timelines_for_ids, fetch_flakes, put_flake_credentials, request_sync_all_flakes,
-    request_sync_flake, test_flake_credentials, trigger_flake_config_cve_scan, update_flake,
+    fetch_flake_timelines_for_ids, fetch_flakes, fetch_systems, put_flake_credentials,
+    request_sync_all_flakes, request_sync_flake, test_flake_credentials,
+    trigger_flake_config_cve_scan, update_flake,
 };
 use crate::api::models::{
     BuildStatus as ApiBuildStatus, CreateFlakeCredentialRequest, CreateFlakeRequest,
-    EnvironmentSummary, FlakeCommitSystemPath, FlakeRegistryItem, FlakeTimeline,
+    EnvironmentSummary, FlakeCommitSystemPath, FlakeRegistryItem, FlakeTimeline, SystemsListParams,
     TestFlakeCredentialRequest, UpdateFlakeRequest,
 };
 use crate::components::layout::Card;
 use crate::components::notifications::{AlertBanner, AlertSeverity};
 use crate::routes::Route;
+use crate::state::app_state::AppState;
+use crate::state::auth;
 use crate::theme;
 use crate::views::systems_mock::mock_system_details;
 
@@ -251,7 +254,7 @@ struct EditFlakeDraft {
     name: String,
     repo_url: String,
     branch: String,
-    environment: String,
+    environments: Vec<String>,
     description: String,
     build_scope: String,
     credential_type: String,
@@ -637,7 +640,6 @@ fn EditFlakeDialog(
     let draft_for_name = draft.clone();
     let draft_for_repo = draft.clone();
     let draft_for_branch = draft.clone();
-    let draft_for_description = draft.clone();
     let draft_for_build_scope = draft.clone();
     let draft_signal = use_signal(|| draft.clone());
     {
@@ -725,29 +727,24 @@ fn EditFlakeDialog(
                                 }
                             }
                         }
-                        label {
-                            class: "field",
-                            span { "Build Scope" }
-                            select {
-                                class: "input focus-ring",
-                                value: "{draft.build_scope}",
-                                onchange: move |evt| {
-                                    let mut next = draft_for_build_scope.clone();
-                                    next.build_scope = evt.value();
-                                    on_change.call(next);
-                                },
-                                option { value: "cf_systems_only", "CF systems only" }
-                                option { value: "all_configs", "All nixosConfigurations" }
+                        div { class: "field",
+                            label { "Environments" }
+                            div { style: "display: flex; align-items: center; min-height: 34px; gap: 6px; flex-wrap: wrap;",
+                                if draft.environments.is_empty() {
+                                    span { style: "font-size: 12px; color: var(--cf-text-muted);", "None assigned" }
+                                } else {
+                                    for env in draft.environments.iter().take(6) {
+                                        EnvBadgeNew { env: env.clone() }
+                                    }
+                                    if draft.environments.len() > 6 {
+                                        span { class: "chip chip-unknown", style: "font-size: 10px;",
+                                            "+{draft.environments.len() - 6}"
+                                        }
+                                    }
+                                }
                             }
+                            div { class: "help", "Derived from the systems built off this flake — not assigned here." }
                         }
-                    }
-
-                    div { class: "field",
-                        label { "Environments" }
-                        div { style: "display: flex; align-items: center; min-height: 34px; gap: 6px; flex-wrap: wrap;",
-                            EnvBadgeNew { env: draft.environment.clone() }
-                        }
-                        div { class: "help", "Derived from systems built from this flake. The registry API does not persist this directly." }
                     }
 
                     div { class: "field",
@@ -757,10 +754,10 @@ fn EditFlakeDialog(
                             value: "{draft.description}",
                             placeholder: "Short description shown in the registry",
                             oninput: move |evt| {
-                                let mut next = draft_for_description.clone();
+                                let mut next = draft_for_build_scope.clone();
                                 next.description = evt.value();
                                 on_change.call(next);
-                            },
+                            }
                         }
                     }
 
@@ -1101,11 +1098,7 @@ fn start_edit_flake(
             name: flake.name,
             repo_url: flake.repo_url,
             branch: flake.branch,
-            environment: flake
-                .environments
-                .first()
-                .cloned()
-                .unwrap_or_else(|| "production".to_string()),
+            environments: flake.environments.clone(),
             description: String::new(),
             build_scope: flake.build_scope,
             credential_type: "none".to_string(),
@@ -2730,6 +2723,8 @@ mod tests {
 /// Uses live API data for flakes, timelines, and commit diffs.
 #[component]
 pub fn FlakesListViewNew() -> Element {
+    let app_state = use_context::<Signal<AppState>>();
+    let is_admin_user = auth::is_admin(&app_state.read().auth);
     let mut view_mode = use_signal(|| "table");
     let mut search_query = use_signal(String::new);
     let mut selected_flake = use_signal(|| None::<MockFlakeItem>);
@@ -2767,6 +2762,42 @@ pub fn FlakesListViewNew() -> Element {
         _ => Vec::new(),
     };
 
+    // Fetch systems (large page) to derive environments-per-flake since the registry API
+    // does not expose which environments a flake spans. Tracked by TASK-357.1.
+    let systems_resource = use_resource(|| async {
+        fetch_systems(&SystemsListParams {
+            page: Some(1),
+            per_page: Some(500),
+            search: None,
+            health_status: None,
+            deployment_status: None,
+            environment: None,
+            sort_by: None,
+            sort_order: None,
+        })
+        .await
+    });
+    // Build flake_id → sorted/deduped environment names
+    let flake_env_map: HashMap<i32, Vec<String>> = {
+        let systems = match systems_resource.read().as_ref() {
+            Some(Ok(resp)) => resp.items.clone(),
+            _ => Vec::new(),
+        };
+        let mut map: HashMap<i32, Vec<String>> = HashMap::new();
+        for system in &systems {
+            if let (Some(flake_id), Some(env)) = (system.flake_id, system.environment.clone()) {
+                let entry = map.entry(flake_id).or_default();
+                if !entry.iter().any(|e: &String| e.eq_ignore_ascii_case(&env)) {
+                    entry.push(env);
+                }
+            }
+        }
+        for envs in map.values_mut() {
+            envs.sort();
+        }
+        map
+    };
+
     let (raw_flakes, load_error, loading) = match flakes_resource.read().as_ref() {
         Some(Ok(items)) => (items.clone(), None, false),
         Some(Err(err)) => (Vec::new(), Some(err.to_string()), false),
@@ -2787,6 +2818,10 @@ pub fn FlakesListViewNew() -> Element {
         .iter()
         .map(|item| {
             let mut mapped = map_registry_flake_to_view(item);
+            // Populate environment from systems data
+            if let Some(envs) = flake_env_map.get(&item.id) {
+                mapped.environment = envs.join(",");
+            }
             if let Some(commits) = commit_map.get(&item.id) {
                 if let Some(latest) = commits.first() {
                     mapped.latest_commit = latest.sha.clone();
@@ -2903,57 +2938,59 @@ pub fn FlakesListViewNew() -> Element {
                     }
                 }
                 div { style: "display: flex; gap: 8px;",
-                    button {
-                        class: "btn btn-ghost focus-ring",
-                        onclick: move |_| {
-                            let mut reload_nonce = reload_nonce.clone();
-                            spawn(async move {
-                                let result = request_sync_all_flakes().await;
-                                match result {
-                                    Ok(_) => {
-                                        action_notice.set(Some("Sync requested for all flakes".to_string()));
-                                        let next = *reload_nonce.read() + 1;
-                                        reload_nonce.set(next);
+                    if is_admin_user {
+                        button {
+                            class: "btn btn-ghost focus-ring",
+                            onclick: move |_| {
+                                let mut reload_nonce = reload_nonce.clone();
+                                spawn(async move {
+                                    let result = request_sync_all_flakes().await;
+                                    match result {
+                                        Ok(_) => {
+                                            action_notice.set(Some("Sync requested for all flakes".to_string()));
+                                            let next = *reload_nonce.read() + 1;
+                                            reload_nonce.set(next);
+                                        }
+                                        Err(err) => action_notice.set(Some(format!("Sync all failed: {err}"))),
                                     }
-                                    Err(err) => action_notice.set(Some(format!("Sync all failed: {err}"))),
-                                }
-                            });
-                        },
-                        // Inline sync icon SVG
-                        svg {
-                            width: "14",
-                            height: "14",
-                            view_box: "0 0 24 24",
-                            fill: "none",
-                            stroke: "currentColor",
-                            stroke_width: "2",
-                            stroke_linecap: "round",
-                            stroke_linejoin: "round",
-                            style: "display: inline-block; vertical-align: middle; margin-right: 6px;",
-                            path { d: "M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" }
+                                });
+                            },
+                            // Inline sync icon SVG
+                            svg {
+                                width: "14",
+                                height: "14",
+                                view_box: "0 0 24 24",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                stroke_linecap: "round",
+                                stroke_linejoin: "round",
+                                style: "display: inline-block; vertical-align: middle; margin-right: 6px;",
+                                path { d: "M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" }
+                            }
+                            " Sync all"
                         }
-                        " Sync all"
-                    }
-                    button {
-                        class: "btn btn-primary focus-ring",
-                        onclick: move |_| {
-                            show_add_form.set(true);
-                            add_error.set(None);
-                        },
-                        // Inline plus icon SVG
-                        svg {
-                            width: "14",
-                            height: "14",
-                            view_box: "0 0 24 24",
-                            fill: "none",
-                            stroke: "currentColor",
-                            stroke_width: "2",
-                            stroke_linecap: "round",
-                            stroke_linejoin: "round",
-                            style: "display: inline-block; vertical-align: middle; margin-right: 6px;",
-                            path { d: "M5 12h14M12 5v14" }
+                        button {
+                            class: "btn btn-primary focus-ring",
+                            onclick: move |_| {
+                                show_add_form.set(true);
+                                add_error.set(None);
+                            },
+                            // Inline plus icon SVG
+                            svg {
+                                width: "14",
+                                height: "14",
+                                view_box: "0 0 24 24",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                stroke_linecap: "round",
+                                stroke_linejoin: "round",
+                                style: "display: inline-block; vertical-align: middle; margin-right: 6px;",
+                                path { d: "M5 12h14M12 5v14" }
+                            }
+                            " Add flake"
                         }
-                        " Add flake"
                     }
                 }
             }
@@ -3143,7 +3180,7 @@ pub fn FlakesListViewNew() -> Element {
 
                     if mode == "table" {
                         let all_flakes_for_edit = all_flakes.clone();
-                        rsx! { FlakeTableNew { flakes: filtered_flakes.clone(), selected_id, is_admin: true, on_select: move |f| selected_flake.set(Some(f)), on_sync: move |flake_id| {
+                        rsx! { FlakeTableNew { flakes: filtered_flakes.clone(), selected_id, is_admin: is_admin_user, on_select: move |f| selected_flake.set(Some(f)), on_sync: move |flake_id| {
                             let mut reload_nonce = reload_nonce.clone();
                             spawn(async move {
                                 let result = request_sync_flake(flake_id).await;
@@ -3172,7 +3209,7 @@ pub fn FlakesListViewNew() -> Element {
                                     name: current.name.clone(),
                                     repo_url: current.url.clone(),
                                     branch: current.branch.clone(),
-                                    environment: current.environment.clone(),
+                                    environments: current.environment.split(',').map(str::trim).filter(|s| !s.is_empty()).map(ToString::to_string).collect(),
                                     description: current.description.clone(),
                                     build_scope: current.build_scope.clone(),
                                     credential_type: "none".to_string(),
@@ -3209,7 +3246,7 @@ pub fn FlakesListViewNew() -> Element {
                         } } }
                     } else {
                         let all_flakes_for_edit = all_flakes.clone();
-                        rsx! { FlakeCardsNew { flakes: filtered_flakes.clone(), selected_id, is_admin: true, on_select: move |f| selected_flake.set(Some(f)), on_sync: move |flake_id| {
+                        rsx! { FlakeCardsNew { flakes: filtered_flakes.clone(), selected_id, is_admin: is_admin_user, on_select: move |f| selected_flake.set(Some(f)), on_sync: move |flake_id| {
                             let mut reload_nonce = reload_nonce.clone();
                             spawn(async move {
                                 let result = request_sync_flake(flake_id).await;
@@ -3238,7 +3275,7 @@ pub fn FlakesListViewNew() -> Element {
                                     name: current.name.clone(),
                                     repo_url: current.url.clone(),
                                     branch: current.branch.clone(),
-                                    environment: current.environment.clone(),
+                                    environments: current.environment.split(',').map(str::trim).filter(|s| !s.is_empty()).map(ToString::to_string).collect(),
                                     description: current.description.clone(),
                                     build_scope: current.build_scope.clone(),
                                     credential_type: "none".to_string(),
@@ -3309,7 +3346,7 @@ pub fn FlakesListViewNew() -> Element {
                             commits_loading: tray_commits_loading,
                             commits_error: tray_commits_error,
                             notice: action_notice.read().clone(),
-                            is_admin: true,
+                            is_admin: is_admin_user,
                             flake,
                             on_edit: move |flake_id| {
                                 if let Some(current) = all_flakes_for_edit.iter().find(|item| item.id == flake_id) {
@@ -3318,7 +3355,7 @@ pub fn FlakesListViewNew() -> Element {
                                         name: current.name.clone(),
                                         repo_url: current.url.clone(),
                                         branch: current.branch.clone(),
-                                        environment: current.environment.clone(),
+                                        environments: current.environment.split(',').map(str::trim).filter(|s| !s.is_empty()).map(ToString::to_string).collect(),
                                         description: current.description.clone(),
                                         build_scope: current.build_scope.clone(),
                                         credential_type: "none".to_string(),

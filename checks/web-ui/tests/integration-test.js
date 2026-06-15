@@ -5948,6 +5948,31 @@ const steps = [
       await unrouteSystemsWarningData(page);
     },
   },
+  {
+    name: "13i-flakes-non-admin",
+    description: "Flakes view hides admin-only mutations for non-admin users",
+    action: async (page) => {
+      await routeFlakeParityData(page);
+      try {
+        await page.goto(`${baseUrl}/flakes?ui_check_auth=1&ui_check_role=viewer`, { timeout: LOAD_TIMEOUT });
+        await page.waitForTimeout(1800);
+
+        // Admin mutation buttons in header must not render
+        await assertHidden(page.getByRole("button", { name: /Sync all/i }).first(), "Sync all button should be hidden for non-admins");
+        await assertHidden(page.getByRole("button", { name: /Add flake/i }).first(), "Add flake button should be hidden for non-admins");
+
+        // Per-flake row action buttons must not render in table
+        await assertHidden(page.locator("table.sys-table button[title='Sync']").first(), "Per-flake Sync button should be hidden for non-admins");
+        await assertHidden(page.locator("table.sys-table button[title='Edit flake']").first(), "Per-flake Edit button should be hidden for non-admins");
+
+        // Read-only view should still show flake data
+        await assertVisible(page.getByRole("heading", { name: "Flakes" }).first(), "Expected Flakes page heading for non-admin");
+        await assertVisible(page.getByText("platform-core").first(), "Expected platform-core flake in non-admin view");
+      } finally {
+        await unrouteFlakeParityData(page);
+      }
+    },
+  },
 ];
 
 const CI_FAST_STEP_NAMES = new Set([
@@ -5992,6 +6017,7 @@ const CI_FAST_STEP_NAMES = new Set([
   "13f-flakes-edit-modal-credentials",
   "13g-flakes-edit-modal-ssh-save-persist",
   "13h-flakes-force-push-rewrite-recovery",
+  "13i-flakes-non-admin",
   // TASK-358: Environments parity evidence
   "14-environments",
   "14a-environments-add-modal",
