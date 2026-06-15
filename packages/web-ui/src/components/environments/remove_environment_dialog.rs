@@ -1,11 +1,10 @@
-//! Remove environment dialog component.
+//! Reference-style remove environment confirmation.
 
 use dioxus::prelude::*;
 
 use super::EnvironmentItem;
-use crate::theme;
+use crate::components::icon::{Icon, IconName};
 
-/// Props for the remove environment dialog.
 #[derive(Props, Clone, PartialEq)]
 pub struct RemoveEnvironmentDialogProps {
     pub environment: EnvironmentItem,
@@ -13,34 +12,55 @@ pub struct RemoveEnvironmentDialogProps {
     pub on_confirm: EventHandler<()>,
 }
 
-/// Confirmation dialog for removing an environment.
 #[component]
 pub fn RemoveEnvironmentDialog(props: RemoveEnvironmentDialogProps) -> Element {
-    let env_name = props.environment.name.clone();
+    let env = props.environment.clone();
+    let mut typed = use_signal(String::new);
+    let matches = typed() == env.name;
+    let has_systems = env.system_count > 0;
+    let system_plural = if env.system_count == 1 { "" } else { "s" };
 
     rsx! {
-        div {
-            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
-            onclick: move |_| props.on_cancel.call(()),
-            div {
-                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6 cf-modal-panel-30",
-                onclick: |evt| evt.stop_propagation(),
-                h3 { class: "text-lg font-semibold text-white mb-2", "Remove environment {env_name}?" }
-                p {
-                    class: "text-sm {theme::text::SECONDARY} mb-6",
-                    "This deletes the environment from the registry view."
-                }
-                div {
-                    class: "flex gap-3",
-                    button {
-                        class: "flex-1 px-4 py-2 rounded-lg font-medium text-sm transition-colors bg-gray-700 hover:bg-gray-600 text-white",
-                        onclick: move |_| props.on_cancel.call(()),
-                        "Cancel"
+        div { class: "modal-backdrop", onclick: move |_| props.on_cancel.call(()),
+            div { class: "modal", style: "width:min(520px,96vw);", onclick: |evt| evt.stop_propagation(),
+                div { class: "modal-head", style: "background:rgba(248,113,113,0.06);",
+                    h2 { style: "color:#fecaca; display:flex; align-items:center; gap:8px;",
+                        Icon { name: IconName::Warn, size: 16 }
+                        "Remove environment"
                     }
+                    p { "This removes the " span { class: "mono", style: "font-weight:600;", "{env.name}" } " environment." }
+                }
+                div { class: "modal-body",
+                    if has_systems {
+                        div { class: "sd-callout sd-callout-danger", style: "margin-bottom:12px;",
+                            Icon { name: IconName::Warn, size: 14 }
+                            div { style: "font-size:12px; color:#fecaca;",
+                                strong { "{env.system_count} system{system_plural} still assigned to this environment." }
+                                " Reassign them before removing."
+                            }
+                        }
+                    }
+                    div { class: "field",
+                        label { "Type " span { class: "mono", style: "color:#fecaca; font-weight:700;", "{env.name}" } " to confirm" }
+                        input {
+                            class: "input focus-ring mono",
+                            placeholder: "{env.name}",
+                            value: "{typed}",
+                            disabled: has_systems,
+                            style: if !typed().is_empty() && !matches { "border-color:rgba(248,113,113,0.5);" } else { "" },
+                            oninput: move |evt| typed.set(evt.value())
+                        }
+                    }
+                }
+                div { class: "modal-foot",
+                    button { class: "btn btn-ghost focus-ring", onclick: move |_| props.on_cancel.call(()), "Cancel" }
                     button {
-                        class: "flex-1 px-4 py-2 rounded-lg font-medium text-sm transition-colors bg-red-500 hover:bg-red-400 text-white",
+                        class: "btn focus-ring",
+                        disabled: !matches || has_systems,
+                        style: if matches && !has_systems { "background:#dc2626; color:white;" } else { "background:var(--cf-subtle-bg); color:var(--cf-text-muted);" },
                         onclick: move |_| props.on_confirm.call(()),
-                        "Remove"
+                        Icon { name: IconName::X, size: 13 }
+                        " Remove environment"
                     }
                 }
             }

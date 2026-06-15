@@ -12,10 +12,10 @@
 //! - `GET /api/v1/environments/:id` — returns a single `EnvironmentSummary`
 
 use axum::{
-    Json,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
+    Json,
 };
 use sqlx::Error as SqlxError;
 use sqlx::PgPool;
@@ -536,6 +536,7 @@ mod tests {
             color_hex: "#0F766E".to_string(),
             is_active: true,
             system_count: 12,
+            rollup: Default::default(),
         };
 
         let json = serde_json::to_value(&summary).unwrap();
@@ -543,6 +544,7 @@ mod tests {
         assert_eq!(json["color_hex"], "#0F766E");
         assert_eq!(json["system_count"], 12);
         assert_eq!(json["is_active"], true);
+        assert_eq!(json["rollup"]["healthy"], 0);
     }
 
     #[test]
@@ -554,6 +556,7 @@ mod tests {
             color_hex: "#B45309".to_string(),
             is_active: true,
             system_count: 0,
+            rollup: Default::default(),
         };
 
         let json = serde_json::to_value(&summary).unwrap();

@@ -2657,6 +2657,173 @@ html[data-theme="light"] .sd-nix {
   opacity: 1;
 }
 
+/* Environments parity surface */
+.env-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  display: inline-block;
+  box-shadow: 0 0 0 2px color-mix(in oklab, currentColor 14%, transparent);
+  flex-shrink: 0;
+}
+
+.env-prod-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 5px;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: #fecaca;
+  background: rgba(248, 113, 113, 0.12);
+  border: 1px solid rgba(248, 113, 113, 0.28);
+}
+
+.env-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--cf-card-border);
+  background: var(--cf-card-bg);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+}
+
+.env-card:hover {
+  border-color: color-mix(in oklab, var(--cf-brand-purple) 45%, var(--cf-card-border));
+  transform: translateY(-1px);
+  transition: border-color 150ms, transform 150ms;
+}
+
+.env-card-rail {
+  position: absolute;
+  left: 0;
+  top: 14px;
+  bottom: 14px;
+  width: 3px;
+  border-radius: 0 2px 2px 0;
+  opacity: 0.9;
+}
+
+.env-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.env-card-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--cf-text-primary);
+}
+
+.env-card-desc {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--cf-text-muted);
+}
+
+.env-card-stat {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.env-card-stat-num {
+  font-size: 28px;
+  line-height: 1;
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  color: var(--cf-text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.env-card-stat-label {
+  font-size: 11px;
+  color: var(--cf-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.env-card-flakes {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.env-health-bar {
+  display: flex;
+  height: 6px;
+  background: var(--cf-subtle-bg);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.env-health-bar.compact {
+  height: 4px;
+  flex: 1;
+}
+
+.env-health-legend {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 11px;
+  color: var(--cf-text-muted);
+}
+
+.env-health-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.env-health-sw {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+}
+
+.env-kv {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 7px 12px;
+  margin: 0;
+  font-size: 12px;
+}
+
+.env-kv dt {
+  color: var(--cf-text-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.env-kv dd {
+  margin: 0;
+  min-width: 0;
+}
+
+.env-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--cf-divider);
+}
+
 /* Side panel (detail peek) */
 .side-panel-backdrop {
   position: fixed;

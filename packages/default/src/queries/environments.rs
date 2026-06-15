@@ -1,5 +1,6 @@
 use crate::api::models::{
-    DeploymentPolicySummary, EnvironmentPolicyMapEntry, EnvironmentSummary, EnvironmentWithPolicies,
+    DeploymentPolicySummary, EnvironmentPolicyMapEntry, EnvironmentRollup, EnvironmentSummary,
+    EnvironmentWithPolicies,
 };
 use crate::config::EnvironmentConfig;
 use crate::models::environments::Environment;
@@ -19,6 +20,33 @@ pub struct EnvironmentRow {
     pub color_hex: String,
     pub is_active: bool,
     pub system_count: i64,
+    pub active_system_count: i64,
+    pub healthy_count: i64,
+    pub warning_count: i64,
+    pub critical_count: i64,
+    pub offline_count: i64,
+    pub cve_critical_high_count: i64,
+    pub flake_names: Vec<String>,
+}
+
+fn environment_summary_from_row(r: EnvironmentRow) -> EnvironmentSummary {
+    EnvironmentSummary {
+        id: r.id,
+        name: r.name,
+        description: r.description,
+        color_hex: r.color_hex,
+        is_active: r.is_active,
+        system_count: r.system_count,
+        rollup: EnvironmentRollup {
+            active_system_count: r.active_system_count,
+            healthy: r.healthy_count,
+            warning: r.warning_count,
+            critical: r.critical_count,
+            offline: r.offline_count,
+            cve_critical_high: r.cve_critical_high_count,
+            flakes: r.flake_names,
+        },
+    }
 }
 
 /// Fetch the environment record associated with this system
@@ -104,10 +132,18 @@ pub async fn list_environments_for_user(
                 e.description,
                 COALESCE(e.color_hex, '#6B7280') AS color_hex,
                 COALESCE(e.is_active, TRUE) AS is_active,
-                COUNT(s.id) AS system_count
+                COUNT(s.id)::bigint AS system_count,
+                COALESCE(er.active_system_count, 0)::bigint AS active_system_count,
+                COALESCE(er.healthy_count, 0)::bigint AS healthy_count,
+                COALESCE(er.warning_count, 0)::bigint AS warning_count,
+                COALESCE(er.critical_count, 0)::bigint AS critical_count,
+                COALESCE(er.offline_count, 0)::bigint AS offline_count,
+                COALESCE(er.cve_critical_high_count, 0)::bigint AS cve_critical_high_count,
+                COALESCE(er.flake_names, ARRAY[]::text[]) AS flake_names
             FROM environments e
+            LEFT JOIN view_environment_rollups er ON er.environment_id = e.id
             LEFT JOIN systems s ON s.environment_id = e.id
-            GROUP BY e.id, e.name, e.description, e.color_hex, e.is_active
+            GROUP BY e.id, e.name, e.description, e.color_hex, e.is_active, er.active_system_count, er.healthy_count, er.warning_count, er.critical_count, er.offline_count, er.cve_critical_high_count, er.flake_names
             ORDER BY e.name ASC
             "#,
         )
@@ -123,13 +159,21 @@ pub async fn list_environments_for_user(
                 e.description,
                 COALESCE(e.color_hex, '#6B7280') AS color_hex,
                 COALESCE(e.is_active, TRUE) AS is_active,
-                COUNT(s.id) AS system_count
+                COUNT(s.id)::bigint AS system_count,
+                COALESCE(er.active_system_count, 0)::bigint AS active_system_count,
+                COALESCE(er.healthy_count, 0)::bigint AS healthy_count,
+                COALESCE(er.warning_count, 0)::bigint AS warning_count,
+                COALESCE(er.critical_count, 0)::bigint AS critical_count,
+                COALESCE(er.offline_count, 0)::bigint AS offline_count,
+                COALESCE(er.cve_critical_high_count, 0)::bigint AS cve_critical_high_count,
+                COALESCE(er.flake_names, ARRAY[]::text[]) AS flake_names
             FROM environments e
             JOIN user_environment_memberships uem
               ON uem.environment_id = e.id
              AND uem.user_id = $1
+            LEFT JOIN view_environment_rollups er ON er.environment_id = e.id
             LEFT JOIN systems s ON s.environment_id = e.id
-            GROUP BY e.id, e.name, e.description, e.color_hex, e.is_active
+            GROUP BY e.id, e.name, e.description, e.color_hex, e.is_active, er.active_system_count, er.healthy_count, er.warning_count, er.critical_count, er.offline_count, er.cve_critical_high_count, er.flake_names
             ORDER BY e.name ASC
             "#,
         )
@@ -138,17 +182,7 @@ pub async fn list_environments_for_user(
         .await?
     };
 
-    Ok(rows
-        .into_iter()
-        .map(|r| EnvironmentSummary {
-            id: r.id,
-            name: r.name,
-            description: r.description,
-            color_hex: r.color_hex,
-            is_active: r.is_active,
-            system_count: r.system_count,
-        })
-        .collect())
+    Ok(rows.into_iter().map(environment_summary_from_row).collect())
 }
 
 /// Fetch a single environment by ID, scoped to a user.
@@ -169,11 +203,19 @@ pub async fn find_environment_for_user(
                 e.description,
                 COALESCE(e.color_hex, '#6B7280') AS color_hex,
                 COALESCE(e.is_active, TRUE) AS is_active,
-                COUNT(s.id) AS system_count
+                COUNT(s.id)::bigint AS system_count,
+                COALESCE(er.active_system_count, 0)::bigint AS active_system_count,
+                COALESCE(er.healthy_count, 0)::bigint AS healthy_count,
+                COALESCE(er.warning_count, 0)::bigint AS warning_count,
+                COALESCE(er.critical_count, 0)::bigint AS critical_count,
+                COALESCE(er.offline_count, 0)::bigint AS offline_count,
+                COALESCE(er.cve_critical_high_count, 0)::bigint AS cve_critical_high_count,
+                COALESCE(er.flake_names, ARRAY[]::text[]) AS flake_names
             FROM environments e
+            LEFT JOIN view_environment_rollups er ON er.environment_id = e.id
             LEFT JOIN systems s ON s.environment_id = e.id
             WHERE e.id = $1
-            GROUP BY e.id, e.name, e.description, e.color_hex, e.is_active
+            GROUP BY e.id, e.name, e.description, e.color_hex, e.is_active, er.active_system_count, er.healthy_count, er.warning_count, er.critical_count, er.offline_count, er.cve_critical_high_count, er.flake_names
             "#,
         )
         .bind(environment_id)
@@ -188,14 +230,22 @@ pub async fn find_environment_for_user(
                 e.description,
                 COALESCE(e.color_hex, '#6B7280') AS color_hex,
                 COALESCE(e.is_active, TRUE) AS is_active,
-                COUNT(s.id) AS system_count
+                COUNT(s.id)::bigint AS system_count,
+                COALESCE(er.active_system_count, 0)::bigint AS active_system_count,
+                COALESCE(er.healthy_count, 0)::bigint AS healthy_count,
+                COALESCE(er.warning_count, 0)::bigint AS warning_count,
+                COALESCE(er.critical_count, 0)::bigint AS critical_count,
+                COALESCE(er.offline_count, 0)::bigint AS offline_count,
+                COALESCE(er.cve_critical_high_count, 0)::bigint AS cve_critical_high_count,
+                COALESCE(er.flake_names, ARRAY[]::text[]) AS flake_names
             FROM environments e
             JOIN user_environment_memberships uem
               ON uem.environment_id = e.id
              AND uem.user_id = $1
+            LEFT JOIN view_environment_rollups er ON er.environment_id = e.id
             LEFT JOIN systems s ON s.environment_id = e.id
             WHERE e.id = $2
-            GROUP BY e.id, e.name, e.description, e.color_hex, e.is_active
+            GROUP BY e.id, e.name, e.description, e.color_hex, e.is_active, er.active_system_count, er.healthy_count, er.warning_count, er.critical_count, er.offline_count, er.cve_critical_high_count, er.flake_names
             "#,
         )
         .bind(user_id.unwrap())
@@ -204,14 +254,7 @@ pub async fn find_environment_for_user(
         .await?
     };
 
-    Ok(row.map(|r| EnvironmentSummary {
-        id: r.id,
-        name: r.name,
-        description: r.description,
-        color_hex: r.color_hex,
-        is_active: r.is_active,
-        system_count: r.system_count,
-    }))
+    Ok(row.map(environment_summary_from_row))
 }
 
 /// Create a new environment and return API summary shape.
@@ -222,11 +265,11 @@ pub async fn create_environment(
     color_hex: &str,
     is_active: bool,
 ) -> Result<EnvironmentSummary> {
-    let row = sqlx::query_as::<_, EnvironmentRow>(
+    let environment_id = sqlx::query_scalar::<_, Uuid>(
         r#"
         INSERT INTO environments (name, description, color_hex, is_active)
         VALUES ($1, $2, $3, $4)
-        RETURNING id, name, description, COALESCE(color_hex, '#6B7280') AS color_hex, COALESCE(is_active, TRUE) AS is_active, 0::bigint AS system_count
+        RETURNING id
         "#,
     )
     .bind(name)
@@ -236,14 +279,10 @@ pub async fn create_environment(
     .fetch_one(pool)
     .await?;
 
-    Ok(EnvironmentSummary {
-        id: row.id,
-        name: row.name,
-        description: row.description,
-        color_hex: row.color_hex,
-        is_active: row.is_active,
-        system_count: row.system_count,
-    })
+    match find_environment_for_user(pool, environment_id, None).await? {
+        Some(summary) => Ok(summary),
+        None => anyhow::bail!("created environment was not visible after insert"),
+    }
 }
 
 /// Delete an environment by id.
@@ -274,7 +313,7 @@ pub async fn update_environment_metadata(
     description: Option<&str>,
     color_hex: &str,
 ) -> Result<Option<EnvironmentSummary>> {
-    let row = sqlx::query_as::<_, EnvironmentRow>(
+    let environment_id = sqlx::query_scalar::<_, Uuid>(
         r#"
         UPDATE environments e
         SET name = $2,
@@ -282,17 +321,7 @@ pub async fn update_environment_metadata(
             color_hex = $4,
             updated_at = NOW()
         WHERE e.id = $1
-        RETURNING
-            e.id,
-            e.name,
-            e.description,
-            COALESCE(e.color_hex, '#6B7280') AS color_hex,
-            COALESCE(e.is_active, TRUE) AS is_active,
-            (
-                SELECT COUNT(s.id)::bigint
-                FROM systems s
-                WHERE s.environment_id = e.id
-            ) AS system_count
+        RETURNING e.id
         "#,
     )
     .bind(environment_id)
@@ -302,14 +331,10 @@ pub async fn update_environment_metadata(
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(|r| EnvironmentSummary {
-        id: r.id,
-        name: r.name,
-        description: r.description,
-        color_hex: r.color_hex,
-        is_active: r.is_active,
-        system_count: r.system_count,
-    }))
+    match environment_id {
+        Some(environment_id) => find_environment_for_user(pool, environment_id, None).await,
+        None => Ok(None),
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -433,11 +458,19 @@ pub async fn get_environment_with_policies(
             e.description,
             COALESCE(e.color_hex, '#6B7280') AS color_hex,
             COALESCE(e.is_active, TRUE) AS is_active,
-            COUNT(s.id) AS system_count
+            COUNT(s.id)::bigint AS system_count,
+            COALESCE(er.active_system_count, 0)::bigint AS active_system_count,
+            COALESCE(er.healthy_count, 0)::bigint AS healthy_count,
+            COALESCE(er.warning_count, 0)::bigint AS warning_count,
+            COALESCE(er.critical_count, 0)::bigint AS critical_count,
+            COALESCE(er.offline_count, 0)::bigint AS offline_count,
+            COALESCE(er.cve_critical_high_count, 0)::bigint AS cve_critical_high_count,
+            COALESCE(er.flake_names, ARRAY[]::text[]) AS flake_names
         FROM environments e
+        LEFT JOIN view_environment_rollups er ON er.environment_id = e.id
         LEFT JOIN systems s ON s.environment_id = e.id
         WHERE e.id = $1
-        GROUP BY e.id, e.name, e.description, e.color_hex, e.is_active
+        GROUP BY e.id, e.name, e.description, e.color_hex, e.is_active, er.active_system_count, er.healthy_count, er.warning_count, er.critical_count, er.offline_count, er.cve_critical_high_count, er.flake_names
         "#,
     )
     .bind(environment_id)
@@ -623,4 +656,37 @@ pub async fn remove_system_policy(pool: &PgPool, system_id: Uuid, policy_id: Uui
     .await?;
 
     Ok(result.rows_affected() > 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn environment_summary_from_row_maps_rollup_fields() {
+        let summary = environment_summary_from_row(EnvironmentRow {
+            id: Uuid::from_u128(42),
+            name: "production".to_string(),
+            description: Some("Live fleet".to_string()),
+            color_hex: "#0F766E".to_string(),
+            is_active: true,
+            system_count: 6,
+            active_system_count: 5,
+            healthy_count: 4,
+            warning_count: 1,
+            critical_count: 1,
+            offline_count: 0,
+            cve_critical_high_count: 9,
+            flake_names: vec!["infra".to_string(), "edge".to_string()],
+        });
+
+        assert_eq!(summary.system_count, 6);
+        assert_eq!(summary.rollup.active_system_count, 5);
+        assert_eq!(summary.rollup.healthy, 4);
+        assert_eq!(summary.rollup.warning, 1);
+        assert_eq!(summary.rollup.critical, 1);
+        assert_eq!(summary.rollup.offline, 0);
+        assert_eq!(summary.rollup.cve_critical_high, 9);
+        assert_eq!(summary.rollup.flakes, vec!["infra", "edge"]);
+    }
 }
