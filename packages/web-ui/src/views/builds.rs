@@ -507,25 +507,22 @@ pub fn BuildsView() -> Element {
                         "Completed ({build_history.read().len()})"
                     }
                 }
-                div {
-                    class: "px-4 pt-3 pb-4",
-                    BuildQueuePane {
-                        builds: if active_view() == BuildsTab::ActiveQueue {
-                            queue_data.clone()
-                        } else {
-                            completed_rows.clone()
-                        },
-                        selected_id: selected_build,
-                        can_requeue,
-                        on_build_action: move |(build_id, action)| {
-                            pending_action.set(Some(PendingAction::Build { build_id, action }))
-                        },
-                        on_log: move |build_id| {
-                            // Open log modal immediately when Logs button clicked (JSX parity)
-                            selected_build.set(Some(build_id));
-                            log_open.set(true);
-                        },
-                    }
+                BuildQueuePane {
+                    builds: if active_view() == BuildsTab::ActiveQueue {
+                        queue_data.clone()
+                    } else {
+                        completed_rows.clone()
+                    },
+                    selected_id: selected_build,
+                    can_requeue,
+                    on_build_action: move |(build_id, action)| {
+                        pending_action.set(Some(PendingAction::Build { build_id, action }))
+                    },
+                    on_log: move |build_id| {
+                        // Open log modal immediately when Logs button clicked (JSX parity)
+                        selected_build.set(Some(build_id));
+                        log_open.set(true);
+                    },
                 }
             }
 
