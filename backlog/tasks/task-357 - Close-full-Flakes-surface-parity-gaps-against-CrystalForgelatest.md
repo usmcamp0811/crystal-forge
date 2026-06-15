@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - gpt-5.5
 created_date: '2026-06-14 18:56'
-updated_date: '2026-06-15 01:18'
+updated_date: '2026-06-15 01:21'
 labels:
   - design-parity
   - flakes
@@ -76,8 +76,20 @@ Medium — primarily UI component work; backend changes minimal and scoped to pa
 - CrystalForgelatest reference: /home/mcamp/code/crystal-forge/CrystalForgelatest/components/FlakesView.jsx
 <!-- SECTION:DESCRIPTION:END -->
 
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Audit current `/flakes` against `CrystalForgelatest/components/FlakesView.jsx`, focusing on already-existing `FlakesListViewNew`, `FlakeTrayNew`, Add/Edit modal, delete dialog, and web-ui screenshots.
+2. Rework the list surface with minimal backend expansion only if required: add the missing 3-metric stat strip; align header action labels/casing and filter/table/card layout; ensure table and card cells render authoritative values or explicit unavailable/not persisted states.
+3. Bring Add/Edit modal closer to reference without storing secrets client-side: keep existing credential API wiring; present credential mode controls and test/save behavior in the reference layout; clearly disable or mark unsupported auto-sync interval behavior if no backend persistence exists.
+4. Replace the current delete dialog with a name-based type-to-confirm flow matching the reference while preserving backend deletion behavior where supported.
+5. Tighten the side tray: verify commit list filtering, timeline buckets, selected commit detail, pipeline dots/pills, rollout pill, file grid, and diff modal against the reference; adjust labels/styling and add test affordances only where needed for screenshot checks.
+6. Update `checks/web-ui/tests/integration-test.js` to assert and capture `/flakes` list/table parity, cards mode, Add/Edit modal credential surface, side tray commit explorer/diff modal, and delete type-to-confirm state.
+7. Run targeted verification and update TASK-357 notes/acceptance criteria as each criterion is satisfied.
+<!-- SECTION:PLAN:END -->
+
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-LOCK: gpt-5.5 on reckless in /home/mcamp/code/crystal-forge/TASK-357-flakes-surface-parity
+Implementation plan approved by user and recorded before code changes.
 <!-- SECTION:NOTES:END -->
