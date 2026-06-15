@@ -22,12 +22,13 @@ use crate::api::client::{
     ApiClientError, accept_flake_history_rewrite, create_flake, delete_flake,
     delete_flake_credentials, fetch_commit_diff, fetch_cve_scan_status, fetch_environments,
     fetch_flake_credentials, fetch_flake_timeline_for_tray, fetch_flake_timelines,
-    fetch_flake_timelines_for_ids, fetch_flakes, put_flake_credentials, request_sync_all_flakes,
-    request_sync_flake, test_flake_credentials, trigger_flake_config_cve_scan, update_flake,
+    fetch_flake_timelines_for_ids, fetch_flakes, fetch_systems, put_flake_credentials,
+    request_sync_all_flakes, request_sync_flake, test_flake_credentials,
+    trigger_flake_config_cve_scan, update_flake,
 };
 use crate::api::models::{
     BuildStatus as ApiBuildStatus, CreateFlakeCredentialRequest, CreateFlakeRequest,
-    EnvironmentSummary, FlakeCommitSystemPath, FlakeRegistryItem, FlakeTimeline,
+    EnvironmentSummary, FlakeCommitSystemPath, FlakeRegistryItem, FlakeTimeline, SystemsListParams,
     TestFlakeCredentialRequest, UpdateFlakeRequest,
 };
 use crate::components::layout::Card;
@@ -53,7 +54,6 @@ fn came_from_setup() -> bool {
 }
 
 const VIEW_PREF_KEY: &str = "crystal_forge.flakes.view";
-const FLAKE_TABLE_SCHEMA_NOTE: &str = "flakes(name, repo_url UNIQUE, branch)";
 const INITIAL_TIMELINE_FLAKES: usize = 1;
 const TIMELINE_BATCH_SIZE: usize = 2;
 const MAX_SYSTEM_CHIPS_RENDER: usize = 24;
@@ -254,7 +254,7 @@ struct EditFlakeDraft {
     name: String,
     repo_url: String,
     branch: String,
-    environment: String,
+    environments: Vec<String>,
     description: String,
     build_scope: String,
     credential_type: String,
@@ -286,13 +286,10 @@ fn AddFlakeForm(
             div {
                 class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6 cf-modal-panel-44",
                 onclick: |evt| evt.stop_propagation(),
-                h3 { class: "text-lg font-semibold text-white mb-1", "Register Flake" }
+                h3 { class: "text-lg font-semibold text-white mb-1", "Add flake" }
+                p { class: "text-sm {theme::text::SECONDARY} mb-4", "Register a new NixOS flake repository." }
                 div {
                     class: "space-y-4",
-                    p {
-                        class: "text-sm {theme::text::SECONDARY}",
-                        "Schema context: {FLAKE_TABLE_SCHEMA_NOTE}."
-                    }
                     div {
                         class: "grid grid-cols-1 md:grid-cols-2 gap-4",
                         label {
@@ -423,6 +420,19 @@ fn AddFlakeForm(
                                 draft.set(next);
                             }
                         }
+                        div { class: "md:col-span-2", style: "display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding: 12px; border: 1px solid var(--cf-divider); border-radius: 10px; background: color-mix(in oklab, var(--cf-page-bg) 45%, var(--cf-card-bg));",
+                            label { style: "display: flex; gap: 8px; align-items: center; font-size: 13px; color: var(--cf-text-muted); cursor: not-allowed;",
+                                input { r#type: "checkbox", disabled: true }
+                                span { "Auto-sync" }
+                            }
+                            div { class: "field",
+                                label { "Sync interval" }
+                                select { class: "input focus-ring", disabled: true,
+                                    option { "not persisted" }
+                                }
+                                div { class: "help", "Auto-sync scheduling is not persisted by the current backend API." }
+                            }
+                        }
                     }
                     if let Some(message) = error.read().clone() {
                         p { class: "text-sm text-red-300", "{message}" }
@@ -453,46 +463,51 @@ fn RemoveFlakeDialog(
     on_confirm: EventHandler<(bool, bool)>, // (hard_delete, cascade)
     on_cancel: EventHandler<()>,
 ) -> Element {
-    let mut hard_delete = use_signal(|| false);
-    let mut cascade = use_signal(|| false);
     let mut confirm_text = use_signal(|| String::new());
     let mut deleting = use_signal(|| false);
-
-    let has_dependencies = system_count > 0;
-    let needs_cascade = has_dependencies && !cascade();
-    let needs_hard_confirm = hard_delete();
-    let can_proceed = if needs_hard_confirm {
-        confirm_text() == "DELETE"
-    } else {
-        true
-    };
+    let can_proceed = confirm_text.read().trim() == flake_name;
 
     rsx! {
         div {
-            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
+            class: "modal-backdrop",
+            style: "z-index: 3300;",
             onclick: move |_| {
                 if !deleting() {
                     on_cancel.call(())
                 }
             },
             div {
-                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6 cf-modal-panel-34",
+                class: "modal",
+                style: "width: min(620px, 96vw); max-height: 92vh;",
                 onclick: |evt| evt.stop_propagation(),
-
-                // Header
-                h3 {
-                    class: "text-lg font-semibold text-white mb-2",
-                    "Delete flake {flake_name}?"
+                div { class: "modal-head", style: "background: rgba(248,113,113,0.06);",
+                    h2 { style: "color: #fecaca; display: flex; align-items: center; gap: 8px;",
+                        svg {
+                            width: "16",
+                            height: "16",
+                            view_box: "0 0 24 24",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            style: "color: #f87171;",
+                            path { d: "m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" }
+                            path { d: "M12 9v4" }
+                            path { d: "M12 17h.01" }
+                        }
+                        "Remove flake from registry"
+                    }
+                    p { "This stops sync for " span { class: "mono", style: "font-weight: 600;", "{flake_name}" } " and removes it from the registry." }
                 }
-
-                // Warning message
-                if has_dependencies {
+                div { class: "modal-body",
                     div {
-                        class: "mb-4 p-3 rounded-lg bg-amber-500/10 border border-amber-500/30",
-                        div {
-                            class: "flex items-start gap-2",
+                        class: "sd-callout sd-callout-danger",
+                        style: "flex-direction: column; align-items: stretch;",
+                        div { style: "display: flex; gap: 10px; align-items: flex-start;",
                             svg {
-                                class: "w-5 h-5 text-amber-400 shrink-0 mt-0.5",
+                                width: "14",
+                                height: "14",
                                 fill: "none",
                                 stroke: "currentColor",
                                 view_box: "0 0 24 24",
@@ -503,130 +518,60 @@ fn RemoveFlakeDialog(
                                     d: "M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
                                 }
                             }
-                            div {
-                                p {
-                                    class: "text-sm font-medium text-amber-200",
-                                    "This flake is linked to {system_count} system(s)"
-                                }
-                                p {
-                                    class: "text-xs text-amber-300/80 mt-1",
-                                    "Enable cascade delete to remove all related evaluations, builds, and deployments"
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    p {
-                        class: "text-sm {theme::text::SECONDARY} mb-4",
-                        "This will soft-delete the flake (can be recovered). Related commits are retained."
-                    }
-                }
-
-                // Delete options
-                div {
-                    class: "space-y-3 mb-6",
-
-                    // Cascade checkbox (only if has dependencies)
-                    if has_dependencies {
-                        label {
-                            class: "flex items-start gap-3 cursor-pointer",
-                            input {
-                                r#type: "checkbox",
-                                class: "mt-1 w-4 h-4 rounded border-gray-600 bg-gray-800 text-violet-500 focus:ring-violet-500 focus:ring-offset-gray-900",
-                                checked: cascade(),
-                                onchange: move |evt| cascade.set(evt.checked())
-                            }
-                            div {
-                                span {
-                                    class: "text-sm font-medium text-gray-200",
-                                    "Also delete all evaluations, builds, and deployments (cascade)"
-                                }
-                                p {
-                                    class: "text-xs text-gray-400 mt-0.5",
-                                    "This will permanently remove all related data"
+                            div { style: "font-size: 12px;",
+                                div { style: "font-weight: 600; color: #fecaca; margin-bottom: 4px;", "What happens" }
+                                ul { style: "margin: 0; padding-left: 18px; color: var(--cf-text-secondary); line-height: 1.6;",
+                                    li { "Sync polling for this flake stops immediately" }
+                                    li { "{system_count} system" if system_count != 1 { "s" } " on this flake may need to be retargeted" }
+                                    li { "Tracked commits are retained for audit where the backend supports soft delete" }
+                                    li { "Repository credentials are not deleted by this action" }
                                 }
                             }
                         }
                     }
-
-                    // Hard delete checkbox
-                    label {
-                        class: "flex items-start gap-3 cursor-pointer",
+                    div { class: "field",
+                        label { "Type " span { class: "mono", style: "color: #fecaca; font-weight: 700;", "{flake_name}" } " to confirm" }
                         input {
-                            r#type: "checkbox",
-                            class: "mt-1 w-4 h-4 rounded border-gray-600 bg-gray-800 text-red-500 focus:ring-red-500 focus:ring-offset-gray-900",
-                            checked: hard_delete(),
-                            onchange: move |evt| {
-                                hard_delete.set(evt.checked());
-                                if !evt.checked() {
-                                    confirm_text.set(String::new());
-                                }
-                            }
-                        }
-                        div {
-                            span {
-                                class: "text-sm font-medium text-gray-200",
-                                "Permanently delete (hard delete)"
-                            }
-                            p {
-                                class: "text-xs text-gray-400 mt-0.5",
-                                "Cannot be undone. Default is soft delete (recoverable)"
-                            }
-                        }
-                    }
-                }
-
-                // Hard delete confirmation input
-                if hard_delete() {
-                    div {
-                        class: "mb-6 p-4 rounded-lg bg-red-500/10 border border-red-500/30",
-                        p {
-                            class: "text-sm font-medium text-red-200 mb-2",
-                            "⚠️ This will PERMANENTLY delete \"{flake_name}\" and cannot be undone."
-                        }
-                        p {
-                            class: "text-xs text-red-300/80 mb-3",
-                            "Type DELETE to confirm:"
-                        }
-                        input {
-                            class: "w-full rounded-lg px-3 py-2 text-sm font-mono bg-gray-800 border border-gray-600 focus:border-red-500 focus:ring-1 focus:ring-red-500 text-white",
-                            r#type: "text",
-                            placeholder: "DELETE",
-                            value: "{confirm_text()}",
+                            class: "input focus-ring mono",
+                            placeholder: "{flake_name}",
+                            value: "{confirm_text}",
+                            autofocus: true,
+                            style: if !confirm_text.read().is_empty() && !can_proceed { "border-color: rgba(248,113,113,0.5);" } else { "" },
                             oninput: move |evt| confirm_text.set(evt.value())
                         }
                     }
                 }
-
-                // Buttons
-                div {
-                    class: "flex gap-3",
+                div { class: "modal-foot",
                     button {
-                        class: "flex-1 px-4 py-2 rounded-lg font-medium text-sm transition-colors bg-gray-700 hover:bg-gray-600 text-white",
+                        class: "btn btn-ghost focus-ring",
                         disabled: deleting(),
                         onclick: move |_| on_cancel.call(()),
                         "Cancel"
                     }
                     button {
-                        class: "flex-1 px-4 py-2 rounded-lg font-medium text-sm transition-colors",
-                        class: if can_proceed && !needs_cascade && !deleting() {
-                            "bg-red-500 hover:bg-red-400 text-white"
-                        } else {
-                            "bg-gray-600 text-gray-400 cursor-not-allowed"
-                        },
-                        disabled: !can_proceed || needs_cascade || deleting(),
+                        class: "btn focus-ring",
+                        style: if can_proceed && !deleting() { "background: #dc2626; color: white;" } else { "background: var(--cf-subtle-bg); color: var(--cf-text-muted);" },
+                        disabled: !can_proceed || deleting(),
                         onclick: move |_| {
                             deleting.set(true);
-                            on_confirm.call((hard_delete(), cascade()));
+                            on_confirm.call((false, false));
                         },
                         if deleting() {
-                            "Deleting..."
-                        } else if needs_cascade {
-                            "Enable cascade to proceed"
-                        } else if needs_hard_confirm && !can_proceed {
-                            "Type DELETE to confirm"
+                            "Removing..."
                         } else {
-                            "Delete Flake"
+                            svg {
+                                width: "13",
+                                height: "13",
+                                view_box: "0 0 24 24",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                stroke_linecap: "round",
+                                stroke_linejoin: "round",
+                                style: "margin-right: 6px; vertical-align: text-bottom;",
+                                path { d: "M18 6 6 18M6 6l12 12" }
+                            }
+                            "Remove flake"
                         }
                     }
                 }
@@ -695,8 +640,7 @@ fn EditFlakeDialog(
     let draft_for_name = draft.clone();
     let draft_for_repo = draft.clone();
     let draft_for_branch = draft.clone();
-    let draft_for_description = draft.clone();
-    let draft_for_build_scope = draft.clone();
+
     let draft_signal = use_signal(|| draft.clone());
     {
         let mut draft_signal = draft_signal.clone();
@@ -783,20 +727,28 @@ fn EditFlakeDialog(
                                 }
                             }
                         }
-                        label {
-                            class: "field",
-                            span { "Build Scope" }
-                            select {
-                                class: "input focus-ring",
-                                value: "{draft.build_scope}",
-                                onchange: move |evt| {
-                                    let mut next = draft_for_build_scope.clone();
-                                    next.build_scope = evt.value();
-                                    on_change.call(next);
-                                },
-                                option { value: "cf_systems_only", "CF systems only" }
-                                option { value: "all_configs", "All nixosConfigurations" }
+                        div { class: "field",
+                            label { "Environments" }
+                            div { style: "display: flex; align-items: center; min-height: 34px; gap: 6px; flex-wrap: wrap;",
+                                if draft.environments.is_empty() {
+                                    span { style: "font-size: 12px; color: var(--cf-text-muted);", "None assigned" }
+                                } else {
+                                    for env in draft.environments.iter().take(6) {
+                                        {
+                                            let color_hex = environments.iter()
+                                                .find(|e| e.name.eq_ignore_ascii_case(env))
+                                                .map(|e| e.color_hex.clone());
+                                            rsx! { EnvBadgeNew { env: env.clone(), color_hex } }
+                                        }
+                                    }
+                                    if draft.environments.len() > 6 {
+                                        span { class: "chip chip-unknown", style: "font-size: 10px;",
+                                            "+{draft.environments.len() - 6}"
+                                        }
+                                    }
+                                }
                             }
+                            div { class: "help", "Derived from the systems built off this flake — not assigned here." }
                         }
                     }
 
@@ -805,14 +757,28 @@ fn EditFlakeDialog(
                         input {
                             class: "input focus-ring",
                             value: "{draft.description}",
-                            placeholder: "Short description shown in the registry",
-                            oninput: move |evt| {
-                                let mut next = draft_for_description.clone();
-                                next.description = evt.value();
-                                on_change.call(next);
-                            },
+                            placeholder: "not persisted",
+                            disabled: true,
+                        }
+                        div { class: "help", "Description is not persisted by the current backend API." }
+                    }
+
+                    div { style: "display: grid; grid-template-columns: 1fr 1fr; gap: 14px;",
+                        label { style: "display: flex; gap: 8px; align-items: center; font-size: 13px; cursor: pointer;",
+                            input { r#type: "checkbox", disabled: true, style: "accent-color: var(--cf-brand-purple);" }
+                            span { "Auto-sync" }
+                        }
+                        div { class: "field",
+                            label { "Sync interval" }
+                            select { class: "input focus-ring", disabled: true,
+                                option { value: "1m", "Every 1 min" }
+                                option { value: "5m", selected: true, "Every 5 min" }
+                                option { value: "15m", "Every 15 min" }
+                                option { value: "1h", "Every hour" }
+                            }
                         }
                     }
+                    div { class: "help", "Auto-sync scheduling is not persisted by the current backend API." }
 
                     FlakeCredentialFields {
                         flake_id: Some(draft.id),
@@ -1012,84 +978,20 @@ fn FlakeCredentialFields(
             }
 
             if credential_type == "ssh_key" {
-                div {
-                    style: "display: grid; gap: 10px;",
-                    div { style: "display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: center;",
-                        span { style: "font-size: 13px; color: var(--cf-text-secondary);", "SSH username" }
-                        input {
-                            class: "input focus-ring",
-                            value: "{credential_ssh_username}",
-                            placeholder: "git",
-                            oninput: move |evt| on_change.call(("credential_ssh_username".to_string(), evt.value())),
-                        }
-                    }
-                    div {
-                        class: "field",
-                        span { "Private key" }
-                        textarea {
-                            class: "input focus-ring",
-                            rows: "6",
-                            value: "{credential_secret}",
-                            placeholder: if has_existing_secret {
-                                "-----BEGIN OPENSSH PRIVATE KEY-----\n(leave blank to keep existing key)"
-                            } else {
-                                "-----BEGIN OPENSSH PRIVATE KEY-----"
-                            },
-                            oninput: move |evt| on_change.call(("credential_secret".to_string(), evt.value())),
-                        }
-                        div {
-                            style: "margin-top: 6px; font-size: 11px; color: var(--cf-text-muted);",
-                            "Paste an unencrypted SSH private key. Leave blank to keep the existing key."
-                        }
-                    }
+                SshCredSection {
+                    ssh_username: credential_ssh_username.clone(),
+                    credential_secret: credential_secret.clone(),
+                    has_existing_secret,
+                    on_change: on_change.clone(),
                 }
             }
 
-            if credential_type == "pat" {
-                div { style: "display: grid; gap: 10px;",
-                    div { style: "display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: center;",
-                        span { style: "font-size: 13px; color: var(--cf-text-secondary);", "Token Username (optional)" }
-                        input {
-                            class: "input focus-ring",
-                            value: "{credential_username}",
-                            placeholder: "oauth2",
-                            oninput: move |evt| on_change.call(("credential_username".to_string(), evt.value())),
-                        }
-                    }
-                    div { style: "display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: center;",
-                        span { style: "font-size: 13px; color: var(--cf-text-secondary);", "Access Token" }
-                        input {
-                            class: "input focus-ring",
-                            r#type: "password",
-                            value: "{credential_secret}",
-                            placeholder: if has_existing_secret { "•••••••• (leave blank to keep existing)" } else { "glpat-..." },
-                            oninput: move |evt| on_change.call(("credential_secret".to_string(), evt.value())),
-                        }
-                    }
-                }
-            }
-
-            if credential_type == "username_password" {
-                div { style: "display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: end;",
-                    label {
-                        class: "field",
-                        span { "Username" }
-                        input {
-                            class: "input focus-ring",
-                            value: "{credential_username}",
-                            oninput: move |evt| on_change.call(("credential_username".to_string(), evt.value())),
-                        }
-                    }
-                    label {
-                        class: "field",
-                        span { "Password" }
-                        input {
-                            class: "input focus-ring",
-                            r#type: "password",
-                            value: "{credential_secret}",
-                            oninput: move |evt| on_change.call(("credential_secret".to_string(), evt.value())),
-                        }
-                    }
+            if credential_type == "pat" || credential_type == "username_password" {
+                HttpsCredSection {
+                    credential_username: credential_username.clone(),
+                    credential_secret: credential_secret.clone(),
+                    has_existing_secret,
+                    on_change: on_change.clone(),
                 }
             }
 
@@ -1101,6 +1003,158 @@ fn FlakeCredentialFields(
             }
 
 
+        }
+    }
+}
+
+/// SSH credential sub-section: shows a preview card when a key already exists,
+/// with a "Replace key" toggle to reveal the paste-in form.
+#[component]
+fn SshCredSection(
+    ssh_username: String,
+    credential_secret: String,
+    has_existing_secret: bool,
+    on_change: EventHandler<(String, String)>,
+) -> Element {
+    let mut replacing = use_signal(|| !has_existing_secret);
+
+    rsx! {
+        div { style: "display: flex; flex-direction: column; gap: 10px;",
+            // Preview card — only when a stored key exists and not currently replacing
+            if has_existing_secret && !*replacing.read() {
+                div {
+                    style: "padding: 10px 12px; border: 1px solid var(--cf-divider); border-radius: 8px; font-size: 11px;",
+                    div {
+                        style: "display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;",
+                        span {
+                            class: "mono",
+                            style: "font-weight: 600;",
+                            if ssh_username.trim().is_empty() { "git" } else { "{ssh_username}" }
+                            " — stored SSH key"
+                        }
+                        button {
+                            class: "btn btn-ghost focus-ring xs",
+                            onclick: move |_| replacing.set(true),
+                            "Replace key"
+                        }
+                    }
+                    div { style: "color: var(--cf-text-muted);",
+                        span { class: "mono", "•••• •••• •••• ••••" }
+                        " · Encrypted at rest"
+                    }
+                }
+            } else {
+                // Add / replace form
+                div { style: "display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: center;",
+                    span { style: "font-size: 13px; color: var(--cf-text-secondary);", "SSH username" }
+                    input {
+                        class: "input focus-ring",
+                        value: "{ssh_username}",
+                        placeholder: "git",
+                        oninput: move |evt| on_change.call(("credential_ssh_username".to_string(), evt.value())),
+                    }
+                }
+                div { class: "field",
+                    span { "Private key" }
+                    textarea {
+                        class: "input focus-ring mono",
+                        rows: "5",
+                        value: "{credential_secret}",
+                        placeholder: "-----BEGIN OPENSSH PRIVATE KEY-----\n…\n-----END OPENSSH PRIVATE KEY-----",
+                        style: "font-size: 11px; font-family: var(--font-mono); resize: vertical; padding: 10px;",
+                        oninput: move |evt| on_change.call(("credential_secret".to_string(), evt.value())),
+                    }
+                    div { class: "help", "Encrypted at rest. Crystal Forge never logs key material." }
+                }
+                if has_existing_secret {
+                    div { style: "display: flex; justify-content: flex-end;",
+                        button {
+                            class: "btn btn-ghost focus-ring xs",
+                            onclick: move |_| {
+                                replacing.set(false);
+                                on_change.call(("credential_secret".to_string(), String::new()));
+                            },
+                            "Cancel"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// HTTPS/PAT credential sub-section: shows a preview card when a token already
+/// exists, with a "Replace token" toggle to reveal the input form.
+#[component]
+fn HttpsCredSection(
+    credential_username: String,
+    credential_secret: String,
+    has_existing_secret: bool,
+    on_change: EventHandler<(String, String)>,
+) -> Element {
+    let mut replacing = use_signal(|| !has_existing_secret);
+
+    rsx! {
+        div { style: "display: flex; flex-direction: column; gap: 10px;",
+            if has_existing_secret && !*replacing.read() {
+                div {
+                    style: "padding: 10px 12px; border: 1px solid var(--cf-divider); border-radius: 8px; font-size: 11px;",
+                    div {
+                        style: "display: flex; justify-content: space-between; align-items: center;",
+                        span {
+                            class: "mono",
+                            style: "font-weight: 600;",
+                            "•••••••••••••••••••"
+                        }
+                        button {
+                            class: "btn btn-ghost focus-ring xs",
+                            onclick: move |_| replacing.set(true),
+                            "Replace token"
+                        }
+                    }
+                    if !credential_username.trim().is_empty() {
+                        div { style: "margin-top: 4px; color: var(--cf-text-muted);",
+                            "User: "
+                            span { class: "mono", "{credential_username}" }
+                        }
+                    }
+                }
+            } else {
+                div { style: "display: grid; grid-template-columns: 1fr 2fr; gap: 10px;",
+                    div { class: "field",
+                        label { "Username" }
+                        input {
+                            class: "input focus-ring",
+                            value: "{credential_username}",
+                            placeholder: "ops-bot",
+                            oninput: move |evt| on_change.call(("credential_username".to_string(), evt.value())),
+                        }
+                    }
+                    div { class: "field",
+                        label { "Token / password" }
+                        input {
+                            class: "input focus-ring mono",
+                            r#type: "password",
+                            value: "{credential_secret}",
+                            placeholder: "glpat-… or ghp_…",
+                            style: "font-size: 12px;",
+                            oninput: move |evt| on_change.call(("credential_secret".to_string(), evt.value())),
+                        }
+                    }
+                }
+                if has_existing_secret {
+                    div { style: "display: flex; justify-content: flex-end;",
+                        button {
+                            class: "btn btn-ghost focus-ring xs",
+                            onclick: move |_| {
+                                replacing.set(false);
+                                on_change.call(("credential_secret".to_string(), String::new()));
+                            },
+                            "Cancel"
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -1137,11 +1191,7 @@ fn start_edit_flake(
             name: flake.name,
             repo_url: flake.repo_url,
             branch: flake.branch,
-            environment: flake
-                .environments
-                .first()
-                .cloned()
-                .unwrap_or_else(|| "production".to_string()),
+            environments: flake.environments.clone(),
             description: String::new(),
             build_scope: flake.build_scope,
             credential_type: "none".to_string(),
@@ -2697,6 +2747,23 @@ mod tests {
             Some("/nix/store/current-gamma")
         );
     }
+
+    #[test]
+    fn registry_mapping_does_not_fabricate_environment_badges() {
+        let item = FlakeRegistryItem {
+            id: 7,
+            name: "platform-core".to_string(),
+            repo_url: "https://gitlab.com/crystal-forge/platform-core.git".to_string(),
+            branch: "main".to_string(),
+            build_scope: "cf_systems_only".to_string(),
+            system_count: 3,
+        };
+
+        let mapped = map_registry_flake_to_view(&item);
+
+        assert_eq!(mapped.environment, "");
+        assert_eq!(mapped.description, "Build scope: cf_systems_only");
+    }
 }
 
 // ============================================================================
@@ -2749,10 +2816,8 @@ mod tests {
 /// Uses live API data for flakes, timelines, and commit diffs.
 #[component]
 pub fn FlakesListViewNew() -> Element {
-    // Auth state for gating admin-only mutation controls
     let app_state = use_context::<Signal<AppState>>();
     let is_admin_user = auth::is_admin(&app_state.read().auth);
-
     let mut view_mode = use_signal(|| "table");
     let mut search_query = use_signal(String::new);
     let mut selected_flake = use_signal(|| None::<MockFlakeItem>);
@@ -2790,6 +2855,42 @@ pub fn FlakesListViewNew() -> Element {
         _ => Vec::new(),
     };
 
+    // Fetch systems (large page) to derive environments-per-flake since the registry API
+    // does not expose which environments a flake spans. Tracked by TASK-357.1.
+    let systems_resource = use_resource(|| async {
+        fetch_systems(&SystemsListParams {
+            page: Some(1),
+            per_page: Some(500),
+            search: None,
+            health_status: None,
+            deployment_status: None,
+            environment: None,
+            sort_by: None,
+            sort_order: None,
+        })
+        .await
+    });
+    // Build flake_id → sorted/deduped environment names
+    let flake_env_map: HashMap<i32, Vec<String>> = {
+        let systems = match systems_resource.read().as_ref() {
+            Some(Ok(resp)) => resp.items.clone(),
+            _ => Vec::new(),
+        };
+        let mut map: HashMap<i32, Vec<String>> = HashMap::new();
+        for system in &systems {
+            if let (Some(flake_id), Some(env)) = (system.flake_id, system.environment.clone()) {
+                let entry = map.entry(flake_id).or_default();
+                if !entry.iter().any(|e: &String| e.eq_ignore_ascii_case(&env)) {
+                    entry.push(env);
+                }
+            }
+        }
+        for envs in map.values_mut() {
+            envs.sort();
+        }
+        map
+    };
+
     let (raw_flakes, load_error, loading) = match flakes_resource.read().as_ref() {
         Some(Ok(items)) => (items.clone(), None, false),
         Some(Err(err)) => (Vec::new(), Some(err.to_string()), false),
@@ -2810,6 +2911,10 @@ pub fn FlakesListViewNew() -> Element {
         .iter()
         .map(|item| {
             let mut mapped = map_registry_flake_to_view(item);
+            // Populate environment from systems data
+            if let Some(envs) = flake_env_map.get(&item.id) {
+                mapped.environment = envs.join(",");
+            }
             if let Some(commits) = commit_map.get(&item.id) {
                 if let Some(latest) = commits.first() {
                     mapped.latest_commit = latest.sha.clone();
@@ -2864,6 +2969,14 @@ pub fn FlakesListViewNew() -> Element {
         .iter()
         .filter(|f| f.status == "synced")
         .count();
+    let syncing_count = filtered_flakes
+        .iter()
+        .filter(|f| f.status == "syncing")
+        .count();
+    let error_count = filtered_flakes
+        .iter()
+        .filter(|f| f.status == "error")
+        .count();
     let selected_flake_value = selected_flake.read().clone();
     let selected_flake_for_timeline = selected_flake.clone();
     // Use extended commit limit (200) for the tray view
@@ -2917,9 +3030,8 @@ pub fn FlakesListViewNew() -> Element {
                         "{flake_count} tracked · {total_systems} systems · {synced_count} synced"
                     }
                 }
-                // Admin-only mutation controls: Sync all, Add flake
-                if is_admin_user {
-                    div { style: "display: flex; gap: 8px;",
+                div { style: "display: flex; gap: 8px;",
+                    if is_admin_user {
                         button {
                             class: "btn btn-ghost focus-ring",
                             onclick: move |_| {
@@ -2973,6 +3085,39 @@ pub fn FlakesListViewNew() -> Element {
                             " Add flake"
                         }
                     }
+                }
+            }
+
+            div { class: "stat-strip flakes-stat-strip", "data-testid": "flakes-stat-strip",
+                div { class: "stat",
+                    div { class: "stat-accent", style: "--stat-color: var(--cf-brand-purple);" }
+                    div { class: "stat-label", "Tracked" }
+                    div { class: "stat-value", "{flake_count}" }
+                    div { class: "stat-meta", "registered flakes" }
+                }
+                div { class: "stat",
+                    div { class: "stat-accent", style: "--stat-color: #60a5fa;" }
+                    div { class: "stat-label", "Systems" }
+                    div { class: "stat-value", "{total_systems}" }
+                    div { class: "stat-meta", "mapped hosts" }
+                }
+                div { class: "stat",
+                    div { class: "stat-accent", style: "--stat-color: #34d399;" }
+                    div { class: "stat-label", "Synced" }
+                    div { class: "stat-value", "{synced_count}" }
+                    div { class: "stat-meta", "latest status clean" }
+                }
+                div { class: "stat",
+                    div { class: "stat-accent", style: "--stat-color: #f59e0b;" }
+                    div { class: "stat-label", "Syncing" }
+                    div { class: "stat-value", "{syncing_count}" }
+                    div { class: "stat-meta", "queued or building" }
+                }
+                div { class: "stat",
+                    div { class: "stat-accent", style: "--stat-color: #f87171;" }
+                    div { class: "stat-label", "Errors" }
+                    div { class: "stat-value", "{error_count}" }
+                    div { class: "stat-meta", "needs attention" }
                 }
             }
 
@@ -3049,8 +3194,7 @@ pub fn FlakesListViewNew() -> Element {
                 div { class: "card", style: "padding: 10px 14px; color: var(--cf-text-secondary);", "{msg}" }
             }
 
-            // Add flake form (admin-only, guarded by show_add_form which is only set by admin button)
-            if is_admin_user && *show_add_form.read() {
+            if *show_add_form.read() {
                 AddFlakeForm {
                     draft: draft,
                     error: add_error,
@@ -3129,7 +3273,7 @@ pub fn FlakesListViewNew() -> Element {
 
                     if mode == "table" {
                         let all_flakes_for_edit = all_flakes.clone();
-                        rsx! { FlakeTableNew { flakes: filtered_flakes.clone(), selected_id, is_admin: is_admin_user, on_select: move |f| selected_flake.set(Some(f)), on_sync: move |flake_id| {
+                        rsx! { FlakeTableNew { flakes: filtered_flakes.clone(), selected_id, is_admin: is_admin_user, env_colors: db_environments.clone(), on_select: move |f| selected_flake.set(Some(f)), on_sync: move |flake_id| {
                             let mut reload_nonce = reload_nonce.clone();
                             spawn(async move {
                                 let result = request_sync_flake(flake_id).await;
@@ -3158,7 +3302,7 @@ pub fn FlakesListViewNew() -> Element {
                                     name: current.name.clone(),
                                     repo_url: current.url.clone(),
                                     branch: current.branch.clone(),
-                                    environment: current.environment.clone(),
+                                    environments: current.environment.split(',').map(str::trim).filter(|s| !s.is_empty()).map(ToString::to_string).collect(),
                                     description: current.description.clone(),
                                     build_scope: current.build_scope.clone(),
                                     credential_type: "none".to_string(),
@@ -3195,7 +3339,7 @@ pub fn FlakesListViewNew() -> Element {
                         } } }
                     } else {
                         let all_flakes_for_edit = all_flakes.clone();
-                        rsx! { FlakeCardsNew { flakes: filtered_flakes.clone(), selected_id, is_admin: is_admin_user, on_select: move |f| selected_flake.set(Some(f)), on_sync: move |flake_id| {
+                        rsx! { FlakeCardsNew { flakes: filtered_flakes.clone(), selected_id, is_admin: is_admin_user, env_colors: db_environments.clone(), on_select: move |f| selected_flake.set(Some(f)), on_sync: move |flake_id| {
                             let mut reload_nonce = reload_nonce.clone();
                             spawn(async move {
                                 let result = request_sync_flake(flake_id).await;
@@ -3224,7 +3368,7 @@ pub fn FlakesListViewNew() -> Element {
                                     name: current.name.clone(),
                                     repo_url: current.url.clone(),
                                     branch: current.branch.clone(),
-                                    environment: current.environment.clone(),
+                                    environments: current.environment.split(',').map(str::trim).filter(|s| !s.is_empty()).map(ToString::to_string).collect(),
                                     description: current.description.clone(),
                                     build_scope: current.build_scope.clone(),
                                     credential_type: "none".to_string(),
@@ -3304,7 +3448,7 @@ pub fn FlakesListViewNew() -> Element {
                                         name: current.name.clone(),
                                         repo_url: current.url.clone(),
                                         branch: current.branch.clone(),
-                                        environment: current.environment.clone(),
+                                        environments: current.environment.split(',').map(str::trim).filter(|s| !s.is_empty()).map(ToString::to_string).collect(),
                                         description: current.description.clone(),
                                         build_scope: current.build_scope.clone(),
                                         credential_type: "none".to_string(),
@@ -3557,7 +3701,9 @@ fn map_registry_flake_to_view(item: &FlakeRegistryItem) -> MockFlakeItem {
         latest_message: "No commits yet".to_string(),
         latest_author: "—".to_string(),
         last_sync_at: "Not synced yet".to_string(),
-        environment: build_scope_label.to_string(),
+        // The current registry API does not expose the environments spanned by a flake.
+        // Render this as an explicit unsupported/pending value instead of fabricating one.
+        environment: String::new(),
         error_msg: None,
         total_commits: 0,
     }
@@ -4088,6 +4234,7 @@ fn FlakeTableNew(
     flakes: Vec<MockFlakeItem>,
     selected_id: Option<i32>,
     is_admin: bool,
+    #[props(default)] env_colors: Vec<EnvironmentSummary>,
     on_select: EventHandler<MockFlakeItem>,
     on_sync: EventHandler<i32>,
     on_edit: EventHandler<i32>,
@@ -4102,6 +4249,7 @@ fn FlakeTableNew(
                         th { "Status" }
                         th { "Branch" }
                         th { "Systems" }
+                        th { "Environments" }
                         th { "Latest commit" }
                         th { "Author" }
                         th { "Synced" }
@@ -4142,6 +4290,10 @@ fn FlakeTableNew(
 
                                     // Systems count
                                     td { style: "font-size: 13px;", "{flake.system_count}" }
+
+                                    td {
+                                        FlakeEnvBadgesNew { flake: flake.clone(), max: 3, align: "flex-start", env_colors: env_colors.clone() }
+                                    }
 
                                     // Latest commit
                                     td {
@@ -4261,6 +4413,7 @@ fn FlakeCardsNew(
     flakes: Vec<MockFlakeItem>,
     selected_id: Option<i32>,
     is_admin: bool,
+    #[props(default)] env_colors: Vec<EnvironmentSummary>,
     on_select: EventHandler<MockFlakeItem>,
     on_sync: EventHandler<i32>,
     on_edit: EventHandler<i32>,
@@ -4323,7 +4476,11 @@ fn FlakeCardsNew(
                                     }
                                     div { class: "sys-fqdn", "{flake.url}" }
                                 }
-                                EnvBadgeNew { env: flake.environment.clone() }
+                            }
+
+                            div { style: "display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;",
+                                span { style: "font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--cf-text-muted); font-weight: 600; flex-shrink: 0;", "Environments" }
+                                FlakeEnvBadgesNew { flake: flake.clone(), max: 6, align: "flex-start", env_colors: env_colors.clone() }
                             }
 
                             // Description (limit to 2 lines)
@@ -4455,17 +4612,72 @@ fn FlakeCardsNew(
 // Helper component for environment badge
 #[allow(dead_code)]
 #[component]
-fn EnvBadgeNew(env: String) -> Element {
-    let chip_class = match env.as_str() {
-        "production" => "chip-critical",
-        "staging" => "chip-warning",
-        "dev" => "chip-info",
-        "edge" => "chip-info",
-        _ => "chip-unknown",
+fn EnvBadgeNew(env: String, #[props(default)] color_hex: Option<String>) -> Element {
+    let label = if env.trim().is_empty() {
+        "not persisted"
+    } else {
+        env.trim()
     };
+    if let Some(hex) = color_hex.as_deref().filter(|h| !h.trim().is_empty()) {
+        // Use the environment's assigned color as an inline pill style.
+        let hex = hex.trim_start_matches('#');
+        let style = format!(
+            "background: #{hex}22; color: #{hex}; border: 1px solid #{hex}55; \
+             border-radius: 4px; padding: 2px 7px; font-size: 11px; font-weight: 600; \
+             white-space: nowrap;"
+        );
+        rsx! { span { style: "{style}", "{label}" } }
+    } else {
+        let chip_class = match label {
+            "production" => "chip-critical",
+            "staging" => "chip-warning",
+            "dev" | "edge" => "chip-info",
+            _ => "chip-unknown",
+        };
+        rsx! { span { class: "chip {chip_class}", "{label}" } }
+    }
+}
+
+#[allow(dead_code)]
+#[component]
+fn FlakeEnvBadgesNew(
+    flake: MockFlakeItem,
+    max: usize,
+    align: &'static str,
+    #[props(default)] env_colors: Vec<EnvironmentSummary>,
+) -> Element {
+    let envs = if flake.environment.trim().is_empty() {
+        Vec::new()
+    } else {
+        flake
+            .environment
+            .split(',')
+            .map(str::trim)
+            .filter(|env| !env.is_empty())
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+    };
+    let shown = envs.iter().take(max).cloned().collect::<Vec<_>>();
+    let extra = envs.len().saturating_sub(shown.len());
 
     rsx! {
-        span { class: "chip {chip_class}", "{env}" }
+        div { style: "display: flex; align-items: center; gap: 4px; flex-wrap: wrap; justify-content: {align};",
+            if shown.is_empty() {
+                EnvBadgeNew { env: String::new() }
+            } else {
+                for env in shown {
+                    {
+                        let color_hex = env_colors.iter()
+                            .find(|e| e.name.eq_ignore_ascii_case(&env))
+                            .map(|e| e.color_hex.clone());
+                        rsx! { EnvBadgeNew { env, color_hex } }
+                    }
+                }
+                if extra > 0 {
+                    span { class: "chip chip-unknown", style: "font-size: 10px;", title: "Additional environments are hidden", "+{extra}" }
+                }
+            }
+        }
     }
 }
 

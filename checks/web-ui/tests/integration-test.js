@@ -1107,6 +1107,190 @@ async function unrouteFlakeWarningData(page) {
   await page.unroute("**/api/v1/flakes");
 }
 
+function buildFlakeParityFixture() {
+  const nowMs = Date.now();
+  const flakes = [
+    {
+      id: 41,
+      name: "platform-core",
+      repo_url: "https://gitlab.com/crystal-forge/platform-core.git",
+      branch: "main",
+      build_scope: "cf_systems_only",
+      system_count: 12,
+    },
+    {
+      id: 42,
+      name: "edge-fleet",
+      repo_url: "git@gitlab.com:crystal-forge/edge-fleet.git",
+      branch: "release/2026.06",
+      build_scope: "all_configs",
+      system_count: 8,
+    },
+  ];
+
+  const commits = [
+    {
+      id: 4101,
+      hash: "a3f8c12000000000000000000000000000000000",
+      message: "feat: add rollout guard rails",
+      author: "ops-bot",
+      committed_at: new Date(nowMs - 2 * 60 * 60 * 1000).toISOString(),
+      system_count: 10,
+      commits_behind: 0,
+      systems: ["atlas-01", "atlas-02", "orion-db", "edge-01"],
+      system_paths: [
+        {
+          config_name: "atlas-01",
+          is_cf_system: true,
+          cf_hostname: "atlas-01",
+          mapped_host_count: 1,
+          expected_store_path: "/nix/store/atlas-expected",
+          current_store_path: "/nix/store/atlas-current",
+          cve_scan_eligible: true,
+          cve_scan_blocked_reason: null,
+        },
+      ],
+      build_status: "complete",
+      evaluation_status: "complete",
+      evaluation_error_message: null,
+    },
+    {
+      id: 4102,
+      hash: "b7d9e51000000000000000000000000000000000",
+      message: "fix: tighten ssh hardening profile",
+      author: "security",
+      committed_at: new Date(nowMs - 2 * 24 * 60 * 60 * 1000).toISOString(),
+      system_count: 7,
+      commits_behind: 1,
+      systems: ["atlas-01", "atlas-02"],
+      system_paths: [],
+      build_status: "building",
+      evaluation_status: "complete",
+      evaluation_error_message: null,
+    },
+  ];
+
+  return {
+    flakes,
+    timelines: [
+      {
+        flake_id: 41,
+        flake_name: "platform-core",
+        repo_url: flakes[0].repo_url,
+        commits,
+      },
+      {
+        flake_id: 42,
+        flake_name: "edge-fleet",
+        repo_url: flakes[1].repo_url,
+        commits: [
+          {
+            ...commits[0],
+            id: 4201,
+            hash: "c9a2f33000000000000000000000000000000000",
+            message: "edge: update cache substituters",
+            author: "edge-bot",
+            build_status: "failed",
+            evaluation_status: "failed",
+            evaluation_error_message: "evaluation failed for edge profile",
+          },
+        ],
+      },
+    ],
+    diff: [
+      "diff --git a/nixos/hosts/atlas-01.nix b/nixos/hosts/atlas-01.nix",
+      "index 1111111..2222222 100644",
+      "--- a/nixos/hosts/atlas-01.nix",
+      "+++ b/nixos/hosts/atlas-01.nix",
+      "@@ -1,5 +1,7 @@",
+      " { config, pkgs, ... }:",
+      " {",
+      "-  services.openssh.enable = true;",
+      "+  services.openssh.enable = true;",
+      "+  services.openssh.settings.PasswordAuthentication = false;",
+      "+  security.auditd.enable = true;",
+      " }",
+      "diff --git a/nixos/modules/rollout.nix b/nixos/modules/rollout.nix",
+      "index 3333333..4444444 100644",
+      "--- a/nixos/modules/rollout.nix",
+      "+++ b/nixos/modules/rollout.nix",
+      "@@ -4,6 +4,7 @@",
+      "   options.cf.rollout = {",
+      "+    guardRails = true;",
+      "   };",
+    ].join("\n"),
+  };
+}
+
+async function routeFlakeParityData(page) {
+  const fixture = buildFlakeParityFixture();
+
+  await page.route("**/api/v1/flakes/timelines*", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(fixture.timelines),
+    });
+  });
+
+  await page.route("**/api/v1/flakes/*/commits/*/diff", async (route) => {
+    const commitHash = route.request().url().split("/commits/")[1].split("/diff")[0];
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ commit_hash: commitHash, diff: fixture.diff }),
+    });
+  });
+
+  await page.route("**/api/v1/flakes", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(fixture.flakes),
+    });
+  });
+}
+
+async function unrouteFlakeParityData(page) {
+  await page.unroute("**/api/v1/flakes/timelines*");
+  await page.unroute("**/api/v1/flakes/*/commits/*/diff");
+  await page.unroute("**/api/v1/flakes");
+}
+
+async function gotoFlakesAsAdmin(page) {
+  await page.goto(`${baseUrl}/flakes?ui_check_auth=1`, { timeout: LOAD_TIMEOUT });
+  await page.evaluate(() => localStorage.setItem("cf.ui_check_admin_controls", "1"));
+  // The app shell only installs ui_check mock auth while auth state is empty.
+  // A document reload resets in-memory viewer/admin state from prior steps.
+  await page.reload({ timeout: LOAD_TIMEOUT });
+}
+
+async function clickFirstButtonByText(page, text) {
+  const clicked = await page.evaluate((needle) => {
+    const button = Array.from(document.querySelectorAll("button")).find((candidate) =>
+      (candidate.textContent || "").toLowerCase().includes(needle.toLowerCase()),
+    );
+    if (!button) return false;
+    button.click();
+    return true;
+  }, text);
+  if (!clicked) {
+    throw new Error(`Expected a button containing '${text}' to exist`);
+  }
+}
+
+async function clickFirstFlakeEditButton(page) {
+  const clicked = await page.evaluate(() => {
+    const button = document.querySelector("table.sys-table tbody tr button[title='Edit flake']");
+    if (!button) return false;
+    button.click();
+    return true;
+  });
+  if (!clicked) {
+    throw new Error("Expected a flakes table Edit button to exist");
+  }
+}
+
 function buildFlakeStressFixture() {
   const flakeNames = ["platform-core", "infra-core", "edge-fleet", "workstations"];
   const systemsPattern = [35, 24, 19, 17, 15, 14, 12, 11, 10, 8];
@@ -1632,7 +1816,7 @@ const steps = [
         }
       });
 
-      await page.locator("button:has-text('Add Flake')").first().click();
+      await clickFirstButtonByText(page, "Add flake");
       await page.waitForTimeout(800);
 
       // Name callout visible first
@@ -3673,24 +3857,117 @@ const steps = [
   },
   {
     name: "13-flakes",
-    description: "Flakes registry",
+    description: "Flakes registry list/table parity",
     action: async (page) => {
-      await page.goto(`${baseUrl}/flakes`, { timeout: LOAD_TIMEOUT });
-      await page.waitForTimeout(2000);
+      await routeFlakeParityData(page);
+      try {
+        await gotoFlakesAsAdmin(page);
+        await page.waitForTimeout(1800);
+
+        await assertVisible(page.getByRole("heading", { name: "Flakes" }).first(), "Expected Flakes page heading");
+        await assertVisible(page.locator('[data-testid="flakes-stat-strip"]').first(), "Expected Flakes stat strip");
+        for (const label of ["Tracked", "Systems", "Synced", "Syncing", "Errors"]) {
+          await assertVisible(page.locator('[data-testid="flakes-stat-strip"]').getByText(label).first(), `Expected stat '${label}'`);
+        }
+        for (const column of ["Flake", "Status", "Branch", "Systems", "Environments", "Latest commit", "Author", "Synced"]) {
+          await assertVisible(page.locator("table.sys-table th", { hasText: column }).first(), `Expected flakes table column '${column}'`);
+        }
+        await assertVisible(page.getByText("platform-core").first(), "Expected platform-core flake row");
+        await assertVisible(page.getByText("not persisted").first(), "Expected non-fabricated environment badge placeholder");
+      } finally {
+        await unrouteFlakeParityData(page);
+      }
+    },
+  },
+  {
+    name: "13a-flakes-cards-parity",
+    description: "Flakes cards mode parity",
+    action: async (page) => {
+      await routeFlakeParityData(page);
+      try {
+        await gotoFlakesAsAdmin(page);
+        await page.waitForTimeout(1600);
+        await page.getByRole("button", { name: /Cards/ }).first().click();
+        await page.waitForTimeout(500);
+
+        await assertVisible(page.locator(".sys-card", { hasText: "platform-core" }).first(), "Expected platform-core flake card");
+        await assertVisible(page.locator(".sys-card", { hasText: "Environments" }).first(), "Expected card environment badge rail");
+        await assertVisible(page.locator(".sys-card", { hasText: "2 commits" }).first(), "Expected card commit count chip");
+      } finally {
+        await unrouteFlakeParityData(page);
+      }
+    },
+  },
+  {
+    name: "13aa-flakes-tray-diff-parity",
+    description: "Flake side tray commit explorer and diff modal parity",
+    action: async (page) => {
+      await routeFlakeParityData(page);
+      try {
+        await gotoFlakesAsAdmin(page);
+        await page.waitForTimeout(1800);
+        await page.getByText("platform-core").first().click();
+
+        await assertVisible(page.locator(".fl-tray").first(), "Expected flake side tray to open", 10000);
+        await assertVisible(page.locator(".fl-tray-commits-search").first(), "Expected tray commit search");
+        await assertVisible(page.getByText("feat: add rollout guard rails").first(), "Expected latest commit in tray");
+        await assertVisible(page.getByText(/Rollout/i).first(), "Expected rollout pill in commit detail");
+        await assertVisible(page.locator(".fl-files-grid").first(), "Expected files changed grid");
+
+        await page.locator(".fl-file-card").first().click();
+        await assertVisible(page.locator(".diff-modal").first(), "Expected diff modal to open", 10000);
+        await assertVisible(page.locator(".diff-table").first(), "Expected diff body table to render");
+      } finally {
+        await unrouteFlakeParityData(page);
+      }
     },
   },
   {
     name: "13e-flakes-add-modal-credentials",
     description: "Flake add modal with build scope and credential controls",
     action: async (page) => {
-      await page.goto(`${baseUrl}/flakes`, { timeout: LOAD_TIMEOUT });
+      await gotoFlakesAsAdmin(page);
       await page.waitForTimeout(1500);
-      await page.locator("button:has-text('Add Flake')").first().click();
-      await page.getByText("Register Flake").first().waitFor({ timeout: 5000 });
-      await page.getByLabel(/Authentication Type/i).selectOption("pat");
-      await page.getByLabel(/Token Username/i).fill("oauth2");
-      await page.getByLabel(/Token Secret/i).fill("glpat-example-token");
+      await clickFirstButtonByText(page, "Add flake");
+      await page.getByText("Add flake").first().waitFor({ timeout: 5000 });
+      await page.locator("button", { hasText: "HTTPS token" }).first().click();
+      await page.locator("input[placeholder='oauth2']").first().fill("oauth2");
+      await page.locator("input[placeholder='glpat-...']").first().fill("glpat-example-token");
       await page.getByLabel(/Build Scope/i).selectOption("all_configs");
+      await assertVisible(page.getByText("Auto-sync scheduling is not persisted").first(), "Expected explicit non-persisted sync note");
+    },
+  },
+  {
+    name: "13ea-flakes-delete-confirm-parity",
+    description: "Flake delete confirmation requires typing the flake name",
+    action: async (page) => {
+      await routeFlakeParityData(page);
+      await page.route(/\/api\/v1\/flakes\/\d+\/credentials$/, async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ flake_id: 41, auth_type: "none", username: null, ssh_username: null, has_secret: false }),
+        });
+      });
+      try {
+        await gotoFlakesAsAdmin(page);
+        await page.waitForTimeout(1600);
+        await clickFirstFlakeEditButton(page);
+        await page.getByRole("heading", { name: /Edit platform-core|Edit Flake/ }).waitFor({ timeout: 7000 });
+        await page.getByRole("button", { name: /Remove flake from registry/ }).first().click();
+        await assertVisible(page.getByRole("heading", { name: "Remove flake from registry" }).first(), "Expected delete confirmation heading");
+        const removeButton = page.getByRole("button", { name: "Remove flake" }).first();
+        if (await removeButton.isEnabled().catch(() => false)) {
+          throw new Error("Expected Remove flake button to be disabled before typing flake name");
+        }
+        await page.locator("input[placeholder='platform-core']").first().fill("platform-core");
+        if (!(await removeButton.isEnabled().catch(() => false))) {
+          throw new Error("Expected Remove flake button to enable after typing flake name");
+        }
+      } finally {
+        await page.unroute(/\/api\/v1\/flakes\/\d+\/credentials$/);
+        await unrouteFlakeParityData(page);
+      }
     },
   },
   {
@@ -3712,15 +3989,13 @@ const steps = [
         });
       });
 
-      await page.goto(`${baseUrl}/flakes`, { timeout: LOAD_TIMEOUT });
+      await gotoFlakesAsAdmin(page);
       await page.waitForTimeout(1500);
-      const editButton = page.locator("button:has-text('Edit')").first();
-      await editButton.waitFor({ timeout: 5000 });
-      await editButton.click();
-      await page.getByRole("heading", { name: "Edit Flake" }).waitFor({ timeout: 5000 });
+      await clickFirstFlakeEditButton(page);
+      await page.getByRole("heading", { name: /Edit platform-core|Edit Flake/ }).waitFor({ timeout: 5000 });
       await page.getByLabel(/Build Scope/i).selectOption("cf_systems_only");
-      await page.getByLabel(/Authentication Type/i).selectOption("ssh_key");
-      await page.getByLabel(/SSH Username/i).fill("git");
+      await page.locator("button", { hasText: "SSH key" }).first().click();
+      await page.locator("input[placeholder='git']").first().fill("git");
       await page.unroute(/\/api\/v1\/flakes\/\d+\/credentials$/);
       await unrouteFlakeWarningData(page);
     },
@@ -3729,14 +4004,36 @@ const steps = [
     name: "13g-flakes-edit-modal-ssh-save-persist",
     description: "Flakes edit modal persists SSH auth settings after save/reopen",
     action: async (page) => {
-      await page.goto(`${baseUrl}/flakes`, { timeout: LOAD_TIMEOUT });
+      let storedCredentials = {
+        flake_id: 41,
+        auth_type: "none",
+        username: null,
+        ssh_username: null,
+        has_secret: false,
+      };
+      await page.route(/\/api\/v1\/flakes\/\d+\/credentials$/, async (route) => {
+        if (route.request().method() === "PUT") {
+          const payload = route.request().postDataJSON();
+          storedCredentials = {
+            flake_id: 41,
+            auth_type: payload.auth_type,
+            username: payload.username ?? null,
+            ssh_username: payload.ssh_username ?? null,
+            has_secret: Boolean(payload.secret),
+          };
+          await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(storedCredentials) });
+          return;
+        }
+
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(storedCredentials) });
+      });
+
+      await gotoFlakesAsAdmin(page);
       await page.waitForTimeout(1800);
 
-      const editButton = page.locator("button:has-text('Edit')").first();
-      await editButton.waitFor({ timeout: 7000 });
-      await editButton.click();
+      await clickFirstFlakeEditButton(page);
 
-      await page.getByRole("heading", { name: "Edit Flake" }).waitFor({ timeout: 7000 });
+      await page.getByRole("heading", { name: /Edit .*|Edit Flake/ }).waitFor({ timeout: 7000 });
 
       await page.locator("button", { hasText: "SSH key" }).first().click();
       await page.locator("input[placeholder='git']").first().fill("git");
@@ -3766,10 +4063,8 @@ const steps = [
       await page.waitForTimeout(1400);
 
       // Reopen and verify persisted auth mode + username.
-      const reopenEdit = page.locator("button:has-text('Edit')").first();
-      await reopenEdit.waitFor({ timeout: 7000 });
-      await reopenEdit.click();
-      await page.getByRole("heading", { name: "Edit Flake" }).waitFor({ timeout: 7000 });
+      await clickFirstFlakeEditButton(page);
+      await page.getByRole("heading", { name: /Edit .*|Edit Flake/ }).waitFor({ timeout: 7000 });
 
       const sshToggle = page.locator("button.active", { hasText: "SSH key" }).first();
       await assertVisible(sshToggle, "Expected SSH key auth mode to remain selected after reopen", 7000);
@@ -3778,6 +4073,7 @@ const steps = [
       if (sshUserValue.trim() !== "git") {
         throw new Error(`Expected persisted SSH username 'git', got '${sshUserValue}'`);
       }
+      await page.unroute(/\/api\/v1\/flakes\/\d+\/credentials$/);
     },
   },
   {
@@ -5652,6 +5948,31 @@ const steps = [
       await unrouteSystemsWarningData(page);
     },
   },
+  {
+    name: "13i-flakes-non-admin",
+    description: "Flakes view hides admin-only mutations for non-admin users",
+    action: async (page) => {
+      await routeFlakeParityData(page);
+      try {
+        await page.goto(`${baseUrl}/flakes?ui_check_auth=1&ui_check_role=viewer`, { timeout: LOAD_TIMEOUT });
+        await page.waitForTimeout(1800);
+
+        // Admin mutation buttons in header must not render
+        await assertHidden(page.getByRole("button", { name: /Sync all/i }).first(), "Sync all button should be hidden for non-admins");
+        await assertHidden(page.getByRole("button", { name: /Add flake/i }).first(), "Add flake button should be hidden for non-admins");
+
+        // Per-flake row action buttons must not render in table
+        await assertHidden(page.locator("table.sys-table button[title='Sync']").first(), "Per-flake Sync button should be hidden for non-admins");
+        await assertHidden(page.locator("table.sys-table button[title='Edit flake']").first(), "Per-flake Edit button should be hidden for non-admins");
+
+        // Read-only view should still show flake data
+        await assertVisible(page.getByRole("heading", { name: "Flakes" }).first(), "Expected Flakes page heading for non-admin");
+        await assertVisible(page.getByText("platform-core").first(), "Expected platform-core flake in non-admin view");
+      } finally {
+        await unrouteFlakeParityData(page);
+      }
+    },
+  },
 ];
 
 const CI_FAST_STEP_NAMES = new Set([
@@ -5687,11 +6008,16 @@ const CI_FAST_STEP_NAMES = new Set([
   "12k-system-detail-tab-icons",
   "12d-systems-api-error-no-mock-fallback",
   "12g-systems-warning-clears-after-link",
+  "13-flakes",
+  "13a-flakes-cards-parity",
+  "13aa-flakes-tray-diff-parity",
+  "13ea-flakes-delete-confirm-parity",
   "13d-flakes-stress-dataset",
   "13e-flakes-add-modal-credentials",
   "13f-flakes-edit-modal-credentials",
   "13g-flakes-edit-modal-ssh-save-persist",
   "13h-flakes-force-push-rewrite-recovery",
+  "13i-flakes-non-admin",
   // TASK-358: Environments parity evidence
   "14-environments",
   "14a-environments-add-modal",

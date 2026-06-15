@@ -1,9 +1,11 @@
 ---
 id: TASK-357
 title: Close full Flakes surface parity gaps against CrystalForgelatest
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - gpt-5.5
 created_date: '2026-06-14 18:56'
+updated_date: '2026-06-15 01:18'
 labels:
   - design-parity
   - flakes
@@ -73,3 +75,9 @@ Medium — primarily UI component work; backend changes minimal and scoped to pa
 - TASK-221 (flake credential management, already Done; should be re-evaluated for parity gaps)
 - CrystalForgelatest reference: /home/mcamp/code/crystal-forge/CrystalForgelatest/components/FlakesView.jsx
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: gpt-5.5 on reckless in /home/mcamp/code/crystal-forge/TASK-357-flakes-surface-parity
+<!-- SECTION:NOTES:END -->
