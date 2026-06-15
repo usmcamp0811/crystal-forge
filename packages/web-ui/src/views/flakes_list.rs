@@ -734,7 +734,12 @@ fn EditFlakeDialog(
                                     span { style: "font-size: 12px; color: var(--cf-text-muted);", "None assigned" }
                                 } else {
                                     for env in draft.environments.iter().take(6) {
-                                        EnvBadgeNew { env: env.clone() }
+                                        {
+                                            let color_hex = environments.iter()
+                                                .find(|e| e.name.eq_ignore_ascii_case(env))
+                                                .map(|e| e.color_hex.clone());
+                                            rsx! { EnvBadgeNew { env: env.clone(), color_hex } }
+                                        }
                                     }
                                     if draft.environments.len() > 6 {
                                         span { class: "chip chip-unknown", style: "font-size: 10px;",
@@ -3180,7 +3185,7 @@ pub fn FlakesListViewNew() -> Element {
 
                     if mode == "table" {
                         let all_flakes_for_edit = all_flakes.clone();
-                        rsx! { FlakeTableNew { flakes: filtered_flakes.clone(), selected_id, is_admin: is_admin_user, on_select: move |f| selected_flake.set(Some(f)), on_sync: move |flake_id| {
+                        rsx! { FlakeTableNew { flakes: filtered_flakes.clone(), selected_id, is_admin: is_admin_user, env_colors: db_environments.clone(), on_select: move |f| selected_flake.set(Some(f)), on_sync: move |flake_id| {
                             let mut reload_nonce = reload_nonce.clone();
                             spawn(async move {
                                 let result = request_sync_flake(flake_id).await;
@@ -3246,7 +3251,7 @@ pub fn FlakesListViewNew() -> Element {
                         } } }
                     } else {
                         let all_flakes_for_edit = all_flakes.clone();
-                        rsx! { FlakeCardsNew { flakes: filtered_flakes.clone(), selected_id, is_admin: is_admin_user, on_select: move |f| selected_flake.set(Some(f)), on_sync: move |flake_id| {
+                        rsx! { FlakeCardsNew { flakes: filtered_flakes.clone(), selected_id, is_admin: is_admin_user, env_colors: db_environments.clone(), on_select: move |f| selected_flake.set(Some(f)), on_sync: move |flake_id| {
                             let mut reload_nonce = reload_nonce.clone();
                             spawn(async move {
                                 let result = request_sync_flake(flake_id).await;
@@ -4141,6 +4146,7 @@ fn FlakeTableNew(
     flakes: Vec<MockFlakeItem>,
     selected_id: Option<i32>,
     is_admin: bool,
+    #[props(default)] env_colors: Vec<EnvironmentSummary>,
     on_select: EventHandler<MockFlakeItem>,
     on_sync: EventHandler<i32>,
     on_edit: EventHandler<i32>,
@@ -4198,7 +4204,7 @@ fn FlakeTableNew(
                                     td { style: "font-size: 13px;", "{flake.system_count}" }
 
                                     td {
-                                        FlakeEnvBadgesNew { flake: flake.clone(), max: 3, align: "flex-start" }
+                                        FlakeEnvBadgesNew { flake: flake.clone(), max: 3, align: "flex-start", env_colors: env_colors.clone() }
                                     }
 
                                     // Latest commit
@@ -4319,6 +4325,7 @@ fn FlakeCardsNew(
     flakes: Vec<MockFlakeItem>,
     selected_id: Option<i32>,
     is_admin: bool,
+    #[props(default)] env_colors: Vec<EnvironmentSummary>,
     on_select: EventHandler<MockFlakeItem>,
     on_sync: EventHandler<i32>,
     on_edit: EventHandler<i32>,
@@ -4385,7 +4392,7 @@ fn FlakeCardsNew(
 
                             div { style: "display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;",
                                 span { style: "font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--cf-text-muted); font-weight: 600; flex-shrink: 0;", "Environments" }
-                                FlakeEnvBadgesNew { flake: flake.clone(), max: 6, align: "flex-start" }
+                                FlakeEnvBadgesNew { flake: flake.clone(), max: 6, align: "flex-start", env_colors: env_colors.clone() }
                             }
 
                             // Description (limit to 2 lines)
@@ -4517,28 +4524,40 @@ fn FlakeCardsNew(
 // Helper component for environment badge
 #[allow(dead_code)]
 #[component]
-fn EnvBadgeNew(env: String) -> Element {
+fn EnvBadgeNew(env: String, #[props(default)] color_hex: Option<String>) -> Element {
     let label = if env.trim().is_empty() {
         "not persisted"
     } else {
         env.trim()
     };
-    let chip_class = match label {
-        "production" => "chip-critical",
-        "staging" => "chip-warning",
-        "dev" => "chip-info",
-        "edge" => "chip-info",
-        _ => "chip-unknown",
-    };
-
-    rsx! {
-        span { class: "chip {chip_class}", "{label}" }
+    if let Some(hex) = color_hex.as_deref().filter(|h| !h.trim().is_empty()) {
+        // Use the environment's assigned color as an inline pill style.
+        let hex = hex.trim_start_matches('#');
+        let style = format!(
+            "background: #{hex}22; color: #{hex}; border: 1px solid #{hex}55; \
+             border-radius: 4px; padding: 2px 7px; font-size: 11px; font-weight: 600; \
+             white-space: nowrap;"
+        );
+        rsx! { span { style: "{style}", "{label}" } }
+    } else {
+        let chip_class = match label {
+            "production" => "chip-critical",
+            "staging" => "chip-warning",
+            "dev" | "edge" => "chip-info",
+            _ => "chip-unknown",
+        };
+        rsx! { span { class: "chip {chip_class}", "{label}" } }
     }
 }
 
 #[allow(dead_code)]
 #[component]
-fn FlakeEnvBadgesNew(flake: MockFlakeItem, max: usize, align: &'static str) -> Element {
+fn FlakeEnvBadgesNew(
+    flake: MockFlakeItem,
+    max: usize,
+    align: &'static str,
+    #[props(default)] env_colors: Vec<EnvironmentSummary>,
+) -> Element {
     let envs = if flake.environment.trim().is_empty() {
         Vec::new()
     } else {
@@ -4559,7 +4578,12 @@ fn FlakeEnvBadgesNew(flake: MockFlakeItem, max: usize, align: &'static str) -> E
                 EnvBadgeNew { env: String::new() }
             } else {
                 for env in shown {
-                    EnvBadgeNew { env }
+                    {
+                        let color_hex = env_colors.iter()
+                            .find(|e| e.name.eq_ignore_ascii_case(&env))
+                            .map(|e| e.color_hex.clone());
+                        rsx! { EnvBadgeNew { env, color_hex } }
+                    }
                 }
                 if extra > 0 {
                     span { class: "chip chip-unknown", style: "font-size: 10px;", title: "Additional environments are hidden", "+{extra}" }
