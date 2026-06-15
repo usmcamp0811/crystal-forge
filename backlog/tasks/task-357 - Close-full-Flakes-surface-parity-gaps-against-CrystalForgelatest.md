@@ -1,11 +1,11 @@
 ---
 id: TASK-357
 title: Close full Flakes surface parity gaps against CrystalForgelatest
-status: Review
+status: In Progress
 assignee:
   - gpt-5.5
 created_date: '2026-06-14 18:56'
-updated_date: '2026-06-15 03:14'
+updated_date: '2026-06-15 03:20'
 labels:
   - design-parity
   - flakes
@@ -87,11 +87,11 @@ Medium — primarily UI component work; backend changes minimal and scoped to pa
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-MR !277 opened: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/277
+LOCK: opencode-agent on host in /home/mcamp/code/crystal-forge/TASK-357-flakes-surface-parity
 
-Follow-up backend gaps created: TASK-357.1 for flake environment span API data and TASK-357.2 for flake auto-sync settings persistence.
-
-Flakes web-ui check evidence produced: 13-flakes.png, 13a-flakes-cards-parity.png, 13aa-flakes-tray-diff-parity.png, 13e-flakes-add-modal-credentials.png, 13ea-flakes-delete-confirm-parity.png, 13f-flakes-edit-modal-credentials.png, 13g-flakes-edit-modal-ssh-save-persist.png.
+MR !277 opened with two reviewer blockers:
+1. Admin-only Flakes mutations are hard-coded as `is_admin: true` — need to derive actual viewer/admin state and gate mutations
+2. Edit modal Description field is writable but silently discarded — need to make read-only/disabled with "not persisted" label
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
