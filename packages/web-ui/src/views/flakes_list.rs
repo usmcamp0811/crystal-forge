@@ -978,84 +978,20 @@ fn FlakeCredentialFields(
             }
 
             if credential_type == "ssh_key" {
-                div {
-                    style: "display: grid; gap: 10px;",
-                    div { style: "display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: center;",
-                        span { style: "font-size: 13px; color: var(--cf-text-secondary);", "SSH username" }
-                        input {
-                            class: "input focus-ring",
-                            value: "{credential_ssh_username}",
-                            placeholder: "git",
-                            oninput: move |evt| on_change.call(("credential_ssh_username".to_string(), evt.value())),
-                        }
-                    }
-                    div {
-                        class: "field",
-                        span { "Private key" }
-                        textarea {
-                            class: "input focus-ring",
-                            rows: "6",
-                            value: "{credential_secret}",
-                            placeholder: if has_existing_secret {
-                                "-----BEGIN OPENSSH PRIVATE KEY-----\n(leave blank to keep existing key)"
-                            } else {
-                                "-----BEGIN OPENSSH PRIVATE KEY-----"
-                            },
-                            oninput: move |evt| on_change.call(("credential_secret".to_string(), evt.value())),
-                        }
-                        div {
-                            style: "margin-top: 6px; font-size: 11px; color: var(--cf-text-muted);",
-                            "Paste an unencrypted SSH private key. Leave blank to keep the existing key."
-                        }
-                    }
+                SshCredSection {
+                    ssh_username: credential_ssh_username.clone(),
+                    credential_secret: credential_secret.clone(),
+                    has_existing_secret,
+                    on_change: on_change.clone(),
                 }
             }
 
-            if credential_type == "pat" {
-                div { style: "display: grid; gap: 10px;",
-                    div { style: "display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: center;",
-                        span { style: "font-size: 13px; color: var(--cf-text-secondary);", "Token Username (optional)" }
-                        input {
-                            class: "input focus-ring",
-                            value: "{credential_username}",
-                            placeholder: "oauth2",
-                            oninput: move |evt| on_change.call(("credential_username".to_string(), evt.value())),
-                        }
-                    }
-                    div { style: "display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: center;",
-                        span { style: "font-size: 13px; color: var(--cf-text-secondary);", "Access Token" }
-                        input {
-                            class: "input focus-ring",
-                            r#type: "password",
-                            value: "{credential_secret}",
-                            placeholder: if has_existing_secret { "•••••••• (leave blank to keep existing)" } else { "glpat-..." },
-                            oninput: move |evt| on_change.call(("credential_secret".to_string(), evt.value())),
-                        }
-                    }
-                }
-            }
-
-            if credential_type == "username_password" {
-                div { style: "display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: end;",
-                    label {
-                        class: "field",
-                        span { "Username" }
-                        input {
-                            class: "input focus-ring",
-                            value: "{credential_username}",
-                            oninput: move |evt| on_change.call(("credential_username".to_string(), evt.value())),
-                        }
-                    }
-                    label {
-                        class: "field",
-                        span { "Password" }
-                        input {
-                            class: "input focus-ring",
-                            r#type: "password",
-                            value: "{credential_secret}",
-                            oninput: move |evt| on_change.call(("credential_secret".to_string(), evt.value())),
-                        }
-                    }
+            if credential_type == "pat" || credential_type == "username_password" {
+                HttpsCredSection {
+                    credential_username: credential_username.clone(),
+                    credential_secret: credential_secret.clone(),
+                    has_existing_secret,
+                    on_change: on_change.clone(),
                 }
             }
 
@@ -1067,6 +1003,158 @@ fn FlakeCredentialFields(
             }
 
 
+        }
+    }
+}
+
+/// SSH credential sub-section: shows a preview card when a key already exists,
+/// with a "Replace key" toggle to reveal the paste-in form.
+#[component]
+fn SshCredSection(
+    ssh_username: String,
+    credential_secret: String,
+    has_existing_secret: bool,
+    on_change: EventHandler<(String, String)>,
+) -> Element {
+    let mut replacing = use_signal(|| !has_existing_secret);
+
+    rsx! {
+        div { style: "display: flex; flex-direction: column; gap: 10px;",
+            // Preview card — only when a stored key exists and not currently replacing
+            if has_existing_secret && !*replacing.read() {
+                div {
+                    style: "padding: 10px 12px; border: 1px solid var(--cf-divider); border-radius: 8px; font-size: 11px;",
+                    div {
+                        style: "display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;",
+                        span {
+                            class: "mono",
+                            style: "font-weight: 600;",
+                            if ssh_username.trim().is_empty() { "git" } else { "{ssh_username}" }
+                            " — stored SSH key"
+                        }
+                        button {
+                            class: "btn btn-ghost focus-ring xs",
+                            onclick: move |_| replacing.set(true),
+                            "Replace key"
+                        }
+                    }
+                    div { style: "color: var(--cf-text-muted);",
+                        span { class: "mono", "•••• •••• •••• ••••" }
+                        " · Encrypted at rest"
+                    }
+                }
+            } else {
+                // Add / replace form
+                div { style: "display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: center;",
+                    span { style: "font-size: 13px; color: var(--cf-text-secondary);", "SSH username" }
+                    input {
+                        class: "input focus-ring",
+                        value: "{ssh_username}",
+                        placeholder: "git",
+                        oninput: move |evt| on_change.call(("credential_ssh_username".to_string(), evt.value())),
+                    }
+                }
+                div { class: "field",
+                    span { "Private key" }
+                    textarea {
+                        class: "input focus-ring mono",
+                        rows: "5",
+                        value: "{credential_secret}",
+                        placeholder: "-----BEGIN OPENSSH PRIVATE KEY-----\n…\n-----END OPENSSH PRIVATE KEY-----",
+                        style: "font-size: 11px; font-family: var(--font-mono); resize: vertical; padding: 10px;",
+                        oninput: move |evt| on_change.call(("credential_secret".to_string(), evt.value())),
+                    }
+                    div { class: "help", "Encrypted at rest. Crystal Forge never logs key material." }
+                }
+                if has_existing_secret {
+                    div { style: "display: flex; justify-content: flex-end;",
+                        button {
+                            class: "btn btn-ghost focus-ring xs",
+                            onclick: move |_| {
+                                replacing.set(false);
+                                on_change.call(("credential_secret".to_string(), String::new()));
+                            },
+                            "Cancel"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// HTTPS/PAT credential sub-section: shows a preview card when a token already
+/// exists, with a "Replace token" toggle to reveal the input form.
+#[component]
+fn HttpsCredSection(
+    credential_username: String,
+    credential_secret: String,
+    has_existing_secret: bool,
+    on_change: EventHandler<(String, String)>,
+) -> Element {
+    let mut replacing = use_signal(|| !has_existing_secret);
+
+    rsx! {
+        div { style: "display: flex; flex-direction: column; gap: 10px;",
+            if has_existing_secret && !*replacing.read() {
+                div {
+                    style: "padding: 10px 12px; border: 1px solid var(--cf-divider); border-radius: 8px; font-size: 11px;",
+                    div {
+                        style: "display: flex; justify-content: space-between; align-items: center;",
+                        span {
+                            class: "mono",
+                            style: "font-weight: 600;",
+                            "•••••••••••••••••••"
+                        }
+                        button {
+                            class: "btn btn-ghost focus-ring xs",
+                            onclick: move |_| replacing.set(true),
+                            "Replace token"
+                        }
+                    }
+                    if !credential_username.trim().is_empty() {
+                        div { style: "margin-top: 4px; color: var(--cf-text-muted);",
+                            "User: "
+                            span { class: "mono", "{credential_username}" }
+                        }
+                    }
+                }
+            } else {
+                div { style: "display: grid; grid-template-columns: 1fr 2fr; gap: 10px;",
+                    div { class: "field",
+                        label { "Username" }
+                        input {
+                            class: "input focus-ring",
+                            value: "{credential_username}",
+                            placeholder: "ops-bot",
+                            oninput: move |evt| on_change.call(("credential_username".to_string(), evt.value())),
+                        }
+                    }
+                    div { class: "field",
+                        label { "Token / password" }
+                        input {
+                            class: "input focus-ring mono",
+                            r#type: "password",
+                            value: "{credential_secret}",
+                            placeholder: "glpat-… or ghp_…",
+                            style: "font-size: 12px;",
+                            oninput: move |evt| on_change.call(("credential_secret".to_string(), evt.value())),
+                        }
+                    }
+                }
+                if has_existing_secret {
+                    div { style: "display: flex; justify-content: flex-end;",
+                        button {
+                            class: "btn btn-ghost focus-ring xs",
+                            onclick: move |_| {
+                                replacing.set(false);
+                                on_change.call(("credential_secret".to_string(), String::new()));
+                            },
+                            "Cancel"
+                        }
+                    }
+                }
+            }
         }
     }
 }
