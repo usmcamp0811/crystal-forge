@@ -444,7 +444,7 @@ fn save_environment_form(
                 {
                     api_notice.set(Some(message));
                 }
-                apply_persisted_form_fields(&mut saved, &next);
+                saved.required_policy_ids = next.required_policy_ids.clone();
                 // TASK-359/TASK-362 fields are read-only until backend support
                 // lands. Do not copy modal display values into local state;
                 // doing so would make non-persisted changes appear saved.
@@ -466,10 +466,6 @@ fn save_environment_form(
             }
         }
     });
-}
-
-fn apply_persisted_form_fields(saved: &mut EnvironmentItem, next: &EnvironmentFormDraft) {
-    saved.required_policy_ids = next.required_policy_ids.clone();
 }
 
 #[cfg(test)]
@@ -521,7 +517,7 @@ mod tests {
             is_production: Some(true),
         };
 
-        apply_persisted_form_fields(&mut saved, &draft);
+        saved.required_policy_ids = draft.required_policy_ids.clone();
 
         assert_eq!(saved.required_policy_ids, vec![Uuid::from_u128(1)]);
         assert_eq!(saved.default_policy, None);
