@@ -43,23 +43,24 @@ pub fn BuildDetailPane(
         return rsx! { div {} };
     };
 
-    let progress = if matches!(build.status, BuildStatus::Building | BuildStatus::Stopping) {
-        56
-    } else {
-        0
-    };
     let _ = tab;
     let _ = on_tab_change;
     let _ = follow_logs;
     let _ = pause_logs;
     let _ = wrap_logs;
     let _ = log_query;
-    let log_line_count = build
-        .logs
-        .as_deref()
-        .map(|text| text.lines().count())
-        .unwrap_or(0);
-    let duration_label = build.runtime.clone().unwrap_or_else(|| "-".to_string());
+    let duration_label = build.runtime.clone().unwrap_or_else(|| "—".to_string());
+    let has_drv_progress = build.total_derivs > 0
+        && build.built_derivs < build.total_derivs
+        && matches!(build.status, BuildStatus::Building | BuildStatus::Stopping);
+    let derivs_label = if build.total_derivs > 0 {
+        format!(
+            "{}/{} built · {} cached",
+            build.built_derivs, build.total_derivs, build.cached_derivs
+        )
+    } else {
+        "—".to_string()
+    };
 
     rsx! {
         // Note: The aside.side-panel wrapper is in builds.rs
@@ -109,40 +110,56 @@ pub fn BuildDetailPane(
                 section {
                     class: "panel-section",
                     // JSX: <dl className="kv-grid">
-                    dl {
-                        class: "kv-grid",
-                dt { class: "{theme::text::MUTED}", "Flake" } dd { class: "{theme::text::SECONDARY}", "{build.flake}" }
-                dt { class: "{theme::text::MUTED}", "Commit" } dd { class: "font-mono {theme::text::SECONDARY} truncate", "{build.commit}" }
-                dt { class: "{theme::text::MUTED}", "Worker" }
-                dd {
-                    class: "font-mono {theme::text::SECONDARY}",
-                    // JSX: b.worker || "unassigned"
-                    if build.worker_id == "unassigned" {
-                        "unassigned"
-                    } else {
-                        "{build.worker_id}"
-                    }
-                }
-                dt { class: "{theme::text::MUTED}", "Arch" } dd { class: "font-mono {theme::text::SECONDARY}", "x86_64-linux" }
-                dt { class: "{theme::text::MUTED}", "Queued" } dd { class: "{theme::text::SECONDARY}", "{build.queued_for}" }
-                dt { class: "{theme::text::MUTED}", "Duration" } dd { class: "font-mono {theme::text::SECONDARY}", "{duration_label}" }
-                dt { class: "{theme::text::MUTED}", "Attempts" } dd { class: "{theme::text::SECONDARY}", "1" }
-                        dt { class: "{theme::text::MUTED}", "Log lines" } dd { class: "{theme::text::SECONDARY}", "{log_line_count}" }
+                    // JSX: <dl className="kv-grid">
+                    // System, Flake, Commit, Worker, Arch, Derivations, Queued, Duration, Attempts
+                    dl { class: "kv-grid",
+                        dt { "System" }
+                        dd { class: "mono", "{extract_system_name(&build.hostname)}" }
+                        dt { "Flake" }
+                        dd { "{build.flake}" }
+                        dt { "Commit" }
+                        dd { class: "mono", "{build.commit}" }
+                        dt { "Worker" }
+                        dd { class: "mono",
+                            if build.worker_id == "unassigned" { "unassigned" } else { "{build.worker_id}" }
+                        }
+                        dt { "Arch" }
+                        dd { class: "mono", "{build.arch}" }
+                        dt { "Derivations" }
+                        dd { "{derivs_label}" }
+                        dt { "Queued" }
+                        dd { "{build.queued_for}" }
+                        dt { "Duration" }
+                        dd { class: "mono", "{duration_label}" }
+                        dt { "Attempts" }
+                        dd { "{build.attempts}" }
                     }
                 }
 
-                if progress > 0 && progress < 100 {
-                    // JSX: <section className="panel-section">
-                    section {
-                        class: "panel-section",
-                        h3 { "Progress" }
-                        div {
-                            style: "height: 6px; background: var(--cf-subtle-bg); border-radius: 99px; overflow: hidden;",
-                            div { style: "width: {progress}%; height: 100%; background: {status_color(build.status)};" }
-                        }
-                        div {
-                            style: "font-size: 11px; color: var(--cf-text-muted); margin-top: 4px;",
-                            "{progress}% complete"
+                // JSX: derivation progress section — shown when build is in progress
+                if has_drv_progress {
+                    section { class: "panel-section",
+                        h3 { "Derivation progress" }
+                        {
+                            let total = build.total_derivs as f64;
+                            let cached_pct = (build.cached_derivs as f64 / total * 100.0).min(100.0);
+                            let built_pct = ((build.built_derivs.saturating_sub(build.cached_derivs)) as f64 / total * 100.0).min(100.0);
+                            let col = status_color(build.status);
+                            rsx! {
+                                div {
+                                    style: "height: 6px; background: var(--cf-subtle-bg); border-radius: 99px; overflow: hidden; display: flex;",
+                                    div { style: "width: {cached_pct}%; background: #34d399;" }
+                                    div { style: "width: {built_pct}%; background: {col};" }
+                                }
+                                div {
+                                    style: "font-size: 11px; color: var(--cf-text-muted); margin-top: 4px;",
+                                    "{build.built_derivs} of {build.total_derivs} derivations"
+                                    if let Some(ref pkg) = build.current_pkg {
+                                        " · "
+                                        span { class: "mono", style: "color: #60a5fa;", "building {pkg}" }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -151,18 +168,75 @@ pub fn BuildDetailPane(
             // JSX: <div className="panel-actions">
             div {
                 class: "panel-actions",
-                // JSX: <button className="btn btn-ghost focus-ring xs">
+                // Logs always available
                 button {
                     class: "btn btn-ghost focus-ring xs",
                     onclick: move |_| on_log.call(()),
-                    span { style: "font-size: 12px;", "⌘" }
-                    " Logs"
+                    // terminal icon
+                    svg {
+                        width: "12", height: "12",
+                        view_box: "0 0 24 24",
+                        fill: "none", stroke: "currentColor",
+                        stroke_width: "2",
+                        stroke_linecap: "round", stroke_linejoin: "round",
+                        style: "margin-right: 4px;",
+                        polyline { points: "4 17 10 11 4 5" }
+                        line { x1: "12", y1: "19", x2: "20", y2: "19" }
+                    }
+                    "Logs"
                 }
-                button {
-                    class: "btn btn-ghost focus-ring xs",
-                    onclick: move |_| on_close.call(()),
-                    span { style: "font-size: 12px;", "✕" }
-                    " Cancel"
+                // Cancel for building/queued
+                if matches!(build.status, BuildStatus::Building | BuildStatus::Queued) {
+                    button {
+                        class: "btn btn-ghost focus-ring xs",
+                        svg {
+                            width: "12", height: "12",
+                            view_box: "0 0 24 24",
+                            fill: "none", stroke: "currentColor",
+                            stroke_width: "2",
+                            stroke_linecap: "round", stroke_linejoin: "round",
+                            style: "margin-right: 4px;",
+                            line { x1: "18", y1: "6", x2: "6", y2: "18" }
+                            line { x1: "6", y1: "6", x2: "18", y2: "18" }
+                        }
+                        "Cancel build"
+                    }
+                }
+                // Force kill for stopping
+                if build.status == BuildStatus::Stopping {
+                    button {
+                        class: "btn btn-ghost focus-ring xs",
+                        style: "color: var(--cf-red, #f87171);",
+                        svg {
+                            width: "12", height: "12",
+                            view_box: "0 0 24 24",
+                            fill: "none", stroke: "currentColor",
+                            stroke_width: "2",
+                            stroke_linecap: "round", stroke_linejoin: "round",
+                            style: "margin-right: 4px;",
+                            line { x1: "18", y1: "6", x2: "6", y2: "18" }
+                            line { x1: "6", y1: "6", x2: "18", y2: "18" }
+                        }
+                        "Force kill"
+                    }
+                }
+                // Retry for failed
+                if build.status == BuildStatus::Failed {
+                    button {
+                        class: "btn btn-ghost focus-ring xs",
+                        svg {
+                            width: "12", height: "12",
+                            view_box: "0 0 24 24",
+                            fill: "none", stroke: "currentColor",
+                            stroke_width: "2",
+                            stroke_linecap: "round", stroke_linejoin: "round",
+                            style: "margin-right: 4px;",
+                            path { d: "M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74" }
+                            path { d: "M21 3v9h-9" }
+                            path { d: "M21 12A9 9 0 0 0 3.26 9.26" }
+                        }
+                        "Retry build"
+                    }
                 }
             }
         }
@@ -307,6 +381,14 @@ fn action_prompt(action: &PendingAction) -> (&'static str, String, &'static str)
             "Run this build next?",
             format!("Build #{build_id} will be promoted to the front of the queued set."),
             "Prioritize",
+        ),
+        PendingAction::Build {
+            action: BuildAction::MoveUp | BuildAction::MoveDown,
+            ..
+        } => (
+            "Reorder build?",
+            "Adjust queue position.".to_string(),
+            "Move",
         ),
     }
 }

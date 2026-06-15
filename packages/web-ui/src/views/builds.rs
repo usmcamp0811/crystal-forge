@@ -148,6 +148,7 @@ fn map_queue_item(item: &crate::api::models::BuildQueueItem, idx: usize) -> Buil
         flake: item.flake_name.clone(),
         commit: item.commit_hash.clone(),
         branch: "main".to_string(),
+        arch: "x86_64-linux".to_string(),
         worker_id: item
             .builder_name
             .clone()
@@ -175,6 +176,12 @@ fn map_queue_item(item: &crate::api::models::BuildQueueItem, idx: usize) -> Buil
                     .unwrap_or_else(|| "unknown".to_string())
             )
         }),
+        cached_derivs: 0,
+        built_derivs: 0,
+        total_derivs: 0,
+        current_pkg: None,
+        failed_pkg: None,
+        attempts: 1,
     }
 }
 
@@ -327,6 +334,7 @@ pub fn BuildsView() -> Element {
                         flake: item.flake_name.clone(),
                         commit: item.commit_hash.clone(),
                         branch: "main".to_string(),
+                        arch: "x86_64-linux".to_string(),
                         worker_id: item
                             .builder_name
                             .clone()
@@ -354,6 +362,12 @@ pub fn BuildsView() -> Element {
                                     .unwrap_or_else(|| "unknown".to_string())
                             )
                         }),
+                        cached_derivs: 0,
+                        built_derivs: 0,
+                        total_derivs: 0,
+                        current_pkg: None,
+                        failed_pkg: None,
+                        attempts: 1,
                     }
                 })
                 .collect::<Vec<_>>();
@@ -435,34 +449,8 @@ pub fn BuildsView() -> Element {
                         "{queue_data.iter().filter(|b| matches!(b.status, BuildStatus::Building | BuildStatus::Stopping)).count()} building · {queue_data.iter().filter(|b| b.status == BuildStatus::Queued).count()} queued · {worker_data.iter().filter(|w| w.status == WorkerStatus::Running).count()}/{worker_data.len()} workers active"
                     }
                 }
-                // JSX: <div style={{ display:"flex", gap:8 }}>
-                div {
-                    style: "display: flex; gap: 8px;",
-                    // JSX: <button className="btn btn-ghost focus-ring"><Icon name="sync" size={14} /> Refresh</button>
-                    button {
-                        class: "btn btn-ghost focus-ring",
-                        onclick: move |_| refresh_trigger.set(refresh_trigger() + 1),
-                        svg {
-                            width: "14",
-                            height: "14",
-                            view_box: "0 0 24 24",
-                            fill: "none",
-                            stroke: "currentColor",
-                            stroke_width: "2",
-                            stroke_linecap: "round",
-                            stroke_linejoin: "round",
-                            style: "display: inline-block; vertical-align: middle; margin-right: 6px;",
-                            path { d: "M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" }
-                        }
-                        "Refresh"
-                    }
-                    QueueActionButton {
-                        label: "Queue build",
-                        onclick: move |_| {
-                            last_action_note.set(Some("Queue build flow is mocked in this UI pass; use Flakes/Evaluations to trigger real builds.".to_string()));
-                        },
-                    }
-                }
+                // JSX: <LiveIndicator />
+                LiveIndicator {}
             }
 
             MetricsRow {
@@ -842,6 +830,21 @@ pub fn BuildsView() -> Element {
                                             BuildAction::RunNext => {
                                                 // RunNext is handled in local state only (no server action)
                                             }
+                                            BuildAction::MoveUp | BuildAction::MoveDown => {
+                                                // Local reorder — swap in builds signal
+                                                let mut current = builds.read().clone();
+                                                if let Some(idx) = current.iter().position(|b| b.id == build_id) {
+                                                    let new_idx = if action == BuildAction::MoveUp {
+                                                        idx.saturating_sub(1)
+                                                    } else {
+                                                        (idx + 1).min(current.len().saturating_sub(1))
+                                                    };
+                                                    if idx != new_idx {
+                                                        current.swap(idx, new_idx);
+                                                        builds.set(current);
+                                                    }
+                                                }
+                                            }
                                          }
                                     });
                                 }
@@ -849,6 +852,42 @@ pub fn BuildsView() -> Element {
                         }
                         pending_action.set(None);
                     }
+                }
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LiveIndicator — pulsing dot + "updated Ns ago" counter
+// JSX: function LiveIndicator({ label = "Live" })
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[component]
+fn LiveIndicator() -> Element {
+    let mut secs = use_signal(|| 0_u32);
+
+    use_future(move || async move {
+        loop {
+            gloo_timers::future::TimeoutFuture::new(1_000).await;
+            secs.set((secs() + 1) % 60);
+        }
+    });
+
+    rsx! {
+        div {
+            style: "display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--cf-text-muted);",
+            span {
+                style: "display: inline-flex; align-items: center; gap: 6px;",
+                span { class: "ed-pulse", style: "position: static; margin: 0;" }
+                span { style: "color: #34d399; font-weight: 600;", "Live" }
+            }
+            {
+                let s = secs();
+                if s == 0 {
+                    rsx! { span { "· updated just now" } }
+                } else {
+                    rsx! { span { "· updated {s}s ago" } }
                 }
             }
         }

@@ -4519,3 +4519,28 @@ html[data-theme="light"] .sd-log-day { background: #0f172a; }
   background: var(--cf-card-bg); border: 1px solid var(--cf-brand-purple);
   color: var(--cf-text-primary); font-family: var(--font-mono);
 }
+
+/* ─── Build queue table (TASK-347.1 — matches BuildsView.jsx) ─────────────── */
+.q-queue-table { width: 100%; }
+.q-queue-table thead th { font-size: 12px; font-weight: 600; color: var(--cf-text-muted);
+  padding: 8px 12px; text-align: left; }
+.q-row { cursor: pointer; border-bottom: 1px solid var(--cf-card-border); transition: background 0.1s; }
+.q-row:hover { background: rgba(255,255,255,0.03); }
+.q-row.selected { background: rgba(96,165,250,0.08); }
+.q-row.row-checked { background: rgba(167,139,250,0.10); }
+.q-row td { padding: 8px 12px; vertical-align: middle; }
+/* Drag-and-drop visual indicators */
+.q-dragging { opacity: 0.4; }
+.q-drop-before { box-shadow: inset 0 2px 0 0 var(--cf-brand-purple); }
+.q-drop-after  { box-shadow: inset 0 -2px 0 0 var(--cf-brand-purple); }
+/* Drag handle */
+.q-drag-handle { cursor: grab; color: var(--cf-text-muted); display: inline-flex; align-items: center; }
+.q-drag-handle:active { cursor: grabbing; }
+/* Move up/down buttons */
+.q-move-group { display: inline-flex; flex-direction: column; gap: 1px; }
+.q-move-btn { background: none; border: none; color: var(--cf-text-muted); cursor: pointer;
+  padding: 1px 3px; border-radius: 3px; display: flex; align-items: center; }
+.q-move-btn:hover:not(:disabled) { color: var(--cf-text-primary); background: var(--cf-subtle-bg); }
+.q-move-btn:disabled { opacity: 0.3; cursor: default; }
+/* chip-dot inside status chips in the queue table */
+.chip-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 5px; flex-shrink: 0; }
