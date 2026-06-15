@@ -4,7 +4,7 @@ title: Close full Environments surface parity gaps against CrystalForgelatest
 status: Review
 assignee: []
 created_date: '2026-06-14 18:56'
-updated_date: '2026-06-14 20:50'
+updated_date: '2026-06-15 00:33'
 labels:
   - design-parity
   - environments
@@ -99,31 +99,16 @@ Medium — primarily UI component work; backend changes moderate if cache/policy
 - CrystalForgelatest reference: /home/mcamp/code/crystal-forge/CrystalForgelatest/components/EnvironmentsView.jsx
 <!-- SECTION:DESCRIPTION:END -->
 
-## Implementation Plan
+<!-- AC:END -->
 
-<!-- SECTION:PLAN:BEGIN -->
-1. Backend (cheap data): new SQL view + query for per-environment rollups (health breakdown healthy/warning/critical/offline, CVE totals, flakes list) derivable from systems. New migration only. Extend EnvironmentSummary. Update query/handler. cargo sqlx prepare.
-2. API model + adapter: extend EnvironmentItem with health breakdown, CVE total, flakes, and clearly-commented placeholder fields (deploy_policy, cache, auto_sync, requires_approval, is_production) for deferred backend.
-3. UI list rewrite: header/subtitle, 5-metric stat strip, filter bar (search + cards/table seg + count), cards mode (color rail, PROD badge, health bar+legend, KV grid, footer), table mode.
-4. Unified Add/Edit modal: color picker, description, cache dropdown (placeholder), deploy mode, gate policy picker, compliance selector (placeholder), production toggle, auto-sync/approval toggles, danger zone.
-5. Delete confirmation: type-to-confirm + systems guard.
-6. web-ui check: screenshot + assertions for /environments.
-7. Tests: query mapping, adapter mapping, validation.
-8. Follow-up Backlog tasks for deferred backend (cache assignment, gate policies, compliance bundles, RBAC, per-env deploy policy persistence, production flag persistence).
-<!-- SECTION:PLAN:END -->
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+MR !276 blocker fix pushed: f44581d0. Verification after fixes: web-ui cargo check passed, backend cargo check passed, backend rollup mapping test passed, web-ui adapter test passed, web-ui view placeholder-boundary tests passed, cargo sqlx prepare --check passed, node --check passed, nix build .#checks.x86_64-linux.web-ui passed with 14-environments / 14a-environments-add-modal / 14b-environments-config-warning screenshots.
+<!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Implemented full Environments surface parity for TASK-358 and opened MR !276.
-
-Summary:
-- Added `view_environment_rollups` migration and `EnvironmentRollup` DTO for real per-env health breakdown, critical/high CVE totals, and flake names.
-- Reworked `/environments` with reference-style header, stat strip, search/filter bar, cards/table toggle, cards, table, unified Add/Edit modal, and type-to-confirm delete guard.
-- Placeholder-backed deferred backend fields are clearly commented and tracked by TASK-359, TASK-360, TASK-361, TASK-362, plus TASK-358.1 for module split debt.
-- Expanded web-ui check to capture Environments list/table, modal, and warning-state screenshots.
-
-MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/276
+Review blockers addressed in f44581d0: preserved `system_count` as all assigned systems, added separate `rollup.active_system_count`, removed fake operational placeholders for successful API data, disabled/read-only unsupported modal fields, stopped copying placeholder-only values into local state, added targeted tests, refreshed screenshots, and updated MR !276 description/comment.
 <!-- SECTION:FINAL_SUMMARY:END -->
-
-<!-- AC:END -->
