@@ -369,25 +369,26 @@ pub fn BuildQueuePane(
     }
 }
 
-/// Bulk action bar — shown when multiple builds are shift-selected.
-/// JSX: <BulkBar count={sel.size} onClear={sel.clear}>
+/// Bulk action bar — sticky floating pill, shown when multi-select is active.
+/// JSX: <BulkBar count={sel.size} onClear={sel.clear}> ... </BulkBar>
 #[component]
 fn BulkBar(count: usize, on_cancel: EventHandler<()>, on_clear: EventHandler<()>) -> Element {
-    let label = if count == 1 {
-        "1 build".to_string()
-    } else {
-        format!("{count} builds")
-    };
+    let s = if count == 1 { "" } else { "s" };
     rsx! {
         div {
             class: "bulk-bar",
-            style: "display: flex; align-items: center; gap: 12px; padding: 10px 16px; \
-                    background: var(--cf-card-bg); border-top: 1px solid var(--cf-divider); \
-                    font-size: 13px;",
-            span { style: "color: var(--cf-text-muted);", "{label} selected" }
+            role: "toolbar",
+            "aria-label": "Bulk actions",
+            // JSX: <span className="bulk-count"><strong>{count}</strong> selected</span>
+            span { class: "bulk-count",
+                strong { "{count}" }
+                " selected"
+            }
+            // JSX: <span className="bulk-sep" />
+            span { class: "bulk-sep" }
+            // Cancel action
             button {
                 class: "btn btn-danger xs focus-ring",
-                style: "background: rgba(248,113,113,0.15); color: #f87171; border: 1px solid rgba(248,113,113,0.3);",
                 onclick: move |_| on_cancel.call(()),
                 svg {
                     width: "12", height: "12",
@@ -399,10 +400,11 @@ fn BulkBar(count: usize, on_cancel: EventHandler<()>, on_clear: EventHandler<()>
                     line { x1: "18", y1: "6", x2: "6", y2: "18" }
                     line { x1: "6", y1: "6", x2: "18", y2: "18" }
                 }
-                "Cancel {label}"
+                "Cancel {count} build{s}"
             }
+            // JSX: <button className="btn btn-ghost xs focus-ring" onClick={onClear}>Clear</button>
             button {
-                class: "btn btn-ghost focus-ring xs",
+                class: "btn btn-ghost xs focus-ring",
                 onclick: move |_| on_clear.call(()),
                 "Clear"
             }

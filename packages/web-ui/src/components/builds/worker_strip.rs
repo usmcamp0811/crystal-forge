@@ -1,12 +1,13 @@
 //! Worker strip component for the builds control center.
+//!
+//! Matches BuildsView.jsx WorkerCard exactly — inline styles, no Tailwind.
 
 use dioxus::prelude::*;
 
-use crate::theme;
+use super::helpers::{WorkerAction, WorkerItem, WorkerStatus};
 
-use super::helpers::{WorkerAction, WorkerItem};
-
-/// Worker strip showing all build workers and their status.
+/// Worker grid showing all build workers and their status.
+/// JSX: <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(240px,1fr))", gap:10 }}>
 #[component]
 pub fn WorkerStrip(
     workers: Vec<WorkerItem>,
@@ -15,59 +16,79 @@ pub fn WorkerStrip(
     let _ = &on_action;
     rsx! {
         div {
-            class: "grid gap-2",
-            style: "grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));",
+            style: "display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px;",
             for worker in workers {
-                {
-                    let slot_pct = if worker.total_slots == 0 {
-                        0
-                    } else {
-                        ((worker.active_slots as f64 / worker.total_slots as f64) * 100.0).round() as i32
-                    };
-                    rsx! {
-                        // JSX: <div className="card" style={{ padding:"14px 16px", display:"flex", flexDirection:"column", gap:10 }}>
+                WorkerCard { worker: worker.clone() }
+            }
+        }
+    }
+}
+
+/// Individual worker card.
+/// JSX: <div className="card" style={{ padding:"14px 16px", display:"flex", flexDirection:"column", gap:10 }}>
+#[component]
+fn WorkerCard(worker: WorkerItem) -> Element {
+    let slot_pct = if worker.total_slots == 0 {
+        0
+    } else {
+        ((worker.active_slots as f64 / worker.total_slots as f64) * 100.0).round() as usize
+    };
+    let status_col = status_color(worker.status);
+    let chip_style = format!(
+        "color: {status_col}; background: {status_col}22; font-size: 10px;",
+    );
+
+    rsx! {
+        div {
+            key: "{worker.id}",
+            class: "card",
+            style: "padding: 14px 16px; display: flex; flex-direction: column; gap: 10px;",
+
+            // Row 1: name + host / status chip
+            div {
+                style: "display: flex; align-items: center; justify-content: space-between;",
+                div {
+                    div {
+                        style: "font-size: 13px; font-weight: 600;",
+                        "{worker.name}"
+                    }
+                    if let Some(ref host) = worker.host {
                         div {
-                            key: "{worker.id}",
-                            class: "card px-4 py-[14px] space-y-[10px]",
-                            div {
-                                class: "flex items-center justify-between gap-2",
-                                div {
-                                    p { class: "text-[13px] leading-[1.15] text-white font-semibold", "{worker.name}" }
-                                if let Some(host) = worker.host.clone() {
-                                    // JSX: fontSize:11
-                                    p { class: "text-[11px] font-mono {theme::text::MUTED} whitespace-nowrap overflow-hidden text-ellipsis", "{host}" }
-                                }
-                                }
-                                span {
-                                    class: "inline-flex px-2 py-0.5 rounded text-[10px] font-medium",
-                                    style: "color: {status_color(worker.status)}; background-color: {status_bg(worker.status)};",
-                                    "{status_text(worker.status)}"
-                                }
-                            }
-                            div {
-                                class: "text-[11px] {theme::text::SECONDARY} flex items-center gap-3",
-                                if let Some(arch) = worker.arch.clone() {
-                                    span { class: "font-mono", "{arch}" }
-                                }
-                                if let (Some(cores), Some(mem)) = (worker.cpu_cores, worker.memory_gb) {
-                                    span { "{cores}c · {mem}GB" }
-                                }
-                            }
-                            div {
-                                div {
-                                    class: "flex items-center justify-between text-[11px] {theme::text::MUTED} mb-1",
-                                    span { "Slots" }
-                                    span { "{worker.active_slots}/{worker.total_slots}" }
-                                }
-                                div {
-                                    class: "h-1 rounded-full bg-slate-800 overflow-hidden",
-                                    div {
-                                        class: "h-full rounded-full transition-all",
-                                        style: "width: {slot_pct}%; background-color: {status_color(worker.status)};",
-                                    }
-                                }
-                            }
+                            class: "mono",
+                            style: "font-size: 11px; color: var(--cf-text-muted);",
+                            "{host}"
                         }
+                    }
+                }
+                span {
+                    class: "chip",
+                    style: "{chip_style}",
+                    "{status_label(worker.status)}"
+                }
+            }
+
+            // Row 2: arch · cores · mem
+            div {
+                style: "font-size: 11px; color: var(--cf-text-secondary); display: flex; gap: 12px;",
+                if let Some(ref arch) = worker.arch {
+                    span { "{arch}" }
+                }
+                if let (Some(cores), Some(mem)) = (worker.cpu_cores, worker.memory_gb) {
+                    span { "{cores}c · {mem}GB" }
+                }
+            }
+
+            // Row 3: slots label + progress bar
+            div {
+                div {
+                    style: "display: flex; justify-content: space-between; font-size: 11px; color: var(--cf-text-muted); margin-bottom: 4px;",
+                    span { "Slots" }
+                    span { "{worker.active_slots}/{worker.total_slots}" }
+                }
+                div {
+                    style: "height: 4px; background: var(--cf-subtle-bg); border-radius: 99px; overflow: hidden;",
+                    div {
+                        style: "width: {slot_pct}%; height: 100%; background: {status_col};",
                     }
                 }
             }
@@ -75,26 +96,18 @@ pub fn WorkerStrip(
     }
 }
 
-fn status_color(status: super::helpers::WorkerStatus) -> &'static str {
+fn status_color(status: WorkerStatus) -> &'static str {
     match status {
-        super::helpers::WorkerStatus::Running => "#34d399",
-        super::helpers::WorkerStatus::Paused => "#fbbf24",
-        super::helpers::WorkerStatus::Draining => "#60a5fa",
+        WorkerStatus::Running  => "#34d399",
+        WorkerStatus::Paused   => "#fbbf24",
+        WorkerStatus::Draining => "#60a5fa",
     }
 }
 
-fn status_bg(status: super::helpers::WorkerStatus) -> &'static str {
+fn status_label(status: WorkerStatus) -> &'static str {
     match status {
-        super::helpers::WorkerStatus::Running => "rgba(52, 211, 153, 0.14)",
-        super::helpers::WorkerStatus::Paused => "rgba(251, 191, 36, 0.14)",
-        super::helpers::WorkerStatus::Draining => "rgba(96, 165, 250, 0.14)",
-    }
-}
-
-fn status_text(status: super::helpers::WorkerStatus) -> &'static str {
-    match status {
-        super::helpers::WorkerStatus::Running => "running",
-        super::helpers::WorkerStatus::Paused => "paused",
-        super::helpers::WorkerStatus::Draining => "draining",
+        WorkerStatus::Running  => "running",
+        WorkerStatus::Paused   => "paused",
+        WorkerStatus::Draining => "draining",
     }
 }

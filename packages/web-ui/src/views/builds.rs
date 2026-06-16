@@ -176,9 +176,9 @@ fn map_queue_item(item: &crate::api::models::BuildQueueItem, idx: usize) -> Buil
                     .unwrap_or_else(|| "unknown".to_string())
             )
         }),
-        cached_derivs: 0,
-        built_derivs: 0,
-        total_derivs: 0,
+        cached_derivs: item.cached_derivs as usize,
+        built_derivs: item.built_derivs as usize,
+        total_derivs: item.total_derivs as usize,
         current_pkg: None,
         failed_pkg: None,
         attempts: 1,
@@ -478,8 +478,8 @@ pub fn BuildsView() -> Element {
                 class: "card overflow-hidden",
                 // JSX: <div className="sd-tabs" style={{ padding:"0 16px", borderBottom:"1px solid var(--cf-card-border)" }}>
                 div {
-                    class: "sd-tabs px-4 border-b {theme::surface::CARD_BORDER}",
-                    // JSX: <button className="sd-tab focus-ring" (+ "active" when selected)>
+                    class: "sd-tabs",
+                    style: "padding: 0 16px; border-bottom: 1px solid var(--cf-card-border);",
                     button {
                         class: if active_view() == BuildsTab::ActiveQueue {
                             "sd-tab focus-ring active"
@@ -505,6 +505,19 @@ pub fn BuildsView() -> Element {
                             log_open.set(false);
                         },
                         "Completed ({build_history.read().len()})"
+                    }
+                    // JSX: {tab==="active" && cancellable.length > 0 && <MultiSelectHint />}
+                    if active_view() == BuildsTab::ActiveQueue
+                        && queue_data.iter().any(|b| matches!(b.status, BuildStatus::Queued | BuildStatus::Building | BuildStatus::Stopping))
+                    {
+                        span {
+                            class: "ms-hint",
+                            title: "⌘/Ctrl-click to toggle rows · Shift-click to select a range",
+                            kbd { "⌘" }
+                            "/"
+                            kbd { "⇧" }
+                            "-click to select"
+                        }
                     }
                 }
                 BuildQueuePane {
