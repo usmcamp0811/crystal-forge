@@ -30,8 +30,10 @@ impl DetailTab {
 #[component]
 pub fn BuildDetailPane(
     selected: Option<BuildItem>,
+    can_requeue: bool,
     on_close: EventHandler<()>,
     on_log: EventHandler<()>,
+    on_build_action: EventHandler<BuildAction>,
     tab: Signal<DetailTab>,
     on_tab_change: EventHandler<DetailTab>,
     follow_logs: Signal<bool>,
@@ -186,9 +188,10 @@ pub fn BuildDetailPane(
                     "Logs"
                 }
                 // Cancel for building/queued
-                if matches!(build.status, BuildStatus::Building | BuildStatus::Queued) {
+                if can_requeue && matches!(build.status, BuildStatus::Building | BuildStatus::Queued) {
                     button {
                         class: "btn btn-ghost focus-ring xs",
+                        onclick: move |_| on_build_action.call(BuildAction::Stop),
                         svg {
                             width: "12", height: "12",
                             view_box: "0 0 24 24",
@@ -203,10 +206,11 @@ pub fn BuildDetailPane(
                     }
                 }
                 // Force kill for stopping
-                if build.status == BuildStatus::Stopping {
+                if can_requeue && build.status == BuildStatus::Stopping {
                     button {
                         class: "btn btn-ghost focus-ring xs",
                         style: "color: var(--cf-red, #f87171);",
+                        onclick: move |_| on_build_action.call(BuildAction::ForceCancel),
                         svg {
                             width: "12", height: "12",
                             view_box: "0 0 24 24",
@@ -221,9 +225,10 @@ pub fn BuildDetailPane(
                     }
                 }
                 // Retry for failed
-                if build.status == BuildStatus::Failed {
+                if can_requeue && build.status == BuildStatus::Failed {
                     button {
                         class: "btn btn-ghost focus-ring xs",
+                        onclick: move |_| on_build_action.call(BuildAction::Restart),
                         svg {
                             width: "12", height: "12",
                             view_box: "0 0 24 24",

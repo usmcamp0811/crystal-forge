@@ -16,7 +16,7 @@ pub fn BuildQueuePane(
     on_build_action: EventHandler<(i32, BuildAction)>,
     on_log: EventHandler<i32>,
 ) -> Element {
-    // Multi-select state: set of selected build IDs (only cancellable ones).
+    // Multi-select state: set of selected build IDs (only operator-cancellable ones).
     let mut selected_ids: Signal<Vec<i32>> = use_signal(Vec::new);
 
     let bulk_count = selected_ids.read().len();
@@ -44,7 +44,7 @@ pub fn BuildQueuePane(
                             let build = build.clone();
                             let is_selected = *selected_id.read() == Some(build.id);
                             let is_checked = selected_ids.read().contains(&build.id);
-                            let can_cancel = is_cancellable(build.status);
+                            let can_cancel = can_requeue && is_cancellable(build.status);
                             let mut row_class = "q-row".to_string();
                             if is_selected { row_class.push_str(" selected"); }
                             if is_checked  { row_class.push_str(" row-checked"); }
@@ -56,7 +56,7 @@ pub fn BuildQueuePane(
                                     class: "{row_class}",
                                     "data-testid": "build-queue-row",
                                     onclick: move |evt| {
-                                        // Shift-click: toggle multi-select on cancellable rows
+                                        // Shift-click: toggle multi-select on operator-cancellable rows
                                         if evt.modifiers().shift() && can_cancel {
                                             let mut ids = selected_ids.read().clone();
                                             if is_checked {
@@ -277,8 +277,8 @@ pub fn BuildQueuePane(
             }
         }
 
-        // Bulk cancel bar — appears when multi-select has items
-        if bulk_count > 0 {
+        // Bulk cancel bar — appears when multi-select has items and caller may mutate queue
+        if can_requeue && bulk_count > 0 {
             BulkBar {
                 count: bulk_count,
                 on_cancel: move |_| {

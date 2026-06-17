@@ -514,9 +514,7 @@ pub fn BuildsView() -> Element {
                             style: "display: inline-flex; align-items: center; gap: 10px; margin-left: auto;",
                             span {
                                 class: "ms-hint",
-                                title: "⌘/Ctrl-click to toggle rows · Shift-click to select a range",
-                                kbd { "⌘" }
-                                "/"
+                                title: "Shift-click to toggle cancellable rows",
                                 kbd { "⇧" }
                                 "-click to select"
                             }
@@ -560,8 +558,12 @@ pub fn BuildsView() -> Element {
                 aside {
                     class: "side-panel",
                     onclick: |evt| evt.stop_propagation(),
+                    {
+                        let selected_for_action = selected.clone();
+                        rsx! {
                     BuildDetailPane {
                         selected: selected.clone(),
+                        can_requeue,
                         on_close: move |_| {
                             selected_build.set(None);
                             log_open.set(false);
@@ -570,12 +572,22 @@ pub fn BuildsView() -> Element {
                             active_tab.set(DetailTab::Logs);
                             log_open.set(true);
                         },
+                        on_build_action: move |action| {
+                            if let Some(build) = selected_for_action.clone() {
+                                pending_action.set(Some(PendingAction::Build {
+                                    build_id: build.id,
+                                    action,
+                                }));
+                            }
+                        },
                         tab: active_tab,
                         on_tab_change: move |tab| active_tab.set(tab),
                         follow_logs: follow_logs,
                         pause_logs: pause_logs,
                         wrap_logs: wrap_logs,
                         log_query: log_query,
+                    }
+                        }
                     }
                 }
             }
