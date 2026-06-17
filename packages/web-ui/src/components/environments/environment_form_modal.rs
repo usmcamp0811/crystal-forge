@@ -3,8 +3,8 @@
 use dioxus::prelude::*;
 
 use super::{
-    looks_like_hex_color, EnvironmentDeploymentPolicy, EnvironmentFormDraft, EnvironmentItem,
-    PolicyOption,
+    EnvironmentDeploymentPolicy, EnvironmentFormDraft, EnvironmentItem, PolicyOption,
+    looks_like_hex_color,
 };
 use crate::components::icon::{Icon, IconName};
 

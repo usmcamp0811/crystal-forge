@@ -4,10 +4,10 @@ use dioxus::prelude::*;
 use uuid::Uuid;
 
 use crate::components::environments::{
+    EnvironmentCard, EnvironmentDeploymentPolicy, EnvironmentFormDraft, EnvironmentFormModal,
+    EnvironmentItem, EnvironmentTable, NewEnvironmentDraft, PolicyOption, RemoveEnvironmentDialog,
     environment_name_for_id, normalize_color_hex, normalize_optional, policy_library,
-    required_agent_policy_id, validate_environment, validate_environment_form, EnvironmentCard,
-    EnvironmentDeploymentPolicy, EnvironmentFormDraft, EnvironmentFormModal, EnvironmentItem,
-    EnvironmentTable, NewEnvironmentDraft, PolicyOption, RemoveEnvironmentDialog,
+    required_agent_policy_id, validate_environment, validate_environment_form,
 };
 use crate::components::icon::{Icon, IconName};
 use crate::components::notifications::{AlertBanner, AlertSeverity};

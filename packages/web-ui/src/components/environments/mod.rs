@@ -132,7 +132,7 @@ mod environment_form_modal;
 mod remove_environment_dialog;
 
 pub use environment_card::{EnvironmentCard, EnvironmentTable};
-pub use environment_form_modal::{validate_environment_form, EnvironmentFormModal};
+pub use environment_form_modal::{EnvironmentFormModal, validate_environment_form};
 pub use remove_environment_dialog::RemoveEnvironmentDialog;
 
 // Re-export helper functions

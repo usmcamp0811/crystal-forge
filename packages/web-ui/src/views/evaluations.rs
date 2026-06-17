@@ -460,12 +460,20 @@ fn EvaluationsPage() -> Element {
                                 let mut selected_sig = active_selected_ids.clone();
                                 let mut toast = toast_msg.clone();
                                 spawn(async move {
+                                    let mut success = 0u32;
+                                    let mut failed = Vec::new();
                                     for commit_id in &ids {
-                                        let _ = cancel_commit_evaluation(*commit_id).await;
+                                        match cancel_commit_evaluation(*commit_id).await {
+                                            Ok(_) => success += 1,
+                                            Err(e) => failed.push((*commit_id, e.to_string())),
+                                        }
                                     }
-                                    let cancel_count = ids.len();
-                                    toast.set(Some(format!("Cancelled {} evaluation{}", cancel_count, if cancel_count == 1 { "" } else { "s" })));
-                                    selected_sig.set(std::collections::HashSet::new());
+                                    if success > 0 {
+                                        toast.set(Some(format!("Cancelled {} evaluation{}", success, if success == 1 { "" } else { "s" })));
+                                        selected_sig.set(failed.iter().map(|(id, _)| *id).collect());
+                                    } else {
+                                        toast.set(Some("Failed to cancel evaluations — see server logs".to_string()));
+                                    }
                                     refresh_sig.set(refresh_sig() + 1);
                                 });
                             },
@@ -590,28 +598,38 @@ fn EvalActiveQueue(
                                 },
                                 ondrop: move |evt| {
                                     evt.prevent_default();
-                                    if drag_id().is_some() {
+                                    let src_id = drag_id();
+                                    if let Some(src_id) = src_id {
+                                        let target_cid = commit_id;
+                                        if src_id == target_cid { return; }
                                         let items = queue_items.clone();
                                         let mut refresh_sig = refresh.clone();
-                                        let cid = commit_id;
+                                        let mut drag_sig = drag_id.clone();
+                                        let mut over_sig = over_idx.clone();
                                         spawn(async move {
-                                            let mut active: Vec<_> = items.read().iter()
+                                            let active: Vec<_> = items.read().iter()
                                                 .filter(|item| is_active_eval_status(&item.evaluation_status))
                                                 .cloned().collect();
-                                            if let Some(idx) = active.iter().position(|e| e.commit_id == cid) {
-                                                if idx + 1 < active.len() {
-                                                    active.swap(idx, idx + 1);
-                                                    let ordered_ids: Vec<i32> = active.iter().map(|e| e.commit_id).collect();
-                                                    let _ = reorder_eval_queue(&ordered_ids).await;
-                                                    refresh_sig.set(refresh_sig() + 1);
-                                                }
+                                            let src_pos = active.iter().position(|e| e.commit_id == src_id);
+                                            let target_pos = active.iter().position(|e| e.commit_id == target_cid);
+                                            if let (Some(sp), Some(tp)) = (src_pos, target_pos) {
+                                                let mut reordered = active.clone();
+                                                let removed = reordered.remove(sp);
+                                                let adjusted_tp = if sp < tp { tp - 1 } else { tp };
+                                                reordered.insert(adjusted_tp, removed);
+                                                let ordered_ids: Vec<i32> = reordered.iter().map(|e| e.commit_id).collect();
+                                                let _ = reorder_eval_queue(&ordered_ids).await;
+                                                refresh_sig.set(refresh_sig() + 1);
                                             }
                                         });
+                                        drag_sig.set(None);
+                                        over_sig.set(None);
                                     }
                                 },
                                 onclick: row_onclick,
                                 td {
                                     style: "color: var(--cf-text-muted); font-size: 12px; width: 32px;",
+                                    onclick: move |evt| evt.stop_propagation(),
                                     input {
                                         class: "ed-checkbox",
                                         r#type: "checkbox",
@@ -665,16 +683,22 @@ fn EvalActiveQueue(
                                                 if is_first { return; }
                                                 let items = queue_items.clone();
                                                 let mut refresh_sig = refresh.clone();
+                                                let mut toast = toast_msg.clone();
                                                 spawn(async move {
-                                                    let mut active: Vec<_> = items.read().iter()
+                                                    let active: Vec<_> = items.read().iter()
                                                         .filter(|item| is_active_eval_status(&item.evaluation_status))
                                                         .cloned().collect();
                                                     if let Some(idx) = active.iter().position(|e| e.commit_id == commit_id) {
                                                         if idx > 0 {
-                                                            active.swap(idx - 1, idx);
-                                                            let ordered_ids: Vec<i32> = active.iter().map(|e| e.commit_id).collect();
-                                                            let _ = reorder_eval_queue(&ordered_ids).await;
-                                                            refresh_sig.set(refresh_sig() + 1);
+                                                            let mut reordered = active;
+                                                            let removed = reordered.remove(idx);
+                                                            reordered.insert(idx - 1, removed);
+                                                            let ordered_ids: Vec<i32> = reordered.iter().map(|e| e.commit_id).collect();
+                                                            if let Err(e) = reorder_eval_queue(&ordered_ids).await {
+                                                                toast.set(Some(format!("Reorder failed: {}", e)));
+                                                            } else {
+                                                                refresh_sig.set(refresh_sig() + 1);
+                                                            }
                                                         }
                                                     }
                                                 });
@@ -690,16 +714,22 @@ fn EvalActiveQueue(
                                                 if is_last { return; }
                                                 let items = queue_items.clone();
                                                 let mut refresh_sig = refresh.clone();
+                                                let mut toast = toast_msg.clone();
                                                 spawn(async move {
-                                                    let mut active: Vec<_> = items.read().iter()
+                                                    let active: Vec<_> = items.read().iter()
                                                         .filter(|item| is_active_eval_status(&item.evaluation_status))
                                                         .cloned().collect();
                                                     if let Some(idx) = active.iter().position(|e| e.commit_id == commit_id) {
                                                         if idx + 1 < active.len() {
-                                                            active.swap(idx, idx + 1);
-                                                            let ordered_ids: Vec<i32> = active.iter().map(|e| e.commit_id).collect();
-                                                            let _ = reorder_eval_queue(&ordered_ids).await;
-                                                            refresh_sig.set(refresh_sig() + 1);
+                                                            let mut reordered = active;
+                                                            let removed = reordered.remove(idx);
+                                                            reordered.insert(idx, removed);
+                                                            let ordered_ids: Vec<i32> = reordered.iter().map(|e| e.commit_id).collect();
+                                                            if let Err(e) = reorder_eval_queue(&ordered_ids).await {
+                                                                toast.set(Some(format!("Reorder failed: {}", e)));
+                                                            } else {
+                                                                refresh_sig.set(refresh_sig() + 1);
+                                                            }
                                                         }
                                                     }
                                                 });
@@ -712,9 +742,13 @@ fn EvalActiveQueue(
                                                 style: "padding: 3px 8px; font-size: 11px;",
                                                 onclick: move |_| {
                                                     let mut refresh_sig = refresh.clone();
+                                                    let mut toast = toast_msg.clone();
                                                     spawn(async move {
-                                                        let _ = force_cancel_commit_evaluation(commit_id).await;
-                                                        refresh_sig.set(refresh_sig() + 1);
+                                                        if let Err(e) = force_cancel_commit_evaluation(commit_id).await {
+                                                            toast.set(Some(format!("Force cancel failed: {}", e)));
+                                                        } else {
+                                                            refresh_sig.set(refresh_sig() + 1);
+                                                        }
                                                     });
                                                 },
                                                 "Force cancel"
@@ -726,9 +760,13 @@ fn EvalActiveQueue(
                                                 style: "padding: 3px 8px; font-size: 11px;",
                                                 onclick: move |_| {
                                                     let mut refresh_sig = refresh.clone();
+                                                    let mut toast = toast_msg.clone();
                                                     spawn(async move {
-                                                        let _ = cancel_commit_evaluation(commit_id).await;
-                                                        refresh_sig.set(refresh_sig() + 1);
+                                                        if let Err(e) = cancel_commit_evaluation(commit_id).await {
+                                                            toast.set(Some(format!("Cancel failed: {}", e)));
+                                                        } else {
+                                                            refresh_sig.set(refresh_sig() + 1);
+                                                        }
                                                     });
                                                 },
                                                 "Cancel"
