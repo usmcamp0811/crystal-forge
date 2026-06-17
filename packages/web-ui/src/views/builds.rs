@@ -510,13 +510,21 @@ pub fn BuildsView() -> Element {
                     if active_view() == BuildsTab::ActiveQueue
                         && queue_data.iter().any(|b| matches!(b.status, BuildStatus::Queued | BuildStatus::Building | BuildStatus::Stopping))
                     {
-                        span {
-                            class: "ms-hint",
-                            title: "⌘/Ctrl-click to toggle rows · Shift-click to select a range",
-                            kbd { "⌘" }
-                            "/"
-                            kbd { "⇧" }
-                            "-click to select"
+                        div {
+                            style: "display: inline-flex; align-items: center; gap: 10px; margin-left: auto;",
+                            span {
+                                class: "ms-hint",
+                                title: "⌘/Ctrl-click to toggle rows · Shift-click to select a range",
+                                kbd { "⌘" }
+                                "/"
+                                kbd { "⇧" }
+                                "-click to select"
+                            }
+                            span {
+                                class: "ms-hint",
+                                title: "Queue reordering is unavailable until the backend persists priority changes.",
+                                "Queue reordering unavailable"
+                            }
                         }
                     }
                 }
@@ -837,25 +845,7 @@ pub fn BuildsView() -> Element {
                                                     }
                                                 }
                                             }
-                                            BuildAction::RunNext => {
-                                                // RunNext is handled in local state only (no server action)
-                                            }
-                                            BuildAction::MoveUp | BuildAction::MoveDown => {
-                                                // Local reorder — swap in builds signal
-                                                let mut current = builds.read().clone();
-                                                if let Some(idx) = current.iter().position(|b| b.id == build_id) {
-                                                    let new_idx = if action == BuildAction::MoveUp {
-                                                        idx.saturating_sub(1)
-                                                    } else {
-                                                        (idx + 1).min(current.len().saturating_sub(1))
-                                                    };
-                                                    if idx != new_idx {
-                                                        current.swap(idx, new_idx);
-                                                        builds.set(current);
-                                                    }
-                                                }
-                                            }
-                                         }
+                                          }
                                     });
                                 }
                             }

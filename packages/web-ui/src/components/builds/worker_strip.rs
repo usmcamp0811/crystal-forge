@@ -34,9 +34,7 @@ fn WorkerCard(worker: WorkerItem) -> Element {
         ((worker.active_slots as f64 / worker.total_slots as f64) * 100.0).round() as usize
     };
     let status_col = status_color(worker.status);
-    let chip_style = format!(
-        "color: {status_col}; background: {status_col}22; font-size: 10px;",
-    );
+    let chip_style = format!("color: {status_col}; background: {status_col}22; font-size: 10px;",);
 
     rsx! {
         div {
@@ -98,16 +96,16 @@ fn WorkerCard(worker: WorkerItem) -> Element {
 
 fn status_color(status: WorkerStatus) -> &'static str {
     match status {
-        WorkerStatus::Running  => "#34d399",
-        WorkerStatus::Paused   => "#fbbf24",
+        WorkerStatus::Running => "#34d399",
+        WorkerStatus::Paused => "#fbbf24",
         WorkerStatus::Draining => "#60a5fa",
     }
 }
 
 fn status_label(status: WorkerStatus) -> &'static str {
     match status {
-        WorkerStatus::Running  => "running",
-        WorkerStatus::Paused   => "paused",
+        WorkerStatus::Running => "running",
+        WorkerStatus::Paused => "paused",
         WorkerStatus::Draining => "draining",
     }
 }

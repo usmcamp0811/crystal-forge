@@ -115,10 +115,6 @@ pub enum BuildAction {
     ForceCancel,
     Restart,
     RunNext,
-    /// Move up one position in the active queue (local reorder).
-    MoveUp,
-    /// Move down one position in the active queue (local reorder).
-    MoveDown,
 }
 
 /// Worker item struct.
@@ -370,22 +366,6 @@ pub fn apply_action(
                         next_builds.insert(insert_idx, target);
                         selected_build.set(Some(build_id));
                         note.set(Some(format!("Prioritized build #{build_id}")));
-                    }
-                }
-                BuildAction::MoveUp => {
-                    if let Some(idx) = next_builds.iter().position(|b| b.id == build_id) {
-                        if idx > 0 {
-                            next_builds.swap(idx, idx - 1);
-                            note.set(Some(format!("Moved build #{build_id} up")));
-                        }
-                    }
-                }
-                BuildAction::MoveDown => {
-                    if let Some(idx) = next_builds.iter().position(|b| b.id == build_id) {
-                        if idx + 1 < next_builds.len() {
-                            next_builds.swap(idx, idx + 1);
-                            note.set(Some(format!("Moved build #{build_id} down")));
-                        }
                     }
                 }
             }

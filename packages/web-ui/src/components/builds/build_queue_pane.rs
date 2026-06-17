@@ -1,7 +1,7 @@
 //! Build queue pane component for the builds control center.
 //!
 //! Matches BuildsView.jsx: BuildQueueTable with q-queue-table CSS,
-//! dual-segment derivations bar, drag-to-reorder, multi-select bulk bar.
+//! dual-segment derivations bar, and multi-select bulk bar.
 
 use dioxus::prelude::*;
 
@@ -18,15 +18,6 @@ pub fn BuildQueuePane(
 ) -> Element {
     // Multi-select state: set of selected build IDs (only cancellable ones).
     let mut selected_ids: Signal<Vec<i32>> = use_signal(Vec::new);
-    let reorderable = builds
-        .iter()
-        .any(|b| matches!(b.status, BuildStatus::Queued | BuildStatus::Building));
-
-    let cancellable_ids: Vec<i32> = builds
-        .iter()
-        .filter(|b| is_cancellable(b.status))
-        .map(|b| b.id)
-        .collect();
 
     let bulk_count = selected_ids.read().len();
 
@@ -38,28 +29,22 @@ pub fn BuildQueuePane(
                 "data-testid": "build-queue-table",
                 thead {
                     tr {
-                        if reorderable { th { style: "width: 48px;", "#" } }
                         th { "System configuration" }
                         th { "Status" }
                         th { "Worker" }
                         th { "Derivations" }
                         th { "Queued" }
                         th { "Duration" }
-                        th { style: "text-align: right;",
-                            if reorderable { "Reorder · actions" } else { " " }
-                        }
+                        th { style: "text-align: right;", "Actions" }
                     }
                 }
                 tbody {
-                    for (pos, build) in builds.iter().enumerate() {
+                    for build in builds.iter() {
                         {
                             let build = build.clone();
                             let is_selected = *selected_id.read() == Some(build.id);
                             let is_checked = selected_ids.read().contains(&build.id);
                             let can_cancel = is_cancellable(build.status);
-                            let cancellable_ids = cancellable_ids.clone();
-                            let last_pos = builds.len().saturating_sub(1);
-
                             let mut row_class = "q-row".to_string();
                             if is_selected { row_class.push_str(" selected"); }
                             if is_checked  { row_class.push_str(" row-checked"); }
@@ -90,34 +75,6 @@ pub fn BuildQueuePane(
                                         }
                                         selected_id.set(Some(build.id));
                                     },
-
-                                    // Position + drag handle column
-                                    if reorderable {
-                                        td { onclick: move |evt| evt.stop_propagation(),
-                                            div { style: "display: flex; align-items: center; gap: 6px;",
-                                                span { class: "q-drag-handle", title: "Drag to reorder",
-                                                    // grip icon
-                                                    svg {
-                                                        width: "15", height: "15",
-                                                        view_box: "0 0 24 24",
-                                                        fill: "none", stroke: "currentColor",
-                                                        stroke_width: "2",
-                                                        stroke_linecap: "round", stroke_linejoin: "round",
-                                                        line { x1: "8", y1: "6", x2: "21", y2: "6" }
-                                                        line { x1: "8", y1: "12", x2: "21", y2: "12" }
-                                                        line { x1: "8", y1: "18", x2: "21", y2: "18" }
-                                                        line { x1: "3", y1: "6", x2: "3.01", y2: "6" }
-                                                        line { x1: "3", y1: "12", x2: "3.01", y2: "12" }
-                                                        line { x1: "3", y1: "18", x2: "3.01", y2: "18" }
-                                                    }
-                                                }
-                                                span {
-                                                    style: "color: var(--cf-text-muted); font-size: 12px; font-variant-numeric: tabular-nums;",
-                                                    "{pos + 1}"
-                                                }
-                                            }
-                                        }
-                                    }
 
                                     // System configuration column
                                     td {
@@ -234,39 +191,7 @@ pub fn BuildQueuePane(
                                         onclick: move |evt| evt.stop_propagation(),
                                         div {
                                             class: "row-actions",
-                                            style: if reorderable { "opacity: 1; gap: 6px; justify-content: flex-end;" } else { "" },
-
-                                            // Move up / down buttons (active queue only)
-                                            if reorderable {
-                                                div { class: "q-move-group",
-                                                    button {
-                                                        class: "q-move-btn focus-ring",
-                                                        title: "Move up",
-                                                        disabled: pos == 0,
-                                                        onclick: move |_| on_build_action.call((build.id, BuildAction::MoveUp)),
-                                                        svg {
-                                                            width: "15", height: "15",
-                                                            view_box: "0 0 24 24",
-                                                            fill: "none", stroke: "currentColor",
-                                                            stroke_width: "2",
-                                                            polyline { points: "18 15 12 9 6 15" }
-                                                        }
-                                                    }
-                                                    button {
-                                                        class: "q-move-btn focus-ring",
-                                                        title: "Move down",
-                                                        disabled: pos == last_pos,
-                                                        onclick: move |_| on_build_action.call((build.id, BuildAction::MoveDown)),
-                                                        svg {
-                                                            width: "15", height: "15",
-                                                            view_box: "0 0 24 24",
-                                                            fill: "none", stroke: "currentColor",
-                                                            stroke_width: "2",
-                                                            polyline { points: "6 9 12 15 18 9" }
-                                                        }
-                                                    }
-                                                }
-                                            }
+                                            style: "opacity: 1; gap: 6px; justify-content: flex-end;",
 
                                             // Logs button
                                             button {
@@ -289,7 +214,7 @@ pub fn BuildQueuePane(
                                             }
 
                                             // Cancel / force-kill
-                                            if matches!(build.status, BuildStatus::Building | BuildStatus::Queued) {
+                                            if can_requeue && matches!(build.status, BuildStatus::Building | BuildStatus::Queued) {
                                                 button {
                                                     class: "btn-icon focus-ring",
                                                     title: "Cancel build",
@@ -305,7 +230,7 @@ pub fn BuildQueuePane(
                                                     }
                                                 }
                                             }
-                                            if build.status == BuildStatus::Stopping {
+                                            if can_requeue && build.status == BuildStatus::Stopping {
                                                 button {
                                                     class: "btn-icon focus-ring",
                                                     title: "Force kill",
@@ -324,7 +249,7 @@ pub fn BuildQueuePane(
                                             }
 
                                             // Retry for failed
-                                            if build.status == BuildStatus::Failed {
+                                            if can_requeue && build.status == BuildStatus::Failed {
                                                 button {
                                                     class: "btn-icon focus-ring",
                                                     title: "Retry build",
@@ -366,6 +291,7 @@ pub fn BuildQueuePane(
                 on_clear: move |_| selected_ids.set(Vec::new()),
             }
         }
+
     }
 }
 
