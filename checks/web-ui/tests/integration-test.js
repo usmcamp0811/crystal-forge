@@ -4320,19 +4320,9 @@ const steps = [
       await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
 
-      const queueCards = page.locator("[data-testid='build-queue-card']");
-      const queueCardCount = await queueCards.count();
-      if (queueCardCount === 0) {
-        throw new Error("Expected at least one build queue card in builds screenshot");
-      }
-      if (queueCardCount > 0) {
-        const overflowingCards = await queueCards.evaluateAll((cards) =>
-          cards.filter((card) => card.scrollWidth > card.clientWidth + 1).length,
-        );
-        if (overflowingCards > 0) {
-          throw new Error(`Build queue has ${overflowingCards} overflowing cards`);
-        }
-      }
+      await assertVisible(page.getByRole("heading", { name: "Builds" }).first(), "Expected Builds heading");
+      await assertVisible(page.locator("[data-testid='build-queue-table']"), "Expected build queue table");
+      await assertVisible(page.locator(".card").filter({ hasText: "builder" }).first(), "Expected worker cards section");
 
       await unrouteBuildsData(page);
     },
@@ -4345,8 +4335,9 @@ const steps = [
       await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
 
-      await assertVisible(page.locator("button:has-text('Refresh')"), "Expected Refresh action in Builds header");
-      await assertVisible(page.locator("button:has-text('Queue build')"), "Expected Queue build action in Builds header");
+      await assertVisible(page.getByText(/updated just now|updated \d+s ago/i).first(), "Expected LiveIndicator in Builds header");
+      await assertVisible(page.getByText(/click to select/i).first(), "Expected multi-select hint in Builds header");
+      await assertVisible(page.locator("button[title='Move up']").first(), "Expected Move up reorder action in Builds table");
 
       const pageText = await page.locator("body").textContent();
       for (const metric of ["Building", "Queued", "Failed 24h", "Workers", "Slot usage"]) {
@@ -4360,18 +4351,18 @@ const steps = [
   },
   {
     name: "11b-builds-queue-card-focus",
-    description: "Build queue card layout focus",
+    description: "Build queue row selection focus",
     action: async (page) => {
       await routeBuildsData(page);
       await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
 
-      const firstQueueCard = page.locator("[data-testid='build-queue-card']").first();
-      if (await firstQueueCard.isVisible({ timeout: 2000 }).catch(() => false)) {
-        await firstQueueCard.click();
+      const firstQueueRow = page.locator("[data-testid='build-queue-row']").first();
+      if (await firstQueueRow.isVisible({ timeout: 2000 }).catch(() => false)) {
+        await firstQueueRow.click();
         await page.waitForTimeout(700);
       } else {
-        throw new Error("Expected first build queue card to be visible for focused screenshot");
+        throw new Error("Expected first build queue row to be visible for focused screenshot");
       }
 
       await unrouteBuildsData(page);
@@ -4385,8 +4376,7 @@ const steps = [
       await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
 
-      // Click the Completed Builds tab
-      const completedTab = page.locator("button:has-text('Completed Builds')");
+      const completedTab = page.locator("button:has-text('Completed (')");
       await completedTab.click();
       await page.waitForTimeout(800);
 
@@ -4407,8 +4397,7 @@ const steps = [
       await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
 
-      // Switch to Completed Builds tab
-      const completedTab = page.locator("button:has-text('Completed Builds')");
+      const completedTab = page.locator("button:has-text('Completed (')");
       await completedTab.click();
       await page.waitForTimeout(800);
 
@@ -4462,14 +4451,12 @@ const steps = [
       await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
 
-      // Stay in card view (default) to show cancelling state badge
-      const queueCards = page.locator("[data-testid='build-queue-card']");
-      const cardCount = await queueCards.count();
-      if (cardCount === 0) {
-        throw new Error("Expected at least one build queue card");
+      const queueRows = page.locator("[data-testid='build-queue-row']");
+      const rowCount = await queueRows.count();
+      if (rowCount === 0) {
+        throw new Error("Expected at least one build queue row");
       }
 
-      // Verify we can see the stopping/cancelling status badge
       const stoppingBadge = page.getByText(/stopping|cancelling/i).first();
       const stoppingVisible = await stoppingBadge.isVisible({ timeout: 2000 }).catch(() => false);
       if (!stoppingVisible) {
@@ -4506,27 +4493,13 @@ const steps = [
       await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
 
-      // In card view, click on a cancelled build to select it
-      // Restart should be visible for cancelled builds
-      const cards = page.locator("[data-testid='build-queue-card']");
-      const cardCount = await cards.count();
-      
-      // Find the card with cancelled status and click it
-      for (let i = 0; i < cardCount; i++) {
-        const cardText = await cards.nth(i).textContent();
-        if (/cancelled|canceled/i.test(cardText)) {
-          await cards.nth(i).click();
-          await page.waitForTimeout(500);
-          break;
-        }
-      }
+      const stoppingRow = page.locator("[data-testid='build-queue-row']", { hasText: "system-stopping-build" });
+      await assertVisible(stoppingRow, "Expected stopping build row");
+      await assertVisible(stoppingRow.locator("button[title='Force kill']"), "Expected Force kill action for stopping build");
 
-      // Verify Restart button is visible for cancelled build
-      const restartBtn = page.locator("button:has-text('Restart')");
-      const restartVisible = await restartBtn.isVisible({ timeout: 2000 }).catch(() => false);
-      if (!restartVisible) {
-        throw new Error("Expected Restart button to be visible for cancelled build");
-      }
+      const queuedRow = page.locator("[data-testid='build-queue-row']", { hasText: "queued-system-01" });
+      await assertVisible(queuedRow, "Expected queued build row");
+      await assertVisible(queuedRow.locator("button[title='Cancel build']"), "Expected Cancel action for queued build");
 
       await unrouteBuildsDataWithCancelStates(page);
     },
@@ -4561,18 +4534,18 @@ const steps = [
       await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
 
-      const completedTab = page.locator("button:has-text('Completed Builds')");
-      await assertVisible(completedTab, "Completed Builds tab should be visible");
+      const completedTab = page.locator("button:has-text('Completed (')");
+      await assertVisible(completedTab, "Completed tab should be visible");
       await completedTab.click();
       await page.waitForTimeout(800);
 
       const cancelledRow = page.locator("tr", { hasText: "cancelled-history-system" });
       await assertVisible(cancelledRow, "Cancelled build row should be visible in Completed tab");
 
-      const restartBtn = cancelledRow.locator("button:has-text('Restart')");
-      await assertVisible(restartBtn, "Restart button should be visible for cancelled completed build");
+      const restartBtn = cancelledRow.locator("button[title='Retry build']");
+      await assertVisible(restartBtn, "Retry action should be visible for cancelled completed build");
       await restartBtn.click();
-      await page.getByRole("heading", { name: "Restart build?" }).waitFor({ timeout: 3000 });
+      await page.getByRole("heading", { name: /Restart build\?/i }).waitFor({ timeout: 3000 });
 
       const modalConfirm = page.locator(".cf-modal-panel-30 button:has-text('Restart')");
       await assertVisible(modalConfirm, "Restart confirmation button should be visible in modal");
@@ -4591,6 +4564,23 @@ const steps = [
 
       await page.unroute("**/api/v1/build-jobs/recent*");
       await page.unroute("**/api/v1/build-jobs/*/requeue");
+      await unrouteBuildsDataWithCancelStates(page);
+    },
+  },
+  {
+    name: "15i-builds-non-operator",
+    description: "Builds view hides retry and mutating controls for non-operators",
+    action: async (page) => {
+      await routeBuildsDataWithCancelStates(page);
+      await page.goto(`${baseUrl}/builds?ui_check_auth=1&ui_check_role=viewer`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2000);
+
+      await assertHidden(page.locator("button[title='Retry build']").first(), "Retry build should be hidden for non-operators");
+      await assertHidden(page.locator("button[title='Cancel build']").first(), "Cancel build should be hidden for non-operators");
+      await assertHidden(page.locator("button[title='Force kill']").first(), "Force kill should be hidden for non-operators");
+      await assertHidden(page.locator("button[title='Move up']").first(), "Move up should be hidden for non-operators");
+      await assertHidden(page.locator("button[title='Move down']").first(), "Move down should be hidden for non-operators");
+
       await unrouteBuildsDataWithCancelStates(page);
     },
   },
@@ -6028,6 +6018,7 @@ const CI_FAST_STEP_NAMES = new Set([
   "15f-builds-human-duration",
   "15g-builds-action-visibility",
   "15h-builds-completed-restart-action",
+  "15i-builds-non-operator",
   // TASK-17: CVE dashboard evidence
   "16-cves",
   "16b-cves-severity-filter",

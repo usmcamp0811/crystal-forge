@@ -785,6 +785,18 @@ pub async fn prioritize_build_job(job_id: &uuid::Uuid) -> Result<(), ApiClientEr
     send_empty_with_csrf("POST", &url, None::<&()>).await
 }
 
+/// Move a queued build job one position earlier in the queue.
+pub async fn move_build_job_up(job_id: &uuid::Uuid) -> Result<(), ApiClientError> {
+    let url = format!("{}/build-jobs/{}/move-up", base_url(), job_id);
+    send_empty_with_csrf("POST", &url, None::<&()>).await
+}
+
+/// Move a queued build job one position later in the queue.
+pub async fn move_build_job_down(job_id: &uuid::Uuid) -> Result<(), ApiClientError> {
+    let url = format!("{}/build-jobs/{}/move-down", base_url(), job_id);
+    send_empty_with_csrf("POST", &url, None::<&()>).await
+}
+
 /// Cancel a queued or building job (admin/operator).
 /// Returns the updated job with new status (cancelled or cancelling).
 pub async fn cancel_build_job(job_id: &uuid::Uuid) -> Result<(), ApiClientError> {

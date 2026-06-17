@@ -589,6 +589,15 @@ pub struct BuildQueueItem {
     /// Environment name (if system has an environment).
     #[serde(default)]
     pub environment: Option<String>,
+    /// Total derivations for this system config at this commit (for progress bar).
+    #[serde(default)]
+    pub total_derivs: i64,
+    /// Derivations that have completed a build (build-complete or complete status).
+    #[serde(default)]
+    pub built_derivs: i64,
+    /// Derivations that have been pushed to cache (cache-pushed status).
+    #[serde(default)]
+    pub cached_derivs: i64,
 }
 
 /// Query parameters for the paginated build queue endpoint.

@@ -279,6 +279,9 @@ pub async fn fetch_build_queue(pool: &PgPool, limit: i64) -> Result<BuildQueueSu
                     elapsed_secs,
                     logs,
                     environment,
+                    total_derivs: 0,
+                    built_derivs: 0,
+                    cached_derivs: 0,
                 }
             },
         )
@@ -397,6 +400,9 @@ pub async fn fetch_recent_build_history(pool: &PgPool, limit: i64) -> Result<Vec
                     elapsed_secs,
                     logs,
                     environment,
+                    total_derivs: 0,
+                    built_derivs: 0,
+                    cached_derivs: 0,
                 }
             },
         )
@@ -425,23 +431,27 @@ pub async fn list_build_queue_paginated(
         .filter(|s| !s.is_empty())
         .collect();
 
-    // Shared type aliases for the raw row tuple.
-    type BuildRow = (
-        Option<Uuid>,          // job_id
-        Option<Uuid>,          // system_id
-        Option<String>,        // hostname
-        Option<String>,        // flake_name
-        Option<String>,        // commit_hash
-        Option<String>,        // commit_message (first line)
-        String,                // status
-        Option<String>,        // builder_name
-        DateTime<Utc>,         // queued_at
-        Option<DateTime<Utc>>, // started_at
-        Option<i64>,           // elapsed_secs
-        Option<String>,        // logs
-        Option<String>,        // environment
-        i64,                   // total_count
-    );
+    // Named struct for the raw row (tuple limit is 16; we have 17 fields).
+    #[derive(sqlx::FromRow)]
+    struct BuildRow {
+        job_id: Option<Uuid>,
+        system_id: Option<Uuid>,
+        hostname: Option<String>,
+        flake_name: Option<String>,
+        commit_hash: Option<String>,
+        commit_message: Option<String>,
+        status: String,
+        builder_name: Option<String>,
+        queued_at: DateTime<Utc>,
+        started_at: Option<DateTime<Utc>>,
+        elapsed_secs: Option<i64>,
+        logs: Option<String>,
+        environment: Option<String>,
+        total_count: i64,
+        total_derivs: i64,
+        built_derivs: i64,
+        cached_derivs: i64,
+    }
 
     let rows = sqlx::query_as::<_, BuildRow>(
         r#"
@@ -472,7 +482,30 @@ pub async fn list_build_queue_paginated(
             END AS elapsed_secs,
             bj.logs,
             e.name AS environment,
-            COUNT(*) OVER () AS total_count
+            COUNT(*) OVER () AS total_count,
+            -- Derivation progress counts for the same system config at this commit.
+            -- total: all derivations that reached dry-run-complete or beyond (eligible to build).
+            COALESCE((
+                SELECT COUNT(*)::BIGINT FROM derivations d2
+                WHERE d2.commit_id = d.commit_id
+                  AND d2.derivation_target = d.derivation_target
+                  AND d2.status_id >= 5  -- dry-run-complete or later
+                  AND d2.status_id <> 6  -- exclude dry-run-failed
+            ), 0)::BIGINT AS total_derivs,
+            -- built: build-complete (10), complete (11), build-failed (12)
+            COALESCE((
+                SELECT COUNT(*)::BIGINT FROM derivations d2
+                WHERE d2.commit_id = d.commit_id
+                  AND d2.derivation_target = d.derivation_target
+                  AND d2.status_id IN (10, 11, 12)
+            ), 0)::BIGINT AS built_derivs,
+            -- cached: cache-pushed (14)
+            COALESCE((
+                SELECT COUNT(*)::BIGINT FROM derivations d2
+                WHERE d2.commit_id = d.commit_id
+                  AND d2.derivation_target = d.derivation_target
+                  AND d2.status_id = 14
+            ), 0)::BIGINT AS cached_derivs
         FROM build_jobs bj
         JOIN derivations d ON d.id = bj.derivation_id
         LEFT JOIN commits c ON c.id = d.commit_id
@@ -535,53 +568,39 @@ pub async fn list_build_queue_paginated(
     .fetch_all(pool)
     .await?;
 
-    let total = rows.first().map(|r| r.13).unwrap_or(0);
+    let total = rows.first().map(|r| r.total_count).unwrap_or(0);
 
     let items = rows
         .into_iter()
-        .map(
-            |(
-                job_id,
-                system_id,
-                hostname,
-                flake_name,
-                commit_hash,
-                commit_message,
+        .map(|r| {
+            let status = match r.status.as_str() {
+                "queued" => BuildStatus::Queued,
+                "building" => BuildStatus::Building,
+                "cancelling" => BuildStatus::Cancelling,
+                "cancelled" => BuildStatus::Cancelled,
+                "failed" => BuildStatus::Failed,
+                "success" => BuildStatus::Complete,
+                _ => BuildStatus::Idle,
+            };
+            BuildQueueItem {
+                job_id: r.job_id,
+                system_id: r.system_id,
+                hostname: r.hostname.unwrap_or_else(|| "unknown".to_string()),
+                flake_name: r.flake_name.unwrap_or_else(|| "unknown".to_string()),
+                commit_hash: r.commit_hash.unwrap_or_else(|| "unknown".to_string()),
+                commit_message: r.commit_message,
                 status,
-                builder_name,
-                queued_at,
-                started_at,
-                elapsed_secs,
-                logs,
-                environment,
-                _total,
-            )| {
-                let status = match status.as_str() {
-                    "queued" => BuildStatus::Queued,
-                    "building" => BuildStatus::Building,
-                    "cancelling" => BuildStatus::Cancelling,
-                    "cancelled" => BuildStatus::Cancelled,
-                    "failed" => BuildStatus::Failed,
-                    "success" => BuildStatus::Complete,
-                    _ => BuildStatus::Idle,
-                };
-                BuildQueueItem {
-                    job_id,
-                    system_id,
-                    hostname: hostname.unwrap_or_else(|| "unknown".to_string()),
-                    flake_name: flake_name.unwrap_or_else(|| "unknown".to_string()),
-                    commit_hash: commit_hash.unwrap_or_else(|| "unknown".to_string()),
-                    commit_message,
-                    status,
-                    builder_name,
-                    queued_at,
-                    started_at,
-                    elapsed_secs,
-                    logs,
-                    environment,
-                }
-            },
-        )
+                builder_name: r.builder_name,
+                queued_at: r.queued_at,
+                started_at: r.started_at,
+                elapsed_secs: r.elapsed_secs,
+                logs: r.logs,
+                environment: r.environment,
+                total_derivs: r.total_derivs,
+                built_derivs: r.built_derivs,
+                cached_derivs: r.cached_derivs,
+            }
+        })
         .collect();
 
     Ok(BuildQueuePageResponse {
