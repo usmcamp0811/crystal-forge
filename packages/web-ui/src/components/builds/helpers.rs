@@ -115,6 +115,8 @@ pub enum BuildAction {
     ForceCancel,
     Restart,
     RunNext,
+    MoveUp,
+    MoveDown,
 }
 
 /// Worker item struct.
@@ -367,6 +369,9 @@ pub fn apply_action(
                         selected_build.set(Some(build_id));
                         note.set(Some(format!("Prioritized build #{build_id}")));
                     }
+                }
+                BuildAction::MoveUp | BuildAction::MoveDown => {
+                    // Persistent queue reorder is handled through backend endpoints in builds.rs.
                 }
             }
             builds.set(next_builds);

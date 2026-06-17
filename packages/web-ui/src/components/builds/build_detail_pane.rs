@@ -387,5 +387,13 @@ fn action_prompt(action: &PendingAction) -> (&'static str, String, &'static str)
             format!("Build #{build_id} will be promoted to the front of the queued set."),
             "Prioritize",
         ),
+        PendingAction::Build {
+            action: BuildAction::MoveUp | BuildAction::MoveDown,
+            ..
+        } => (
+            "Reorder build?",
+            "Adjust queued build priority order.".to_string(),
+            "Move",
+        ),
     }
 }

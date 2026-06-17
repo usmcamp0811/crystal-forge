@@ -4337,7 +4337,7 @@ const steps = [
 
       await assertVisible(page.getByText(/updated just now|updated \d+s ago/i).first(), "Expected LiveIndicator in Builds header");
       await assertVisible(page.getByText(/click to select/i).first(), "Expected multi-select hint in Builds header");
-      await assertVisible(page.getByText(/Queue reordering unavailable/i).first(), "Expected reorder unavailable hint in Builds header");
+      await assertVisible(page.locator("button[title='Move up']").first(), "Expected Move up reorder action in Builds table");
 
       const pageText = await page.locator("body").textContent();
       for (const metric of ["Building", "Queued", "Failed 24h", "Workers", "Slot usage"]) {
@@ -4578,7 +4578,8 @@ const steps = [
       await assertHidden(page.locator("button[title='Retry build']").first(), "Retry build should be hidden for non-operators");
       await assertHidden(page.locator("button[title='Cancel build']").first(), "Cancel build should be hidden for non-operators");
       await assertHidden(page.locator("button[title='Force kill']").first(), "Force kill should be hidden for non-operators");
-      await assertVisible(page.getByText(/Queue reordering unavailable/i).first(), "Expected honest reorder unavailable hint");
+      await assertHidden(page.locator("button[title='Move up']").first(), "Move up should be hidden for non-operators");
+      await assertHidden(page.locator("button[title='Move down']").first(), "Move down should be hidden for non-operators");
 
       await unrouteBuildsDataWithCancelStates(page);
     },

@@ -5,7 +5,10 @@ use dioxus::prelude::*;
 
 use crate::api::{
     self,
-    client::{fetch_build_queue_paginated, fetch_recent_build_jobs},
+    client::{
+        fetch_build_queue_paginated, fetch_recent_build_jobs, move_build_job_down,
+        move_build_job_up,
+    },
     models::{BuildQueueParams, BuildStatus as ApiBuildStatus, BuilderStatus},
 };
 use crate::components::builds::{
@@ -518,11 +521,6 @@ pub fn BuildsView() -> Element {
                                 kbd { "⇧" }
                                 "-click to select"
                             }
-                            span {
-                                class: "ms-hint",
-                                title: "Queue reordering is unavailable until the backend persists priority changes.",
-                                "Queue reordering unavailable"
-                            }
                         }
                     }
                 }
@@ -535,7 +533,47 @@ pub fn BuildsView() -> Element {
                     selected_id: selected_build,
                     can_requeue,
                     on_build_action: move |(build_id, action)| {
-                        pending_action.set(Some(PendingAction::Build { build_id, action }))
+                        match action {
+                            BuildAction::MoveUp | BuildAction::MoveDown => {
+                                let queue_snapshot = builds.read().clone();
+                                let mut action_error = action_error;
+                                let mut last_action_note = last_action_note;
+                                let mut refresh_trigger = refresh_trigger;
+                                spawn(async move {
+                                    let selected = queue_snapshot.iter().find(|b| b.id == build_id);
+                                    let Some(selected) = selected else {
+                                        action_error.set(Some(format!("Build row #{} not found", build_id)));
+                                        return;
+                                    };
+                                    let Some(job_id) = selected.job_id else {
+                                        action_error.set(Some("Queue item has no job id; cannot reorder".to_string()));
+                                        return;
+                                    };
+
+                                    let result = if action == BuildAction::MoveUp {
+                                        move_build_job_up(&job_id).await
+                                    } else {
+                                        move_build_job_down(&job_id).await
+                                    };
+
+                                    match result {
+                                        Ok(_) => {
+                                            action_error.set(None);
+                                            last_action_note.set(Some(
+                                                if action == BuildAction::MoveUp {
+                                                    format!("Moved job {} up", job_id)
+                                                } else {
+                                                    format!("Moved job {} down", job_id)
+                                                },
+                                            ));
+                                            refresh_trigger.set(refresh_trigger() + 1);
+                                        }
+                                        Err(e) => action_error.set(Some(format!("Failed to reorder: {}", e))),
+                                    }
+                                });
+                            }
+                            _ => pending_action.set(Some(PendingAction::Build { build_id, action })),
+                        }
                     },
                     on_log: move |build_id| {
                         // Open log modal immediately when Logs button clicked (JSX parity)
@@ -856,6 +894,9 @@ pub fn BuildsView() -> Element {
                                                         action_error.set(Some(format!("Failed to force cancel: {}", e)));
                                                     }
                                                 }
+                                            }
+                                            BuildAction::MoveUp | BuildAction::MoveDown => {
+                                                // Queue reorder is handled directly at the table action site.
                                             }
                                           }
                                     });

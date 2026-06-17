@@ -991,6 +991,70 @@ pub async fn prioritize_build_job(pool: &PgPool, job_id: &Uuid) -> Result<()> {
     Ok(())
 }
 
+/// Move a queued build job one position earlier in the persisted queue order.
+pub async fn move_build_job_up(pool: &PgPool, job_id: &Uuid) -> Result<()> {
+    reorder_queued_build_job(pool, job_id, true).await
+}
+
+/// Move a queued build job one position later in the persisted queue order.
+pub async fn move_build_job_down(pool: &PgPool, job_id: &Uuid) -> Result<()> {
+    reorder_queued_build_job(pool, job_id, false).await
+}
+
+async fn reorder_queued_build_job(pool: &PgPool, job_id: &Uuid, move_up: bool) -> Result<()> {
+    let mut tx = pool.begin().await.context("Failed to open queue reorder transaction")?;
+
+    let mut ids: Vec<Uuid> = sqlx::query_scalar(
+        r#"
+        SELECT id
+        FROM build_jobs
+        WHERE status = 'queued'
+        ORDER BY priority_weight DESC, created_at ASC
+        FOR UPDATE
+        "#,
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .context("Failed to load queued build order")?;
+
+    let Some(idx) = ids.iter().position(|id| id == job_id) else {
+        bail!("Queued build job not found");
+    };
+
+    if move_up {
+        if idx == 0 {
+            return Ok(());
+        }
+        ids.swap(idx, idx - 1);
+    } else {
+        if idx + 1 >= ids.len() {
+            return Ok(());
+        }
+        ids.swap(idx, idx + 1);
+    }
+
+    let total = ids.len();
+    for (index, id) in ids.iter().enumerate() {
+        let weight = (total - index) as f64;
+        sqlx::query(
+            r#"
+            UPDATE build_jobs
+            SET priority_weight = $2,
+                updated_at = now()
+            WHERE id = $1
+            "#,
+        )
+        .bind(id)
+        .bind(weight)
+        .execute(&mut *tx)
+        .await
+        .context("Failed updating reordered build priorities")?;
+    }
+
+    tx.commit().await.context("Failed to commit queue reorder")?;
+    Ok(())
+}
+
 /// Mark a job as failed with retry logic
 /// If retry_count < max_retries, re-queue the job with incremented retry_count
 /// Otherwise, mark as permanently failed
