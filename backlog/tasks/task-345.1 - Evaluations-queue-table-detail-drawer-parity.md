@@ -1,7 +1,7 @@
 ---
 id: TASK-345.1
 title: 'Evaluations: queue/table + detail drawer parity'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-06-10 13:33'
 updated_date: '2026-06-17 02:39'
@@ -94,3 +94,9 @@ Medium. The evaluations surface involves real-time websocket state, queue orderi
 - [ ] #5 web-ui steps screenshot queue + drawer and assert selection and a real control
 - [ ] #6 fmt, clippy, and web-ui check all pass
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: opencode-agent (mcamp/code) on $(hostname) in /home/mcamp/code/crystal-forge/TASK-345.1-evaluations-parity
+<!-- SECTION:NOTES:END -->
