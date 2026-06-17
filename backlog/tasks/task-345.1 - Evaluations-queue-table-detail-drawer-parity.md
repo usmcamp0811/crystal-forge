@@ -1,10 +1,10 @@
 ---
 id: TASK-345.1
 title: 'Evaluations: queue/table + detail drawer parity'
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-06-10 13:33'
-updated_date: '2026-06-17 02:40'
+updated_date: '2026-06-17 03:40'
 labels:
   - design-parity
   - evaluations
@@ -99,4 +99,6 @@ Medium. The evaluations surface involves real-time websocket state, queue orderi
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: opencode-agent on reckless in /home/mcamp/code/crystal-forge/TASK-345.1-evaluations-parity
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/279
 <!-- SECTION:NOTES:END -->
