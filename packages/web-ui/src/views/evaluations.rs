@@ -477,7 +477,11 @@ fn EvaluationsPage() -> Element {
                                     refresh_sig.set(refresh_sig() + 1);
                                 });
                             },
-                            " Cancel all"
+                            Icon { name: IconName::X, size: 12 }
+                            {
+                                let n = active_selected_ids.read().len();
+                                format!(" Cancel {} eval{}", n, if n == 1 { "" } else { "s" })
+                            }
                         }
                     }
                 }
@@ -560,7 +564,6 @@ fn EvalActiveQueue(
                         let commit_id = ev.commit_id;
                         let status_meta = eval_status_meta(&ev.evaluation_status);
                         let can_cancel = matches!(ev.evaluation_status.as_str(), "pending" | "in_progress");
-                        let can_force_cancel = ev.evaluation_status == "cancelling";
                         let is_first = i == 0;
                         let is_last = i == evals.len() - 1;
                         let ev_for_row = ev_clone.clone();
@@ -574,7 +577,17 @@ fn EvalActiveQueue(
                         let mut row_draw = drawer_target.clone();
                         let row_ev = ev_for_row.clone();
                         let row_onclick = move |_| {
-                            row_draw.set(Some(EvalDrawerTarget::Queue(row_ev.clone())));
+                            if can_cancel {
+                                let mut next = active_selected_ids.read().clone();
+                                if next.contains(&commit_id) {
+                                    next.remove(&commit_id);
+                                } else {
+                                    next.insert(commit_id);
+                                }
+                                active_selected_ids.set(next);
+                            } else {
+                                row_draw.set(Some(EvalDrawerTarget::Queue(row_ev.clone())));
+                            }
                         };
 
                         let row_classes = format!(
@@ -628,22 +641,18 @@ fn EvalActiveQueue(
                                 },
                                 onclick: row_onclick,
                                 td {
-                                    style: "color: var(--cf-text-muted); font-size: 12px; width: 32px;",
                                     onclick: move |evt| evt.stop_propagation(),
-                                    input {
-                                        class: "ed-checkbox",
-                                        r#type: "checkbox",
-                                        checked: checked,
-                                        oninput: move |_| {
-                                            let mut next = active_selected_ids.read().clone();
-                                            if next.contains(&commit_id) { next.remove(&commit_id); } else { next.insert(commit_id); }
-                                            active_selected_ids.set(next);
-                                        },
+                                    div { style: "display: flex; align-items: center; gap: 6px;",
+                                        span {
+                                            class: "q-drag-handle",
+                                            title: "Drag to reorder",
+                                            Icon { name: IconName::Grip, size: 15 }
+                                        }
+                                        span {
+                                            style: "color: var(--cf-text-muted); font-size: 12px; font-variant-numeric: tabular-nums;",
+                                            "{ev.queue_position}"
+                                        }
                                     }
-                                }
-                                td {
-                                    style: "color: var(--cf-text-muted); font-size: 12px;",
-                                    "{ev.queue_position}"
                                 }
                                 td {
                                     div { style: "font-weight: 600; font-size: 13px;", "{ev_clone.flake_name}" }
@@ -673,85 +682,67 @@ fn EvalActiveQueue(
                                     onclick: move |evt| evt.stop_propagation(),
                                     div {
                                         class: "row-actions",
-                                        style: "opacity: 1; gap: 4px; justify-content: flex-end;",
-                                        button {
-                                            class: "btn-icon focus-ring",
-                                            title: "Move up",
-                                            disabled: is_first,
-                                            style: if is_first { "opacity: 0.3;" } else { "" },
-                                            onclick: move |_| {
-                                                if is_first { return; }
-                                                let items = queue_items.clone();
-                                                let mut refresh_sig = refresh.clone();
-                                                let mut toast = toast_msg.clone();
-                                                spawn(async move {
-                                                    let active: Vec<_> = items.read().iter()
-                                                        .filter(|item| is_active_eval_status(&item.evaluation_status))
-                                                        .cloned().collect();
-                                                    if let Some(idx) = active.iter().position(|e| e.commit_id == commit_id) {
-                                                        if idx > 0 {
-                                                            let mut reordered = active;
-                                                            let removed = reordered.remove(idx);
-                                                            reordered.insert(idx - 1, removed);
-                                                            let ordered_ids: Vec<i32> = reordered.iter().map(|e| e.commit_id).collect();
-                                                            if let Err(e) = reorder_eval_queue(&ordered_ids).await {
-                                                                toast.set(Some(format!("Reorder failed: {}", e)));
-                                                            } else {
-                                                                refresh_sig.set(refresh_sig() + 1);
-                                                            }
-                                                        }
-                                                    }
-                                                });
-                                            },
-                                            "↑"
-                                        }
-                                        button {
-                                            class: "btn-icon focus-ring",
-                                            title: "Move down",
-                                            disabled: is_last,
-                                            style: if is_last { "opacity: 0.3;" } else { "" },
-                                            onclick: move |_| {
-                                                if is_last { return; }
-                                                let items = queue_items.clone();
-                                                let mut refresh_sig = refresh.clone();
-                                                let mut toast = toast_msg.clone();
-                                                spawn(async move {
-                                                    let active: Vec<_> = items.read().iter()
-                                                        .filter(|item| is_active_eval_status(&item.evaluation_status))
-                                                        .cloned().collect();
-                                                    if let Some(idx) = active.iter().position(|e| e.commit_id == commit_id) {
-                                                        if idx + 1 < active.len() {
-                                                            let mut reordered = active;
-                                                            let removed = reordered.remove(idx);
-                                                            reordered.insert(idx, removed);
-                                                            let ordered_ids: Vec<i32> = reordered.iter().map(|e| e.commit_id).collect();
-                                                            if let Err(e) = reorder_eval_queue(&ordered_ids).await {
-                                                                toast.set(Some(format!("Reorder failed: {}", e)));
-                                                            } else {
-                                                                refresh_sig.set(refresh_sig() + 1);
-                                                            }
-                                                        }
-                                                    }
-                                                });
-                                            },
-                                            "↓"
-                                        }
-                                        if can_force_cancel {
+                                        style: "opacity: 1; gap: 6px; justify-content: flex-end;",
+                                        div { class: "q-move-group",
                                             button {
-                                                class: "btn btn-danger focus-ring",
-                                                style: "padding: 3px 8px; font-size: 11px;",
+                                                class: "q-move-btn focus-ring",
+                                                title: "Move up",
+                                                disabled: is_first,
                                                 onclick: move |_| {
+                                                    if is_first { return; }
+                                                    let items = queue_items.clone();
                                                     let mut refresh_sig = refresh.clone();
                                                     let mut toast = toast_msg.clone();
                                                     spawn(async move {
-                                                        if let Err(e) = force_cancel_commit_evaluation(commit_id).await {
-                                                            toast.set(Some(format!("Force cancel failed: {}", e)));
-                                                        } else {
-                                                            refresh_sig.set(refresh_sig() + 1);
+                                                        let active: Vec<_> = items.read().iter()
+                                                            .filter(|item| is_active_eval_status(&item.evaluation_status))
+                                                            .cloned().collect();
+                                                        if let Some(idx) = active.iter().position(|e| e.commit_id == commit_id) {
+                                                            if idx > 0 {
+                                                                let mut reordered = active;
+                                                                let removed = reordered.remove(idx);
+                                                                reordered.insert(idx - 1, removed);
+                                                                let ordered_ids: Vec<i32> = reordered.iter().map(|e| e.commit_id).collect();
+                                                                if let Err(e) = reorder_eval_queue(&ordered_ids).await {
+                                                                    toast.set(Some(format!("Reorder failed: {}", e)));
+                                                                } else {
+                                                                    refresh_sig.set(refresh_sig() + 1);
+                                                                }
+                                                            }
                                                         }
                                                     });
                                                 },
-                                                "Force cancel"
+                                                Icon { name: IconName::ChevronUp, size: 15 }
+                                            }
+                                            button {
+                                                class: "q-move-btn focus-ring",
+                                                title: "Move down",
+                                                disabled: is_last,
+                                                onclick: move |_| {
+                                                    if is_last { return; }
+                                                    let items = queue_items.clone();
+                                                    let mut refresh_sig = refresh.clone();
+                                                    let mut toast = toast_msg.clone();
+                                                    spawn(async move {
+                                                        let active: Vec<_> = items.read().iter()
+                                                            .filter(|item| is_active_eval_status(&item.evaluation_status))
+                                                            .cloned().collect();
+                                                        if let Some(idx) = active.iter().position(|e| e.commit_id == commit_id) {
+                                                            if idx + 1 < active.len() {
+                                                                let mut reordered = active;
+                                                                let removed = reordered.remove(idx);
+                                                                reordered.insert(idx, removed);
+                                                                let ordered_ids: Vec<i32> = reordered.iter().map(|e| e.commit_id).collect();
+                                                                if let Err(e) = reorder_eval_queue(&ordered_ids).await {
+                                                                    toast.set(Some(format!("Reorder failed: {}", e)));
+                                                                } else {
+                                                                    refresh_sig.set(refresh_sig() + 1);
+                                                                }
+                                                            }
+                                                        }
+                                                    });
+                                                },
+                                                Icon { name: IconName::ChevronDown, size: 15 }
                                             }
                                         }
                                         if can_cancel {

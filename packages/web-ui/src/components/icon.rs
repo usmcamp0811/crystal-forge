@@ -13,6 +13,8 @@ pub enum IconName {
     Git,
     ChevronRight,
     ChevronDown,
+    ChevronUp,
+    Grip,
     ArrowRight,
     Check,
     Search,
@@ -107,6 +109,21 @@ pub fn Icon(name: IconName, #[props(default = 16)] size: u32) -> Element {
                 stroke_linecap: "round",
                 stroke_linejoin: "round"
             }
+        },
+        IconName::ChevronUp => rsx! {
+            path {
+                d: "m18 15-6-6-6 6",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+        },
+        IconName::Grip => rsx! {
+            circle { cx: "9",  cy: "6",  r: "1", fill: "currentColor", stroke: "none" }
+            circle { cx: "15", cy: "6",  r: "1", fill: "currentColor", stroke: "none" }
+            circle { cx: "9",  cy: "12", r: "1", fill: "currentColor", stroke: "none" }
+            circle { cx: "15", cy: "12", r: "1", fill: "currentColor", stroke: "none" }
+            circle { cx: "9",  cy: "18", r: "1", fill: "currentColor", stroke: "none" }
+            circle { cx: "15", cy: "18", r: "1", fill: "currentColor", stroke: "none" }
         },
         IconName::ArrowRight => rsx! {
             path {
