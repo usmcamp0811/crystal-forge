@@ -14,6 +14,20 @@ use crate::models::builders::{
 };
 use crate::models::public_key::PublicKey;
 
+/// Advisory lock used to serialize all queue priority_weight mutations.
+const BUILD_QUEUE_PRIORITY_LOCK_ID: i64 = 0x4346_4251; // 'CFBQ'
+
+async fn lock_build_queue_priority(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(BUILD_QUEUE_PRIORITY_LOCK_ID)
+        .execute(&mut **tx)
+        .await
+        .context("Failed to acquire build queue priority lock")?;
+    Ok(())
+}
+
 /// Generate a cryptographically correct Ed25519 keypair
 /// Returns (public_key_base64, private_key_base64)
 ///
@@ -965,6 +979,13 @@ pub async fn get_build_job_by_id(pool: &PgPool, job_id: &Uuid) -> Result<Option<
 
 /// Increase priority of a queued build job so it runs next.
 pub async fn prioritize_build_job(pool: &PgPool, job_id: &Uuid) -> Result<()> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to open prioritize transaction")?;
+
+    lock_build_queue_priority(&mut tx).await?;
+
     let result = sqlx::query(
         r#"
         UPDATE build_jobs
@@ -980,13 +1001,17 @@ pub async fn prioritize_build_job(pool: &PgPool, job_id: &Uuid) -> Result<()> {
         "#,
     )
     .bind(job_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .context("Failed to prioritize build job")?;
 
     if result.rows_affected() == 0 {
         bail!("Queued build job not found");
     }
+
+    tx.commit()
+        .await
+        .context("Failed to commit prioritize transaction")?;
 
     Ok(())
 }
@@ -1003,6 +1028,8 @@ pub async fn move_build_job_down(pool: &PgPool, job_id: &Uuid) -> Result<()> {
 
 async fn reorder_queued_build_job(pool: &PgPool, job_id: &Uuid, move_up: bool) -> Result<()> {
     let mut tx = pool.begin().await.context("Failed to open queue reorder transaction")?;
+
+    lock_build_queue_priority(&mut tx).await?;
 
     let mut ids: Vec<Uuid> = sqlx::query_scalar(
         r#"
@@ -1456,6 +1483,20 @@ mod tests {
         .expect("Failed to insert queued build job")
     }
 
+    async fn queued_order(pool: &PgPool) -> Vec<Uuid> {
+        sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT id
+            FROM build_jobs
+            WHERE status = 'queued'
+            ORDER BY priority_weight DESC, created_at ASC
+            "#,
+        )
+        .fetch_all(pool)
+        .await
+        .expect("Failed to fetch queued order")
+    }
+
     async fn set_build_job_status(pool: &PgPool, job_id: Uuid, status: &str) {
         sqlx::query(
             r#"
@@ -1674,6 +1715,129 @@ mod tests {
             .expect("Failed to claim after prioritize")
             .expect("Expected a queued job after prioritize");
         assert_eq!(claimed.id, second);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_move_up_and_down_persist_order_after_reload() {
+        let pool = queue_test_pool().await;
+        let now = Utc::now();
+
+        let first = create_queued_job(
+            &pool,
+            "https://example.com/reorder-a.git",
+            "reorder-a",
+            "r0000001",
+            now,
+            "reorder-a-system",
+            30.0,
+            now - Duration::minutes(3),
+        )
+        .await;
+        let second = create_queued_job(
+            &pool,
+            "https://example.com/reorder-b.git",
+            "reorder-b",
+            "r0000002",
+            now,
+            "reorder-b-system",
+            20.0,
+            now - Duration::minutes(2),
+        )
+        .await;
+        let third = create_queued_job(
+            &pool,
+            "https://example.com/reorder-c.git",
+            "reorder-c",
+            "r0000003",
+            now,
+            "reorder-c-system",
+            10.0,
+            now - Duration::minutes(1),
+        )
+        .await;
+
+        assert_eq!(queued_order(&pool).await, vec![first, second, third]);
+
+        move_build_job_down(&pool, &first)
+            .await
+            .expect("move down should succeed");
+        assert_eq!(queued_order(&pool).await, vec![second, first, third]);
+
+        move_build_job_up(&pool, &third)
+            .await
+            .expect("move up should succeed");
+        assert_eq!(queued_order(&pool).await, vec![second, third, first]);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_move_up_down_first_last_are_noops() {
+        let pool = queue_test_pool().await;
+        let now = Utc::now();
+
+        let first = create_queued_job(
+            &pool,
+            "https://example.com/noop-a.git",
+            "noop-a",
+            "n0000001",
+            now,
+            "noop-a-system",
+            20.0,
+            now - Duration::minutes(2),
+        )
+        .await;
+        let second = create_queued_job(
+            &pool,
+            "https://example.com/noop-b.git",
+            "noop-b",
+            "n0000002",
+            now,
+            "noop-b-system",
+            10.0,
+            now - Duration::minutes(1),
+        )
+        .await;
+
+        move_build_job_up(&pool, &first)
+            .await
+            .expect("move up first should no-op");
+        move_build_job_down(&pool, &second)
+            .await
+            .expect("move down last should no-op");
+
+        assert_eq!(queued_order(&pool).await, vec![first, second]);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_move_rejects_unknown_or_non_queued_job() {
+        let pool = queue_test_pool().await;
+        let now = Utc::now();
+
+        let queued = create_queued_job(
+            &pool,
+            "https://example.com/reject-a.git",
+            "reject-a",
+            "x0000001",
+            now,
+            "reject-a-system",
+            10.0,
+            now - Duration::minutes(1),
+        )
+        .await;
+        set_build_job_status(&pool, queued, "building").await;
+
+        let err = move_build_job_up(&pool, &queued)
+            .await
+            .expect_err("building job should be rejected");
+        assert!(err.to_string().contains("Queued build job not found"));
+
+        let unknown = Uuid::new_v4();
+        let err = move_build_job_down(&pool, &unknown)
+            .await
+            .expect_err("unknown job should be rejected");
+        assert!(err.to_string().contains("Queued build job not found"));
     }
 
     #[tokio::test]

@@ -21,6 +21,11 @@ pub fn BuildQueuePane(
     let reorderable = builds
         .iter()
         .any(|b| matches!(b.status, BuildStatus::Queued | BuildStatus::Building));
+    let queued_ids: Vec<i32> = builds
+        .iter()
+        .filter(|b| b.status == BuildStatus::Queued)
+        .map(|b| b.id)
+        .collect();
 
     let bulk_count = selected_ids.read().len();
 
@@ -51,7 +56,8 @@ pub fn BuildQueuePane(
                             let is_selected = *selected_id.read() == Some(build.id);
                             let is_checked = selected_ids.read().contains(&build.id);
                             let can_cancel = can_requeue && is_cancellable(build.status);
-                            let last_pos = builds.len().saturating_sub(1);
+                            let queued_pos = queued_ids.iter().position(|id| *id == build.id);
+                            let queued_last_pos = queued_ids.len().saturating_sub(1);
                             let mut row_class = "q-row".to_string();
                             if is_selected { row_class.push_str(" selected"); }
                             if is_checked  { row_class.push_str(" row-checked"); }
@@ -216,7 +222,7 @@ pub fn BuildQueuePane(
                                                     button {
                                                         class: "q-move-btn focus-ring",
                                                         title: "Move up",
-                                                        disabled: pos == 0 || build.status != BuildStatus::Queued,
+                                                        disabled: queued_pos.is_none() || queued_pos == Some(0),
                                                         onclick: move |_| on_build_action.call((build.id, BuildAction::MoveUp)),
                                                         svg {
                                                             width: "15", height: "15",
@@ -229,7 +235,7 @@ pub fn BuildQueuePane(
                                                     button {
                                                         class: "q-move-btn focus-ring",
                                                         title: "Move down",
-                                                        disabled: pos == last_pos || build.status != BuildStatus::Queued,
+                                                        disabled: queued_pos.is_none() || queued_pos == Some(queued_last_pos),
                                                         onclick: move |_| on_build_action.call((build.id, BuildAction::MoveDown)),
                                                         svg {
                                                             width: "15", height: "15",
