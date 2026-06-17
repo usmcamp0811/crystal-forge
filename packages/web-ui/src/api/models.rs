@@ -1050,6 +1050,15 @@ pub struct BuildQueueItem {
     /// Environment name (if system has an environment).
     #[serde(default)]
     pub environment: Option<String>,
+    /// Total derivations for this system config at this commit.
+    #[serde(default)]
+    pub total_derivs: i64,
+    /// Derivations that have completed a build.
+    #[serde(default)]
+    pub built_derivs: i64,
+    /// Derivations pushed to cache.
+    #[serde(default)]
+    pub cached_derivs: i64,
 }
 
 /// Summary of the evaluation queue for the evaluations page.

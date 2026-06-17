@@ -115,6 +115,8 @@ pub enum BuildAction {
     ForceCancel,
     Restart,
     RunNext,
+    MoveUp,
+    MoveDown,
 }
 
 /// Worker item struct.
@@ -149,6 +151,7 @@ pub struct BuildItem {
     pub flake: String,
     pub commit: String,
     pub branch: String,
+    pub arch: String,
     pub worker_id: String,
     pub queued_for: String,
     pub runtime: Option<String>,
@@ -159,6 +162,16 @@ pub struct BuildItem {
     pub logs: Option<String>,
     pub status: BuildStatus,
     pub summary: String,
+    // Derivation progress fields (matching JSX b.cachedDerivs / b.builtDerivs / b.totalDerivs)
+    pub cached_derivs: usize,
+    pub built_derivs: usize,
+    pub total_derivs: usize,
+    /// Currently building package path (shown for active builds).
+    pub current_pkg: Option<String>,
+    /// Package that failed (shown for failed builds).
+    pub failed_pkg: Option<String>,
+    /// Number of build attempts.
+    pub attempts: usize,
 }
 
 /// Helper methods for BuildItem display.
@@ -357,6 +370,9 @@ pub fn apply_action(
                         note.set(Some(format!("Prioritized build #{build_id}")));
                     }
                 }
+                BuildAction::MoveUp | BuildAction::MoveDown => {
+                    // Persistent queue reorder is handled through backend endpoints in builds.rs.
+                }
             }
             builds.set(next_builds);
         }
@@ -414,6 +430,7 @@ pub fn mock_builds() -> Vec<BuildItem> {
             flake: "campground".to_string(),
             commit: "a38f45fba91d4b0a5d80840c09b0910c70fa013e".to_string(),
             branch: "main".to_string(),
+            arch: "x86_64-linux".to_string(),
             worker_id: "worker-a".to_string(),
             queued_for: "queued 00:58 ago".to_string(),
             runtime: Some("02:13".to_string()),
@@ -424,6 +441,12 @@ pub fn mock_builds() -> Vec<BuildItem> {
             status: BuildStatus::Building,
             summary: "nix build .#nixosConfigurations.atlas-01.config.system.build.toplevel"
                 .to_string(),
+            cached_derivs: 42,
+            built_derivs: 17,
+            total_derivs: 120,
+            current_pkg: Some("openssl-3.3.2".to_string()),
+            failed_pkg: None,
+            attempts: 1,
         },
         BuildItem {
             id: 2,
@@ -434,6 +457,7 @@ pub fn mock_builds() -> Vec<BuildItem> {
             flake: "campground".to_string(),
             commit: "75c2fbf719ac2654af9f1dc4b773f502f9db515e".to_string(),
             branch: "main".to_string(),
+            arch: "x86_64-linux".to_string(),
             worker_id: "worker-b".to_string(),
             queued_for: "queued 01:32 ago".to_string(),
             runtime: None,
@@ -443,6 +467,12 @@ pub fn mock_builds() -> Vec<BuildItem> {
             logs: None,
             status: BuildStatus::Queued,
             summary: "waiting for free worker slot".to_string(),
+            cached_derivs: 0,
+            built_derivs: 0,
+            total_derivs: 0,
+            current_pkg: None,
+            failed_pkg: None,
+            attempts: 1,
         },
         BuildItem {
             id: 3,
@@ -453,6 +483,7 @@ pub fn mock_builds() -> Vec<BuildItem> {
             flake: "campground".to_string(),
             commit: "4144fdc0312734c62bc5f4f9f48f5a87e4b3a85f".to_string(),
             branch: "main".to_string(),
+            arch: "x86_64-linux".to_string(),
             worker_id: "worker-a".to_string(),
             queued_for: "queued 00:29 ago".to_string(),
             runtime: None,
@@ -462,6 +493,12 @@ pub fn mock_builds() -> Vec<BuildItem> {
             logs: None,
             status: BuildStatus::Queued,
             summary: "waiting for free worker slot".to_string(),
+            cached_derivs: 0,
+            built_derivs: 0,
+            total_derivs: 0,
+            current_pkg: None,
+            failed_pkg: None,
+            attempts: 1,
         },
         BuildItem {
             id: 4,
@@ -472,6 +509,7 @@ pub fn mock_builds() -> Vec<BuildItem> {
             flake: "campground".to_string(),
             commit: "9cc53a8f1792043b1f7868ecf5ff312ad67553de".to_string(),
             branch: "release/2026-02".to_string(),
+            arch: "x86_64-linux".to_string(),
             worker_id: "worker-b".to_string(),
             queued_for: "queued 06:11 ago".to_string(),
             runtime: Some("04:22".to_string()),
@@ -481,6 +519,12 @@ pub fn mock_builds() -> Vec<BuildItem> {
             logs: None,
             status: BuildStatus::Failed,
             summary: "dependency graph diverged on nixpkgs input".to_string(),
+            cached_derivs: 38,
+            built_derivs: 51,
+            total_derivs: 97,
+            current_pkg: None,
+            failed_pkg: Some("nginx-1.27.4".to_string()),
+            attempts: 2,
         },
     ]
 }

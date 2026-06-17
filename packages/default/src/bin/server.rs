@@ -437,6 +437,14 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/build-jobs/:id/prioritize",
             post(builders::prioritize_build_job),
         )
+        .route(
+            "/api/v1/build-jobs/:id/move-up",
+            post(builders::move_build_job_up),
+        )
+        .route(
+            "/api/v1/build-jobs/:id/move-down",
+            post(builders::move_build_job_down),
+        )
         // Builder-authenticated endpoints
         .route(
             "/api/v1/builders/:id/heartbeat",

@@ -1,9 +1,10 @@
 ---
 id: TASK-347.1
 title: 'Builds: queue/table + detail pane parity and real queue actions'
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-06-10 13:33'
+updated_date: '2026-06-15 17:37'
 labels:
   - design-parity
   - builds
@@ -34,39 +35,45 @@ ordinal: 1751
 Child of Builds umbrella TASK-347. Follow guide doc-14 standard procedure.
 
 ## Problem
-The Builds view (`views/builds.rs`) must match `CrystalForgelatest/components/BuildsView.jsx`. It currently has a mocked queue-build flow (line ~462: "Queue build flow is mocked in this UI pass").
+The Builds view (`packages/web-ui/src/views/builds.rs`) does not match `CrystalForgelatest/components/BuildsView.jsx`. Key gaps:
+- Stat strip labels/values do not match (Building, Queued, Failed 24h, Workers, Slot usage).
+- Worker cards layout and slot progress bar are missing or differ.
+- Queue table columns differ from the reference (`#`, System configuration, Status, Worker, Derivations progress bar, Queued, Duration, Reorder·actions).
+- Derivations column shows a dual-segment progress bar (cached=green, built=status-color) in the reference; not present in current.
+- Row drag-to-reorder with visual drop indicators (`q-drop-before`/`q-drop-after`) exists in current builds.rs but may diverge from reference CSS classes.
+- Detail side panel (`BuildDetailPanel`) layout, kv-grid, derivation progress section, and panel-actions differ.
+- Build log modal (`BuildLogModal`) head/pre/foot layout may differ.
+- `LiveIndicator` component (pulsing dot + "updated Ns ago") is absent.
+- The "Queue build" action is explicitly mocked (line ~462) — must be replaced with a real disabled state or wired to real API.
+- Multi-select bulk bar for batch cancel is absent.
 
 ## Goal
-Pixel-align Builds queue/table + detail pane to the design and replace the mocked queue action with the real API (or remove the action if not yet supported, with a real disabled/explanatory state — not fake success).
+Pixel-align the full Builds surface to `BuildsView.jsx`:
+- Page head + LiveIndicator
+- Stat strip (5 stats: Building, Queued, Failed 24h, Workers, Slot usage)
+- Worker cards section with slot progress bar
+- Active / Completed tabs
+- Queue table with all reference columns, dual-segment derivation bar, drag-reorder, multi-select bulk cancel bar
+- Build detail side panel matching kv-grid and actions
+- Build log modal matching reference structure
+- Remove or truthfully disable the mocked queue-build action
 
-## Exact scope
-1. Active queue table density, columns, selection, first-row auto-select match design.
-2. Detail pane (logs/metadata/actions) matches design.
-3. Completed/history tab + filters match design.
-4. Replace the mocked queue-build flow with a real API call OR a truthful disabled state; no fake "mocked in this UI pass" messaging in production.
-
-## Non-goals
-- Evaluations view (sibling TASK-345).
-- Shared coherence-only changes covered by TASK-275 (coordinate, don't duplicate).
-
-## Files
-- packages/web-ui/src/views/builds.rs
-- packages/web-ui/src/components/builds/**
-- packages/web-ui/assets/app.css
-- checks/web-ui/tests/integration-test.js
-
-## Verification
-- nix develop -c cargo fmt -- --check
-- nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown
-- nix build .#checks.x86_64-linux.web-ui
-- Extend steps `15-builds`, `15d-builds-queue-table-view`, `15b-builds-completed-tab`, `15g-builds-action-visibility`.
-<!-- SECTION:DESCRIPTION:END -->
+## Non-Goals
+- Evaluations view (covered by TASK-345).
+- New backend API endpoints beyond what already exists for builds/queue/workers.
+- Mobile-first layout changes beyond desktop parity.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Builds active queue/table density, columns, selection, and first-row auto-select match the design
-- [ ] #2 Detail pane (logs/metadata/actions) matches the design
-- [ ] #3 Completed/history tab + filters match the design
-- [ ] #4 Mocked queue-build flow is replaced with a real API call or a truthful disabled state (no fake success/mock messaging)
-- [ ] #5 web-ui steps screenshot queue/detail/completed and assert a real action
+- [ ] #1 Page head shows title + subtitle (N building · N queued · N/N workers active) + LiveIndicator (pulsing dot + updated Ns ago)
+- [ ] #2 Stat strip has exactly 5 stats matching reference: Building, Queued, Failed 24h, Workers (N/N), Slot usage (%)
+- [ ] #3 Build Workers section renders one card per worker: name, host mono, status chip (color-matched), arch+cores+mem, slots used/total label, slot progress bar
+- [ ] #4 Active queue table has columns: # (position), System configuration (name+flake+commit+arch+currentPkg sub-rows), Status chip, Worker mono, Derivations dual-segment bar + N/N label, Queued, Duration, Reorder·actions
+- [ ] #5 Drag-to-reorder rows with visual drop-before/drop-after indicators work in Active tab
+- [ ] #6 Multi-select with shift-click works on cancellable rows; bulk cancel bar appears at bottom
+- [ ] #7 Build detail side panel matches reference: panel-head, panel-body kv-grid, optional derivation-progress section, panel-actions (Logs, Cancel/Force-kill/Retry per status)
+- [ ] #8 Build log modal matches reference: head, pre.sd-log-stream with sd-log-line/t/lvl/m spans and caret, foot (Download + Close)
+- [ ] #9 Completed/History tab shows full-width table with appropriate columns and no reorder controls
+- [ ] #10 The mocked 'Queue build' action is removed or replaced with a truthfully disabled button (no fake success messaging in production)
+- [ ] #11 web-ui check steps 15-builds, 15d, 15e, 15g, 15h pass and capture evidence screenshots
 <!-- AC:END -->

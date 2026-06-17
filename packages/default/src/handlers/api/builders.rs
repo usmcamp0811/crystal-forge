@@ -334,18 +334,51 @@ pub async fn regenerate_builder_keypair(
     }))
 }
 
-/// POST /api/v1/build-jobs/:id/prioritize - Move queued build job to front (admin-only)
+/// POST /api/v1/build-jobs/:id/prioritize - Move queued build job to front (operator/admin)
 pub async fn prioritize_build_job(
     State(state): State<CFState>,
     Path(job_id): Path<Uuid>,
     headers: axum::http::HeaderMap,
 ) -> Result<StatusCode, StatusCode> {
-    // Verify admin authorization
-    let Some(_admin_user) = require_admin(&state.pool, &headers).await else {
+    let Some(_operator_or_admin) = require_operator_or_admin(&state.pool, &headers).await else {
         return Err(StatusCode::FORBIDDEN);
     };
 
     builders::prioritize_build_job(&state.pool, &job_id)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+
+    Ok(StatusCode::OK)
+}
+
+/// POST /api/v1/build-jobs/:id/move-up - Move queued build job one position earlier (operator/admin)
+pub async fn move_build_job_up(
+    State(state): State<CFState>,
+    Path(job_id): Path<Uuid>,
+    headers: axum::http::HeaderMap,
+) -> Result<StatusCode, StatusCode> {
+    let Some(_operator_or_admin) = require_operator_or_admin(&state.pool, &headers).await else {
+        return Err(StatusCode::FORBIDDEN);
+    };
+
+    builders::move_build_job_up(&state.pool, &job_id)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+
+    Ok(StatusCode::OK)
+}
+
+/// POST /api/v1/build-jobs/:id/move-down - Move queued build job one position later (operator/admin)
+pub async fn move_build_job_down(
+    State(state): State<CFState>,
+    Path(job_id): Path<Uuid>,
+    headers: axum::http::HeaderMap,
+) -> Result<StatusCode, StatusCode> {
+    let Some(_operator_or_admin) = require_operator_or_admin(&state.pool, &headers).await else {
+        return Err(StatusCode::FORBIDDEN);
+    };
+
+    builders::move_build_job_down(&state.pool, &job_id)
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
 
