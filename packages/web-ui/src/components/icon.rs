@@ -118,12 +118,12 @@ pub fn Icon(name: IconName, #[props(default = 16)] size: u32) -> Element {
             }
         },
         IconName::Grip => rsx! {
-            circle { cx: "9",  cy: "6",  r: "1", fill: "currentColor", stroke: "none" }
-            circle { cx: "15", cy: "6",  r: "1", fill: "currentColor", stroke: "none" }
-            circle { cx: "9",  cy: "12", r: "1", fill: "currentColor", stroke: "none" }
-            circle { cx: "15", cy: "12", r: "1", fill: "currentColor", stroke: "none" }
-            circle { cx: "9",  cy: "18", r: "1", fill: "currentColor", stroke: "none" }
-            circle { cx: "15", cy: "18", r: "1", fill: "currentColor", stroke: "none" }
+            circle { cx: "9",  cy: "6",  r: "1.3", fill: "currentColor", stroke: "none" }
+            circle { cx: "15", cy: "6",  r: "1.3", fill: "currentColor", stroke: "none" }
+            circle { cx: "9",  cy: "12", r: "1.3", fill: "currentColor", stroke: "none" }
+            circle { cx: "15", cy: "12", r: "1.3", fill: "currentColor", stroke: "none" }
+            circle { cx: "9",  cy: "18", r: "1.3", fill: "currentColor", stroke: "none" }
+            circle { cx: "15", cy: "18", r: "1.3", fill: "currentColor", stroke: "none" }
         },
         IconName::ArrowRight => rsx! {
             path {
