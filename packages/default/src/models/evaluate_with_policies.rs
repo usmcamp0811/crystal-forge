@@ -584,7 +584,15 @@ pub async fn evaluate_with_nix_eval_jobs(
                                                             let drv2 = drv.clone();
                                                             let deriv_id = deriv.id;
                                                             let sname = system_name.clone();
+                                                            info!(
+                                                                "📦 Scheduling closure package count for {} (id={}, drv={})",
+                                                                sname, deriv_id, drv2
+                                                            );
                                                             tokio::spawn(async move {
+                                                                info!(
+                                                                    "📦 Starting closure package count for {} (id={}, drv={})",
+                                                                    sname, deriv_id, drv2
+                                                                );
                                                                 match count_closure_packages(&drv2).await {
                                                                     Ok((total, cached)) => {
                                                                         if let Err(e) = set_closure_counts(&pool2, deriv_id, total, cached).await {

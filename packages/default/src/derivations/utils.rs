@@ -1,9 +1,13 @@
 use crate::config::{BuildConfig, CacheConfig};
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 use tokio::process::Command;
+use tokio::time::timeout;
 use tracing::{debug, info, warn};
+
+const CLOSURE_COUNT_COMMAND_TIMEOUT_SECS: u64 = 120;
 
 /// Add/remove to taste; this set covers AWS + MinIO/common S3 endpoints.
 pub const CACHE_ENV_ALLOWLIST: &[&str] = &[
@@ -427,10 +431,22 @@ pub async fn get_store_path_and_build_status(drv_path: &str) -> Result<(String, 
 ///   cached = number already present in the local/substituter-accessible store
 pub async fn count_closure_packages(drv_path: &str) -> Result<(i32, i32)> {
     // Step 1: get all .drv requisites (the full closure as .drv paths)
-    let req_out = Command::new("nix-store")
-        .args(["--query", "--requisites", drv_path])
-        .output()
-        .await?;
+    info!("📦 Counting closure requisites for {}", drv_path);
+    let command_timeout = Duration::from_secs(CLOSURE_COUNT_COMMAND_TIMEOUT_SECS);
+    let req_out = timeout(
+        command_timeout,
+        Command::new("nix-store")
+            .args(["--query", "--requisites", drv_path])
+            .output(),
+    )
+    .await
+    .map_err(|_| {
+        anyhow!(
+            "nix-store --query --requisites timed out after {}s for {}",
+            CLOSURE_COUNT_COMMAND_TIMEOUT_SECS,
+            drv_path
+        )
+    })??;
 
     if !req_out.status.success() {
         anyhow::bail!(
@@ -456,7 +472,20 @@ pub async fn count_closure_packages(drv_path: &str) -> Result<(i32, i32)> {
     for p in &drv_paths {
         outputs_cmd.arg(p);
     }
-    let outputs_out = outputs_cmd.output().await?;
+    info!(
+        "📦 Resolving {} closure outputs for {}",
+        drv_paths.len(),
+        drv_path
+    );
+    let outputs_out = timeout(command_timeout, outputs_cmd.output())
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "nix-store --query --outputs timed out after {}s for {}",
+                CLOSURE_COUNT_COMMAND_TIMEOUT_SECS,
+                drv_path
+            )
+        })??;
 
     let store_paths: Vec<String> = if outputs_out.status.success() {
         String::from_utf8(outputs_out.stdout)?
@@ -482,7 +511,20 @@ pub async fn count_closure_packages(drv_path: &str) -> Result<(i32, i32)> {
     for p in &store_paths {
         pi_cmd.arg(p);
     }
-    let pi_out = pi_cmd.output().await?;
+    info!(
+        "📦 Checking {} closure outputs in local store for {}",
+        store_paths.len(),
+        drv_path
+    );
+    let pi_out = timeout(command_timeout, pi_cmd.output())
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "nix path-info --json timed out after {}s for {}",
+                CLOSURE_COUNT_COMMAND_TIMEOUT_SECS,
+                drv_path
+            )
+        })??;
 
     let cached = if pi_out.status.success() {
         // All paths present — count equals total store paths
