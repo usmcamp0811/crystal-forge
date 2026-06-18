@@ -823,26 +823,23 @@ pub async fn fetch_eval_dependency_breakdown(
     let rows = sqlx::query_as::<_, EvalDependencyPackageRow>(
         r#"
         SELECT
-            COALESCE(NULLIF(BTRIM(sys.derivation_name), ''), 'unknown') AS package_name,
-            -- ready = package build complete or has a store_path
+            COALESCE(NULLIF(BTRIM(d.derivation_name), ''), 'unknown') AS package_name,
+            -- ready = build complete or has a store_path
             COUNT(*) FILTER (
-                WHERE pkg.status_id = 10
-                   OR (pkg.store_path IS NOT NULL AND pkg.store_path != '')
+                WHERE d.status_id = 10
+                   OR (d.store_path IS NOT NULL AND d.store_path != '')
             )::BIGINT AS ready_count,
-            -- pending = evaluated but not yet built
+            -- pending = evaluated (drv known) but not yet built
             COUNT(*) FILTER (
-                WHERE pkg.status_id IN (5, 7, 8)
-                  AND (pkg.store_path IS NULL OR pkg.store_path = '')
+                WHERE d.status_id IN (5, 7, 8)
+                  AND (d.store_path IS NULL OR d.store_path = '')
             )::BIGINT AS pending_count,
             -- failed = eval or build failed
-            COUNT(*) FILTER (WHERE pkg.status_id IN (6, 12))::BIGINT AS failed_count
-        FROM derivations sys
-        JOIN derivations pkg
-          ON pkg.parent_derivation_id = sys.id
-         AND pkg.derivation_type = 'package'
-        WHERE sys.commit_id = $1
-          AND sys.derivation_type = 'nixos'
-        GROUP BY COALESCE(NULLIF(BTRIM(sys.derivation_name), ''), 'unknown')
+            COUNT(*) FILTER (WHERE d.status_id IN (6, 12))::BIGINT AS failed_count
+        FROM derivations d
+        WHERE d.commit_id = $1
+          AND d.derivation_type = 'nixos'
+        GROUP BY COALESCE(NULLIF(BTRIM(d.derivation_name), ''), 'unknown')
         ORDER BY package_name ASC
         "#,
     )
