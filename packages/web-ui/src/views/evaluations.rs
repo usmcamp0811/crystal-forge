@@ -890,7 +890,6 @@ fn EvalHistory(
                                 th { "Policy" }
                                 th { "Duration" }
                                 th { "Completed" }
-                                th { style: "text-align: right;", " " }
                             }
                         }
                         tbody {
@@ -976,31 +975,9 @@ fn EvalHistory(
                                                 style: "font-size: 12px; color: var(--cf-text-secondary);",
                                                 "{format_eval_duration(&ev)}"
                                             }
-                                            td {
+                                             td {
                                                 style: "font-size: 12px; color: var(--cf-text-muted);",
                                                 "{format_eval_completed_at(&ev)}"
-                                            }
-                                             td {
-                                                div {
-                                                    class: "row-actions",
-                                                    // Keep row actions isolated from row-click drawer open.
-                                                    // Any new nested controls here must preserve stop_propagation.
-                                                    onclick: move |evt| evt.stop_propagation(),
-                                                    if ev.evaluation_status != "complete" {
-                                                        button {
-                                                            class: "btn-icon focus-ring",
-                                                            title: "Re-evaluate",
-                                                            onclick: move |_| {
-                                                                let mut refresh_sig = refresh.clone();
-                                                                spawn(async move {
-                                                                    let _ = re_evaluate_commit(commit_id).await;
-                                                                    refresh_sig.set(refresh_sig() + 1);
-                                                                });
-                                                            },
-                                                            Icon { name: IconName::Sync, size: 14 }
-                                                        }
-                                                    }
-                                                }
                                             }
                                         }
                                     }
