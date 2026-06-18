@@ -1906,32 +1906,13 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
                 },
                 Some(Ok(data)) => {
                     let systems_total = data.packages.len() as i64;
-                    let systems_to_build = data
-                        .packages
-                        .iter()
-                        .filter(|p| p.pending_count > 0)
-                        .count() as i64;
-                    let systems_built = data
-                        .packages
-                        .iter()
-                        .filter(|p| p.pending_count == 0 && p.ready_count > 0)
-                        .count() as i64;
-                    let systems_failed = data
-                        .packages
-                        .iter()
-                        .filter(|p| p.failed_count > 0)
-                        .count() as i64;
-                    let systems_unknown = data
-                        .packages
-                        .iter()
-                        .filter(|p| p.ready_count == 0 && p.pending_count == 0 && p.failed_count == 0)
-                        .count() as i64;
-                    let commit_short: String = {
-                        // We don't have the hash here but we can use the commit_id
-                        format!("commit #{}", commit_id)
-                    };
+                    let total_derivs: i64 = data.packages.iter().map(|p| p.ready_count + p.pending_count + p.failed_count).sum();
+                    let total_built: i64 = data.packages.iter().map(|p| p.ready_count).sum();
+                    let total_to_build: i64 = data.packages.iter().map(|p| p.pending_count).sum();
+                    let total_failed: i64 = data.packages.iter().map(|p| p.failed_count).sum();
+                    let commit_short: String = format!("commit #{}", commit_id);
                     rsx! {
-                        // Summary flow: source → eval → derivations → cached / to-build
+                        // Summary flow: source → eval → derivations → built / to-build / failed
                         div { class: "ed-graph-summary",
                             div { class: "ed-graph-node ed-graph-source",
                                 Icon { name: IconName::Git, size: 12 }
@@ -1947,25 +1928,21 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
                                 span { style: "font-weight: 700;", "{systems_total}" }
                                 span { style: "font-size: 10px; color: var(--cf-text-muted);", "systems" }
                             }
-                            span { style: "color: var(--cf-text-muted);", "→" }
-                            div { class: "ed-graph-node ed-graph-fan",
-                                span { style: "font-weight: 700; color: #34d399;", "{systems_built}" }
-                                span { style: "font-size: 10px; color: var(--cf-text-muted);", "built" }
-                            }
-                            div { class: "ed-graph-node ed-graph-fan",
-                                span { style: "font-weight: 700; color: #60a5fa;", "{systems_to_build}" }
-                                span { style: "font-size: 10px; color: var(--cf-text-muted);", "to build" }
-                            }
-                            if systems_failed > 0 {
+                            if total_derivs > 0 {
+                                span { style: "color: var(--cf-text-muted);", "→" }
                                 div { class: "ed-graph-node ed-graph-fan",
-                                    span { style: "font-weight: 700; color: #f87171;", "{systems_failed}" }
-                                    span { style: "font-size: 10px; color: var(--cf-text-muted);", "failed" }
+                                    span { style: "font-weight: 700; color: #34d399;", "{total_built}" }
+                                    span { style: "font-size: 10px; color: var(--cf-text-muted);", "built" }
                                 }
-                            }
-                            if systems_unknown > 0 {
                                 div { class: "ed-graph-node ed-graph-fan",
-                                    span { style: "font-weight: 700; color: #9ca3af;", "{systems_unknown}" }
-                                    span { style: "font-size: 10px; color: var(--cf-text-muted);", "unknown" }
+                                    span { style: "font-weight: 700; color: #60a5fa;", "{total_to_build}" }
+                                    span { style: "font-size: 10px; color: var(--cf-text-muted);", "to build" }
+                                }
+                                if total_failed > 0 {
+                                    div { class: "ed-graph-node ed-graph-fan",
+                                        span { style: "font-weight: 700; color: #f87171;", "{total_failed}" }
+                                        span { style: "font-size: 10px; color: var(--cf-text-muted);", "failed" }
+                                    }
                                 }
                             }
                         }
@@ -1988,15 +1965,17 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
                                     {
                                         let row_total = pkg.ready_count + pkg.pending_count + pkg.failed_count;
                                         let has_counts = row_total > 0;
-                                        let cached_pct = if has_counts { pkg.ready_count * 100 / row_total } else { 0 };
-                                        let build_pct = if has_counts { pkg.pending_count * 100 / row_total } else { 0 };
+                                        let built_pct  = if has_counts { pkg.ready_count  * 100 / row_total } else { 0 };
+                                        let build_pct  = if has_counts { pkg.pending_count * 100 / row_total } else { 0 };
+                                        let failed_pct = if has_counts { pkg.failed_count  * 100 / row_total } else { 0 };
                                         rsx! {
                                             div { key: "{pkg.package_name}", class: "ed-graph-row",
                                                 div { class: "ed-graph-pkg",
                                                     span { class: "mono truncate", style: "font-size: 12px; font-weight: 600;", "{pkg.package_name}" }
                                                     if has_counts {
                                                         span { style: "font-size: 10px; color: var(--cf-text-muted);",
-                                                            "{pkg.pending_count} to build / {row_total} total"
+                                                            "{pkg.ready_count}/{row_total} built · {pkg.pending_count} to build"
+                                                            if pkg.failed_count > 0 { " · {pkg.failed_count} failed" }
                                                         }
                                                     } else {
                                                         span { style: "font-size: 10px; color: #9ca3af;",
@@ -2005,8 +1984,11 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
                                                     }
                                                 }
                                                 div { class: "ed-graph-bar",
-                                                    div { class: "ed-graph-bar-cached", style: "width: {cached_pct}%;" }
-                                                    div { class: "ed-graph-bar-build", style: "width: {build_pct}%;" }
+                                                    div { class: "ed-graph-bar-cached", style: "width: {built_pct}%;" }
+                                                    div { class: "ed-graph-bar-build",  style: "width: {build_pct}%;" }
+                                                    if pkg.failed_count > 0 {
+                                                        div { style: "width: {failed_pct}%; background: #f87171;" }
+                                                    }
                                                 }
                                                 if has_counts {
                                                     div { style: "display: flex; gap: 6px; justify-content: flex-end; font-size: 11px;",
@@ -2029,8 +2011,11 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
                                 }
                             }
                             div { class: "ed-graph-legend",
-                                span { span { class: "ed-graph-sw", style: "background: #34d399;" } "Built (in store)" }
+                                span { span { class: "ed-graph-sw", style: "background: #34d399;" } "Built / cached" }
                                 span { span { class: "ed-graph-sw", style: "background: #60a5fa;" } "To build" }
+                                if total_failed > 0 {
+                                    span { span { class: "ed-graph-sw", style: "background: #f87171;" } "Failed" }
+                                }
                             }
                         }
                     }
