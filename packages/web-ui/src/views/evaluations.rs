@@ -1914,8 +1914,37 @@ fn EvalDrawerPolicyTab(commit_id: i32) -> Element {
 
 #[component]
 fn EvalDrawerGraphTab(commit_id: i32) -> Element {
-    let graph_resource =
-        use_resource(move || async move { fetch_eval_dependency_graph(commit_id).await });
+    let mut graph_refresh = use_signal(|| 0_u64);
+    let mut has_pending_counts = use_signal(|| true);
+    let graph_resource = use_resource(move || async move {
+        let _ = graph_refresh();
+        fetch_eval_dependency_graph(commit_id).await
+    });
+
+    use_effect(move || {
+        if let Some(Ok(data)) = &*graph_resource.read() {
+            has_pending_counts.set(data.packages.iter().any(|p| !p.closure_counted));
+        }
+    });
+
+    {
+        let mut graph_refresh = graph_refresh.clone();
+        use_future(move || async move {
+            loop {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    gloo_timers::future::TimeoutFuture::new(2000).await;
+                    if has_pending_counts() {
+                        graph_refresh.set(graph_refresh() + 1);
+                    }
+                }
+
+                #[cfg(not(target_arch = "wasm32"))]
+                break;
+            }
+        });
+    }
+
     let graph_snapshot = graph_resource.read();
 
     rsx! {
