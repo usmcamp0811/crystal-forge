@@ -243,9 +243,13 @@ fn EvaluationsPage() -> Element {
                                         );
                                         if can_cancel {
                                             let mut refresh_sig = refresh;
+                                            let mut toast = toast_msg;
                                             spawn(async move {
-                                                let _ = cancel_commit_evaluation(commit_id).await;
-                                                refresh_sig.set(refresh_sig() + 1);
+                                                if let Err(e) = cancel_commit_evaluation(commit_id).await {
+                                                    toast.set(Some(format!("Cancel failed: {}", e)));
+                                                } else {
+                                                    refresh_sig.set(refresh_sig() + 1);
+                                                }
                                             });
                                         }
                                     }
@@ -384,11 +388,22 @@ fn EvaluationsPage() -> Element {
                                         let selected_ids: Vec<i32> = history_selected_ids.read().iter().copied().collect();
                                         let mut refresh_sig = refresh.clone();
                                         let mut selected_sig = history_selected_ids.clone();
+                                        let mut toast = toast_msg.clone();
                                         spawn(async move {
+                                            let mut success = 0u32;
+                                            let mut failed: Vec<i32> = Vec::new();
                                             for commit_id in selected_ids {
-                                                let _ = re_evaluate_commit(commit_id).await;
+                                                match re_evaluate_commit(commit_id).await {
+                                                    Ok(_) => success += 1,
+                                                    Err(_) => failed.push(commit_id),
+                                                }
                                             }
-                                            selected_sig.write().clear();
+                                            if success > 0 {
+                                                toast.set(Some(format!("Re-queued {} evaluation{}", success, if success == 1 { "" } else { "s" })));
+                                                selected_sig.set(failed.into_iter().collect());
+                                            } else {
+                                                toast.set(Some("Re-evaluate failed — see server logs".to_string()));
+                                            }
                                             refresh_sig.set(refresh_sig() + 1);
                                         });
                                     },
@@ -440,6 +455,7 @@ fn EvaluationsPage() -> Element {
                         target: target,
                         refresh: refresh,
                         on_close: move |_| drawer_target.set(None),
+                        toast_msg: toast_msg,
                     }
                 }
 
@@ -577,17 +593,7 @@ fn EvalActiveQueue(
                         let mut row_draw = drawer_target.clone();
                         let row_ev = ev_for_row.clone();
                         let row_onclick = move |_| {
-                            if can_cancel {
-                                let mut next = active_selected_ids.read().clone();
-                                if next.contains(&commit_id) {
-                                    next.remove(&commit_id);
-                                } else {
-                                    next.insert(commit_id);
-                                }
-                                active_selected_ids.set(next);
-                            } else {
-                                row_draw.set(Some(EvalDrawerTarget::Queue(row_ev.clone())));
-                            }
+                            row_draw.set(Some(EvalDrawerTarget::Queue(row_ev.clone())));
                         };
 
                         let row_classes = format!(
@@ -619,6 +625,7 @@ fn EvalActiveQueue(
                                         let mut refresh_sig = refresh.clone();
                                         let mut drag_sig = drag_id.clone();
                                         let mut over_sig = over_idx.clone();
+                                        let mut toast = toast_msg.clone();
                                         spawn(async move {
                                             let active: Vec<_> = items.read().iter()
                                                 .filter(|item| is_active_eval_status(&item.evaluation_status))
@@ -631,8 +638,11 @@ fn EvalActiveQueue(
                                                 let adjusted_tp = if sp < tp { tp - 1 } else { tp };
                                                 reordered.insert(adjusted_tp, removed);
                                                 let ordered_ids: Vec<i32> = reordered.iter().map(|e| e.commit_id).collect();
-                                                let _ = reorder_eval_queue(&ordered_ids).await;
-                                                refresh_sig.set(refresh_sig() + 1);
+                                                if let Err(e) = reorder_eval_queue(&ordered_ids).await {
+                                                    toast.set(Some(format!("Reorder failed: {}", e)));
+                                                } else {
+                                                    refresh_sig.set(refresh_sig() + 1);
+                                                }
                                             }
                                         });
                                         drag_sig.set(None);
@@ -1010,6 +1020,7 @@ fn EvalDrawer(
     target: EvalDrawerTarget,
     mut refresh: Signal<u64>,
     on_close: EventHandler<MouseEvent>,
+    mut toast_msg: Signal<Option<String>>,
 ) -> Element {
     let mut drawer_tab = use_signal(|| String::from("log"));
 
@@ -1059,10 +1070,14 @@ fn EvalDrawer(
                                     class: "btn btn-ghost focus-ring xs",
                                     onclick: move |_| {
                                         let mut refresh_sig = refresh.clone();
+                                        let mut toast = toast_msg.clone();
                                         let commit_id = ev.commit_id;
                                         spawn(async move {
-                                            let _ = cancel_commit_evaluation(commit_id).await;
-                                            refresh_sig.set(refresh_sig() + 1);
+                                            if let Err(e) = cancel_commit_evaluation(commit_id).await {
+                                                toast.set(Some(format!("Cancel failed: {}", e)));
+                                            } else {
+                                                refresh_sig.set(refresh_sig() + 1);
+                                            }
                                         });
                                     },
                                     "Cancel"
@@ -1074,10 +1089,14 @@ fn EvalDrawer(
                                     style: "color: #f87171;",
                                     onclick: move |_| {
                                         let mut refresh_sig = refresh.clone();
+                                        let mut toast = toast_msg.clone();
                                         let commit_id = ev.commit_id;
                                         spawn(async move {
-                                            let _ = force_cancel_commit_evaluation(commit_id).await;
-                                            refresh_sig.set(refresh_sig() + 1);
+                                            if let Err(e) = force_cancel_commit_evaluation(commit_id).await {
+                                                toast.set(Some(format!("Force cancel failed: {}", e)));
+                                            } else {
+                                                refresh_sig.set(refresh_sig() + 1);
+                                            }
                                         });
                                     },
                                     "Force-cancel"
@@ -1263,10 +1282,14 @@ fn EvalDrawer(
                                 class: "btn btn-ghost focus-ring",
                                 onclick: move |_| {
                                     let mut refresh_sig = refresh.clone();
+                                    let mut toast = toast_msg.clone();
                                     let commit_id = ev.commit_id;
                                     spawn(async move {
-                                        let _ = re_evaluate_commit(commit_id).await;
-                                        refresh_sig.set(refresh_sig() + 1);
+                                        if let Err(e) = re_evaluate_commit(commit_id).await {
+                                            toast.set(Some(format!("Re-evaluate failed: {}", e)));
+                                        } else {
+                                            refresh_sig.set(refresh_sig() + 1);
+                                        }
                                     });
                                 },
                                 Icon { name: IconName::Sync, size: 14 }
