@@ -377,6 +377,7 @@ fn EvaluationsPage() -> Element {
                                     style: "font-size: 13px; font-weight: 600;",
                                     "{selected_count} selected"
                                 }
+                                div { style: "flex: 1;" }
                                 button {
                                     class: "btn btn-ghost focus-ring xs",
                                     onclick: move |_| {
@@ -410,7 +411,6 @@ fn EvaluationsPage() -> Element {
                                     Icon { name: IconName::Download, size: 11 }
                                     " Download logs"
                                 }
-                                div { style: "flex: 1;" }
                                 button {
                                     class: "btn-icon focus-ring",
                                     onclick: move |_| {
