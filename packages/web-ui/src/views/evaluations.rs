@@ -46,7 +46,7 @@ fn EvaluationsPage() -> Element {
     let mut history_selected_ids = use_signal(std::collections::HashSet::<i32>::new);
     // Keyboard navigation: index into the currently visible list (queue or history).
     // Start at 0 so the first row is auto-selected when the page loads (matching JSX).
-    let mut focused_index: Signal<Option<usize>> = use_signal(|| Some(0));
+    let mut focused_index: Signal<Option<usize>> = use_signal(|| None);
 
     // Active queue multi-select (bulk cancel)
     let mut active_selected_ids = use_signal(std::collections::HashSet::<i32>::new);
@@ -342,7 +342,7 @@ fn EvaluationsPage() -> Element {
                             } else {
                                 "sd-tab focus-ring"
                             },
-                            onclick: move |_| active_tab.set(EvaluationsTab::ActiveQueue),
+                            onclick: move |_| { active_tab.set(EvaluationsTab::ActiveQueue); focused_index.set(None); },
                             "Active Queue "
                             span { class: "sd-tab-badge", "{active_count}" }
                         }
@@ -352,7 +352,7 @@ fn EvaluationsPage() -> Element {
                             } else {
                                 "sd-tab focus-ring"
                             },
-                            onclick: move |_| active_tab.set(EvaluationsTab::History),
+                            onclick: move |_| { active_tab.set(EvaluationsTab::History); focused_index.set(None); },
                             "History"
                         }
                     }
