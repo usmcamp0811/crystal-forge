@@ -414,3 +414,89 @@ pub async fn get_store_path_and_build_status(drv_path: &str) -> Result<(String, 
 
     Ok((store_path, is_built))
 }
+
+/// Count the total packages in a system closure and how many are already cached.
+///
+/// Uses two nix calls:
+///   1. `nix-store --query --requisites <drv>` — list all .drv files in the closure (fast)
+///   2. `nix-store --query --outputs <drv>...` — map each .drv to its output path
+///   3. `nix path-info <paths>...` — batch check which outputs exist in the store
+///
+/// Returns `(total, cached)` where:
+///   total  = number of packages in the closure (excluding the nixos-system drv itself)
+///   cached = number already present in the local/substituter-accessible store
+pub async fn count_closure_packages(drv_path: &str) -> Result<(i32, i32)> {
+    // Step 1: get all .drv requisites (the full closure as .drv paths)
+    let req_out = Command::new("nix-store")
+        .args(["--query", "--requisites", drv_path])
+        .output()
+        .await?;
+
+    if !req_out.status.success() {
+        anyhow::bail!(
+            "nix-store --query --requisites failed: {}",
+            String::from_utf8_lossy(&req_out.stderr)
+        );
+    }
+
+    let drv_paths: Vec<String> = String::from_utf8(req_out.stdout)?
+        .lines()
+        .filter(|l| !l.is_empty() && *l != drv_path)
+        .map(|s| s.to_string())
+        .collect();
+
+    let total = drv_paths.len() as i32;
+    if total == 0 {
+        return Ok((0, 0));
+    }
+
+    // Step 2: map .drv paths → output store paths in one call
+    let mut outputs_cmd = Command::new("nix-store");
+    outputs_cmd.arg("--query").arg("--outputs");
+    for p in &drv_paths {
+        outputs_cmd.arg(p);
+    }
+    let outputs_out = outputs_cmd.output().await?;
+
+    let store_paths: Vec<String> = if outputs_out.status.success() {
+        String::from_utf8(outputs_out.stdout)?
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        // Fall back to zero cached if we can't map outputs
+        warn!("nix-store --query --outputs failed; assuming 0 cached");
+        return Ok((total, 0));
+    };
+
+    if store_paths.is_empty() {
+        return Ok((total, 0));
+    }
+
+    // Step 3: batch check which outputs exist (nix path-info exits 0 only for
+    // paths that are present; non-present paths produce a non-zero exit for the whole
+    // invocation, so we use --json and count the successes instead)
+    let mut pi_cmd = Command::new("nix");
+    pi_cmd.args(["path-info", "--json"]);
+    for p in &store_paths {
+        pi_cmd.arg(p);
+    }
+    let pi_out = pi_cmd.output().await?;
+
+    let cached = if pi_out.status.success() {
+        // All paths present — count equals total store paths
+        store_paths.len() as i32
+    } else {
+        // Some paths missing — parse JSON to count which are present.
+        // nix path-info --json returns an object keyed by store path.
+        // Paths that don't exist are omitted from the output.
+        match serde_json::from_slice::<serde_json::Value>(&pi_out.stdout) {
+            Ok(serde_json::Value::Object(map)) => map.len() as i32,
+            Ok(serde_json::Value::Array(arr)) => arr.len() as i32,
+            _ => 0,
+        }
+    };
+
+    Ok((total, cached))
+}

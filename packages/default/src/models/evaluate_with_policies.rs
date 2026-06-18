@@ -15,6 +15,7 @@ const EVAL_PROGRESS_HEARTBEAT_SECS: u64 = 30;
 use tracing::{debug, error, info, warn};
 
 use crate::config::{BuildConfig, ServerConfig};
+use crate::derivations::utils::count_closure_packages;
 use crate::flake::credentials::FlakeCredentialEnv;
 use crate::models::commits::Commit;
 use crate::models::deployment_policies::{
@@ -23,7 +24,8 @@ use crate::models::deployment_policies::{
 use crate::models::flakes::Flake;
 use crate::queries::build_jobs::enqueue_build_job_for_derivation;
 use crate::queries::derivations::{
-    insert_derivation_with_target, mark_derivation_dry_run_complete, set_expected_store_path,
+    insert_derivation_with_target, mark_derivation_dry_run_complete, set_closure_counts,
+    set_expected_store_path,
 };
 use crate::queries::systems::list_configuration_names_for_flake;
 use crate::queue::QueueNotifier;
@@ -573,6 +575,30 @@ pub async fn evaluate_with_nix_eval_jobs(
                                                                 "⚠️  Could not resolve expected_store_path for {} (id={}) drv={}",
                                                                 system_name, deriv.id, drv
                                                             );
+                                                        }
+
+                                                        // Count closure package totals asynchronously so the
+                                                        // dependency graph can show build weight per system.
+                                                        {
+                                                            let pool2 = pool.clone();
+                                                            let drv2 = drv.clone();
+                                                            let deriv_id = deriv.id;
+                                                            let sname = system_name.clone();
+                                                            tokio::spawn(async move {
+                                                                match count_closure_packages(&drv2).await {
+                                                                    Ok((total, cached)) => {
+                                                                        if let Err(e) = set_closure_counts(&pool2, deriv_id, total, cached).await {
+                                                                            warn!("⚠️  Failed to store closure counts for {} (id={}): {}", sname, deriv_id, e);
+                                                                        } else {
+                                                                            info!("📦 {} closure: {}/{} packages cached/local", sname, cached, total);
+                                                                        }
+                                                                    }
+                                                                    Err(e) => warn!(
+                                                                        "⚠️  Failed to count closure packages for {} (id={}): {}",
+                                                                        sname, deriv_id, e
+                                                                    ),
+                                                                }
+                                                            });
                                                         }
 
                                                         // ── AUTOMATIC HARDENING SCAN ─────────────────────
