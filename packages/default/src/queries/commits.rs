@@ -804,6 +804,7 @@ pub async fn fetch_eval_policy_matrix(
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct EvalDependencyPackageRow {
     pub package_name: String,
+    pub closure_counted: bool,
     pub ready_count: i64,
     pub pending_count: i64,
     pub failed_count: i64,
@@ -833,6 +834,7 @@ pub async fn fetch_eval_dependency_breakdown(
         r#"
         SELECT
             COALESCE(NULLIF(BTRIM(d.derivation_name), ''), 'unknown') AS package_name,
+            (d.closure_total IS NOT NULL) AS closure_counted,
             CASE
                 WHEN d.closure_total IS NOT NULL
                     THEN COALESCE(d.closure_cached, 0)::BIGINT

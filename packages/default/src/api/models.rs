@@ -762,6 +762,9 @@ pub struct EvalDependencyGraphResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvalDependencyPackageRow {
     pub package_name: String,
+    /// True when ready/pending counts represent real closure package counts.
+    /// False means counts are only a temporary system-status fallback.
+    pub closure_counted: bool,
     /// Systems with a completed build (store_path present / BuildComplete).
     pub ready_count: i64,
     /// Systems evaluated but not yet built (DryRunComplete / pending build).

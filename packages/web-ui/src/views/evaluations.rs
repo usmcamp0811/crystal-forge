@@ -1929,10 +1929,10 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
                 },
                 Some(Ok(data)) => {
                     let systems_total = data.packages.len() as i64;
-                    let total_packages: i64 = data.packages.iter().map(|p| p.ready_count + p.pending_count + p.failed_count).sum();
-                    let packages_cached: i64 = data.packages.iter().map(|p| p.ready_count).sum();
-                    let packages_to_build: i64 = data.packages.iter().map(|p| p.pending_count).sum();
-                    let packages_failed: i64 = data.packages.iter().map(|p| p.failed_count).sum();
+                    let total_packages: i64 = data.packages.iter().filter(|p| p.closure_counted).map(|p| p.ready_count + p.pending_count + p.failed_count).sum();
+                    let packages_cached: i64 = data.packages.iter().filter(|p| p.closure_counted).map(|p| p.ready_count).sum();
+                    let packages_to_build: i64 = data.packages.iter().filter(|p| p.closure_counted).map(|p| p.pending_count).sum();
+                    let packages_failed: i64 = data.packages.iter().filter(|p| p.closure_counted).map(|p| p.failed_count).sum();
                     let commit_short: String = format!("commit #{}", commit_id);
                     rsx! {
                         // Summary flow: source → eval → systems → package closure counts
@@ -1987,7 +1987,7 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
                                 for pkg in data.packages.iter() {
                                     {
                                         let row_total = pkg.ready_count + pkg.pending_count + pkg.failed_count;
-                                        let has_counts = row_total > 0;
+                                        let has_counts = pkg.closure_counted && row_total > 0;
                                         let cached_pct = if has_counts { pkg.ready_count * 100 / row_total } else { 0 };
                                         let build_pct = if has_counts { pkg.pending_count * 100 / row_total } else { 0 };
                                         let failed_pct = if has_counts { pkg.failed_count * 100 / row_total } else { 0 };
@@ -2000,6 +2000,8 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
                                                             "{pkg.ready_count}/{row_total} cached/local · {pkg.pending_count} to build"
                                                             if pkg.failed_count > 0 { " · {pkg.failed_count} failed" }
                                                         }
+                                                    } else if pkg.failed_count > 0 {
+                                                        span { style: "font-size: 10px; color: #f87171;", "failed before closure count" }
                                                     } else {
                                                         span { style: "font-size: 10px; color: #9ca3af;", "pending closure count" }
                                                     }
@@ -2021,6 +2023,8 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
                                                             span { style: "color: #f87171; font-weight: 600;", "{pkg.failed_count}" }
                                                         }
                                                     }
+                                                } else if pkg.failed_count > 0 {
+                                                    div { style: "display: flex; justify-content: flex-end; font-size: 11px; color: #f87171; font-weight: 600;", "failed" }
                                                 } else {
                                                     div { style: "display: flex; justify-content: flex-end; font-size: 11px; color: #9ca3af;", "—" }
                                                 }
