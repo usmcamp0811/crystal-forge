@@ -4616,31 +4616,85 @@ const steps = [
           body: JSON.stringify(["openssl", "glibc"]),
         });
       });
-      await page.route(/\/api\/v1\/cves(?:\?.*)?$/, async (route) => {
+      const cveRowFixture = {
+        cve_id: "CVE-2024-1234",
+        cvss_v3_score: 9.8,
+        title: "OpenSSL bounds check issue",
+        severity: "critical",
+        cvss_vector: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        published_date: "2024-02-01",
+        exploited: true,
+        package_name: "openssl",
+        installed_version: "3.0.1",
+        fixed_version: "3.0.2",
+        fix_status: "fix_available",
+        affected_count: 4,
+        affected_environments: ["prod", "staging"],
+        first_seen: new Date().toISOString(),
+        last_seen: new Date().toISOString(),
+        age_days: 12,
+        triage_status: "outstanding",
+      };
+      // Grouped (default) view fetches /cves/grouped — mock the package rollup so
+      // the default grouped surface renders real-shaped data (not a fallback).
+      await page.route(/\/api\/v1\/cves\/grouped(?:\?.*)?$/, async (route) => {
         await route.fulfill({
           status: 200,
           contentType: "application/json",
           body: JSON.stringify([
             {
-              cve_id: "CVE-2024-1234",
-              cvss_v3_score: 9.8,
-              title: "OpenSSL bounds check issue",
-              severity: "critical",
-              cvss_vector: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
-              published_date: "2024-02-01",
-              exploited: true,
               package_name: "openssl",
-              installed_version: "3.0.1",
-              fixed_version: "3.0.2",
-              fix_status: "fix_available",
-              affected_count: 4,
-              affected_environments: ["prod", "staging"],
-              first_seen: new Date().toISOString(),
-              last_seen: new Date().toISOString(),
-              age_days: 12,
-              triage_status: "outstanding",
+              cve_count: 1,
+              critical_count: 1,
+              high_count: 0,
+              medium_count: 0,
+              low_count: 0,
+              environments_count: 2,
+              total_affected_systems: 4,
+              fixable_count: 1,
+              outstanding_count: 1,
+              exploited_count: 1,
+              max_cvss: 9.8,
+              severity_score: 1000,
+              cves: [cveRowFixture],
             },
           ]),
+        });
+      });
+      // Drawer detail endpoints for the selected CVE.
+      await page.route(/\/api\/v1\/cves\/CVE-2024-1234$/, async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            cve_id: "CVE-2024-1234",
+            cvss_v3_score: 9.8,
+            severity: "critical",
+            title: "OpenSSL bounds check issue",
+            cvss_vector: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+            cwe_id: "CWE-125",
+            published_date: "2024-02-01",
+            modified_date: "2024-02-03",
+            exploited: true,
+            package_name: "openssl",
+            installed_version: "3.0.1",
+            fixed_version: "3.0.2",
+            detection_method: "vulnix",
+            fix_status: "fix_available",
+          }),
+        });
+      });
+      await page.route(/\/api\/v1\/cves\/CVE-2024-1234\/systems$/, async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+      });
+      await page.route(/\/api\/v1\/cves\/CVE-2024-1234\/justifications$/, async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+      });
+      await page.route(/\/api\/v1\/cves(?:\?.*)?$/, async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify([cveRowFixture]),
         });
       });
 
@@ -4671,7 +4725,13 @@ const steps = [
       const severityFilterSeg = page.locator("main .seg button:has-text('Critical')");
       await assertVisible(severityFilterSeg, "Expected severity filter controls");
 
-      // Switch to flat view mode (default is grouped) to see individual CVE rows in a table.
+      // Grouped view is the default. Assert the package group card renders the
+      // real-shaped grouped data (package-first parity surface).
+      const groupCard = page.locator("main .mono:has-text('openssl')").first();
+      await assertVisible(groupCard, "Expected grouped package card to render");
+
+      // Verify flat view mode renders individual CVE rows in a table, then
+      // return to grouped mode so the drawer is opened from the design's default surface.
       const flatViewBtn = page.locator("button:has-text('Flat')");
       await flatViewBtn.waitFor({ timeout: 5000 });
       await flatViewBtn.click();
@@ -4680,9 +4740,23 @@ const steps = [
       const cveRow = page.locator("main td:has-text('CVE-2024-1234')");
       await assertVisible(cveRow, "Expected CVE row to render");
 
+      // Open the CVE detail drawer from the flat-view row and assert it renders.
+      await cveRow.click();
+      await page.waitForTimeout(1000);
+      const drawer = page.locator("aside[role='dialog']");
+      await assertVisible(drawer, "Expected CVE detail drawer to open");
+      const drawerCveId = drawer.locator(".mono:has-text('CVE-2024-1234')").first();
+      await assertVisible(drawerCveId, "Expected CVE id in drawer header");
+
+      // Leave the drawer open so the captured screenshot shows the detail surface.
+
       // Unroute after test.
       await page.unroute("**/api/v1/cves/stats*");
       await page.unroute("**/api/v1/cves/packages*");
+      await page.unroute(/\/api\/v1\/cves\/grouped(?:\?.*)?$/);
+      await page.unroute(/\/api\/v1\/cves\/CVE-2024-1234$/);
+      await page.unroute(/\/api\/v1\/cves\/CVE-2024-1234\/systems$/);
+      await page.unroute(/\/api\/v1\/cves\/CVE-2024-1234\/justifications$/);
       await page.unroute(/\/api\/v1\/cves(?:\?.*)?$/);
     },
   },
