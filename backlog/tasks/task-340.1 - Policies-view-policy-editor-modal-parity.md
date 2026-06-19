@@ -1,11 +1,11 @@
 ---
 id: TASK-340.1
 title: 'Policies: view + policy editor modal parity'
-status: Review
+status: In Progress
 assignee:
   - gpt-5.5
 created_date: '2026-06-10 13:34'
-updated_date: '2026-06-19 15:03'
+updated_date: '2026-06-19 15:18'
 labels:
   - design-parity
   - policies
@@ -106,12 +106,20 @@ Medium-high. The task touches a UI surface with modal workflows and may require 
 - [x] #4 Validation/rejection paths behave per existing 20d/20e policy steps
 - [x] #5 web-ui policy steps pass with parity assertions and capture the Policies UI
 - [x] #6 Any backend/API/model changes are minimal and directly required for UI round-trip parity
+- [ ] #7 The policy editor modal matches the design example PolicyFormModal structure exactly: a single unified create/edit modal with no Basic/Advanced toggle and no raw JSON/TOML editor
+- [ ] #8 Modal includes Name, Description, Category cards, Severity segmented control, Rationale, an Assertions/gate-rules builder, and an Evidence-for-ATO builder per the design
+- [ ] #9 Edit mode includes a Danger zone with a typed-confirmation delete flow matching the design
+- [ ] #10 Fields or rule/evidence types without backend persistence are shown per design but visibly flagged as UI-only/not-persisted yet
+- [ ] #11 Backend follow-up task(s) are created for any UI-only/not-persisted policy modal fields and rule/evidence types
+- [ ] #12 Policy create/edit/delete still round-trip through the real API for backend-supported fields
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
 Pushed modal parity correction commit `e7adb2a7` to MR 281 after re-auth. Uploaded refreshed screenshot `20-policies-new-modal-advanced.png` and updated the MR description. Verification after correction passed: changed-file rustfmt check, wasm cargo check, web-ui check.
+
+Scope expanded per owner direction: full design-faithful policy modal rewrite (single unified modal, no Basic/Advanced, no raw JSON/TOML). Unsupported fields (category, severity, rationale, evidence, rollout/approval/time-window rules) shown per design but flagged UI-only/not-persisted; backend follow-up task(s) to be created. LOCK: gpt-5.5 on reckless in /home/mcamp/code/crystal-forge/TASK-340.1-policies-view-editor-parity
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
