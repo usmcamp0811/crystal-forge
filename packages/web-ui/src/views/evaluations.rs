@@ -6,9 +6,9 @@ use gloo_timers::future::TimeoutFuture;
 
 use crate::api::{
     client::{
-        cancel_commit_evaluation, fetch_eval_dependency_graph, fetch_eval_history,
+        ApiClientError, cancel_commit_evaluation, fetch_eval_dependency_graph, fetch_eval_history,
         fetch_eval_policy_matrix, fetch_eval_queue, force_cancel_commit_evaluation,
-        re_evaluate_commit, reorder_eval_queue, ApiClientError,
+        re_evaluate_commit, reorder_eval_queue,
     },
     models::{EvalHistoryItem, EvalHistoryPage, EvalQueueItem},
 };
@@ -1914,8 +1914,11 @@ fn EvalDrawerPolicyTab(commit_id: i32) -> Element {
 
 #[component]
 fn EvalDrawerGraphTab(commit_id: i32) -> Element {
+    const GRAPH_PENDING_POLL_MAX: u64 = 60;
+
     let mut graph_refresh = use_signal(|| 0_u64);
     let mut has_pending_counts = use_signal(|| true);
+    let mut graph_pending_polls = use_signal(|| 0_u64);
     let graph_resource = use_resource(move || async move {
         let _ = graph_refresh();
         fetch_eval_dependency_graph(commit_id).await
@@ -1923,7 +1926,11 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
 
     use_effect(move || {
         if let Some(Ok(data)) = &*graph_resource.read() {
-            has_pending_counts.set(data.packages.iter().any(|p| !p.closure_counted));
+            let pending = data.packages.iter().any(|p| !p.closure_counted);
+            has_pending_counts.set(pending);
+            if !pending {
+                graph_pending_polls.set(GRAPH_PENDING_POLL_MAX);
+            }
         }
     });
 
@@ -1934,7 +1941,8 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
                 #[cfg(target_arch = "wasm32")]
                 {
                     gloo_timers::future::TimeoutFuture::new(2000).await;
-                    if has_pending_counts() {
+                    if has_pending_counts() && graph_pending_polls() < GRAPH_PENDING_POLL_MAX {
+                        graph_pending_polls.set(graph_pending_polls() + 1);
                         graph_refresh.set(graph_refresh() + 1);
                     }
                 }
