@@ -5,7 +5,7 @@ status: Review
 assignee:
   - gpt-5.5
 created_date: '2026-06-10 13:34'
-updated_date: '2026-06-19 14:11'
+updated_date: '2026-06-19 14:12'
 labels:
   - design-parity
   - policies
@@ -111,11 +111,11 @@ Medium-high. The task touches a UI surface with modal workflows and may require 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Rebased local task branch onto latest `origin/dev` (`fd4501af`, includes TASK-348.1 merge). Verification after rebase passed: `nix build .#web-ui`, `nix build .#checks.x86_64-linux.web-ui`.
+Force-pushed rebased branch to MR 281 with `git push --force-with-lease` (`41103a89...374e6ee4`).
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Rebased local task branch onto `origin/dev` at `fd4501af` after TASK-348.1 merged. Replayed only the TASK-340.1 implementation commit as `374e6ee4`. Post-rebase verification passed: `nix build .#web-ui` and `nix build .#checks.x86_64-linux.web-ui`.
+Force-pushed rebased MR branch with `git push --force-with-lease`: `41103a89...374e6ee4`.
 <!-- SECTION:FINAL_SUMMARY:END -->
