@@ -513,8 +513,8 @@ pub fn PolicyEditorModal(
                 } else {
                     // ── Header ──────────────────────────────────────────────────
                     div { class: "modal-head",
-                        h2 { style: "white-space:nowrap;",
-                            svg { width: "14", height: "14", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round", style: "margin-right:6px;vertical-align:text-bottom;",
+                        h2 { style: "display:flex;align-items:center;gap:6px;white-space:nowrap;",
+                            svg { width: "14", height: "14", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round", style: "flex-shrink:0;",
                                 if is_editing {
                                     circle { cx: "12", cy: "12", r: "3" }
                                     path { d: "M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3h.1a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8v.1a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" }
@@ -559,10 +559,13 @@ pub fn PolicyEditorModal(
                                 "Category "
                                 span { class: "cf-policy-ui-only-badge", "UI only — not persisted yet" }
                             }
-                            div { style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;",
+                            div { role: "radiogroup", style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;",
                                 for (id, label, color, icon, blurb) in CATEGORIES {
                                     button {
                                         key: "{id}",
+                                        r#type: "button",
+                                        role: "radio",
+                                        aria_checked: if category.read().as_str() == id { "true" } else { "false" },
                                         class: "focus-ring",
                                         style: if category.read().as_str() == id {
                                             "display:flex;align-items:flex-start;gap:9px;text-align:left;padding:9px 11px;border-radius:9px;cursor:pointer;background:color-mix(in oklab, {color} 12%, transparent);border:1px solid color-mix(in oklab, {color} 55%, transparent);"
@@ -986,6 +989,7 @@ fn RuleEditorRow(index: usize, rule: PolicyRule, rules: Signal<Vec<PolicyRule>>)
                         input { class: "input focus-ring mono", style: "width:70px;font-size:12px;padding:4px 8px;", value: "{rule.to}", oninput: move |event| set_rule_field!(to, event.value()) }
                         span { "on" }
                         input { class: "input focus-ring mono", style: "width:140px;font-size:12px;padding:4px 8px;", value: "{rule.days}", oninput: move |event| set_rule_field!(days, event.value()) }
+                        span { class: "mono", style: "color:var(--cf-text-muted);font-size:11px;", "America/New_York" }
                     }
                 },
                 "approval_required" => rsx! {
