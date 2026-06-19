@@ -3,9 +3,9 @@ id: TASK-340.1
 title: 'Policies: view + policy editor modal parity'
 status: In Progress
 assignee:
-  - gpt-5.5
+  - '@gpt-5.5'
 created_date: '2026-06-10 13:34'
-updated_date: '2026-06-19 15:18'
+updated_date: '2026-06-19 15:54'
 labels:
   - design-parity
   - policies
@@ -30,6 +30,7 @@ modified_files:
   - packages/web-ui/src/components/policy/policy_editor_modal.rs
   - packages/web-ui/src/components/policy/types.rs
   - checks/web-ui/tests/integration-test.js
+  - packages/web-ui/assets/app.css
 parent_task_id: TASK-340
 priority: high
 ordinal: 1701
@@ -106,24 +107,22 @@ Medium-high. The task touches a UI surface with modal workflows and may require 
 - [x] #4 Validation/rejection paths behave per existing 20d/20e policy steps
 - [x] #5 web-ui policy steps pass with parity assertions and capture the Policies UI
 - [x] #6 Any backend/API/model changes are minimal and directly required for UI round-trip parity
-- [ ] #7 The policy editor modal matches the design example PolicyFormModal structure exactly: a single unified create/edit modal with no Basic/Advanced toggle and no raw JSON/TOML editor
-- [ ] #8 Modal includes Name, Description, Category cards, Severity segmented control, Rationale, an Assertions/gate-rules builder, and an Evidence-for-ATO builder per the design
-- [ ] #9 Edit mode includes a Danger zone with a typed-confirmation delete flow matching the design
-- [ ] #10 Fields or rule/evidence types without backend persistence are shown per design but visibly flagged as UI-only/not-persisted yet
-- [ ] #11 Backend follow-up task(s) are created for any UI-only/not-persisted policy modal fields and rule/evidence types
+- [x] #7 The policy editor modal matches the design example PolicyFormModal structure exactly: a single unified create/edit modal with no Basic/Advanced toggle and no raw JSON/TOML editor
+- [x] #8 Modal includes Name, Description, Category cards, Severity segmented control, Rationale, an Assertions/gate-rules builder, and an Evidence-for-ATO builder per the design
+- [x] #9 Edit mode includes a Danger zone with a typed-confirmation delete flow matching the design
+- [x] #10 Fields or rule/evidence types without backend persistence are shown per design but visibly flagged as UI-only/not-persisted yet
+- [x] #11 Backend follow-up task(s) are created for any UI-only/not-persisted policy modal fields and rule/evidence types
 - [ ] #12 Policy create/edit/delete still round-trip through the real API for backend-supported fields
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Pushed modal parity correction commit `e7adb2a7` to MR 281 after re-auth. Uploaded refreshed screenshot `20-policies-new-modal-advanced.png` and updated the MR description. Verification after correction passed: changed-file rustfmt check, wasm cargo check, web-ui check.
-
-Scope expanded per owner direction: full design-faithful policy modal rewrite (single unified modal, no Basic/Advanced, no raw JSON/TOML). Unsupported fields (category, severity, rationale, evidence, rollout/approval/time-window rules) shown per design but flagged UI-only/not-persisted; backend follow-up task(s) to be created. LOCK: gpt-5.5 on reckless in /home/mcamp/code/crystal-forge/TASK-340.1-policies-view-editor-parity
+Pushed commit `2980d6f0` to MR 281 with the full unified policy modal rewrite. Targeted verification passed: changed-file rustfmt, wasm cargo check, JS syntax check, and `git diff --check`. Skipped the expensive `web-ui` check for this latest commit per owner request unless/until it is necessary for final MR validation/screenshot refresh.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Addressed reviewer feedback that the edit policy modal did not match the design example. Added follow-up commit `e7adb2a7` to rework the modal shell/body/footer toward the design modal classes and sections. Verification passed: changed-file rustfmt check, wasm cargo check, and `nix build .#checks.x86_64-linux.web-ui`. Uploaded refreshed modal screenshot and updated MR 281 description.
+Pushed commit `2980d6f0` to MR 281 with the full unified policy modal rewrite: category cards, severity selector, rationale, assertions/gate-rules builder, evidence-for-ATO builder, edit-mode typed delete danger zone, and UI-only/not-persisted badges. Verification run for this commit: `nix develop -c rustfmt --edition 2024 --check packages/web-ui/src/components/policy/policy_editor_modal.rs` passed; `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` exited 0; `nix develop -c node --check checks/web-ui/tests/integration-test.js` passed; `git diff --check` passed. Per owner request, the expensive `nix build .#checks.x86_64-linux.web-ui` was not run for this latest commit yet, so I am not claiming latest web-ui-check/screenshot validation.
 <!-- SECTION:FINAL_SUMMARY:END -->
