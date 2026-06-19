@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.5'
 created_date: '2026-06-10 13:34'
-updated_date: '2026-06-19 15:54'
+updated_date: '2026-06-19 16:33'
 labels:
   - design-parity
   - policies
@@ -118,5 +118,11 @@ Medium-high. The task touches a UI surface with modal workflows and may require 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-LOCK: gpt-5.5 on reckless in /home/mcamp/code/crystal-forge/TASK-340.1-policies-view-editor-parity
+Pushed commit `5cf71c4b` to MR 281 for the requested header pass: edit/new policy modal headers now share the design reference `modal-head > h2 + p` structure with only the text/icon state changing. Targeted rustfmt, wasm cargo check, and diff whitespace checks passed. Skipped web-ui check per owner request.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Pushed commit `5cf71c4b` to MR 281 to align the policy modal header with the design reference: the normal modal header now uses the direct `modal-head > h2 + p` structure for both new and edit states, removes the extra right-aligned close-button wrapper, and uses the exact design gear icon path. Verification: targeted rustfmt passed, wasm cargo check exited 0, and `git diff --check` passed. Per owner request, the expensive `web-ui` check was not run for this small follow-up.
+<!-- SECTION:FINAL_SUMMARY:END -->
