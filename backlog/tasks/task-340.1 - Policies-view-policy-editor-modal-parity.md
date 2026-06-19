@@ -118,11 +118,5 @@ Medium-high. The task touches a UI surface with modal workflows and may require 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Pushed commit `2980d6f0` to MR 281 with the full unified policy modal rewrite. Targeted verification passed: changed-file rustfmt, wasm cargo check, JS syntax check, and `git diff --check`. Skipped the expensive `web-ui` check for this latest commit per owner request unless/until it is necessary for final MR validation/screenshot refresh.
+LOCK: gpt-5.5 on reckless in /home/mcamp/code/crystal-forge/TASK-340.1-policies-view-editor-parity
 <!-- SECTION:NOTES:END -->
-
-## Final Summary
-
-<!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Pushed commit `2980d6f0` to MR 281 with the full unified policy modal rewrite: category cards, severity selector, rationale, assertions/gate-rules builder, evidence-for-ATO builder, edit-mode typed delete danger zone, and UI-only/not-persisted badges. Verification run for this commit: `nix develop -c rustfmt --edition 2024 --check packages/web-ui/src/components/policy/policy_editor_modal.rs` passed; `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` exited 0; `nix develop -c node --check checks/web-ui/tests/integration-test.js` passed; `git diff --check` passed. Per owner request, the expensive `nix build .#checks.x86_64-linux.web-ui` was not run for this latest commit yet, so I am not claiming latest web-ui-check/screenshot validation.
-<!-- SECTION:FINAL_SUMMARY:END -->
