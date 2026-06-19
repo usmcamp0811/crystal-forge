@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.5'
 created_date: '2026-06-10 13:34'
-updated_date: '2026-06-19 17:17'
+updated_date: '2026-06-19 19:48'
 labels:
   - design-parity
   - policies
@@ -118,11 +118,11 @@ Medium-high. The task touches a UI surface with modal workflows and may require 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Pushed commit `46849309` to MR 281 for the latest feedback: subtle UI-only text, design category icons, design-grouped add-assertion dropdown, single-select severity radiogroup, and no modal header wrapping. Targeted rustfmt, wasm cargo check, and diff whitespace checks passed. Skipped web-ui check per owner request.
+Pushed commit `a34b5108` to MR 281: category is now explicit single-select, header icon/title is forced onto one row, and time-window gates show `America/New_York`. Targeted rustfmt, wasm cargo check, and diff whitespace checks passed. Skipped web-ui check per owner request.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Pushed commit `46849309` to MR 281 for the latest modal parity feedback: category cards now use the same design icons (`deploy`, `build`, `sync`, `shield`), UI-only notices are subtle muted text instead of yellow chips, the add-assertion select now matches the design grouping with NixOS config assertions / Pipeline gates / Rollout gates, severity is an explicit single-select radiogroup, and modal header text is kept on one line. Verification: targeted rustfmt passed, wasm cargo check exited 0, and `git diff --check` passed. The expensive web-ui check was not run per owner request.
+Pushed commit `a34b5108` to MR 281 for additional modal parity details: the category cards are now an explicit single-select radiogroup, modal title icons are forced onto the same row as the edit/new title text, and time-window gate rows display the design timezone `America/New_York`. Verification: targeted rustfmt passed, wasm cargo check exited 0, and `git diff --check` passed. The expensive web-ui check was not run per owner request.
 <!-- SECTION:FINAL_SUMMARY:END -->
