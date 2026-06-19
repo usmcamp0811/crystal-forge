@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.5'
 created_date: '2026-06-10 13:34'
-updated_date: '2026-06-19 19:48'
+updated_date: '2026-06-19 20:23'
 labels:
   - design-parity
   - policies
@@ -118,11 +118,11 @@ Medium-high. The task touches a UI surface with modal workflows and may require 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Pushed commit `a34b5108` to MR 281: category is now explicit single-select, header icon/title is forced onto one row, and time-window gates show `America/New_York`. Targeted rustfmt, wasm cargo check, and diff whitespace checks passed. Skipped web-ui check per owner request.
+Pushed commit `41b975bc` to MR 281: category cards now use active/inactive CSS classes so only the single selected category value renders active after clicking through cards. Targeted rustfmt, wasm cargo check, and diff whitespace checks passed. Skipped web-ui check per owner request.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Pushed commit `a34b5108` to MR 281 for additional modal parity details: the category cards are now an explicit single-select radiogroup, modal title icons are forced onto the same row as the edit/new title text, and time-window gate rows display the design timezone `America/New_York`. Verification: targeted rustfmt passed, wasm cargo check exited 0, and `git diff --check` passed. The expensive web-ui check was not run per owner request.
+Pushed commit `41b975bc` to MR 281 to make category selection visually singular. Category card active/inactive rendering now uses explicit CSS classes (`cf-policy-category-card` and `cf-policy-category-card-active`) instead of conditional inline background/border styles, while the selected state remains driven by the single `category` value. Verification: targeted rustfmt passed, wasm cargo check exited 0, and `git diff --check` passed. The expensive web-ui check was not run per owner request.
 <!-- SECTION:FINAL_SUMMARY:END -->
