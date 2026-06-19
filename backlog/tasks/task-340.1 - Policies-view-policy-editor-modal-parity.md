@@ -5,7 +5,7 @@ status: Review
 assignee:
   - gpt-5.5
 created_date: '2026-06-10 13:34'
-updated_date: '2026-06-19 14:12'
+updated_date: '2026-06-19 15:03'
 labels:
   - design-parity
   - policies
@@ -111,11 +111,11 @@ Medium-high. The task touches a UI surface with modal workflows and may require 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Force-pushed rebased branch to MR 281 with `git push --force-with-lease` (`41103a89...374e6ee4`).
+Pushed modal parity correction commit `e7adb2a7` to MR 281 after re-auth. Uploaded refreshed screenshot `20-policies-new-modal-advanced.png` and updated the MR description. Verification after correction passed: changed-file rustfmt check, wasm cargo check, web-ui check.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Force-pushed rebased MR branch with `git push --force-with-lease`: `41103a89...374e6ee4`.
+Addressed reviewer feedback that the edit policy modal did not match the design example. Added follow-up commit `e7adb2a7` to rework the modal shell/body/footer toward the design modal classes and sections. Verification passed: changed-file rustfmt check, wasm cargo check, and `nix build .#checks.x86_64-linux.web-ui`. Uploaded refreshed modal screenshot and updated MR 281 description.
 <!-- SECTION:FINAL_SUMMARY:END -->
