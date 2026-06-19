@@ -38,6 +38,28 @@ const REQUIRE_CVE_CHECK_JSON_TEMPLATE: &str = r#"{
   }
 }"#;
 
+const MULTI_RULE_JSON_TEMPLATE: &str = r#"{
+  "policy_type": "custom_check",
+  "config": {
+    "rules": [
+      {
+        "expression": "config.services.crystal-forge.enable or false",
+        "description": "Crystal Forge agent is enabled",
+        "field_name": "cfAgentEnabled",
+        "strict": true
+      },
+      {
+        "expression": "builtins.elem \"git\" (builtins.map (p: p.pname or \"\") config.environment.systemPackages)",
+        "description": "git is installed",
+        "field_name": "gitInstalled",
+        "strict": true
+      }
+    ],
+    "mode": "all",
+    "strict": true
+  }
+}"#;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BasicPolicyKind {
     CustomCheck,
@@ -215,9 +237,9 @@ pub fn PolicyEditorModal(
 ) -> Element {
     let is_editing = editing_policy_id.read().is_some();
     let title = if is_editing {
-        "Edit Policy"
+        "Edit custom policy"
     } else {
-        "Create Policy"
+        "New custom policy"
     };
     let action_label = if is_editing {
         "Save Changes"
@@ -457,7 +479,7 @@ pub fn PolicyEditorModal(
                             }
                             div {
                                 h3 { class: "text-white text-lg font-semibold", "{title}" }
-                                p { class: "text-[11px] {theme::text::MUTED}", "Policy metadata + payload" }
+                                p { class: "text-[11px] {theme::text::MUTED}", "Compose deploy gate rules backed by the real policy API" }
                             }
                         }
                         div {
@@ -861,17 +883,26 @@ pub fn PolicyEditorModal(
                                              },
                                              "Require packages"
                                          }
-                                         button {
-                                             class: "px-3 py-1.5 rounded-md text-xs border border-amber-700/60 text-amber-300/80 hover:bg-amber-900/20",
+                                          button {
+                                              class: "px-3 py-1.5 rounded-md text-xs border border-amber-700/60 text-amber-300/80 hover:bg-amber-900/20",
                                              onclick: move |_| {
                                                  edit_format.set(PolicyFormat::Json);
                                                  edit_body.set(REQUIRE_CVE_CHECK_JSON_TEMPLATE.to_string());
                                                  save_error.set(String::new());
                                              },
-                                             "CVE gate"
-                                         }
-                                     }
-                                 } else {
+                                              "CVE gate"
+                                          }
+                                          button {
+                                              class: "px-3 py-1.5 rounded-md text-xs border border-gray-700 text-gray-300 hover:bg-gray-800",
+                                              onclick: move |_| {
+                                                  edit_format.set(PolicyFormat::Json);
+                                                  edit_body.set(MULTI_RULE_JSON_TEMPLATE.to_string());
+                                                  save_error.set(String::new());
+                                              },
+                                              "Multi-rule"
+                                          }
+                                      }
+                                  } else {
                                     if !is_editing {
                                         label { class: "text-xs text-violet-300/70 font-medium", "Policy Type" }
                                         div {
@@ -1209,8 +1240,8 @@ pub fn PolicyEditorModal(
                             if !*advanced_mode.read() {
                                 div {
                                     class: "rounded-lg border border-gray-700 bg-gray-950/40 p-3 space-y-1",
-                                    p { class: "text-xs text-gray-300", "Basic mode keeps policy creation compact." }
-                                    p { class: "text-xs {theme::text::MUTED}", "Use Advanced for free-form JSON/TOML." }
+                                    p { class: "text-xs text-gray-300", "Basic mode keeps common policy creation compact." }
+                                    p { class: "text-xs {theme::text::MUTED}", "Use Advanced for CVE/multi-rule JSON or TOML payloads." }
                                 }
                             }
                         }

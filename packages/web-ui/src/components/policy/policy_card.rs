@@ -1,204 +1,120 @@
 //! Policy card component for displaying policy definitions.
 
 use dioxus::prelude::*;
-#[cfg(target_arch = "wasm32")]
-use js_sys::Object;
 use uuid::Uuid;
-#[cfg(target_arch = "wasm32")]
-use wasm_bindgen::{JsCast, JsValue};
 
-use crate::theme;
+use super::types::{
+    PolicyDefinition, is_core_policy, is_policy_enabled, normalized_policy_type, policy_category,
+    policy_rule_summaries,
+};
 
-use super::types::{PolicyDefinition, PolicyFormat};
-
-/// Card component for displaying a policy definition with expand/collapse and actions.
+/// Card component for displaying a policy definition with design-parity rule summaries.
 #[component]
 pub fn PolicyCard(
     policy: PolicyDefinition,
     on_edit: EventHandler<PolicyDefinition>,
     on_delete: EventHandler<Uuid>,
 ) -> Element {
-    let mut expanded = use_signal(|| false);
-    // Check if this is a core policy by examining the policy_type field
-    // instead of string matching in the body, to work correctly with both
-    // TOML and JSON formats from API
-    let is_core_policy = policy.policy_type.as_ref().map_or(false, |pt| {
-        pt == "require_cf_agent" || pt == "require_crystal_forge_agent"
-    });
-
-    let is_cve_policy = policy
-        .policy_type
-        .as_deref()
-        .map_or(false, |pt| pt == "require_cve_check");
-
-    let format_badge = if is_cve_policy {
-        ("CVE Gate", "bg-amber-500/20 text-amber-400")
+    let category = policy_category(&policy);
+    let rules = policy_rule_summaries(&policy);
+    let is_core = is_core_policy(&policy);
+    let enabled = is_policy_enabled(&policy);
+    let policy_type = normalized_policy_type(&policy);
+    let type_label = if is_core { "built-in" } else { "custom" };
+    let type_chip = if is_core {
+        "chip chip-info"
     } else {
-        match policy.format {
-            PolicyFormat::Toml => ("TOML", "bg-orange-500/20 text-orange-400"),
-            PolicyFormat::Json => ("JSON", "bg-blue-500/20 text-blue-400"),
-        }
+        "chip chip-healthy"
     };
-
-    // For CVE policies render a human-readable summary instead of raw JSON
-    let cve_summary: Option<String> = if is_cve_policy {
-        let config: Option<serde_json::Value> = serde_json::from_str(&policy.body)
-            .ok()
-            .and_then(|v: serde_json::Value| v.get("config").cloned().or(Some(v)));
-        config.map(|c| {
-            let mut parts = Vec::new();
-            if let Some(max_c) = c.get("max_critical").and_then(|v| v.as_u64()) {
-                parts.push(format!("critical ≤ {}", max_c));
-            }
-            if let Some(max_h) = c.get("max_high").and_then(|v| v.as_u64()) {
-                parts.push(format!("high ≤ {}", max_h));
-            }
-            if c.get("require_high_justification")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
-                parts.push("high requires justification".to_string());
-            }
-            let when_no_scan = c
-                .get("when_no_scan")
-                .and_then(|v| v.as_str())
-                .unwrap_or("block");
-            parts.push(format!("no-scan → {}", when_no_scan));
-            let strict = c.get("strict").and_then(|v| v.as_bool()).unwrap_or(true);
-            if !strict {
-                parts.push("warn-only".to_string());
-            }
-            parts.join(" · ")
-        })
-    } else {
-        None
-    };
-
+    let category_color = category.color();
+    let opacity = if enabled { "1" } else { "0.72" };
     let policy_for_edit = policy.clone();
     let policy_id = policy.id;
-    let line_count = policy.body.lines().count();
-    let has_more = line_count > 4;
-
-    // Get the language for syntax highlighting
-    let language = match policy.format {
-        PolicyFormat::Toml => "toml",
-        PolicyFormat::Json => "json",
-    };
-
-    // Get preview or full content based on expanded state
-    let display_text = if *expanded.read() {
-        policy.body.clone()
-    } else {
-        policy.body.lines().take(4).collect::<Vec<_>>().join("\n")
-    };
-
-    let highlighted_html = highlight_code(language, &display_text);
-    let chevron_class = if *expanded.read() { "rotate-180" } else { "" };
 
     rsx! {
         div {
-            class: "group rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-4 hover:border-violet-500/40 transition-all",
+            class: "sys-card",
+            style: "--status-color: {category_color}; opacity: {opacity};",
+            "data-policy-card": "true",
+            div { class: "status-rail" }
 
-            // Header
-            div {
-                class: "flex items-start justify-between gap-3 mb-3",
-                div {
-                    class: "flex-1 min-w-0",
-                    h3 {
-                        class: "text-sm font-semibold text-white truncate",
-                        "{policy.name}"
-                    }
-                    p {
-                        class: "text-xs text-gray-500 mt-1 line-clamp-2",
-                        "{policy.description}"
-                    }
-                }
-                span {
-                    class: "shrink-0 text-xs font-medium px-2 py-0.5 rounded {format_badge.1}",
-                    "{format_badge.0}"
-                }
-                if is_core_policy {
-                    span {
-                        class: "shrink-0 text-xs font-medium px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-400/40",
-                        "Core · Always On"
-                    }
-                }
-            }
-
-            // Code preview — CVE policies get a human-readable summary; others use syntax highlighting
-            div {
-                class: "rounded-lg bg-gray-950/70 border border-gray-800 overflow-hidden mb-3",
-                div {
-                    class: "p-3 overflow-x-auto",
-                    style: if *expanded.read() { "max-height: 400px; overflow-y: auto;" } else { "max-height: 100px; overflow: hidden;" },
-                    if let Some(ref summary) = cve_summary {
-                        p {
-                            class: "text-xs text-amber-300/80 font-mono",
-                            "{summary}"
-                        }
-                    } else {
-                        pre {
-                            class: "text-xs font-mono",
-                            code {
-                                class: "hljs language-{language}",
-                                dangerous_inner_html: "{highlighted_html}"
-                            }
-                        }
-                    }
-                }
-
-                // Expand/collapse button
-                if has_more {
-                    button {
-                        class: "w-full flex items-center justify-center gap-1 py-1.5 text-xs text-violet-400 hover:text-violet-300 hover:bg-gray-800/50 border-t border-gray-800 transition-colors",
-                        onclick: move |_| {
-                            let current = *expanded.read();
-                            expanded.set(!current);
-                        },
-                        if *expanded.read() {
-                            "Show less"
-                        } else {
-                            "Show all {line_count} lines"
-                        }
+            div { class: "sys-card-head",
+                div { class: "sys-title",
+                    div { class: "sys-hostname",
                         svg {
-                            class: "w-3 h-3 transition-transform {chevron_class}",
-                            fill: "none",
-                            stroke: "currentColor",
-                            view_box: "0 0 24 24",
-                            path {
-                                stroke_linecap: "round",
-                                stroke_linejoin: "round",
-                                stroke_width: "2",
-                                d: "M19 9l-7 7-7-7"
-                            }
+                            width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                            path { d: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" }
+                            polyline { points: "14 2 14 8 20 8" }
                         }
+                        span { "{policy.name}" }
+                    }
+                    div { class: "text-[11px] text-gray-400 line-clamp-2", "{policy.description}" }
+                }
+                div { class: "flex flex-col items-end gap-1.5 shrink-0",
+                    span { class: "chip", style: "color: {category_color}; background: color-mix(in oklab, {category_color} 14%, transparent);", "{category.short_label()}" }
+                    span { class: "{type_chip}", "{type_label}" }
+                    if policy_type == "require_cve_check" {
+                        span { class: "chip", style: "color:#fbbf24;background:rgba(251,191,36,0.14);", "CVE gate" }
+                    }
+                    if is_core {
+                        span { class: "chip chip-info", "protected" }
+                    }
+                    if !enabled {
+                        span { class: "chip chip-unknown", "disabled" }
                     }
                 }
             }
 
-            // Actions
             div {
-                class: "flex items-center justify-between pt-2 border-t border-gray-800",
-                div {
-                    class: "text-xs text-gray-500",
-                    "{line_count} lines"
-                }
-                if is_core_policy {
-                    div {
-                        class: "text-xs text-emerald-300",
-                        "Protected policy"
+                div { class: "sys-kv-key", "Rules" }
+                div { class: "flex flex-col gap-1.5",
+                    if rules.is_empty() {
+                        div { class: "text-[11px] italic text-gray-500", "No automated rules — operator approves directly." }
+                    } else {
+                        for rule in rules.iter().take(4) {
+                            div { class: "flex items-start gap-2 text-[11px] text-gray-200",
+                                svg {
+                                    class: "mt-0.5 shrink-0", width: "10", height: "10", view_box: "0 0 24 24", fill: "none", stroke: "#34d399", stroke_width: "3", stroke_linecap: "round", stroke_linejoin: "round",
+                                    polyline { points: "20 6 9 17 4 12" }
+                                }
+                                span { "{rule.label}" }
+                            }
+                        }
                     }
+                    if rules.len() > 4 {
+                        div { class: "text-[11px] text-gray-500", "+ {rules.len() - 4} more rules" }
+                    }
+                }
+            }
+
+            div { class: "sys-card-foot",
+                div { class: "flex items-center gap-2 text-[11px] text-gray-500",
+                    svg { width: "11", height: "11", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                        rect { x: "3", y: "4", width: "18", height: "8", rx: "2" }
+                        rect { x: "3", y: "14", width: "18", height: "6", rx: "2" }
+                    }
+                    span { class: "mono font-semibold text-gray-300", "0" }
+                    span { "systems use this" }
+                }
+                if is_core {
+                    span { class: "text-xs text-emerald-300", "Always on" }
                 } else {
-                    div {
-                        class: "flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity",
+                    div { class: "flex items-center gap-2",
                         button {
-                            class: "text-xs text-violet-400 hover:text-violet-300 px-2 py-1 rounded hover:bg-violet-500/10 transition-colors",
-                            onclick: move |_| on_edit.call(policy_for_edit.clone()),
+                            class: "btn btn-subtle focus-ring xs",
+                            onclick: move |evt| {
+                                evt.stop_propagation();
+                                on_edit.call(policy_for_edit.clone());
+                            },
                             "Edit"
                         }
                         button {
-                            class: "text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors",
-                            onclick: move |_| on_delete.call(policy_id),
+                            class: "btn btn-ghost focus-ring xs",
+                            style: "color:#f87171;border-color:rgba(248,113,113,0.3);",
+                            onclick: move |evt| {
+                                evt.stop_propagation();
+                                on_delete.call(policy_id);
+                            },
                             "Delete"
                         }
                     }
@@ -206,54 +122,4 @@ pub fn PolicyCard(
             }
         }
     }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Syntax Highlighting Helpers
-// ─────────────────────────────────────────────────────────────────────────────
-
-fn escape_html(input: &str) -> String {
-    input
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#x27;")
-}
-
-#[cfg(target_arch = "wasm32")]
-fn highlight_code(language: &str, text: &str) -> String {
-    let Some(window) = web_sys::window() else {
-        return escape_html(text);
-    };
-    let Ok(hljs) = js_sys::Reflect::get(&window, &JsValue::from_str("hljs")) else {
-        return escape_html(text);
-    };
-    if hljs.is_undefined() || hljs.is_null() {
-        return escape_html(text);
-    }
-    let Ok(highlight_fn) = js_sys::Reflect::get(&hljs, &JsValue::from_str("highlight")) else {
-        return escape_html(text);
-    };
-    let Ok(highlight_fn) = highlight_fn.dyn_into::<js_sys::Function>() else {
-        return escape_html(text);
-    };
-    let options = Object::new();
-    let _ = js_sys::Reflect::set(
-        &options,
-        &JsValue::from_str("language"),
-        &JsValue::from_str(language),
-    );
-    let Ok(result) = highlight_fn.call2(&hljs, &JsValue::from_str(text), &options.into()) else {
-        return escape_html(text);
-    };
-    let Ok(value) = js_sys::Reflect::get(&result, &JsValue::from_str("value")) else {
-        return escape_html(text);
-    };
-    value.as_string().unwrap_or_else(|| escape_html(text))
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn highlight_code(_language: &str, text: &str) -> String {
-    escape_html(text)
 }
