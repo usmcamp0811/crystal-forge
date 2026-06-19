@@ -5,7 +5,7 @@ status: Review
 assignee:
   - opencode-agent
 created_date: '2026-06-10 13:34'
-updated_date: '2026-06-19 02:09'
+updated_date: '2026-06-19 03:24'
 labels:
   - design-parity
   - cves
@@ -21,6 +21,7 @@ documentation:
   - design/doc-8 - CrystalForgelatest-UI-Parity-Matrix-TASK-328.md
   - design/doc-14 - Parity-execution-playbook-agent-proof.md
 modified_files:
+  - packages/web-ui/src/views/cves.rs
   - checks/web-ui/tests/integration-test.js
 parent_task_id: TASK-348
 priority: high
@@ -69,20 +70,8 @@ Bring the CVEs view to parity (grouped + flat views, severity filter, stat strip
 - [x] #5 Steps 16-cves and 16b-cves-severity-filter pass with parity assertions
 <!-- AC:END -->
 
-## Implementation Plan
-
-<!-- SECTION:PLAN:BEGIN -->
-Executed: confirmed legacy file removal + mod.rs cleanliness; verified view parity; strengthened web-ui check for grouped + drawer; ran nix web-ui check; opened MR !280; moved to Review.
-<!-- SECTION:PLAN:END -->
-
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Confirmed legacy cves_old.rs already removed and not referenced in views/mod.rs (removed under TASK-341). CVEs view + components/cve already at parity and backed by real API resources, so no Rust source changes were needed.
-
-Extended web-ui check step 16-cves to assert grouped default surface and open/assert the CVE detail drawer; kept 16b-cves-severity-filter.
-
-Verification: nix build .#checks.x86_64-linux.web-ui passed; steps 16-cves and 16b-cves-severity-filter reported OK with screenshots.
-
-MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/280
+Review follow-up: added the missing CVE accept-risk form date input. The label now shows `Review / expiry date (optional)` for accepted risk and `Target patch date` when `Schedule patch` is selected. Pushed commit `50d081ee` to MR !280, reran `nix develop -c cargo fmt --manifest-path packages/web-ui/Cargo.toml -- --check`, `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown`, and `nix build .#checks.x86_64-linux.web-ui -L`. Uploaded refreshed screenshot: ![16-cves](/uploads/54c1106ae1c77de087841961a9149df4/16-cves.png).
 <!-- SECTION:NOTES:END -->
