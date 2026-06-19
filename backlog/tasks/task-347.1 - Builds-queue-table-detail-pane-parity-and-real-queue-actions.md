@@ -1,10 +1,10 @@
 ---
 id: TASK-347.1
 title: 'Builds: queue/table + detail pane parity and real queue actions'
-status: To Do
+status: Review
 assignee: []
 created_date: '2026-06-10 13:33'
-updated_date: '2026-06-15 17:37'
+updated_date: '2026-06-15 17:51'
 labels:
   - design-parity
   - builds
@@ -21,9 +21,10 @@ documentation:
   - design/doc-14 - Parity-execution-playbook-agent-proof.md
 modified_files:
   - packages/web-ui/src/views/builds.rs
-  - packages/web-ui/src/components/builds/mod.rs
+  - packages/web-ui/src/components/builds/build_queue_pane.rs
+  - packages/web-ui/src/components/builds/build_detail_pane.rs
+  - packages/web-ui/src/components/builds/helpers.rs
   - packages/web-ui/assets/app.css
-  - checks/web-ui/tests/integration-test.js
 parent_task_id: TASK-347
 priority: high
 ordinal: 1751
@@ -31,6 +32,7 @@ ordinal: 1751
 
 ## Description
 
+<!-- SECTION:DESCRIPTION:BEGIN -->
 <!-- SECTION:DESCRIPTION:BEGIN -->
 Child of Builds umbrella TASK-347. Follow guide doc-14 standard procedure.
 
@@ -62,6 +64,7 @@ Pixel-align the full Builds surface to `BuildsView.jsx`:
 - Evaluations view (covered by TASK-345).
 - New backend API endpoints beyond what already exists for builds/queue/workers.
 - Mobile-first layout changes beyond desktop parity.
+<!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
@@ -77,3 +80,11 @@ Pixel-align the full Builds surface to `BuildsView.jsx`:
 - [ ] #10 The mocked 'Queue build' action is removed or replaced with a truthfully disabled button (no fake success messaging in production)
 - [ ] #11 web-ui check steps 15-builds, 15d, 15e, 15g, 15h pass and capture evidence screenshots
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: opencode-agent on host in /home/mcamp/code/crystal-forge/TASK-347.1-builds-parity
+
+MR !278: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/278
+<!-- SECTION:NOTES:END -->

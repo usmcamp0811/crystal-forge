@@ -1,9 +1,9 @@
 use crate::models::commits::Commit;
 // Add this line
-use crate::derivations::{Derivation, DerivationType, build_agent_target, parse_derivation_path};
+use crate::derivations::{build_agent_target, parse_derivation_path, Derivation, DerivationType};
+use anyhow::anyhow;
 use anyhow::Context;
 use anyhow::Result;
-use anyhow::anyhow;
 use sqlx::PgPool;
 use sqlx::{Executor, Postgres};
 use tracing::{debug, error, info, warn};
@@ -1475,6 +1475,30 @@ pub async fn mark_target_failed(
     error_message: &str,
 ) -> Result<Derivation> {
     mark_derivation_failed(pool, target_id, phase, error_message).await
+}
+
+/// Persist closure package counts on a nixos-type derivation row.
+/// Called asynchronously after eval completes for a system.
+pub async fn set_closure_counts(
+    pool: &PgPool,
+    derivation_id: i32,
+    total: i32,
+    cached: i32,
+) -> Result<()> {
+    sqlx::query!(
+        r#"
+        UPDATE derivations
+           SET closure_total  = $2,
+               closure_cached = $3
+         WHERE id = $1
+        "#,
+        derivation_id,
+        total,
+        cached,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 /// Discover packages from derivation paths and insert them into the database

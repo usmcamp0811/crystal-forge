@@ -389,6 +389,7 @@ pub async fn get_eval_dependency_graph(
             .into_iter()
             .map(|row| EvalDependencyPackageRow {
                 package_name: row.package_name,
+                closure_counted: row.closure_counted,
                 ready_count: row.ready_count,
                 pending_count: row.pending_count,
                 failed_count: row.failed_count,
