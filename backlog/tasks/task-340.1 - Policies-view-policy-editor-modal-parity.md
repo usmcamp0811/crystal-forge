@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - gpt-5.5
 created_date: '2026-06-10 13:34'
-updated_date: '2026-06-19 03:20'
+updated_date: '2026-06-19 04:09'
 labels:
   - design-parity
   - policies
@@ -18,12 +18,16 @@ references:
   - >-
     /home/mcamp/code/crystal-forge/CrystalForgelatest/components/PoliciesView.jsx
   - design/doc-14 - Parity-execution-playbook-agent-proof.md
+  - TASK-340.2
 documentation:
   - design/doc-8 - CrystalForgelatest-UI-Parity-Matrix-TASK-328.md
   - design/doc-14 - Parity-execution-playbook-agent-proof.md
 modified_files:
   - packages/web-ui/src/views/policies.rs
   - packages/web-ui/src/components/policy/mod.rs
+  - packages/web-ui/src/components/policy/policy_card.rs
+  - packages/web-ui/src/components/policy/policy_editor_modal.rs
+  - packages/web-ui/src/components/policy/types.rs
   - checks/web-ui/tests/integration-test.js
 parent_task_id: TASK-340
 priority: high
@@ -95,28 +99,16 @@ Medium-high. The task touches a UI surface with modal workflows and may require 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Policies list layout, chips, and rule summaries match the design example
-- [ ] #2 New/edit policy modal supports basic, advanced, CVE-gate, and multi-rule flows with design parity
-- [ ] #3 Policy list/create/edit/delete flows round-trip through the real API
-- [ ] #4 Validation/rejection paths behave per existing 20d/20e policy steps
-- [ ] #5 web-ui policy steps pass with parity assertions and capture the Policies UI
-- [ ] #6 Any backend/API/model changes are minimal and directly required for UI round-trip parity
+- [x] #1 Policies list layout, chips, and rule summaries match the design example
+- [x] #2 New/edit policy modal supports basic, advanced, CVE-gate, and multi-rule flows with design parity
+- [x] #3 Policy list/create/edit/delete flows round-trip through the real API
+- [x] #4 Validation/rejection paths behave per existing 20d/20e policy steps
+- [x] #5 web-ui policy steps pass with parity assertions and capture the Policies UI
+- [x] #6 Any backend/API/model changes are minimal and directly required for UI round-trip parity
 <!-- AC:END -->
-
-## Implementation Plan
-
-<!-- SECTION:PLAN:BEGIN -->
-1. Update the Policies view to match the design example structure: page title/subtitle, category stat strip, filter bar with search/category/type filters, clear action, grouped policy sections, empty state, and API-backed counts where available.
-2. Update policy display helpers/cards to render design-like policy cards with category rails, built-in/custom/protected/CVE chips, human-readable rule summaries, usage placeholders where real usage data is unavailable, and edit/delete controls only for editable policies.
-3. Preserve existing real API-backed policy loading and CRUD behavior. Add helper mapping from backend policy payload/config to UI categories and rule summaries without moving business logic into the view.
-4. Update the policy editor modal toward the design: New custom policy/edit wording, clearer metadata and rule-focused basic workflow, preserve advanced JSON/TOML editing, and add or improve multi-rule builder support if required for parity with basic/advanced/CVE/multi-rule flows.
-5. Touch backend/API/model code only if the UI cannot round-trip supported policy shapes through existing APIs. If SQLx query shapes or migrations change, run the mandated devshell database/sqlx prepare workflow.
-6. Extend checks/web-ui policy steps so they assert and screenshot the category/filter/card surface and modal workflows for basic, advanced, CVE-gate, multi-rule, and rejection paths.
-7. Verify with nix develop -c cargo fmt -- --check, nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown, targeted backend checks only if backend code changes, SQLx prepare only if SQLx-affecting changes occur, and nix build .#checks.x86_64-linux.web-ui.
-<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Approved implementation plan recorded before coding. Scope: Policies list/category/filter/card parity, policy editor modal parity including basic/advanced/CVE/multi-rule flows, web-ui parity assertions/screenshots, and only minimal backend/API/model changes if directly required for UI CRUD round-trip parity.
+Implemented Policies design parity surface updates in dedicated worktree: design-style Policies header/subtitle, category stat strip/filter bar, grouped policy sections, rule-summary policy cards, advanced multi-rule template, modal copy updates, and expanded web-ui assertions for policy steps. Verification: `nix build .#web-ui` passed; `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` passed; changed-file `rustfmt --edition 2024 --check` passed; `nix build .#checks.x86_64-linux.web-ui` passed. The root `cargo fmt -- --check` command is not runnable because the repo root has no Cargo.toml; manifest-level cargo fmt reports pre-existing unrelated formatting diffs, so only changed Rust files were formatted/checked. No backend/API/SQLx changes were required. Created follow-up TASK-340.2 for the pre-existing oversized `policy_editor_modal.rs` module.
 <!-- SECTION:NOTES:END -->
