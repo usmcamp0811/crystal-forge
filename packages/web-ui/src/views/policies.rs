@@ -185,13 +185,17 @@ pub fn PoliciesView() -> Element {
                 Card {
                     children: rsx! {
                         div { class: "text-center py-12",
-                            svg { class: "w-12 h-12 mx-auto text-gray-600 mb-4", fill: "none", stroke: "currentColor", view_box: "0 0 24 24",
-                                path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "1.5", d: "M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" }
-                            }
                             if has_filters {
+                                svg { width: "20", height: "20", class: "mx-auto text-gray-600 mb-2", style: "opacity:0.5;", fill: "none", stroke: "currentColor", stroke_width: "2", view_box: "0 0 24 24",
+                                    circle { cx: "11", cy: "11", r: "8" }
+                                    path { stroke_linecap: "round", stroke_linejoin: "round", d: "m21 21-4.35-4.35" }
+                                }
                                 p { class: "text-gray-400 mb-2", "No policies match these filters." }
                                 p { class: "text-sm text-gray-500", "Clear the filters or try a different search." }
                             } else {
+                                svg { class: "w-12 h-12 mx-auto text-gray-600 mb-4", fill: "none", stroke: "currentColor", view_box: "0 0 24 24",
+                                    path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "1.5", d: "M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" }
+                                }
                                 p { class: "text-gray-400 mb-2", "No policies yet" }
                                 p { class: "text-sm text-gray-500", "Create your first custom policy to get started." }
                             }
