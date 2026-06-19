@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@gpt-5.5'
 created_date: '2026-06-10 13:34'
-updated_date: '2026-06-19 16:33'
+updated_date: '2026-06-19 17:17'
 labels:
   - design-parity
   - policies
@@ -118,11 +118,11 @@ Medium-high. The task touches a UI surface with modal workflows and may require 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Pushed commit `5cf71c4b` to MR 281 for the requested header pass: edit/new policy modal headers now share the design reference `modal-head > h2 + p` structure with only the text/icon state changing. Targeted rustfmt, wasm cargo check, and diff whitespace checks passed. Skipped web-ui check per owner request.
+Pushed commit `46849309` to MR 281 for the latest feedback: subtle UI-only text, design category icons, design-grouped add-assertion dropdown, single-select severity radiogroup, and no modal header wrapping. Targeted rustfmt, wasm cargo check, and diff whitespace checks passed. Skipped web-ui check per owner request.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Pushed commit `5cf71c4b` to MR 281 to align the policy modal header with the design reference: the normal modal header now uses the direct `modal-head > h2 + p` structure for both new and edit states, removes the extra right-aligned close-button wrapper, and uses the exact design gear icon path. Verification: targeted rustfmt passed, wasm cargo check exited 0, and `git diff --check` passed. Per owner request, the expensive `web-ui` check was not run for this small follow-up.
+Pushed commit `46849309` to MR 281 for the latest modal parity feedback: category cards now use the same design icons (`deploy`, `build`, `sync`, `shield`), UI-only notices are subtle muted text instead of yellow chips, the add-assertion select now matches the design grouping with NixOS config assertions / Pipeline gates / Rollout gates, severity is an explicit single-select radiogroup, and modal header text is kept on one line. Verification: targeted rustfmt passed, wasm cargo check exited 0, and `git diff --check` passed. The expensive web-ui check was not run per owner request.
 <!-- SECTION:FINAL_SUMMARY:END -->
