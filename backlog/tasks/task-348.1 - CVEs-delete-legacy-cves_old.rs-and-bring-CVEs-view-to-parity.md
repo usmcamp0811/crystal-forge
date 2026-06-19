@@ -70,8 +70,8 @@ Bring the CVEs view to parity (grouped + flat views, severity filter, stat strip
 - [x] #5 Steps 16-cves and 16b-cves-severity-filter pass with parity assertions
 <!-- AC:END -->
 
-## Implementation Notes
+## Implementation Plan
 
-<!-- SECTION:NOTES:BEGIN -->
-Review follow-up: added the missing CVE accept-risk form date input. The label now shows `Review / expiry date (optional)` for accepted risk and `Target patch date` when `Schedule patch` is selected. Pushed commit `50d081ee` to MR !280, reran `nix develop -c cargo fmt --manifest-path packages/web-ui/Cargo.toml -- --check`, `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown`, and `nix build .#checks.x86_64-linux.web-ui -L`. Uploaded refreshed screenshot: ![16-cves](/uploads/54c1106ae1c77de087841961a9149df4/16-cves.png).
-<!-- SECTION:NOTES:END -->
+<!-- SECTION:PLAN:BEGIN -->
+Executed: confirmed legacy file removal + mod.rs cleanliness; verified view parity; added missing CVE triage review/target date field; strengthened web-ui check for grouped + drawer + triage date labels; ran targeted fmt/check and nix web-ui check; updated MR !280; task remains in Review.
+<!-- SECTION:PLAN:END -->
