@@ -1,11 +1,11 @@
 ---
 id: TASK-340.1
 title: 'Policies: view + policy editor modal parity'
-status: In Progress
+status: Review
 assignee:
   - gpt-5.5
 created_date: '2026-06-10 13:34'
-updated_date: '2026-06-19 04:09'
+updated_date: '2026-06-19 04:12'
 labels:
   - design-parity
   - policies
@@ -19,6 +19,7 @@ references:
     /home/mcamp/code/crystal-forge/CrystalForgelatest/components/PoliciesView.jsx
   - design/doc-14 - Parity-execution-playbook-agent-proof.md
   - TASK-340.2
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/281'
 documentation:
   - design/doc-8 - CrystalForgelatest-UI-Parity-Matrix-TASK-328.md
   - design/doc-14 - Parity-execution-playbook-agent-proof.md
@@ -110,5 +111,11 @@ Medium-high. The task touches a UI surface with modal workflows and may require 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Implemented Policies design parity surface updates in dedicated worktree: design-style Policies header/subtitle, category stat strip/filter bar, grouped policy sections, rule-summary policy cards, advanced multi-rule template, modal copy updates, and expanded web-ui assertions for policy steps. Verification: `nix build .#web-ui` passed; `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` passed; changed-file `rustfmt --edition 2024 --check` passed; `nix build .#checks.x86_64-linux.web-ui` passed. The root `cargo fmt -- --check` command is not runnable because the repo root has no Cargo.toml; manifest-level cargo fmt reports pre-existing unrelated formatting diffs, so only changed Rust files were formatted/checked. No backend/API/SQLx changes were required. Created follow-up TASK-340.2 for the pre-existing oversized `policy_editor_modal.rs` module.
+MR opened for review: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/281
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Implemented Policies design parity updates: design-style header/subtitle, category stat strip and filters, grouped sections, rule-summary cards, editor modal copy/template improvements including multi-rule advanced template, and expanded web-ui policy assertions. No backend/API/SQLx changes were required. Verification passed: `nix build .#web-ui`, wasm `cargo check`, changed-file rustfmt check, and `nix build .#checks.x86_64-linux.web-ui`. MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/281
+<!-- SECTION:FINAL_SUMMARY:END -->
