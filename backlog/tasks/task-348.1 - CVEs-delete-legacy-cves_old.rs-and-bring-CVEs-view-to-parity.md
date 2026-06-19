@@ -1,9 +1,10 @@
 ---
 id: TASK-348.1
 title: 'CVEs: delete legacy cves_old.rs and bring CVEs view to parity'
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-06-10 13:34'
+updated_date: '2026-06-19 01:52'
 labels:
   - design-parity
   - cves
@@ -69,3 +70,9 @@ Bring the CVEs view to parity (grouped + flat views, severity filter, stat strip
 - [ ] #4 Triage statuses render from real data with no fabricated values
 - [ ] #5 Steps 16-cves and 16b-cves-severity-filter pass with parity assertions
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Human selected TASK-348.1 for execution from Backlog by requesting work begin on this task.
+<!-- SECTION:NOTES:END -->
