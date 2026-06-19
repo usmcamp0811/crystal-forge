@@ -375,6 +375,18 @@ pub fn PolicyEditorModal(
             .and_then(|v| v.as_bool())
             .unwrap_or(true)
     });
+    let mut design_category = use_signal(|| {
+        if initial_policy_type == "require_cve_check" {
+            "scanning".to_string()
+        } else if initial_policy_type == "require_packages" || initial_policy_type == "custom_check"
+        {
+            "security".to_string()
+        } else {
+            "deployment".to_string()
+        }
+    });
+    let mut design_severity = use_signal(|| "medium".to_string());
+    let mut design_rationale = use_signal(String::new);
     let mut show_strict_info = use_signal(|| false);
     let current_validation_error = {
         let name = edit_name.read().trim().to_string();
@@ -449,41 +461,49 @@ pub fn PolicyEditorModal(
 
     rsx! {
             div {
-                class: "fixed inset-0 z-50 bg-black/60 flex items-start sm:items-center justify-center p-2 sm:p-3 cf-modal-overlay-z50 overflow-y-auto",
+                class: "modal-backdrop cf-modal-overlay-z50",
                 onclick: move |_| on_close.call(()),
 
                 div {
-                    class: "{theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl p-3 shadow-2xl cf-modal-panel-wide cf-policy-modal-panel w-full max-w-5xl flex flex-col overflow-hidden",
-                    style: "max-height: calc(100dvh - 1rem);",
+                    class: "modal cf-policy-modal-panel",
+                    style: "width:min(680px,96vw);max-height:92vh;",
                     onclick: |evt| evt.stop_propagation(),
 
                     // Header
                     div {
-                        class: "flex items-center justify-between gap-3 shrink-0",
+                        class: "modal-head",
                         div {
-                            class: "flex items-center gap-3",
+                            class: "flex items-center justify-between gap-3",
                             div {
-                                class: "w-8 h-8 rounded-lg bg-violet-500/20 flex items-center justify-center",
-                                svg {
-                                    class: "w-4 h-4 text-violet-400",
-                                    fill: "none",
-                                    stroke: "currentColor",
-                                    view_box: "0 0 24 24",
-                                    path {
-                                        stroke_linecap: "round",
-                                        stroke_linejoin: "round",
-                                        stroke_width: "2",
-                                        d: "M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+                                h2 {
+                                    svg {
+                                        width: "14", height: "14", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round", style: "margin-right:6px;vertical-align:text-bottom;",
+                                        if is_editing {
+                                            path { d: "M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5Z" }
+                                            path { d: "M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06A1.65 1.65 0 0 0 15 19.4a1.65 1.65 0 0 0-1 .6l-.09.09a2 2 0 0 1-3.82-1.18l.01-.1A1.65 1.65 0 0 0 9 17.4a1.65 1.65 0 0 0-1.82-.33l-.08.03a2 2 0 0 1-2.18-3.25l.08-.05A1.65 1.65 0 0 0 5.6 12a1.65 1.65 0 0 0-.6-1.4l-.08-.05A2 2 0 0 1 7.1 7.3l.08.03A1.65 1.65 0 0 0 9 6.6a1.65 1.65 0 0 0 .33-1.82l-.01-.1a2 2 0 0 1 3.82-1.18l.09.09a1.65 1.65 0 0 0 1 .6A1.65 1.65 0 0 0 16.9 4l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.38.28.6.73.6 1.2s-.22.92-.6 1.2Z" }
+                                        } else {
+                                            path { d: "M12 5v14M5 12h14" }
+                                        }
+                                    }
+                                    "{title}"
+                                }
+                                p {
+                                    if is_editing {
+                                        "Update the rules and rationale."
+                                    } else {
+                                        "Compose a policy from gate rules. Systems can be assigned this policy from their edit dialog."
                                     }
                                 }
                             }
-                            div {
-                                h3 { class: "text-white text-lg font-semibold", "{title}" }
-                                p { class: "text-[11px] {theme::text::MUTED}", "Compose deploy gate rules backed by the real policy API" }
+                            button {
+                                class: "btn-icon focus-ring",
+                                onclick: move |_| on_close.call(()),
+                                svg { width: "16", height: "16", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                                    path { d: "M18 6 6 18M6 6l12 12" }
+                                }
                             }
                         }
-                        div {
-                            class: "flex items-center gap-2",
+                        div { style: "margin-top:10px;display:flex;justify-content:flex-end;",
                             div {
                                 class: "inline-flex rounded-md border border-gray-700 bg-gray-950/50 p-1",
                                 button {
@@ -743,46 +763,27 @@ pub fn PolicyEditorModal(
                                     "Advanced"
                                 }
                             }
-                            button {
-                                class: "p-2 rounded-lg text-gray-400 hover:text-white hover:bg-violet-500/10 transition-colors",
-                                onclick: move |_| on_close.call(()),
-                                svg {
-                                    class: "w-5 h-5",
-                                    fill: "none",
-                                    stroke: "currentColor",
-                                    view_box: "0 0 24 24",
-                                    path {
-                                        stroke_linecap: "round",
-                                        stroke_linejoin: "round",
-                                        stroke_width: "2",
-                                        d: "M6 18L18 6M6 6l12 12"
-                                    }
-                                }
-                            }
                         }
                     }
 
                     // Form content
                     div {
-                        class: if *advanced_mode.read() {
-                            "grid grid-cols-1 lg:grid-cols-[220px_1fr] gap-2 items-start mt-2 flex-1 min-h-0 overflow-y-auto pr-1"
-                        } else {
-                            "grid grid-cols-1 gap-2 items-start mt-2 flex-1 min-h-0 overflow-y-auto pr-1"
-                        },
+                        class: "modal-body",
+                        style: "overflow-y:auto;",
 
                         // Left column - metadata
                         div {
                             class: "space-y-3 min-h-0",
                             div {
                                 class: "space-y-2",
-                                label { class: "text-xs text-violet-300/70 font-medium", "Policy Name" }
+                                label { "Name" }
                                 input {
                                     class: if name_missing_error {
-                                        "w-full rounded-lg border px-3 py-2 text-sm cf-policy-modal-field cf-policy-modal-field-error focus:outline-none"
+                                        "input focus-ring mono cf-policy-modal-field-error"
                                     } else {
-                                        "w-full rounded-lg border px-3 py-2 text-sm cf-policy-modal-field focus:outline-none"
+                                        "input focus-ring mono"
                                     },
-                                    placeholder: "e.g., Require SSH Enabled",
+                                    placeholder: "e.g. canary-25",
                                     value: "{edit_name}",
                                     oninput: move |event| {
                                         edit_name.set(event.value());
@@ -798,16 +799,94 @@ pub fn PolicyEditorModal(
                             }
                             div {
                                 class: "space-y-2",
-                                label { class: "text-xs text-violet-300/70 font-medium", "Description" }
-                                textarea {
-                                    class: "w-full rounded-lg border px-3 py-2 text-sm cf-policy-modal-field focus:outline-none resize-none",
-                                    placeholder: "Describe what this policy enforces...",
-                                    rows: "3",
+                                label { "Description" }
+                                input {
+                                    class: "input focus-ring",
+                                    placeholder: "One-line summary shown in the registry",
                                     value: "{edit_description}",
                                     oninput: move |event| {
                                         edit_description.set(event.value());
                                         save_error.set(String::new());
                                     },
+                                }
+                            }
+                            div { class: "field",
+                                label { "Category" }
+                                div { style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;",
+                                    for (id, label, blurb, color) in [
+                                        ("deployment", "Deployment gates", "Criteria a system must satisfy before deploy.", "#a78bfa"),
+                                        ("security", "Security baseline", "Host configuration and hardening assertions.", "#60a5fa"),
+                                        ("scanning", "Vulnerability gates", "CVE and scan-result blockers.", "#fbbf24"),
+                                        ("rollout", "Rollout controls", "Approval, timing, and canary constraints.", "#34d399"),
+                                    ] {
+                                        button {
+                                            class: "focus-ring",
+                                            style: if design_category.read().as_str() == id {
+                                                "display:flex;align-items:flex-start;gap:9px;text-align:left;padding:9px 11px;border-radius:9px;cursor:pointer;background:color-mix(in oklab, {color} 12%, transparent);border:1px solid color-mix(in oklab, {color} 55%, transparent);"
+                                            } else {
+                                                "display:flex;align-items:flex-start;gap:9px;text-align:left;padding:9px 11px;border-radius:9px;cursor:pointer;background:var(--cf-subtle-bg);border:1px solid var(--cf-divider);"
+                                            },
+                                            onclick: move |_| {
+                                                design_category.set(id.to_string());
+                                                if id == "scanning" {
+                                                    basic_kind.set(BasicPolicyKind::RequireCveCheck);
+                                                } else if id == "security" {
+                                                    basic_kind.set(BasicPolicyKind::CustomCheck);
+                                                } else if id == "rollout" {
+                                                    advanced_mode.set(true);
+                                                    edit_format.set(PolicyFormat::Json);
+                                                    edit_body.set(MULTI_RULE_JSON_TEMPLATE.to_string());
+                                                }
+                                                save_error.set(String::new());
+                                            },
+                                            span { style: "flex-shrink:0;width:24px;height:24px;border-radius:6px;display:grid;place-items:center;background:color-mix(in oklab, {color} 16%, transparent);color:{color};",
+                                                svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                                                    path { d: "M9 12l2 2 4-4" }
+                                                    path { d: "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z" }
+                                                }
+                                            }
+                                            span { style: "min-width:0;",
+                                                span { style: if design_category.read().as_str() == id { "display:block;font-size:12px;font-weight:600;color:{color};" } else { "display:block;font-size:12px;font-weight:600;color:var(--cf-text-primary);" }, "{label}" }
+                                                span { style: "display:block;font-size:10.5px;color:var(--cf-text-muted);line-height:1.35;margin-top:2px;", "{blurb}" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            div { class: "field",
+                                label { "Severity" }
+                                div { class: "seg seg-sev", style: "width:fit-content;",
+                                    for (value, label, color) in [
+                                        ("high", "High (CAT I)", "#f87171"),
+                                        ("medium", "Medium (CAT II)", "#fbbf24"),
+                                        ("low", "Low (CAT III)", "#60a5fa"),
+                                    ] {
+                                        button {
+                                            class: if design_severity.read().as_str() == value { "active" } else { "" },
+                                            style: if design_severity.read().as_str() == value {
+                                                "color:{color};background:color-mix(in oklab, {color} 16%, transparent);box-shadow:inset 0 0 0 1px color-mix(in oklab, {color} 45%, transparent);"
+                                            } else {
+                                                "color:var(--cf-text-secondary);"
+                                            },
+                                            onclick: move |_| design_severity.set(value.to_string()),
+                                            span { style: "display:inline-flex;align-items:center;gap:6px;",
+                                                span { style: "width:7px;height:7px;border-radius:50%;background:{color};" }
+                                                "{label}"
+                                            }
+                                        }
+                                    }
+                                }
+                                div { class: "help", "Drives how failures of this control are weighted in compliance scoring and evidence reports." }
+                            }
+                            div { class: "field",
+                                label { "Rationale" }
+                                textarea {
+                                    class: "input focus-ring",
+                                    rows: "2",
+                                    placeholder: "Why this policy exists — shown in detail view",
+                                    style: "resize:vertical;",
+                                    value: "{design_rationale}",
+                                    oninput: move |event| design_rationale.set(event.value()),
                                 }
                             }
                             if *advanced_mode.read() {
@@ -857,6 +936,12 @@ pub fn PolicyEditorModal(
                                             "JSON"
                                         }
                                     }
+                                }
+                            }
+                            div { style: "margin-top:6px;",
+                                div { style: "display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;",
+                                    label { style: "font-size:12px;font-weight:600;color:var(--cf-text-primary);", "Assertions & gate rules" }
+                                    span { style: "font-size:11px;color:var(--cf-text-muted);", "All must hold — each compiles to a policy check." }
                                 }
                             }
                             div {
@@ -1288,14 +1373,14 @@ pub fn PolicyEditorModal(
 
                     // Footer
                     div {
-                        class: "flex justify-end items-center gap-3 pt-2 mt-2 border-t border-gray-800 shrink-0",
+                        class: "modal-foot",
                         button {
-                            class: "px-4 py-2 rounded-lg text-sm text-gray-300 border border-gray-700 hover:bg-gray-800 transition-colors",
+                            class: "btn btn-ghost focus-ring",
                             onclick: move |_| on_close.call(()),
                             "Cancel"
                         }
                         button {
-                            class: "px-4 py-2 rounded-lg text-sm font-semibold bg-violet-600 hover:bg-violet-500 text-white transition-colors shadow-lg shadow-violet-900/30",
+                            class: "btn btn-primary focus-ring",
                             disabled: !can_save,
                             onclick: move |_| {
                                 let validation_error_for_submit = current_validation_error.clone();
