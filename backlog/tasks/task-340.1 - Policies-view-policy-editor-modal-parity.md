@@ -1,8 +1,9 @@
 ---
 id: TASK-340.1
 title: 'Policies: view + policy editor modal parity'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - gpt-5.5
 created_date: '2026-06-10 13:34'
 updated_date: '2026-06-19 03:18'
 labels:
@@ -105,5 +106,5 @@ Medium-high. The task touches a UI surface with modal workflows and may require 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Groomed to Sprint-Ready with explicit bounded leeway for small backend/API/model fixes only when directly required for Policies UI parity and CRUD round-trip behavior.
+LOCK: gpt-5.5 on reckless in /home/mcamp/code/crystal-forge/TASK-340.1-policies-view-editor-parity
 <!-- SECTION:NOTES:END -->
