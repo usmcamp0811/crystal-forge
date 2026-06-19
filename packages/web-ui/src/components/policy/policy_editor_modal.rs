@@ -566,12 +566,8 @@ pub fn PolicyEditorModal(
                                         r#type: "button",
                                         role: "radio",
                                         aria_checked: if category.read().as_str() == id { "true" } else { "false" },
-                                        class: "focus-ring",
-                                        style: if category.read().as_str() == id {
-                                            "display:flex;align-items:flex-start;gap:9px;text-align:left;padding:9px 11px;border-radius:9px;cursor:pointer;background:color-mix(in oklab, {color} 12%, transparent);border:1px solid color-mix(in oklab, {color} 55%, transparent);"
-                                        } else {
-                                            "display:flex;align-items:flex-start;gap:9px;text-align:left;padding:9px 11px;border-radius:9px;cursor:pointer;background:var(--cf-subtle-bg);border:1px solid var(--cf-divider);"
-                                        },
+                                        class: if category.read().as_str() == id { "cf-policy-category-card cf-policy-category-card-active focus-ring" } else { "cf-policy-category-card focus-ring" },
+                                        style: "--cf-policy-category-color:{color};",
                                         onclick: move |_| category.set(id.to_string()),
                                         span { style: "flex-shrink:0;width:24px;height:24px;border-radius:6px;display:grid;place-items:center;background:color-mix(in oklab, {color} 16%, transparent);color:{color};",
                                             svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
