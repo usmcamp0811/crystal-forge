@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - gpt-5.5
 created_date: '2026-06-10 13:34'
-updated_date: '2026-06-19 03:18'
+updated_date: '2026-06-19 03:20'
 labels:
   - design-parity
   - policies
@@ -103,8 +103,20 @@ Medium-high. The task touches a UI surface with modal workflows and may require 
 - [ ] #6 Any backend/API/model changes are minimal and directly required for UI round-trip parity
 <!-- AC:END -->
 
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Update the Policies view to match the design example structure: page title/subtitle, category stat strip, filter bar with search/category/type filters, clear action, grouped policy sections, empty state, and API-backed counts where available.
+2. Update policy display helpers/cards to render design-like policy cards with category rails, built-in/custom/protected/CVE chips, human-readable rule summaries, usage placeholders where real usage data is unavailable, and edit/delete controls only for editable policies.
+3. Preserve existing real API-backed policy loading and CRUD behavior. Add helper mapping from backend policy payload/config to UI categories and rule summaries without moving business logic into the view.
+4. Update the policy editor modal toward the design: New custom policy/edit wording, clearer metadata and rule-focused basic workflow, preserve advanced JSON/TOML editing, and add or improve multi-rule builder support if required for parity with basic/advanced/CVE/multi-rule flows.
+5. Touch backend/API/model code only if the UI cannot round-trip supported policy shapes through existing APIs. If SQLx query shapes or migrations change, run the mandated devshell database/sqlx prepare workflow.
+6. Extend checks/web-ui policy steps so they assert and screenshot the category/filter/card surface and modal workflows for basic, advanced, CVE-gate, multi-rule, and rejection paths.
+7. Verify with nix develop -c cargo fmt -- --check, nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown, targeted backend checks only if backend code changes, SQLx prepare only if SQLx-affecting changes occur, and nix build .#checks.x86_64-linux.web-ui.
+<!-- SECTION:PLAN:END -->
+
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-LOCK: gpt-5.5 on reckless in /home/mcamp/code/crystal-forge/TASK-340.1-policies-view-editor-parity
+Approved implementation plan recorded before coding. Scope: Policies list/category/filter/card parity, policy editor modal parity including basic/advanced/CVE/multi-rule flows, web-ui parity assertions/screenshots, and only minimal backend/API/model changes if directly required for UI CRUD round-trip parity.
 <!-- SECTION:NOTES:END -->
