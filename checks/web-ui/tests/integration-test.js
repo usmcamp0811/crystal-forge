@@ -4748,7 +4748,20 @@ const steps = [
       const drawerCveId = drawer.locator(".mono:has-text('CVE-2024-1234')").first();
       await assertVisible(drawerCveId, "Expected CVE id in drawer header");
 
-      // Leave the drawer open so the captured screenshot shows the detail surface.
+      const acceptRiskButton = drawer.locator("button:has-text('Accept risk')").first();
+      await acceptRiskButton.click();
+      await assertVisible(
+        drawer.locator("label:has-text('Review / expiry date (optional)')"),
+        "Expected review/expiry date field in accept-risk form",
+      );
+
+      await drawer.locator("button:has-text('Schedule patch')").click();
+      await assertVisible(
+        drawer.locator("label:has-text('Target patch date')"),
+        "Expected target patch date field when scheduling a patch",
+      );
+
+      // Leave the drawer open so the captured screenshot shows the detail surface and triage form.
 
       // Unroute after test.
       await page.unroute("**/api/v1/cves/stats*");

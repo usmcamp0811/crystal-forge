@@ -1280,6 +1280,7 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
     let cve_id_for_save_seed = cve_id.clone();
     let mut justification_category = use_signal(|| "accepted_risk".to_string());
     let mut justification_reason = use_signal(String::new);
+    let mut justification_review_date = use_signal(String::new);
     // "all" or "some" — mirrors JSX scopeMode
     let mut scope_mode = use_signal(|| "all".to_string());
     // Set of environment names the user toggled on (used when scope_mode == "some")
@@ -1478,6 +1479,7 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
                                         // New acceptance — reset form to defaults
                                         justification_category.set("accepted_risk".to_string());
                                         justification_reason.set(String::new());
+                                        justification_review_date.set(String::new());
                                         scope_mode.set("all".to_string());
                                         scope_envs.set(Vec::new()); // will re-default to all on open
                                         show_accept.set(true);
@@ -1499,6 +1501,7 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
                                         // Editing — prefill from existing justification
                                         justification_category.set(existing_category.clone());
                                         justification_reason.set(existing_reason.clone());
+                                        justification_review_date.set(String::new());
                                         show_accept.set(true);
                                     },
                                     svg {
@@ -1893,6 +1896,25 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
                                                 }
                                             }
 
+                                            // Review / target patch date — parity with the JSX accept-risk form.
+                                            div {
+                                                class: "field",
+                                                style: "max-width: 220px;",
+                                                label {
+                                                    if justification_category() == "patch_scheduled" {
+                                                        "Target patch date"
+                                                    } else {
+                                                        "Review / expiry date (optional)"
+                                                    }
+                                                }
+                                                input {
+                                                    r#type: "date",
+                                                    class: "input focus-ring",
+                                                    value: "{justification_review_date}",
+                                                    oninput: move |evt| justification_review_date.set(evt.value()),
+                                                }
+                                            }
+
                                             // Audit trail callout
                                             div {
                                                 class: "sd-callout sd-callout-info",
@@ -1942,6 +1964,7 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
                                                                 Ok(_) => {
                                                                     save_status.set(Some("Justification saved".to_string()));
                                                                     justification_reason.set(String::new());
+                                                                    justification_review_date.set(String::new());
                                                                     justifications_refresh.set(justifications_refresh() + 1);
                                                                     show_accept.set(false);
                                                                 }
@@ -2037,6 +2060,7 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
                                                     onclick: move |_| {
                                                         justification_category.set(existing_category.clone());
                                                         justification_reason.set(existing_reason.clone());
+                                                        justification_review_date.set(String::new());
                                                         show_accept.set(true);
                                                     },
                                                     svg {
