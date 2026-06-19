@@ -3054,6 +3054,96 @@ tr.kbd-focused > td {
   box-shadow: inset 2px 0 0 var(--cf-brand-purple);
 }
 
+/* Multi-select row highlight */
+.sys-table tr.row-checked > td {
+  background: color-mix(in oklab, var(--cf-brand-purple) 9%, transparent);
+}
+.sys-table tr.row-checked > td:first-child {
+  box-shadow: inset 2px 0 0 var(--cf-brand-purple);
+}
+.sys-table tr.selectable {
+  cursor: pointer;
+}
+
+/* Toast notification */
+.ed-toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--cf-card-bg);
+  border: 1px solid var(--cf-card-border);
+  padding: 10px 14px;
+  border-radius: 8px;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  box-shadow: 0 12px 32px rgba(0,0,0,0.3);
+  z-index: 100;
+  font-size: 13px;
+  animation: toastIn 200ms cubic-bezier(0.2,0.8,0.2,1);
+}
+@keyframes toastIn {
+  from { transform: translate(-50%, 30px); opacity: 0; }
+  to { transform: translate(-50%, 0); opacity: 1; }
+}
+
+/* Bulk action bar */
+.ed-bulkbar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: color-mix(in oklab, var(--cf-brand-purple) 14%, var(--cf-card-bg));
+  padding: 10px 16px;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  border-bottom: 1px solid var(--cf-card-border);
+}
+.ed-checkbox {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--cf-brand-purple);
+  cursor: pointer;
+}
+
+/* Queue reorder: drag handle + move controls */
+.q-drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--cf-text-muted);
+  cursor: grab;
+  width: 18px;
+  height: 22px;
+  border-radius: 5px;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.q-drag-handle:hover { color: var(--cf-text-primary); background: var(--cf-hover-bg); }
+.q-drag-handle:active { cursor: grabbing; }
+.q-row { transition: background 0.12s ease, opacity 0.12s ease; }
+.q-row:hover .q-drag-handle { color: var(--cf-text-secondary); }
+.q-dragging { opacity: 0.4; }
+.q-drop-before td { box-shadow: inset 0 2px 0 0 var(--cf-brand-purple); }
+.q-drop-after td  { box-shadow: inset 0 -2px 0 0 var(--cf-brand-purple); }
+
+.q-move-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 17px;
+  padding: 0;
+  background: var(--cf-subtle-bg);
+  border: none;
+  cursor: pointer;
+  color: var(--cf-text-secondary);
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.q-move-btn + .q-move-btn { border-top: 1px solid var(--cf-card-border); }
+.q-move-btn:hover:not(:disabled) { background: var(--cf-brand-purple); color: #fff; }
+.q-move-btn:disabled { opacity: 0.3; cursor: default; }
+
 /* Policy matrix - Top issues */
 .pm-issues {
   display: flex;
